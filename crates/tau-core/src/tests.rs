@@ -210,6 +210,78 @@ fn background_error(call_id: &str) -> Event {
     })
 }
 
+fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
+    Event::AgentManualCompactionRequested(tau_proto::AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse(request_id).expect("request id"),
+        caller_agent_id: tau_proto::AgentId::parse("caller").expect("caller id"),
+        target_agent_id: tau_proto::AgentId::parse(agent_id).expect("target id"),
+        initiating_agent_prompt_id: "ap-origin".into(),
+        initiating_tool_call_id: "call-origin".into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+        visible_tool_name: ToolName::new("agent_compact"),
+        requested_target_head: tau_proto::AgentHead::Root,
+        target_generation: 0,
+        model: "provider/model".into(),
+        resume_inference: false,
+    })
+}
+
+/// Manual request facts must survive a durable cold reopen and remain
+/// queryable as accepted-but-unstarted recovery state.
+#[test]
+fn manual_compaction_request_replays_after_durable_reopen() {
+    let agents_dir = temp_dir("manual-compaction-durable");
+    {
+        let mut store = AgentStore::open(&agents_dir).expect("open store");
+        store
+            .append_agent_event(
+                "target",
+                None,
+                manual_compaction_request("target", "cr-durable"),
+            )
+            .expect("append request");
+    }
+    let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
+    let tree = reopened
+        .load_agent("target")
+        .expect("load target")
+        .expect("target exists");
+    assert!(matches!(
+        tree.manual_compaction_recoveries().as_slice(),
+        [crate::ManualCompactionRecovery::Waiting(request)]
+            if request.request_id.to_string() == "cr-durable"
+    ));
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Ephemeral agents fold the same semantic request state while creating no
+/// durable per-agent directory.
+#[test]
+fn manual_compaction_request_stays_memory_only_for_ephemeral_agent() {
+    let agents_dir = temp_dir("manual-compaction-ephemeral");
+    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    store
+        .mark_agent_ephemeral("target-ephemeral")
+        .expect("mark ephemeral");
+    store
+        .append_agent_event(
+            "target-ephemeral",
+            None,
+            manual_compaction_request("target-ephemeral", "cr-ephemeral"),
+        )
+        .expect("append request");
+    assert!(matches!(
+        store
+            .agent("target-ephemeral")
+            .expect("memory tree")
+            .manual_compaction_recoveries()
+            .as_slice(),
+        [crate::ManualCompactionRecovery::Waiting(_)]
+    ));
+    assert!(!agents_dir.join("target-ephemeral").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
 #[test]
 fn agent_store_rejects_empty_display_name() {
     // Display names are user-visible labels. Blank durable updates must not

@@ -99,6 +99,34 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
             },
         );
     }
+    for (name, group, tags) in [
+        (
+            "compact",
+            "compaction",
+            &["harness:compaction", "harness:compaction:self"][..],
+        ),
+        (
+            "agent_compact",
+            "cross_agent_compaction",
+            &[
+                "harness:compaction",
+                "harness:compaction:cross-agent",
+                "harness:agent-control",
+            ][..],
+        ),
+    ] {
+        harness.registry.register_with_prompt_fragment(
+            "harness",
+            ToolRegister {
+                tool: tagged_tool(name, false, tags),
+                tool_group: Some(ToolGroup {
+                    name: ToolGroupName::new(group),
+                    prompt_fragment: None,
+                }),
+                prompt_fragment: None,
+            },
+        );
+    }
     PolicyHarness {
         harness,
         _temp_dir: temp_dir,
@@ -114,6 +142,8 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         "read",
         "cd",
         "dir_lock",
+        "compact",
+        "agent_compact",
     ];
     let model = harness.selected_model.as_ref();
     harness
@@ -122,6 +152,90 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .map(|spec| spec.name.into_string())
         .filter(|name| relevant.contains(&name.as_str()))
         .collect()
+}
+
+/// Compaction capabilities are absent by default and each independent role
+/// group exposes only its own tool.
+#[test]
+fn compaction_groups_are_disabled_and_independent() {
+    let default = policy_harness(&[], AgentRole::default());
+    let tools = effective_tool_names(&default.harness);
+    assert!(!tools.contains(&"compact".to_owned()));
+    assert!(!tools.contains(&"agent_compact".to_owned()));
+
+    let self_only = policy_harness(
+        &[],
+        AgentRole {
+            enable_tool_groups: vec![ToolGroupName::new("compaction")],
+            ..AgentRole::default()
+        },
+    );
+    let tools = effective_tool_names(&self_only.harness);
+    assert!(tools.contains(&"compact".to_owned()));
+    assert!(!tools.contains(&"agent_compact".to_owned()));
+
+    let cross_only = policy_harness(
+        &[],
+        AgentRole {
+            enable_tool_groups: vec![ToolGroupName::new("cross_agent_compaction")],
+            ..AgentRole::default()
+        },
+    );
+    let tools = effective_tool_names(&cross_only.harness);
+    assert!(!tools.contains(&"compact".to_owned()));
+    assert!(tools.contains(&"agent_compact".to_owned()));
+}
+
+/// Exact tool and tag policy retains broad-to-specific precedence independently
+/// for the self and cross-agent compaction capabilities.
+#[test]
+fn compaction_exact_and_tag_precedence_remains_independent() {
+    let role = AgentRole {
+        disable_tool_tags: serde_json::from_str(r#"["harness:compaction"]"#).expect("tag pattern"),
+        enable_tools: vec![ToolName::new("agent_compact")],
+        disable_tools: vec![ToolName::new("compact")],
+        ..AgentRole::default()
+    };
+    let policy = policy_harness(&[], role);
+    let tools = effective_tool_names(&policy.harness);
+    assert!(!tools.contains(&"compact".to_owned()));
+    assert!(tools.contains(&"agent_compact".to_owned()));
+}
+
+/// Prompt-owned compaction authority is immutable: later role changes cannot
+/// authorize a tool absent from the originating snapshot or revoke one present.
+#[test]
+fn compaction_prompt_snapshot_survives_later_role_changes() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    let prompt_id: tau_proto::AgentPromptId = "prompt-compaction".into();
+    policy.harness.prompt_tool_specs.insert(
+        prompt_id.clone(),
+        vec![tagged_tool(
+            "compact",
+            false,
+            &["harness:compaction", "harness:compaction:self"],
+        )],
+    );
+    policy.harness.available_roles.insert(
+        ROLE.to_owned(),
+        AgentRole {
+            enable_tools: vec![ToolName::new("agent_compact")],
+            disable_tools: vec![ToolName::new("compact")],
+            ..AgentRole::default()
+        },
+    );
+    assert!(
+        policy
+            .harness
+            .resolve_enabled_tool_spec_for_prompt(&ToolName::new("compact"), &prompt_id)
+            .is_some()
+    );
+    assert!(
+        policy
+            .harness
+            .resolve_enabled_tool_spec_for_prompt(&ToolName::new("agent_compact"), &prompt_id)
+            .is_none()
+    );
 }
 
 /// Provider tool-type support is a final, non-overridable filter so capability

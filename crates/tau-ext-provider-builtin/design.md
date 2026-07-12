@@ -125,3 +125,12 @@ Provider retries carry closed structured categories, saturating attempt counts,
 and approximate bounded delays independently of human UI prose. Providers emit
 only these safe facts alongside their local display status; the harness
 validates prompt ownership and exclusively owns watcher snapshots and fanout.
+## Explicit standalone compaction
+
+Status: unconfirmed
+
+Model-callable compaction always uses the existing standalone-compaction
+operation and exact provider-qualified model captured by the harness. There is
+no inline fallback. A missing route or unsupported model is rejected before
+acceptance; provider terminal errors, including context-window rejection, are
+one terminal transaction failure and are not retried indefinitely.

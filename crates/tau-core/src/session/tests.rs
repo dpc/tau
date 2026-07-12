@@ -27,6 +27,22 @@ fn validation_error(tree: &AgentTree, event: Event) -> String {
         .to_string()
 }
 
+fn manual_request(id: &str) -> tau_proto::AgentManualCompactionRequested {
+    tau_proto::AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse(id).expect("valid request id"),
+        caller_agent_id: other_agent_id(),
+        target_agent_id: agent_id(),
+        initiating_agent_prompt_id: "ap-tool-round".into(),
+        initiating_tool_call_id: "call-compact".into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+        visible_tool_name: ToolName::new("agent_compact"),
+        requested_target_head: AgentHead::Root,
+        target_generation: 0,
+        model: "provider/model".into(),
+        resume_inference: false,
+    }
+}
+
 fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
     tau_proto::AgentStandaloneCompactionStarted {
         compact_prompt_id: "ap-agent-metadata-test-0".into(),
@@ -861,4 +877,214 @@ fn validate_event_rejects_blank_display_names() {
         ),
         "agent display name must not be empty"
     );
+}
+
+/// Ensures an accepted manual request is durable before start and exactly one
+/// matching transaction can claim it after replay.
+#[test]
+fn manual_compaction_request_is_durable_and_uniquely_claimed() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let request = manual_request("cr-1");
+    tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
+        .expect("request is valid");
+    tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+    assert_eq!(
+        tree.manual_compaction_recoveries(),
+        vec![ManualCompactionRecovery::Waiting(request.clone())]
+    );
+
+    let mut started = compaction_start("ct-manual-tool");
+    started.resume_through = None;
+    started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+        request_id: request.request_id.clone(),
+        caller_agent_id: request.caller_agent_id.clone(),
+        initiating_tool_call_id: request.initiating_tool_call_id.clone(),
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("matching transaction claim is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    assert_eq!(
+        tree.manual_compaction_recoveries(),
+        vec![ManualCompactionRecovery::Started {
+            requested: request,
+            started: Box::new(started.clone()),
+            outcome: None,
+        }]
+    );
+
+    let mut duplicate = started;
+    duplicate.transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-manual-tool-2").expect("valid id");
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionStarted(duplicate))
+            .contains("uniquely match")
+    );
+}
+
+/// Ensures a pre-start failure is terminal and cannot race a later start or a
+/// second terminal fact for the same accepted request.
+#[test]
+fn manual_compaction_pre_start_failure_is_exactly_once() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let request = manual_request("cr-failed");
+    tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
+        .expect("request is valid");
+    tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+    let failed = tau_proto::AgentManualCompactionRequestFailed {
+        request_id: request.request_id.clone(),
+        target_agent_id: request.target_agent_id.clone(),
+        reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+    };
+    tree.validate_event(&Event::AgentManualCompactionRequestFailed(failed.clone()))
+        .expect("first failure is valid");
+    tree.apply_event(&Event::AgentManualCompactionRequestFailed(failed.clone()));
+    assert_eq!(
+        tree.manual_compaction_recoveries(),
+        vec![ManualCompactionRecovery::Failed {
+            requested: request.clone(),
+            failed: failed.clone(),
+        }]
+    );
+    assert!(
+        validation_error(&tree, Event::AgentManualCompactionRequestFailed(failed))
+            .contains("terminal")
+    );
+
+    let mut started = compaction_start("ct-too-late");
+    started.resume_through = None;
+    started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+        request_id: request.request_id,
+        caller_agent_id: request.caller_agent_id,
+        initiating_tool_call_id: request.initiating_tool_call_id,
+    };
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionStarted(started))
+            .contains("uniquely match")
+    );
+}
+
+/// Standalone compaction provider prompts must not advance the target-owned
+/// ordinary-inference generation used by the manual compaction rate guard.
+#[test]
+fn manual_compaction_generation_excludes_standalone_prompts() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let prompt = |id: &str, operation| {
+        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+            agent_prompt_id: id.into(),
+            agent_id: agent_id(),
+            session_id: "session".into(),
+            system_prompt: String::new(),
+            context: tau_proto::PromptContext::default(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: "provider/model".into(),
+            model_params: Default::default(),
+            tool_choice: Default::default(),
+            originator: PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            compaction: None,
+            operation,
+        })
+    };
+    tree.apply_event(&prompt(
+        "ap-compact",
+        tau_proto::PromptOperation::StandaloneCompaction,
+    ));
+    assert_eq!(tree.ordinary_inference_generation(), 0);
+    tree.apply_event(&prompt(
+        "ap-inference",
+        tau_proto::PromptOperation::Inference,
+    ));
+    assert_eq!(tree.ordinary_inference_generation(), 1);
+}
+
+/// Manual transaction claims fail closed when any immutable request
+/// correlation is unknown or changed.
+#[test]
+fn manual_compaction_claim_rejects_correlation_mismatches() {
+    let request = manual_request("cr-correlated");
+    let mut base = AgentTree::from_events(agent_id(), &[]);
+    base.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
+        .expect("request");
+    base.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+    let matching = || {
+        let mut started = compaction_start("ct-correlated");
+        started.resume_through = None;
+        started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id: request.request_id.clone(),
+            caller_agent_id: request.caller_agent_id.clone(),
+            initiating_tool_call_id: request.initiating_tool_call_id.clone(),
+        };
+        started
+    };
+
+    let mut unknown = matching();
+    if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool { request_id, .. } =
+        &mut unknown.trigger
+    {
+        *request_id = tau_proto::CompactionRequestId::parse("cr-unknown").expect("request id");
+    }
+    assert!(
+        validation_error(&base, Event::AgentStandaloneCompactionStarted(unknown))
+            .contains("unknown request")
+    );
+
+    for mutation in ["caller", "call", "model"] {
+        let mut started = matching();
+        match mutation {
+            "caller" => {
+                if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                    caller_agent_id,
+                    ..
+                } = &mut started.trigger
+                {
+                    *caller_agent_id = agent_id();
+                }
+            }
+            "call" => {
+                if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                    initiating_tool_call_id,
+                    ..
+                } = &mut started.trigger
+                {
+                    *initiating_tool_call_id = "call-other".into();
+                }
+            }
+            "model" => started.model = "provider/other".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            validation_error(&base, Event::AgentStandaloneCompactionStarted(started))
+                .contains("uniquely match"),
+            "{mutation}"
+        );
+    }
+}
+
+/// Branch-specific notification lookup must not accept matching text from the
+/// tree's global cursor when the caller conversation points at another branch.
+#[test]
+fn manual_completion_notification_lookup_is_branch_specific() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let input = |text: &str| {
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            agent_id: agent_id(),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            inference_activation: false,
+            ctx_id: None,
+        })
+    };
+    tree.apply_event(&input("caller notification"));
+    let caller_head = tree.head();
+    tree.apply_event(&Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+        agent_id: agent_id(),
+        head: AgentHead::Root,
+    }));
+    tree.apply_event(&input("other branch notification"));
+
+    assert!(tree.has_user_input_text_on_branch(caller_head, "caller notification"));
+    assert!(!tree.has_user_input_text_on_branch(caller_head, "other branch notification"));
+    assert!(tree.has_user_input_text_on_branch(tree.head(), "other branch notification"));
 }

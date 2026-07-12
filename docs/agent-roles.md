@@ -170,3 +170,16 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 Runtime role changes are not persisted. Startup is controlled by `agents.default_role` and `agents.role_groups` order, and durable role changes should be made in `harness.yaml`.
 
 Prompt fragment priorities sort ascending. Use priorities below `100` for role/persona instructions that should appear before generated context sections such as skills and AGENTS.md. Use high priorities for epilogue context; Tau's built-in current-working-directory fragment uses `900` so it stays at the end of the prompt.
+## Compaction tool opt-in
+
+Both tools are disabled by default and configured independently:
+
+```yaml
+enable_tool_groups: [compaction]              # only compact {}
+enable_tool_groups: [cross_agent_compaction]  # only agent_compact {agent_id}
+```
+
+Exact `enable_tools` entries may be used instead. `RoleCompaction::Disabled`
+controls automatic compaction and does not override an explicit tool opt-in.
+The cross-agent tool authorizes any other loaded same-session agent; ancestry,
+watching, and messaging are irrelevant to that explicit capability.

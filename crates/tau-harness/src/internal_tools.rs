@@ -19,6 +19,11 @@ pub trait InternalToolHandler: Send + Sync {
     /// Tool specifications this handler registers as internal tools.
     fn tool_specs(&self) -> Vec<ToolSpec>;
 
+    /// Optional independent policy group for one registered tool.
+    fn tool_group(&self, _internal_tool_name: &ToolName) -> Option<tau_proto::ToolGroup> {
+        None
+    }
+
     /// Return true when this handler owns `internal_tool_name`.
     fn handles(&self, internal_tool_name: &ToolName) -> bool;
 
@@ -92,11 +97,19 @@ impl<'a> InternalToolHost<'a> {
     }
 
     /// Register a harness-process internal tool.
-    pub fn register_internal_tool(&mut self, spec: ToolSpec) {
-        let _ = self
-            .harness
-            .registry
-            .register_internal(HARNESS_CONNECTION_ID, spec);
+    pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
+        if let Some(group) = group {
+            let _ = self.harness.registry.register_internal_with_group(
+                HARNESS_CONNECTION_ID,
+                spec,
+                group,
+            );
+        } else {
+            let _ = self
+                .harness
+                .registry
+                .register_internal(HARNESS_CONNECTION_ID, spec);
+        }
     }
 
     /// Return a cloned snapshot of skills discovered by the harness.
@@ -163,6 +176,24 @@ impl<'a> InternalToolHost<'a> {
         }
         self.harness
             .on_tool_call_foreground_complete(call_id.as_str());
+    }
+
+    /// Request standalone compaction on behalf of a committed built-in tool
+    /// call.
+    pub fn request_agent_tool_compaction(
+        &mut self,
+        conversation_id: &AgentId,
+        call: &AgentToolCall,
+        visible_tool_name: ToolName,
+        target_agent_id: Option<&tau_proto::AgentId>,
+    ) -> Result<(), HarnessError> {
+        self.harness.request_agent_tool_compaction(
+            conversation_id,
+            call,
+            visible_tool_name,
+            target_agent_id,
+        );
+        Ok(())
     }
 
     /// Complete a prebuilt internal tool result, routing foreground/background.
@@ -519,7 +550,8 @@ impl Harness {
         let mut host = InternalToolHost::new(self);
         for handler in handlers {
             for spec in handler.tool_specs() {
-                host.register_internal_tool(spec);
+                let group = handler.tool_group(&spec.name);
+                host.register_internal_tool(spec, group);
             }
         }
     }

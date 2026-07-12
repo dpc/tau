@@ -1036,3 +1036,10 @@ does not provide OMEMO or other end-to-end encryption.
 Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
 
 When an ordinary inference receives a canonical context-window rejection before producing output, Tau may automatically run one standalone compaction and retry the owed inference if the model supports standalone compaction and the role permits it. Partial-output, unsupported, disabled, ambiguous, post-compaction, and repeated overflow cases remain terminal rather than recursively compacting.
+### Explicit agent compaction tools
+
+Roles may opt into disabled-by-default `compact {}` (group `compaction`) for
+self-compaction or, independently, `agent_compact {agent_id}` (group
+`cross_agent_compaction`) for another loaded agent. Accepted calls are
+background operations compatible with `wait`; the harness durably defers self
+compaction until the complete sibling tool-result round is folded.

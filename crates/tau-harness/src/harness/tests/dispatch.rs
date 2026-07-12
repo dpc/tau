@@ -8696,7 +8696,6 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = quiet_provider_harness(&state).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -8916,7 +8915,6 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         h.agent_watch_provider_status["main"].state,
         tau_proto::AgentWatchProviderState::Blocked { .. }
     ));
-    enable_remote_compaction_for_test_model(&mut h);
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -8997,7 +8995,6 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
 fn reactive_context_overflow_side_failure_completes_request() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -9275,7 +9272,6 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
 fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -9964,6 +9960,700 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             standalone_compaction_threshold: None,
         },
     );
+}
+
+/// A self-compaction request must remain accepted-but-unstarted while any
+/// foreground sibling is unresolved, then start from the one complete
+/// ToolResults node after the final sibling folds.
+#[test]
+fn manual_self_compaction_waits_for_complete_sibling_round() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    seed_assistant_tool_round(
+        &mut h,
+        &cid,
+        &[("call-compact", "compact"), ("call-sibling", "sibling")],
+    );
+    for (call_id, name) in [("call-compact", "compact"), ("call-sibling", "sibling")] {
+        h.tool_agents.insert(call_id.into(), cid.clone());
+        h.pending_tools.insert(
+            call_id.into(),
+            PendingTool {
+                name: ToolName::new(name),
+                internal_name: ToolName::new(name),
+                tool_type: tau_proto::ToolType::Function,
+            },
+        );
+        h.tool_turn
+            .record_in_flight_for_test(cid.clone(), call_id.into());
+        h.prompt_tool_call_prompts
+            .insert(call_id.into(), "sp-seeded-tools".into());
+    }
+    let compact_call = AgentToolCall {
+        id: "call-compact".into(),
+        name: ToolName::new("compact"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.request_agent_tool_compaction(&cid, &compact_call, ToolName::new("compact"), None);
+
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentManualCompactionRequested(_)
+        )),
+        "tracked={} backgrounded={} events={:?}",
+        h.tool_agents.contains_key(&compact_call.id),
+        h.tool_turn.is_backgrounded(&compact_call.id),
+        event_log_events(&h)
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(_)
+    )));
+
+    h.finish_prebuilt_internal_tool_result(ToolResult {
+        call_id: "call-sibling".into(),
+        tool_name: ToolName::new("sibling"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("done".to_owned()),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("compaction starts after sibling terminal");
+    let tree = h
+        .agent_store
+        .agent(started.agent_id.as_str())
+        .expect("agent tree");
+    assert!(tree.has_complete_tool_round_for(started.cut.as_option(), &compact_call.id));
+    let suffix_end = h
+        .agents
+        .get(&cid)
+        .and_then(|agent| agent.head)
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id: started.agent_id.clone(),
+            transaction_id: Some(started.transaction_id.clone()),
+            cut: Some(started.cut),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(started.compact_prompt_id.clone()),
+            model: Some(started.model.clone()),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    );
+    let events = event_log_events(&h);
+    let background_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ToolBackgroundResult(result) if result.call_id == compact_call.id
+            )
+        })
+        .expect("original compact call completes in background");
+    let checkpoint_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.as_ref() == Some(&started.transaction_id)
+            )
+        })
+        .expect("self compaction checkpoints continuation");
+    assert!(background_index < checkpoint_index);
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancelling an accepted self request before its safe boundary records one
+/// durable pre-start cancellation and one passive background error without
+/// checkpointing or waking inference.
+#[test]
+fn manual_self_compaction_pre_start_cancel_is_passive() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    seed_assistant_tool_round(
+        &mut h,
+        &cid,
+        &[
+            ("call-cancel-compact", "compact"),
+            ("call-cancel-sibling", "sibling"),
+        ],
+    );
+    for (call_id, name) in [
+        ("call-cancel-compact", "compact"),
+        ("call-cancel-sibling", "sibling"),
+    ] {
+        h.tool_agents.insert(call_id.into(), cid.clone());
+        h.pending_tools.insert(
+            call_id.into(),
+            PendingTool {
+                name: ToolName::new(name),
+                internal_name: ToolName::new(name),
+                tool_type: tau_proto::ToolType::Function,
+            },
+        );
+        h.tool_turn
+            .record_in_flight_for_test(cid.clone(), call_id.into());
+        h.prompt_tool_call_prompts
+            .insert(call_id.into(), "sp-seeded-tools".into());
+    }
+    let call = AgentToolCall {
+        id: "call-cancel-compact".into(),
+        name: ToolName::new("compact"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.request_agent_tool_compaction(&cid, &call, ToolName::new("compact"), None);
+    h.cancel_remaining_tool_calls(
+        &cid,
+        vec![call.id.clone()],
+        "test cancellation",
+        BackgroundCompletionPromptMode::QueuePassive,
+    );
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentManualCompactionRequestFailed(failed)
+                    if failed.reason
+                        == tau_proto::ManualCompactionRequestFailureReason::Cancelled
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolBackgroundError(error) if error.call_id == call.id
+            ))
+            .count(),
+        1
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold recovery from compact-success-before-background-terminal reconstructs
+/// the background result exactly once, folds its model-visible notification,
+/// and only then checkpoints self continuation.
+#[test]
+fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-replay-compact", "compact")]);
+    h.tool_agents
+        .insert("call-replay-compact".into(), cid.clone());
+    h.pending_tools.insert(
+        "call-replay-compact".into(),
+        PendingTool {
+            name: ToolName::new("compact"),
+            internal_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_turn
+        .record_in_flight_for_test(cid.clone(), "call-replay-compact".into());
+    h.prompt_tool_call_prompts
+        .insert("call-replay-compact".into(), "sp-seeded-tools".into());
+    h.request_agent_tool_compaction(
+        &cid,
+        &AgentToolCall {
+            id: "call-replay-compact".into(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        ToolName::new("compact"),
+        None,
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("started");
+    let transaction_id = started.transaction_id.clone();
+    let suffix_end = h
+        .agent_store
+        .agent(started.agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    h.agent_store
+        .append_agent_event_at(
+            started.agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: started.agent_id.clone(),
+                transaction_id: Some(transaction_id.clone()),
+                cut: Some(started.cut),
+                suffix_end: Some(suffix_end),
+                compact_prompt_id: Some(started.compact_prompt_id),
+                model: Some(started.model),
+                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                replacement_window: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "summary".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("seed compact success without harness reaction");
+    drop(h);
+
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let events = event_log_events(&resumed);
+    let completion = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ToolBackgroundResult(result)
+                    if result.call_id.as_str() == "call-replay-compact"
+            )
+        })
+        .expect("background completion repaired");
+    let checkpoint = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
+            )
+        })
+        .expect("checkpoint repaired");
+    let notification_text = background_completion_prompt(&ToolCallId::from("call-replay-compact"));
+    let notification = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptSteered(steered) if steered.text == notification_text
+            )
+        })
+        .expect("model-visible completion notification repaired");
+    assert!(completion < checkpoint);
+    assert!(notification < checkpoint);
+    let checkpoint_event = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("checkpoint event");
+    assert!(
+        resumed
+            .agent_store
+            .agent(checkpoint_event.agent_id.as_str())
+            .expect("resumed caller tree")
+            .has_user_input_text_on_branch(
+                checkpoint_event.through.as_option(),
+                &notification_text
+            )
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolBackgroundResult(result)
+                    if result.call_id.as_str() == "call-replay-compact"
+            ))
+            .count(),
+        1
+    );
+}
+
+fn setup_manual_cross_compaction_test() -> (
+    TempDir,
+    Harness,
+    AgentId,
+    AgentId,
+    AgentToolCall,
+    tau_proto::AgentId,
+) {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let caller_cid = ensure_test_user_agent(&mut h);
+    let target_cid: AgentId = crate::parse_agent_id("unrelated-target");
+    let mut target = Agent::new(
+        target_cid.clone(),
+        h.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    target.agent_id = Some("unrelated-target".to_owned());
+    target.role = Some(h.selected_role.clone());
+    h.agents.insert(target_cid.clone(), target);
+    h.agent_routes
+        .insert("unrelated-target".to_owned(), target_cid.clone());
+    h.publish_for_agent(
+        &target_cid,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: tau_proto::AgentId::parse("unrelated-target").expect("target id"),
+            parent_agent: None,
+            role: h.selected_role.clone(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    );
+    h.ensure_loaded_agent_for_agent(&target_cid, "unrelated-target");
+    seed_assistant_tool_round(
+        &mut h,
+        &caller_cid,
+        &[("call-cross-compact", "agent_compact")],
+    );
+    h.tool_agents
+        .insert("call-cross-compact".into(), caller_cid.clone());
+    h.pending_tools.insert(
+        "call-cross-compact".into(),
+        PendingTool {
+            name: ToolName::new("agent_compact"),
+            internal_name: ToolName::new("agent_compact"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_turn
+        .record_in_flight_for_test(caller_cid.clone(), "call-cross-compact".into());
+    h.prompt_tool_call_prompts
+        .insert("call-cross-compact".into(), "sp-seeded-tools".into());
+    let call = AgentToolCall {
+        id: "call-cross-compact".into(),
+        name: ToolName::new("agent_compact"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    let target_id = tau_proto::AgentId::parse("unrelated-target").expect("target id");
+    (td, h, caller_cid, target_cid, call, target_id)
+}
+
+/// Possession of the cross-agent capability authorizes an unrelated loaded
+/// agent without ancestry, watch, or message relationships.
+#[test]
+fn manual_cross_compaction_starts_for_unrelated_loaded_agent() {
+    let (_td, mut h, caller_cid, target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if started.agent_id.as_str() == "unrelated-target"
+                    && matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                    ) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("unrelated target starts");
+    let recoveries = h
+        .agent_store
+        .agent("unrelated-target")
+        .expect("target tree")
+        .manual_compaction_recoveries();
+    assert!(
+        matches!(
+            recoveries.as_slice(),
+            [tau_core::ManualCompactionRecovery::Started { .. }]
+        ),
+        "{recoveries:?}"
+    );
+    h.publish_for_agent(
+        &target_cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: started.agent_id,
+            transaction_id: started.transaction_id,
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+        }),
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id == call.id
+    )));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| match event {
+                Event::ToolBackgroundResult(result) => result.call_id == call.id,
+                Event::ToolBackgroundError(error) => error.call_id == call.id,
+                _ => false,
+            })
+            .count(),
+        1,
+        "tracked={} backgrounded={} events={:?}",
+        h.tool_agents.contains_key(&call.id),
+        h.tool_turn.is_backgrounded(&call.id),
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| match event {
+                Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+                    result.call_id == call.id
+                }
+                Event::ToolError(error) | Event::ProviderToolError(error) => {
+                    error.call_id == call.id
+                }
+                Event::ToolBackgroundResult(result) => result.call_id == call.id,
+                Event::ToolBackgroundError(error) => error.call_id == call.id,
+                Event::AgentCompacted(_) | Event::AgentStandaloneCompactionFailed(_) => true,
+                _ => false,
+            })
+            .collect::<Vec<_>>()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancelling after a cross-agent transaction starts targets that exact compact
+/// prompt and completes the original background call once.
+#[test]
+fn manual_cross_compaction_post_start_cancel_is_exact() {
+    let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    h.cancel_remaining_tool_calls(
+        &caller,
+        vec![call.id.clone()],
+        "test cancellation",
+        BackgroundCompletionPromptMode::QueuePassive,
+    );
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::Cancelled
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolBackgroundError(error) if error.call_id == call.id
+            ))
+            .count(),
+        1
+    );
+}
+
+/// Cross-agent requests fail with bounded non-enumerating state categories and
+/// never persist acceptance for busy, uncertain, unsupported, or unavailable
+/// targets.
+#[test]
+fn manual_cross_compaction_rejects_ineligible_target_matrix() {
+    let assert_error = |h: &Harness, call: &AgentToolCall, expected: &str| {
+        assert!(event_log_contains_any_source(h, |event| matches!(
+            event,
+            Event::ToolError(error)
+                if error.call_id == call.id && error.message == expected
+        )));
+        assert!(!event_log_contains_any_source(h, |event| matches!(
+            event,
+            Event::AgentManualCompactionRequested(requested)
+                if requested.initiating_tool_call_id == call.id
+        )));
+    };
+
+    let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
+    h.agents.get_mut(&target).expect("target").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "ap-busy".into(),
+    };
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &call, "target_busy");
+
+    let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
+    h.agents
+        .get_mut(&target)
+        .expect("target")
+        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
+        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: "ap-uncertain".into(),
+        through: tau_proto::AgentHead::Root,
+    };
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &call, "dispatch_uncertain");
+
+    let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = false;
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &call, "standalone_compaction_unsupported");
+
+    let (_td, mut h, caller, _target, call, _target_id) = setup_manual_cross_compaction_test();
+    let unknown = tau_proto::AgentId::parse("unknown-target").expect("unknown id");
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&unknown),
+    );
+    assert_error(&h, &call, "target_unavailable_or_unauthorized");
+
+    let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
+    let caller_public = crate::parse_agent_id(
+        h.agents[&caller]
+            .agent_id
+            .as_deref()
+            .expect("caller public id"),
+    );
+    for index in 0..4 {
+        h.pending_manual_compaction_tools.insert(
+            tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
+                .expect("transaction id"),
+            crate::harness::PendingManualCompactionTool {
+                request_id: tau_proto::CompactionRequestId::parse(format!("cr-cap-{index}"))
+                    .expect("request id"),
+                caller_agent_id: caller_public.clone(),
+                call_id: format!("call-cap-{index}").into(),
+                tool_name: ToolName::new("agent_compact"),
+                target_agent_id: tau_proto::AgentId::parse(format!("target-{index}"))
+                    .expect("target id"),
+            },
+        );
+    }
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &call, "caller_compaction_limit");
+
+    let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
+    let historical = tau_proto::AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
+        caller_agent_id: crate::parse_agent_id(
+            h.agents[&caller]
+                .agent_id
+                .as_deref()
+                .expect("caller public id"),
+        ),
+        target_agent_id: target_id.clone(),
+        initiating_agent_prompt_id: "ap-older-caller-turn".into(),
+        initiating_tool_call_id: "call-historical".into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+        visible_tool_name: ToolName::new("agent_compact"),
+        requested_target_head: tau_proto::AgentHead::Root,
+        target_generation: 0,
+        model: "echo/model".into(),
+        resume_inference: false,
+    };
+    h.publish_for_agent(
+        &target,
+        Event::AgentManualCompactionRequested(historical.clone()),
+    );
+    h.publish_for_agent(
+        &target,
+        Event::AgentManualCompactionRequestFailed(tau_proto::AgentManualCompactionRequestFailed {
+            request_id: historical.request_id,
+            target_agent_id: historical.target_agent_id,
+            reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+        }),
+    );
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &call, "not_needed");
 }
 
 fn instant_background_test_tool_spec(name: &str) -> ToolSpec {

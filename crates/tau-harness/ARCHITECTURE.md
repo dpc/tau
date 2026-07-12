@@ -493,3 +493,13 @@ Provider retry visibility is harness-owned. After validating provider source and
 ### Reactive context-overflow recovery
 
 An ordinary inference that receives a canonical, no-output context-window rejection may authorize exactly one standalone compaction when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Compaction dispatch and continuation reuse the existing durable transaction machinery. Standalone-compaction overflow, a post-compaction inference overflow, partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never recurse into recovery. Replay resumes an unclaimed planned recovery once, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+### Manual compaction service
+
+Harness-owned `compact` and `agent_compact` requests persist acceptance before
+acknowledgement. Self requests start only from the complete tool-round
+continuation gate, preserving tool-call/result adjacency. Cross-agent requests
+may start for idle or explicitly blocked loaded targets and never queue behind
+busy or dispatch-uncertain work. The target-scoped standalone transaction is
+the provider-work authority; its terminal event produces exactly one
+background completion for the original call before any self continuation
+checkpoint.

@@ -216,3 +216,11 @@ Transient retry updates may carry `ProviderRetryStatus`: a closed work category,
 ### Reactive context recovery correlation
 
 Context-overflow recovery is correlated entirely by durable facts. Inference checkpoints capture the provider-qualified model, operation, and immutable pre-activation cut. The harness, never the provider, stamps an eligible terminal response as `reactive_compaction_planned`; a reactive standalone-compaction start then uniquely claims that failed prompt id. Legacy checkpoints omit the new cut facts and are recovery-ineligible.
+### Durable manual-compaction facts
+
+`agent.manual_compaction_requested` records harness-owned pre-start
+correlation. Exactly one matching `agent.standalone_compaction_started` with a
+`manual_agent_tool` trigger or
+`agent.manual_compaction_request_failed` may terminate that pre-start state.
+These control facts are persisted for durable agents and use the same
+memory-only semantics as other facts for ephemeral agents.

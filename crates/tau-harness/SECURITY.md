@@ -57,3 +57,12 @@ Provider-authored status text, response bodies, headers, prompt text, account id
 Reactive context recovery never trusts provider prose or a provider-authored recovery decision. Eligibility uses the closed failure category, an empty output set, harness-owned prompt operation/model routing, durable activation cut, advertised model capability, and role policy. Watchers receive only the existing sanitized `recovering_context` state; prompt bodies and raw provider errors are not included.
 
 Provider-supplied recovery disposition is unconditionally cleared at ingress and may only be stamped by the harness after eligibility checks. Any accepted streamed semantic output makes the response recovery-ineligible. Cancellation durably terminalizes an active reactive compaction transaction.
+## Compaction tools
+
+Internal registration places `compact` in `compaction` and `agent_compact` in
+`cross_agent_compaction`; both are disabled by default. Runtime caller identity
+comes from committed tool ownership, never arguments. Cross-agent possession
+authorizes any other loaded agent, but self, unavailable, stopped, unloaded,
+and cross-session targets are rejected without state enumeration. Watches,
+messages, ancestry, and automatic-compaction role settings are not substitutes
+for explicit tool presence.

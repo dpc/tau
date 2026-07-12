@@ -130,6 +130,18 @@ impl ToolTurnMachine {
         true
     }
 
+    /// Restore one durably placeholdered call as still running in background.
+    pub(crate) fn restore_backgrounded(&mut self, conversation_id: AgentId, call_id: ToolCallId) {
+        self.in_flight_tool_invocations
+            .entry(call_id)
+            .or_insert(InFlightToolInvocation {
+                conversation_id,
+                foreground_pending: false,
+                backgrounded: true,
+                foreground_deadline: None,
+            });
+    }
+
     /// True when this call has already been completed in the foreground but is
     /// still actually running.
     pub(crate) fn is_backgrounded(&self, call_id: &ToolCallId) -> bool {

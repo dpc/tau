@@ -30,6 +30,8 @@ const WAIT_TOOL_NAME: &str = "wait";
 const CANCEL_TOOL_NAME: &str = "cancel";
 const MESSAGE_TOOL_NAME: &str = "message";
 const AGENT_WATCH_TOOL_NAME: &str = "agent_watch";
+const COMPACT_TOOL_NAME: &str = "compact";
+const AGENT_COMPACT_TOOL_NAME: &str = "agent_compact";
 
 /// Return handlers for Tau's built-in harness-process tools.
 pub fn builtin_handlers() -> Vec<Arc<dyn InternalToolHandler>> {
@@ -193,7 +195,21 @@ impl InternalToolHandler for BuiltinTools {
             cancel_tool_spec(),
             message_tool_spec(),
             agent_watch_tool_spec(),
+            compact_tool_spec(),
+            agent_compact_tool_spec(),
         ]
+    }
+
+    fn tool_group(&self, internal_tool_name: &ToolName) -> Option<tau_proto::ToolGroup> {
+        let name = match internal_tool_name.as_str() {
+            COMPACT_TOOL_NAME => "compaction",
+            AGENT_COMPACT_TOOL_NAME => "cross_agent_compaction",
+            _ => return None,
+        };
+        Some(tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new(name),
+            prompt_fragment: None,
+        })
     }
 
     fn handles(&self, internal_tool_name: &ToolName) -> bool {
@@ -205,6 +221,8 @@ impl InternalToolHandler for BuiltinTools {
                 | CANCEL_TOOL_NAME
                 | MESSAGE_TOOL_NAME
                 | AGENT_WATCH_TOOL_NAME
+                | COMPACT_TOOL_NAME
+                | AGENT_COMPACT_TOOL_NAME
         )
     }
 
@@ -260,6 +278,28 @@ impl InternalToolHandler for BuiltinTools {
                         &call,
                         visible_tool_name,
                     ),
+                    COMPACT_TOOL_NAME | AGENT_COMPACT_TOOL_NAME => {
+                        let target = parse_compaction_args(call.name.as_str(), &call.arguments);
+                        match target {
+                            Ok(target) => host.request_agent_tool_compaction(
+                                &conversation_id,
+                                &call,
+                                visible_tool_name,
+                                target.as_ref(),
+                            ),
+                            Err(message) => {
+                                host.finish_tool_with_error(
+                                    &conversation_id,
+                                    call.id,
+                                    visible_tool_name,
+                                    call.tool_type,
+                                    message,
+                                    Some(call.arguments),
+                                );
+                                Ok(())
+                            }
+                        }
+                    }
                     _ => Ok(()),
                 }
             }
@@ -1664,6 +1704,63 @@ fn cancel_tool_spec() -> ToolSpec {
 
 fn wait_tool_spec() -> ToolSpec {
     ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for completion of a background tool call owned by this conversation with `tool_call_id`, or for the next completed background call in this conversation. When waiting for any call, the result includes an `original_tool_call_id` header identifying the completed call. Already-finished matching results return immediately. Tau will notify you via marked internal messages about background calls completing; `wait({})` consumes one completion and suppresses that completion notice.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. When set, wait for this conversation's specific background tool call."}},"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+}
+
+fn compact_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(COMPACT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Request durable standalone compaction of this agent after the current tool round. The accepted result is asynchronous and can be awaited with wait.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({"type":"object","properties":{},"additionalProperties":false})),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new("harness:compaction"), tau_proto::ToolTag::new("harness:compaction:self")],
+        enabled_by_default: false,
+        background_support: Some(BackgroundSupport::Instant),
+        examples: Vec::new(),
+    }
+}
+
+fn agent_compact_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(AGENT_COMPACT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Request durable standalone compaction of another loaded agent. Possession of this tool is the cross-agent authority. The accepted result is asynchronous and can be awaited with wait.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength":tau_proto::AGENT_ID_MAX_LEN,"pattern":"^[A-Za-z0-9_-]{1,64}$","description":"Required loaded non-self agent to compact."}},"required":["agent_id"],"additionalProperties":false})),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new("harness:compaction"), tau_proto::ToolTag::new("harness:compaction:cross-agent"), tau_proto::ToolTag::new("harness:agent-control")],
+        enabled_by_default: false,
+        background_support: Some(BackgroundSupport::Instant),
+        examples: Vec::new(),
+    }
+}
+
+fn parse_compaction_args(
+    tool: &str,
+    arguments: &CborValue,
+) -> Result<Option<tau_proto::AgentId>, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    if tool == COMPACT_TOOL_NAME {
+        return entries
+            .is_empty()
+            .then_some(None)
+            .ok_or_else(|| "`compact` accepts no arguments".to_owned());
+    }
+    if entries.len() != 1 {
+        return Err("`agent_compact` requires only `agent_id`".to_owned());
+    }
+    let (CborValue::Text(key), CborValue::Text(value)) = &entries[0] else {
+        return Err("`agent_id` must be a string".to_owned());
+    };
+    if key != "agent_id" {
+        return Err("`agent_compact` requires only `agent_id`".to_owned());
+    }
+    tau_proto::AgentId::parse(value)
+        .map(Some)
+        .map_err(|err| format!("invalid `agent_id`: {err}"))
 }
 
 #[cfg(test)]

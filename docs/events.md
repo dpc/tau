@@ -538,3 +538,12 @@ the UI is the only consumer. Components without a terminal silently no-op.
 ### Reactive context recovery fields
 
 `agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
+- **`agent.manual_compaction_requested`** — harness-owned durable acceptance of
+  a model-callable `compact` or `agent_compact` request, including bounded
+  request/caller/target/prompt/tool-call/model correlation.
+- **`agent.manual_compaction_request_failed`** — exactly one categorical
+  terminal outcome when an accepted request cannot reach standalone transaction
+  start.
+- **`agent.standalone_compaction_started`** — standalone transaction start; a
+  `manual_agent_tool` trigger carries the request id, caller id, and original
+  tool call id used for background completion.

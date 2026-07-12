@@ -1408,6 +1408,24 @@ impl ToolRegistry {
         )
     }
 
+    /// Registers one harness-owned tool in an independently configurable group.
+    pub fn register_internal_with_group(
+        &mut self,
+        connection_id: &str,
+        tool: ToolSpec,
+        tool_group: tau_proto::ToolGroup,
+    ) -> RegisterToolReport {
+        self.register_provider(
+            connection_id,
+            ToolRegister {
+                tool,
+                tool_group: Some(tool_group),
+                prompt_fragment: None,
+            },
+            ToolProviderKind::Internal,
+        )
+    }
+
     /// Registers one tool for a live provider connection, including any prompt
     /// fragment attached to the registration.
     pub fn register_with_prompt_fragment(

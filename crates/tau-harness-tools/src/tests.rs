@@ -1006,3 +1006,85 @@ fn agent_watch_spec_documents_initial_and_transition_context_semantics() {
     assert!(description.contains("initial status is not injected"));
     assert!(description.contains("later transitions are delivered separately"));
 }
+
+/// Ensures both compaction capabilities remain absent unless policy explicitly
+/// opts in, and that each advertises instant-background completion semantics.
+#[test]
+fn compaction_specs_are_independently_disabled_and_backgrounded() {
+    let compact = compact_tool_spec();
+    let cross = agent_compact_tool_spec();
+
+    assert!(!compact.enabled_by_default);
+    assert!(!cross.enabled_by_default);
+    assert_eq!(
+        compact.background_support,
+        Some(tau_proto::BackgroundSupport::Instant)
+    );
+    assert_eq!(
+        cross.background_support,
+        Some(tau_proto::BackgroundSupport::Instant)
+    );
+    assert_eq!(
+        compact.tags,
+        vec![
+            tau_proto::ToolTag::new("harness:compaction"),
+            tau_proto::ToolTag::new("harness:compaction:self")
+        ]
+    );
+    assert!(
+        cross
+            .tags
+            .contains(&tau_proto::ToolTag::new("harness:agent-control"))
+    );
+    assert!(
+        !compact
+            .tags
+            .iter()
+            .any(|tag| tag.as_str().contains("cross"))
+    );
+}
+
+/// Ensures the self tool accepts only the empty object so a provider cannot
+/// smuggle target authority through unknown arguments.
+#[test]
+fn compact_arguments_are_strictly_empty() {
+    assert_eq!(
+        parse_compaction_args(COMPACT_TOOL_NAME, &CborValue::Map(Vec::new())),
+        Ok(None)
+    );
+    assert!(
+        parse_compaction_args(
+            COMPACT_TOOL_NAME,
+            &CborValue::Map(vec![(
+                CborValue::Text("agent_id".to_owned()),
+                CborValue::Text("other".to_owned())
+            )])
+        )
+        .is_err()
+    );
+}
+
+/// Ensures cross-agent authority requires one syntactically safe non-empty
+/// target and rejects every extra field.
+#[test]
+fn agent_compact_arguments_require_only_agent_id() {
+    let valid = CborValue::Map(vec![(
+        CborValue::Text("agent_id".to_owned()),
+        CborValue::Text("other-agent".to_owned()),
+    )]);
+    assert_eq!(
+        parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &valid),
+        Ok(Some(
+            tau_proto::AgentId::parse("other-agent").expect("valid agent id")
+        ))
+    );
+    assert!(parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &CborValue::Map(Vec::new())).is_err());
+    let extra = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("other-agent".to_owned()),
+        ),
+        (CborValue::Text("force".to_owned()), CborValue::Bool(true)),
+    ]);
+    assert!(parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &extra).is_err());
+}

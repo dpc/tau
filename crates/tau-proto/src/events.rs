@@ -83,6 +83,8 @@ pub enum AgentHead {
 
 /// Maximum encoded length of a standalone-compaction transaction identifier.
 pub const MAX_COMPACTION_TRANSACTION_ID_LEN: usize = 128;
+/// Maximum encoded length of a manual-compaction request identifier.
+pub const MAX_COMPACTION_REQUEST_ID_LEN: usize = 128;
 
 /// Durable correlation identifier for one standalone-compaction transaction.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -124,6 +126,54 @@ impl From<CompactionTransactionId> for String {
 }
 
 impl fmt::Display for CompactionTransactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Durable correlation identifier for one model-requested compaction.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CompactionRequestId(
+    /// Validated path-safe request identifier.
+    String,
+);
+
+impl CompactionRequestId {
+    /// Validates and constructs a bounded, non-empty request identifier.
+    pub fn parse(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("compaction request id must not be empty");
+        }
+        if value.len() > MAX_COMPACTION_REQUEST_ID_LEN {
+            return Err("compaction request id is too long");
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("compaction request id contains invalid characters");
+        }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<String> for CompactionRequestId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<CompactionRequestId> for String {
+    fn from(value: CompactionRequestId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for CompactionRequestId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -3253,6 +3303,72 @@ pub struct AgentStandaloneCompactionStarted {
     pub trigger: StandaloneCompactionTrigger,
 }
 
+/// Model-callable tool that initiated a durable manual compaction request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualCompactionTool {
+    /// The caller requested compaction of its own complete tool round.
+    Compact,
+    /// The caller requested compaction of another loaded agent.
+    AgentCompact,
+}
+
+/// Harness-owned durable acceptance fact for a model-requested compaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentManualCompactionRequested {
+    /// Stable identifier for this accepted request.
+    pub request_id: CompactionRequestId,
+    /// Public id of the tool-call owner.
+    pub caller_agent_id: AgentId,
+    /// Public id of the agent whose transcript will be compacted.
+    pub target_agent_id: AgentId,
+    /// Prompt snapshot that authorized the tool call.
+    pub initiating_agent_prompt_id: AgentPromptId,
+    /// Original tool call completed when compaction terminates.
+    pub initiating_tool_call_id: ToolCallId,
+    /// Exact separately authorized tool used by the caller.
+    pub initiating_tool_name: ManualCompactionTool,
+    /// Prompt-visible name retained for terminal background correlation.
+    pub visible_tool_name: ToolName,
+    /// Target branch head observed at acceptance.
+    pub requested_target_head: AgentHead,
+    /// Target-owned materialized prompt generation observed at acceptance.
+    pub target_generation: u64,
+    /// Provider-qualified model observed at acceptance.
+    pub model: ModelId,
+    /// Whether successful compaction owes continuation inference.
+    pub resume_inference: bool,
+}
+
+/// Safe categorical reason an accepted request could not start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualCompactionRequestFailureReason {
+    /// The original background tool call was cancelled.
+    Cancelled,
+    /// The target left the loaded session before dispatch.
+    TargetUnloaded,
+    /// The target's selected model changed after acceptance.
+    ModelChanged,
+    /// The selected model no longer supports standalone compaction.
+    Unsupported,
+    /// The captured provider route disappeared before dispatch.
+    RouteFailed,
+    /// The captured branch is no longer a safe compaction boundary.
+    StaleBranch,
+}
+
+/// Durable terminal failure before a manual request became a transaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentManualCompactionRequestFailed {
+    /// Request that reached this one terminal pre-start outcome.
+    pub request_id: CompactionRequestId,
+    /// Target agent owning the durable request.
+    pub target_agent_id: AgentId,
+    /// Safe bounded failure category.
+    pub reason: ManualCompactionRequestFailureReason,
+}
+
 /// Durable cause of a standalone compaction transaction.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -3260,6 +3376,15 @@ pub enum StandaloneCompactionTrigger {
     /// Explicit or proactive compaction without a failed inference claim.
     #[default]
     Manual,
+    /// Explicit compaction requested by a model-callable harness tool.
+    ManualAgentTool {
+        /// Durable request uniquely claimed by this transaction.
+        request_id: CompactionRequestId,
+        /// Public id of the agent that owned the tool call.
+        caller_agent_id: AgentId,
+        /// Tool call completed when this transaction reaches a terminal state.
+        initiating_tool_call_id: ToolCallId,
+    },
     /// Automatic recovery of one canonically rejected ordinary inference.
     ReactiveContextOverflow {
         /// Failed inference prompt uniquely claimed by this transaction.
@@ -4231,6 +4356,10 @@ pub enum Event {
     AgentCompacted(AgentCompacted),
     #[serde(rename = "agent.standalone_compaction_started")]
     AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted),
+    #[serde(rename = "agent.manual_compaction_requested")]
+    AgentManualCompactionRequested(AgentManualCompactionRequested),
+    #[serde(rename = "agent.manual_compaction_request_failed")]
+    AgentManualCompactionRequestFailed(AgentManualCompactionRequestFailed),
     #[serde(rename = "agent.standalone_compaction_failed")]
     AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed),
     #[serde(rename = "agent.inference_dispatch_started")]
@@ -4463,6 +4592,10 @@ impl Event {
             Self::AgentCompacted(_) => EventName::AGENT_COMPACTED,
             Self::AgentStandaloneCompactionStarted(_) => {
                 EventName::AGENT_STANDALONE_COMPACTION_STARTED
+            }
+            Self::AgentManualCompactionRequested(_) => EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+            Self::AgentManualCompactionRequestFailed(_) => {
+                EventName::AGENT_MANUAL_COMPACTION_REQUEST_FAILED
             }
             Self::AgentStandaloneCompactionFailed(_) => {
                 EventName::AGENT_STANDALONE_COMPACTION_FAILED

@@ -38,8 +38,9 @@ pub use policy::{
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
     AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
-    BackgroundToolPlaceholder, InferenceDispatchRecovery, NodeId, PersistedAgentEvent,
-    PersistedAgentEventSeq, SessionMeta, StandaloneCompactionRecovery,
+    BackgroundToolPlaceholder, InferenceDispatchRecovery, ManualCompactionOutcome,
+    ManualCompactionRecovery, NodeId, PersistedAgentEvent, PersistedAgentEventSeq, SessionMeta,
+    StandaloneCompactionRecovery,
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,

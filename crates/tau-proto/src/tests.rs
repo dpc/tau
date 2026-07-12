@@ -54,6 +54,51 @@ fn test_message_envelope() -> MessageEnvelope {
     }
 }
 
+/// Ensures manual-compaction request ids remain bounded and safe for notices,
+/// persistence keys, and provider-independent correlation.
+#[test]
+fn compaction_request_id_validation() {
+    assert!(CompactionRequestId::parse("cr-agent_1-42").is_ok());
+    assert!(CompactionRequestId::parse("").is_err());
+    assert!(CompactionRequestId::parse("cr/unsafe").is_err());
+    assert!(CompactionRequestId::parse("x".repeat(MAX_COMPACTION_REQUEST_ID_LEN + 1)).is_err());
+}
+
+/// Ensures the two durable pre-start facts retain every immutable authority and
+/// correlation field across the CBOR wire format.
+#[test]
+fn manual_compaction_request_events_round_trip() {
+    let requested = Event::AgentManualCompactionRequested(AgentManualCompactionRequested {
+        request_id: CompactionRequestId::parse("cr-wire").expect("request id"),
+        caller_agent_id: AgentId::parse("caller").expect("caller"),
+        target_agent_id: AgentId::parse("target").expect("target"),
+        initiating_agent_prompt_id: "ap-origin".into(),
+        initiating_tool_call_id: "call-origin".into(),
+        initiating_tool_name: ManualCompactionTool::AgentCompact,
+        visible_tool_name: ToolName::new("compact_other"),
+        requested_target_head: AgentHead::Root,
+        target_generation: 7,
+        model: "provider/model".into(),
+        resume_inference: false,
+    });
+    let bytes = encode_message_to_vec(&requested).expect("encode request");
+    assert_eq!(
+        decode_message_from_slice::<Event>(&bytes).expect("decode request"),
+        requested
+    );
+
+    let failed = Event::AgentManualCompactionRequestFailed(AgentManualCompactionRequestFailed {
+        request_id: CompactionRequestId::parse("cr-wire").expect("request id"),
+        target_agent_id: AgentId::parse("target").expect("target"),
+        reason: ManualCompactionRequestFailureReason::RouteFailed,
+    });
+    let bytes = encode_message_to_vec(&failed).expect("encode failure");
+    assert_eq!(
+        decode_message_from_slice::<Event>(&bytes).expect("decode failure"),
+        failed
+    );
+}
+
 /// Ensures older serialized `extension.skill_available` payloads remain
 /// readable and default to user-invocable/model-invocable behavior.
 #[test]

@@ -354,6 +354,8 @@ pub struct AgentTree {
     /// derived tree. Maintained while replaying/applying events so callers can
     /// mint the next per-agent prompt id without rescanning the event log.
     materialized_prompt_count: u64,
+    /// Number of ordinary inference prompts, excluding compaction operations.
+    ordinary_inference_generation: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
     /// Message facts committed while provider tool adjacency is open. They are
@@ -366,6 +368,11 @@ pub struct AgentTree {
     compaction_transactions: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
     /// Durable insertion order for deterministic recovery projection.
     compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
+    /// Durable model-requested compactions, including requests not started yet.
+    manual_compaction_requests:
+        HashMap<tau_proto::CompactionRequestId, ManualCompactionRequestFold>,
+    /// Durable request insertion order for deterministic recovery.
+    manual_compaction_request_order: Vec<tau_proto::CompactionRequestId>,
     /// All durable inference checkpoints keyed by their provider prompt id.
     inference_dispatches: HashMap<tau_proto::AgentPromptId, InferenceDispatchFold>,
     /// Durable inference checkpoint insertion order.
@@ -393,6 +400,49 @@ struct CompactionTransactionFold {
 #[derive(Clone, Debug, PartialEq)]
 enum CompactionTransactionOutcome {
     Succeeded(tau_proto::AgentCompacted),
+    Failed(tau_proto::AgentStandaloneCompactionFailed),
+}
+
+/// Folded state for one accepted model-requested compaction.
+#[derive(Clone, Debug, PartialEq)]
+struct ManualCompactionRequestFold {
+    /// Immutable harness-owned acceptance fact.
+    requested: tau_proto::AgentManualCompactionRequested,
+    /// Transaction that uniquely claimed this request, if started.
+    transaction_id: Option<tau_proto::CompactionTransactionId>,
+    /// Terminal pre-start failure, if starting became impossible.
+    failed: Option<tau_proto::AgentManualCompactionRequestFailed>,
+}
+
+/// Durable state of an accepted model-requested compaction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManualCompactionRecovery {
+    /// The accepted request has not started or failed.
+    Waiting(tau_proto::AgentManualCompactionRequested),
+    /// The request has started a durable standalone transaction.
+    Started {
+        /// Immutable acceptance fact.
+        requested: tau_proto::AgentManualCompactionRequested,
+        /// Matching transaction.
+        started: Box<tau_proto::AgentStandaloneCompactionStarted>,
+        /// Durable transaction outcome, when provider work terminated.
+        outcome: Option<Box<ManualCompactionOutcome>>,
+    },
+    /// The request failed before transaction start.
+    Failed {
+        /// Immutable acceptance fact.
+        requested: tau_proto::AgentManualCompactionRequested,
+        /// Matching terminal pre-start failure.
+        failed: tau_proto::AgentManualCompactionRequestFailed,
+    },
+}
+
+/// Durable terminal transaction outcome for a model-requested compaction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManualCompactionOutcome {
+    /// Compaction committed a replacement boundary.
+    Succeeded(tau_proto::AgentCompacted),
+    /// Compaction failed and left the target blocked.
     Failed(tau_proto::AgentStandaloneCompactionFailed),
 }
 
@@ -495,6 +545,85 @@ impl AgentTree {
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), Some(_)) => None,
         }
+    }
+
+    /// Returns model-requested compaction state in durable acceptance order.
+    #[must_use]
+    pub fn manual_compaction_recoveries(&self) -> Vec<ManualCompactionRecovery> {
+        self.manual_compaction_request_order
+            .iter()
+            .filter_map(|id| {
+                let request = self.manual_compaction_requests.get(id)?;
+                if let Some(failed) = &request.failed {
+                    return Some(ManualCompactionRecovery::Failed {
+                        requested: request.requested.clone(),
+                        failed: failed.clone(),
+                    });
+                }
+                if let Some(transaction_id) = &request.transaction_id {
+                    let transaction = self.compaction_transactions.get(transaction_id)?;
+                    return Some(ManualCompactionRecovery::Started {
+                        requested: request.requested.clone(),
+                        started: Box::new(transaction.started.clone()),
+                        outcome: transaction.outcome.as_ref().map(|outcome| {
+                            Box::new(match outcome {
+                                CompactionTransactionOutcome::Succeeded(compacted) => {
+                                    ManualCompactionOutcome::Succeeded(compacted.clone())
+                                }
+                                CompactionTransactionOutcome::Failed(failed) => {
+                                    ManualCompactionOutcome::Failed(failed.clone())
+                                }
+                            })
+                        }),
+                    });
+                }
+                Some(ManualCompactionRecovery::Waiting(request.requested.clone()))
+            })
+            .collect()
+    }
+
+    /// Returns whether the branch contains the complete tool-results node for a
+    /// call.
+    #[must_use]
+    pub fn has_complete_tool_round_for(&self, head: Option<NodeId>, call_id: &ToolCallId) -> bool {
+        self.branch_node_ids_from(head).into_iter().any(|node_id| {
+            self.node(node_id).is_some_and(|node| {
+                matches!(
+                    &node.entry,
+                    AgentEntry::ToolResults { items }
+                        if items.iter().any(|item| item.call_id == *call_id)
+                )
+            })
+        })
+    }
+
+    /// Returns whether `ancestor` is on the path to `descendant`.
+    #[must_use]
+    pub fn contains_head_ancestry(&self, ancestor: AgentHead, descendant: AgentHead) -> bool {
+        self.is_ancestor_head(ancestor, descendant)
+    }
+
+    /// Returns whether the branch ending at `head` contains an exact user-input
+    /// text item.
+    #[must_use]
+    pub fn has_user_input_text_on_branch(&self, head: Option<NodeId>, text: &str) -> bool {
+        self.branch_node_ids_from(head).into_iter().any(|node_id| {
+            self.node(node_id).is_some_and(|node| {
+                matches!(
+                    &node.entry,
+                    AgentEntry::UserInput { items, .. }
+                        if items.iter().any(|item| matches!(
+                            item,
+                            ContextItem::Message(message)
+                                if message.content.iter().any(|part| matches!(
+                                    part,
+                                    ContentPart::Text { text: item_text }
+                                        if item_text == text
+                                ))
+                        ))
+                )
+            })
+        })
     }
 
     /// Returns recovery state for the latest durable inference checkpoint.
@@ -886,12 +1015,15 @@ impl AgentTree {
             display_name: None,
             next_event_seq: PersistedAgentEventSeq::new(0),
             materialized_prompt_count: 0,
+            ordinary_inference_generation: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
             pending_message_envelopes: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
             compaction_transactions: HashMap::new(),
             compaction_transaction_order: Vec::new(),
+            manual_compaction_requests: HashMap::new(),
+            manual_compaction_request_order: Vec::new(),
             inference_dispatches: HashMap::new(),
             inference_dispatch_order: Vec::new(),
         };
@@ -916,6 +1048,12 @@ impl AgentTree {
     #[must_use]
     pub fn materialized_prompt_count(&self) -> u64 {
         self.materialized_prompt_count
+    }
+
+    /// Returns target-owned ordinary inference progress for manual rate guards.
+    #[must_use]
+    pub fn ordinary_inference_generation(&self) -> u64 {
+        self.ordinary_inference_generation
     }
 
     /// Bumps the cached next-event-seq after a successful append.
@@ -960,6 +1098,23 @@ impl AgentTree {
 
     fn apply_compaction_control_event(&mut self, event: &Event) {
         match event {
+            Event::AgentManualCompactionRequested(requested) => {
+                self.manual_compaction_request_order
+                    .push(requested.request_id.clone());
+                self.manual_compaction_requests.insert(
+                    requested.request_id.clone(),
+                    ManualCompactionRequestFold {
+                        requested: requested.clone(),
+                        transaction_id: None,
+                        failed: None,
+                    },
+                );
+            }
+            Event::AgentManualCompactionRequestFailed(failed) => {
+                if let Some(request) = self.manual_compaction_requests.get_mut(&failed.request_id) {
+                    request.failed = Some(failed.clone());
+                }
+            }
             Event::AgentStandaloneCompactionStarted(started) => {
                 self.compaction_transaction_order
                     .push(started.transaction_id.clone());
@@ -972,6 +1127,13 @@ impl AgentTree {
                         inference_finished: false,
                     },
                 );
+                if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                    request_id, ..
+                } = &started.trigger
+                    && let Some(request) = self.manual_compaction_requests.get_mut(request_id)
+                {
+                    request.transaction_id = Some(started.transaction_id.clone());
+                }
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
                 if let Some(transaction) =
@@ -1025,8 +1187,12 @@ impl AgentTree {
     }
 
     fn count_materialized_prompt(&mut self, event: &Event) {
-        if matches!(event, Event::AgentPromptCreated(_)) {
+        if let Event::AgentPromptCreated(created) = event {
             self.materialized_prompt_count += 1;
+            if created.operation == tau_proto::PromptOperation::Inference {
+                self.ordinary_inference_generation =
+                    self.ordinary_inference_generation.saturating_add(1);
+            }
         }
     }
 
@@ -1452,6 +1618,16 @@ impl AgentTree {
             {
                 Some(self.validate_compaction_started(started))
             }
+            Event::AgentManualCompactionRequested(requested)
+                if requested.target_agent_id == self.agent_id =>
+            {
+                Some(self.validate_manual_compaction_requested(requested))
+            }
+            Event::AgentManualCompactionRequestFailed(failed)
+                if failed.target_agent_id == self.agent_id =>
+            {
+                Some(self.validate_manual_compaction_request_failed(failed))
+            }
             Event::AgentStandaloneCompactionFailed(failed) if failed.agent_id == self.agent_id => {
                 Some(self.validate_compaction_failed(failed))
             }
@@ -1493,6 +1669,57 @@ impl AgentTree {
             return Err(AgentEventValidationError::new(
                 "duplicate standalone compaction transaction id",
             ));
+        }
+        if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id,
+            caller_agent_id,
+            initiating_tool_call_id,
+        } = &started.trigger
+        {
+            let Some(request) = self.manual_compaction_requests.get(request_id) else {
+                return Err(AgentEventValidationError::new(
+                    "manual-agent transaction references unknown request",
+                ));
+            };
+            if request.failed.is_some()
+                || request.transaction_id.is_some()
+                || request.requested.target_agent_id != started.agent_id
+                || request.requested.caller_agent_id != *caller_agent_id
+                || request.requested.initiating_tool_call_id != *initiating_tool_call_id
+                || request.requested.model != started.model
+            {
+                return Err(AgentEventValidationError::new(
+                    "manual-agent transaction does not uniquely match its request",
+                ));
+            }
+            let accepted = &request.requested;
+            let valid_cut = match accepted.initiating_tool_name {
+                tau_proto::ManualCompactionTool::Compact => {
+                    started.supersedes.is_none()
+                        && started.resume_through == Some(started.cut)
+                        && self.is_ancestor_head(accepted.requested_target_head, started.cut)
+                        && self.has_complete_tool_round_for(
+                            started.cut.as_option(),
+                            &accepted.initiating_tool_call_id,
+                        )
+                }
+                tau_proto::ManualCompactionTool::AgentCompact => {
+                    if started.supersedes.is_some() {
+                        self.is_ancestor_head(started.cut, accepted.requested_target_head)
+                            && started
+                                .resume_through
+                                .is_none_or(|resume| resume == accepted.requested_target_head)
+                    } else {
+                        started.cut == accepted.requested_target_head
+                            && started.resume_through.is_none()
+                    }
+                }
+            };
+            if !valid_cut {
+                return Err(AgentEventValidationError::new(
+                    "manual-agent transaction does not honor its accepted target boundary",
+                ));
+            }
         }
         if let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
             failed_agent_prompt_id,
@@ -1561,6 +1788,83 @@ impl AgentTree {
                     "superseding compaction must preserve cut and resume obligation",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_manual_compaction_requested(
+        &self,
+        requested: &tau_proto::AgentManualCompactionRequested,
+    ) -> Result<(), AgentEventValidationError> {
+        if self
+            .manual_compaction_requests
+            .contains_key(&requested.request_id)
+        {
+            return Err(AgentEventValidationError::new(
+                "duplicate manual compaction request id",
+            ));
+        }
+        if self
+            .manual_compaction_requests
+            .values()
+            .any(|request| request.failed.is_none() && request.transaction_id.is_none())
+            || self
+                .compaction_transactions
+                .values()
+                .any(|transaction| transaction.outcome.is_none())
+        {
+            return Err(AgentEventValidationError::new(
+                "another compaction request or transaction is pending",
+            ));
+        }
+        if requested.initiating_tool_name == tau_proto::ManualCompactionTool::Compact
+            && (requested.caller_agent_id != requested.target_agent_id
+                || !requested.resume_inference)
+        {
+            return Err(AgentEventValidationError::new(
+                "self compaction request has different caller and target",
+            ));
+        }
+        if requested.initiating_tool_name == tau_proto::ManualCompactionTool::AgentCompact
+            && (requested.caller_agent_id == requested.target_agent_id
+                || requested.resume_inference)
+        {
+            return Err(AgentEventValidationError::new(
+                "cross-agent compaction request targets its caller",
+            ));
+        }
+        if !self.is_ancestor_head(
+            requested.requested_target_head,
+            requested.requested_target_head,
+        ) {
+            return Err(AgentEventValidationError::new(
+                "manual compaction request references an unknown target head",
+            ));
+        }
+        if requested.target_generation != self.ordinary_inference_generation {
+            return Err(AgentEventValidationError::new(
+                "manual compaction request has a stale target generation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_manual_compaction_request_failed(
+        &self,
+        failed: &tau_proto::AgentManualCompactionRequestFailed,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(request) = self.manual_compaction_requests.get(&failed.request_id) else {
+            return Err(AgentEventValidationError::new(
+                "manual compaction failure references unknown request",
+            ));
+        };
+        if request.requested.target_agent_id != failed.target_agent_id
+            || request.failed.is_some()
+            || request.transaction_id.is_some()
+        {
+            return Err(AgentEventValidationError::new(
+                "manual compaction request already has a terminal pre-start outcome",
+            ));
         }
         Ok(())
     }

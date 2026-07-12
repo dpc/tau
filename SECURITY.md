@@ -536,3 +536,18 @@ unusable at the scheduler until exact resolution succeeds.
 ### Watcher-visible provider work
 
 Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
+## Model-requested compaction authority
+
+The CLI `/compact` command is human/UI authority. The model-callable `compact`
+tool is a separate, disabled-by-default self-compaction authority, while
+`agent_compact` is an independently opted-in authority over any *other loaded
+agent in the same harness session*. Enabling either tool never enables the
+other. Agent ancestry, watches, message capability, role names, and knowledge
+of an id do not grant compaction authority; conversely, the binding
+`agent_compact` capability does not require ancestry. Unknown, unloaded,
+stopped, and cross-session targets share a non-enumerating error.
+
+Accepted model requests are harness-owned durable facts correlated to the
+originating prompt and tool call. Provider and extension input cannot select a
+cut, model, or caller, and exactly one durable start or pre-start failure may
+claim an accepted request.

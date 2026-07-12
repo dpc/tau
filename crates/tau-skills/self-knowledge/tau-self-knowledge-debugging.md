@@ -171,3 +171,10 @@ and approximate delays. Enabling or re-enabling shows the current snapshot rathe
 than attempt history. Raw endpoint bodies and provider error text intentionally
 remain unavailable across the watch boundary; inspect provider-local debug logs
 under the existing diagnostics policy when those details are required.
+### Debugging manual compaction
+
+Trace `agent.manual_compaction_requested` by request id, then expect exactly
+one pre-start failure or a matching `agent.standalone_compaction_started`.
+After transaction success/failure, verify one terminal background event for
+the initiating call. For self requests, the start cut must include the complete
+sibling tool-result round; a request without that boundary remains deferred.

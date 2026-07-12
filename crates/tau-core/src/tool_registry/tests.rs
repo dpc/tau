@@ -620,6 +620,54 @@ fn oversized_tool_example_rejects_registration() {
     );
 }
 
+/// Ensures harness-owned tools retain distinct policy groups rather than
+/// inheriting an implicit shared internal-tool capability.
+#[test]
+fn internal_tools_preserve_independent_registration_groups() {
+    let mut registry = ToolRegistry::new();
+    let mut self_tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }));
+    self_tool.name = ToolName::new("compact");
+    self_tool.enabled_by_default = false;
+    let mut cross_tool = self_tool.clone();
+    cross_tool.name = ToolName::new("agent_compact");
+
+    registry.register_internal_with_group(
+        "harness",
+        self_tool,
+        ToolGroup {
+            name: tau_proto::ToolGroupName::new("compaction"),
+            prompt_fragment: None,
+        },
+    );
+    registry.register_internal_with_group(
+        "harness",
+        cross_tool,
+        ToolGroup {
+            name: tau_proto::ToolGroupName::new("cross_agent_compaction"),
+            prompt_fragment: None,
+        },
+    );
+
+    assert_eq!(
+        registry
+            .resolve_provider("compact")
+            .and_then(|provider| provider.tool_group.as_ref())
+            .map(|group| group.name.as_str()),
+        Some("compaction")
+    );
+    assert_eq!(
+        registry
+            .resolve_provider("agent_compact")
+            .and_then(|provider| provider.tool_group.as_ref())
+            .map(|group| group.name.as_str()),
+        Some("cross_agent_compaction")
+    );
+}
+
 #[test]
 fn tool_example_hint_selects_matching_subcommand_deterministically() {
     let mut tool = strict_tool(serde_json::json!({
