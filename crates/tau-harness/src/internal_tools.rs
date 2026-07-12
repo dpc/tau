@@ -482,16 +482,19 @@ impl<'a> InternalToolHost<'a> {
             .publish_agent_watch_response_from_agent(&sender_cid, recipient_id, message)
     }
 
-    /// Enable or disable a session-local agent watch relationship.
-    pub fn set_agent_watch(
+    /// Atomically validate the target lifecycle and mutate a watch relation.
+    ///
+    /// Enabling requires a live target. Disabling is idempotent, including for
+    /// stopped or unknown target ids.
+    pub fn try_set_agent_watch(
         &mut self,
         watcher_id: &str,
         watched_agent_id: &str,
         enable: bool,
         cause: tau_proto::AgentWatchUpdateCause,
-    ) {
+    ) -> Result<(), String> {
         self.harness
-            .set_agent_watch(watcher_id, watched_agent_id, enable, cause);
+            .try_set_agent_watch(watcher_id, watched_agent_id, enable, cause)
     }
 
     /// Return public watcher ids currently watching `watched_agent_id`.
@@ -540,14 +543,6 @@ impl<'a> InternalToolHost<'a> {
         !matches!(
             self.harness.agent_message_recipient_status(agent_id),
             crate::harness::AgentMessageRecipientStatus::Unknown
-        )
-    }
-
-    /// Return whether `agent_id` is a currently live recipient.
-    pub fn is_live_agent_id(&self, agent_id: &str) -> bool {
-        matches!(
-            self.harness.agent_message_recipient_status(agent_id),
-            crate::harness::AgentMessageRecipientStatus::Live
         )
     }
 }

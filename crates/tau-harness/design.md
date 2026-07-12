@@ -238,6 +238,12 @@ Lifecycle-notification-only turns suppress both state edges to prevent cyclic
 watch amplification. If ordinary input joins such a running generation, a
 delayed start is emitted before the eventual matching stop.
 
+Enable lifecycle classification and watch mutation form one authoritative
+harness-loop operation. Only a Live target can create topology, subscription,
+or notification state; Stopped and Unknown failures change none of that state.
+A same-id reload remains unwatched until an explicit enable creates a fresh
+subscription, while disable stays idempotent for known stopped endpoints.
+
 The initial snapshot remains a durable client-visible fact but is not queued or
 replayed into the watching model's context. Live delivery and transcript replay
 derive later model-visible transition wording from the structured watched-turn

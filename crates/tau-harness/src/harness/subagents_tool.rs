@@ -295,6 +295,30 @@ impl Harness {
 
     /// Enable or disable one session-local watch relation and publish the
     /// authoritative watcher snapshot.
+    pub(crate) fn try_set_agent_watch(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        enable: bool,
+        cause: AgentWatchUpdateCause,
+    ) -> Result<(), String> {
+        if enable {
+            match self.agent_message_recipient_status(watched_agent_id) {
+                AgentMessageRecipientStatus::Live => {}
+                AgentMessageRecipientStatus::Stopped => {
+                    return Err(format!("agent is not live: `{watched_agent_id}`"));
+                }
+                AgentMessageRecipientStatus::Unknown => {
+                    return Err(format!("unknown agent: `{watched_agent_id}`"));
+                }
+            }
+        }
+        self.set_agent_watch(watcher_id, watched_agent_id, enable, cause);
+        Ok(())
+    }
+
+    /// Mutate one already-validated session-local watch relation and publish
+    /// the authoritative watcher snapshot.
     pub(crate) fn set_agent_watch(
         &mut self,
         watcher_id: &str,

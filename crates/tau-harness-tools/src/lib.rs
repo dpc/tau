@@ -395,12 +395,13 @@ impl BuiltinTools {
                 },
             );
         }
-        host.set_agent_watch(
+        host.try_set_agent_watch(
             &self_agent_id,
             &agent_id,
             true,
             tau_proto::AgentWatchUpdateCause::AgentStart,
-        );
+        )
+        .map_err(HarnessError::Participant)?;
         finish_agent_start_success(
             host,
             cid,
@@ -452,33 +453,24 @@ impl BuiltinTools {
             if parsed.agent_id.as_str() == self_agent_id {
                 return Err("`agent_id` must identify another agent".to_owned());
             }
-            if !host.is_known_agent_id(&parsed.agent_id) {
-                return Err(format!("unknown agent: `{}`", parsed.agent_id));
-            }
-            if parsed.enable {
-                if !host.is_live_agent_id(&parsed.agent_id) {
-                    return Err(format!("agent is not live: `{}`", parsed.agent_id));
+            agent_watch_tool_result(&self_agent_id, &parsed, |watcher_id, watched_id, enable| {
+                if !enable && !host.is_known_agent_id(watched_id) {
+                    return Err(format!("unknown agent: `{watched_id}`"));
                 }
-                host.set_agent_watch(
-                    &self_agent_id,
-                    &parsed.agent_id,
-                    true,
-                    tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-                );
-                let snapshot = host.agent_watch_provider_status_summary(&parsed.agent_id);
-                Ok(agent_watch_enabled_result(
-                    &parsed.agent_id,
-                    snapshot.as_deref(),
-                ))
-            } else {
-                host.set_agent_watch(
-                    &self_agent_id,
-                    &parsed.agent_id,
-                    false,
-                    tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
-                );
-                Ok(format!("Stopped watching agent `{}`", parsed.agent_id))
-            }
+                host.try_set_agent_watch(
+                    watcher_id,
+                    watched_id,
+                    enable,
+                    if enable {
+                        tau_proto::AgentWatchUpdateCause::AgentWatchEnable
+                    } else {
+                        tau_proto::AgentWatchUpdateCause::AgentWatchDisable
+                    },
+                )?;
+                Ok(enable
+                    .then(|| host.agent_watch_provider_status_summary(watched_id))
+                    .flatten())
+            })
         });
         match result {
             Ok(message) => finish_agent_watch_success(
@@ -549,6 +541,22 @@ impl BuiltinTools {
                 host.prune_agent_watch(&watcher_id, sender_id);
             }
         }
+    }
+}
+
+fn agent_watch_tool_result(
+    self_agent_id: &str,
+    parsed: &AgentWatchArgs,
+    mut try_set: impl FnMut(&str, &str, bool) -> Result<Option<String>, String>,
+) -> Result<String, String> {
+    let snapshot = try_set(self_agent_id, &parsed.agent_id, parsed.enable)?;
+    if parsed.enable {
+        Ok(agent_watch_enabled_result(
+            &parsed.agent_id,
+            snapshot.as_deref(),
+        ))
+    } else {
+        Ok(format!("Stopped watching agent `{}`", parsed.agent_id))
     }
 }
 

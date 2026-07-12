@@ -463,6 +463,50 @@ fn finish_agent_watch_error_passes_informative_display() {
     assert_eq!(display.status_text, "unknown agent: `agent-missing`");
 }
 
+/// A stopped-target classification from the handler's atomic watch adapter
+/// must finish as a tool error without reaching the adapter's mutation branch.
+#[test]
+fn agent_watch_stopped_target_errors_without_mutation() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-stopped".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+    ]);
+    let parsed = parse_agent_watch_args(&args).expect("valid watch arguments");
+    let mutation_called = std::cell::Cell::new(false);
+    let result = agent_watch_tool_result("agent-watcher", &parsed, |_, watched_id, enable| {
+        assert!(enable);
+        if watched_id == "agent-stopped" {
+            return Err(format!("agent is not live: `{watched_id}`"));
+        }
+        mutation_called.set(true);
+        Ok(None)
+    });
+    let error = result.expect_err("stopped target must fail");
+    let mut finisher = RecordingAgentWatchFinisher::default();
+    finish_agent_watch_error(
+        &mut finisher,
+        &AgentId::parse("watcher-cid").expect("valid agent id"),
+        ToolCallId::from("watch-stopped"),
+        ToolName::new(AGENT_WATCH_TOOL_NAME),
+        ToolType::Function,
+        &args,
+        error,
+    );
+
+    assert!(!mutation_called.get());
+    assert!(finisher.success.is_none());
+    let call = finisher.error.expect("tool error recorded");
+    assert_eq!(call.call_id.as_str(), "watch-stopped");
+    assert_eq!(call.message, "agent is not live: `agent-stopped`");
+    assert_eq!(
+        call.display.expect("error display").status,
+        ToolUseStatus::Error
+    );
+}
+
 #[test]
 fn agent_watch_notification_extracts_assistant_response_text() {
     let response = ProviderResponseFinished {

@@ -114,6 +114,12 @@ endpoint lifecycle boundary: it atomically retires every incoming and outgoing
 relation, subscription identity, provider snapshot, and delivery-dedupe bucket.
 Surviving watchers receive a replacement topology snapshot, while no event is
 addressed to the unloaded endpoint.
+Watch enable classification and mutation are one harness-loop operation. Only a
+Live target may create topology, subscription, or notification state; Stopped
+and Unknown targets fail without changing the forward or reverse topology,
+subscription identity, provider snapshot, or delivery-dedupe state. Reloading
+the same id does not revive retired relations and requires a fresh enable and
+subscription. Disable remains idempotent for known stopped endpoints.
 
 Model-visible `agent_watch` notifications are deliberately narrow. A watcher may
 receive only a watched agent's final response notification (`Watched agent <id>

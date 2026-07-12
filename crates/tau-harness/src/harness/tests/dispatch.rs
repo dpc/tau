@@ -14871,8 +14871,11 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
 }
 
 /// Unloading a watched target during context recovery must remove its current
-/// provider snapshot and every subscription/dedupe bucket, and a late terminal
-/// update must neither recreate stale reload state nor append to the watcher.
+/// provider snapshot and every subscription/dedupe bucket. The authoritative
+/// watch operation must reject the stopped target without mutating any of its
+/// five state maps, and reload must require one explicit fresh subscription.
+/// A late terminal update must neither recreate stale reload state nor append
+/// to the watcher.
 #[test]
 fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     let td = TempDir::new().expect("tempdir");
@@ -14925,6 +14928,45 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     h.remove_agent(&watched_cid);
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert!(h.agent_watch_provider_status.get(&watched_id).is_none());
+    let watches_after_unload = h.agent_watches.clone();
+    let watchers_after_unload = h.agent_watchers.clone();
+    let subscriptions_after_unload = h.agent_watch_subscriptions.clone();
+    let provider_status_after_unload = h.agent_watch_provider_status.clone();
+    let provider_deliveries_after_unload = h.agent_watch_provider_deliveries.clone();
+    let enable_error = crate::internal_tools::InternalToolHost::new(&mut h)
+        .try_set_agent_watch(
+            &watcher_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        )
+        .expect_err("an unloaded target must reject a new watch");
+    assert!(enable_error.contains("not live"));
+    assert_eq!(h.agent_watches, watches_after_unload);
+    assert_eq!(h.agent_watchers, watchers_after_unload);
+    assert_eq!(h.agent_watch_subscriptions, subscriptions_after_unload);
+    assert_eq!(h.agent_watch_provider_status, provider_status_after_unload);
+    assert_eq!(
+        h.agent_watch_provider_deliveries,
+        provider_deliveries_after_unload
+    );
+    let unknown_error = crate::internal_tools::InternalToolHost::new(&mut h)
+        .try_set_agent_watch(
+            &watcher_id,
+            "agent-never-loaded",
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        )
+        .expect_err("an unknown target must reject a new watch");
+    assert!(unknown_error.contains("unknown agent"));
+    assert_eq!(h.agent_watches, watches_after_unload);
+    assert_eq!(h.agent_watchers, watchers_after_unload);
+    assert_eq!(h.agent_watch_subscriptions, subscriptions_after_unload);
+    assert_eq!(h.agent_watch_provider_status, provider_status_after_unload);
+    assert_eq!(
+        h.agent_watch_provider_deliveries,
+        provider_deliveries_after_unload
+    );
     // Exercise the local fallback after the committed unload reaction.
     h.retire_agent_watch_endpoint(&watched_id);
     let durable_before = h
@@ -14997,12 +15039,17 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     h.ensure_loaded_agent_for_agent(&reloaded_cid, &watched_id);
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
-    h.set_agent_watch(
-        &watcher_id,
-        &watched_id,
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
+    assert!(!h.agent_watches.contains_key(&watcher_id));
+    crate::internal_tools::InternalToolHost::new(&mut h)
+        .try_set_agent_watch(
+            &watcher_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        )
+        .expect("a freshly reloaded live target accepts a new watch");
+    assert_eq!(h.watchers_for_agent(&watched_id), vec![watcher_id.clone()]);
+    assert_eq!(h.agent_watch_subscriptions.len(), 1);
     assert_ne!(
         h.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())],
         retired_subscription,
