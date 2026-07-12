@@ -118,3 +118,70 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
         MAX_TRACKED_PROVIDER_STATUS_PROMPTS
     );
 }
+
+/// Thousands of serial prompt identities in one generation must retain exact
+/// first/category-change/terminal decisions without allowing either terminal or
+/// nonterminal bookkeeping cardinality to grow without bound.
+#[test]
+fn provider_status_delivery_stays_bounded_across_a_long_high_cardinality_turn() {
+    const HIGH_CARDINALITY_PROMPTS: usize = 4_096;
+
+    let mut deliveries = AgentWatchProviderDeliveries::default();
+    for index in 0..HIGH_CARDINALITY_PROMPTS {
+        let prompt = tau_proto::AgentPromptId::from(format!("sp-terminal-stream-{index}"));
+        assert!(
+            deliveries
+                .record(11, &prompt, retrying_transport())
+                .should_deliver
+        );
+        assert!(
+            !deliveries
+                .record(11, &prompt, retrying_transport())
+                .should_deliver
+        );
+        assert!(
+            deliveries
+                .record(
+                    11,
+                    &prompt,
+                    AgentWatchProviderDeliveryKind::Blocked(
+                        tau_proto::AgentWatchProviderCategory::Compaction,
+                    ),
+                )
+                .should_deliver
+        );
+        let terminal = deliveries.record(
+            11,
+            &prompt,
+            AgentWatchProviderDeliveryKind::TerminalError(
+                tau_proto::ProviderFailureKind::RequestRejected,
+            ),
+        );
+        assert!(terminal.should_deliver);
+        assert!(terminal.terminal_retired);
+        assert_eq!(deliveries.prompt_count(), 0);
+        assert_eq!(deliveries.delivery_key_count(), 0);
+    }
+
+    for index in 0..HIGH_CARDINALITY_PROMPTS {
+        assert!(
+            deliveries
+                .record(
+                    11,
+                    &tau_proto::AgentPromptId::from(format!("sp-nonterminal-stream-{index}")),
+                    retrying_transport(),
+                )
+                .should_deliver
+        );
+        assert!(deliveries.prompt_count() <= MAX_TRACKED_PROVIDER_STATUS_PROMPTS);
+        assert!(deliveries.delivery_key_count() <= MAX_TRACKED_PROVIDER_STATUS_PROMPTS);
+    }
+    assert_eq!(
+        deliveries.prompt_count(),
+        MAX_TRACKED_PROVIDER_STATUS_PROMPTS
+    );
+    assert_eq!(
+        deliveries.delivery_key_count(),
+        MAX_TRACKED_PROVIDER_STATUS_PROMPTS
+    );
+}
