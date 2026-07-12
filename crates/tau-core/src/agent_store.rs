@@ -226,6 +226,9 @@ pub struct AgentAppendOutcome {
 /// loads individual agent trees on first access. Flocks are still taken lazily
 /// on first durable write so read-only consumers (e.g. inspection commands)
 /// don't contend with a running daemon.
+///
+/// Durable replay and memory-only parity follow
+/// `DESIGN-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,

@@ -2,6 +2,8 @@
 //!
 //! The extension exposes split email and calendar command tools while keeping
 //! shared configuration, approval, and runtime boundaries inside one extension.
+//! Component, storage, provider, and secret-handling boundaries are summarized
+//! in `ARCH-tau-ext-pim`.
 
 use std::error::Error;
 use std::io::{Read, Write};

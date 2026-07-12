@@ -3,6 +3,9 @@
 //! This crate owns the ChatGPT/Codex model metadata and OpenAI Responses API
 //! implementation, including HTTP/SSE, WebSocket transport, and pooled WS
 //! sessions.
+//! Component boundaries and provider-visible replay are summarized in
+//! `ARCH-tau-provider-chatgpt` and
+//! `SPEC-tau-provider-chatgpt-streaming-replay`.
 //! Its transport test boundary is recorded in
 //! `DESIGN-tau-provider-chatgpt-backend-testing`.
 
@@ -40,6 +43,9 @@ pub mod responses;
 /// socket. Implementors should register the supplied waker with their native
 /// cancellation primitive and call it when the current turn is canceled or the
 /// provider is shutting down.
+///
+/// The cooperative wake contract is recorded in
+/// `DESIGN-tau-provider-chatgpt-cooperative-cancellation`.
 pub trait TurnAbort {
     /// Return whether the current turn has already been canceled.
     fn is_aborted(&mut self) -> bool;

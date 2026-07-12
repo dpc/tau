@@ -7,6 +7,10 @@
 //! `ARCH-tau-ext-xmpp`.
 //! The plaintext-over-TLS limitation is recorded in
 //! `DESIGN-tau-ext-xmpp-tls-security-model`.
+//! Resource generation, MUC identity, and failed-registration cleanup follow
+//! `DESIGN-tau-ext-xmpp-generated-resources`,
+//! `DESIGN-tau-ext-xmpp-muc-identity`, and
+//! `DESIGN-tau-ext-xmpp-registration-rollback`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;

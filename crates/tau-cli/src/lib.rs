@@ -1,5 +1,7 @@
 //! CLI entrypoint for tau: starts a harness daemon and connects as a
 //! socket client for interactive chat.
+//!
+//! Transcript presentation follows `DESIGN-tau-cli-transcript-styling`.
 
 pub mod cli;
 

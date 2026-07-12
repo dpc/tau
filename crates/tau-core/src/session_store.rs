@@ -318,6 +318,9 @@ impl SessionMembership {
 /// only: they never create the sessions root, session directories, event logs,
 /// metadata, or locks, `session_events` reports no durable records, and
 /// `session_restore_events` returns same-daemon in-memory restore facts.
+///
+/// Durable replay and memory-only parity follow
+/// `DESIGN-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
