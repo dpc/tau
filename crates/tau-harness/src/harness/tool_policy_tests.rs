@@ -1,3 +1,6 @@
+//! Prompt capability and tool-policy behavior is specified by
+//! `SPEC-tau-harness-prompt-dispatch`.
+
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 

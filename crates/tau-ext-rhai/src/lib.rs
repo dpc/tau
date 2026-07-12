@@ -834,6 +834,8 @@ fn stage_tool(state: &HostStateRef, name: &str, spec: Map, handler: FnPtr) -> Re
             tool_type: ToolType::Function,
             parameters,
             format: None,
+            // Rhai's registration API has no validated tag surface yet; see
+            // `DESIGN-tau-ext-rhai-untagged-tools`.
             tags: Vec::new(),
             enabled_by_default,
             background_support: None,

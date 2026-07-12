@@ -660,9 +660,10 @@ fn prompt_command_is_local_slash_command() {
     assert!(is_local_slash_command("/prompt review"));
 }
 
-/// Protects interactive prompt submission from treating a likely mistyped
-/// leading slash command as a normal user message while leaving non-leading
-/// slashes available in ordinary prompt text.
+/// Protects the final slash-command ownership fallback recorded by
+/// `DESIGN-tau-cli-slash-command-ownership`: a likely mistyped leading command
+/// must not become a normal prompt, while non-leading slashes remain prompt
+/// text.
 #[test]
 fn leading_slash_actions_are_identified_before_prompt_submission() {
     assert_eq!(leading_slash_action("/typo"), Some("/typo"));

@@ -9,6 +9,8 @@
 //! receiver will see `Ok(())` first and only get `Err(Disconnected)` on the
 //! next call. Dropping the receiver is not observable by senders; later
 //! notifications still set the coalesced bit and return normally.
+//! These reliability invariants are governed by
+//! `ARCH-tau-blocking-notify-channel`.
 //!
 //! # Example
 //!

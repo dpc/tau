@@ -1396,8 +1396,9 @@ impl WorkerState {
         Ok(address)
     }
 
-    /// Send best-effort human notices after the registration response has
-    /// already been returned to the tool caller.
+    /// Send the best-effort invitation and fallback notice described by
+    /// `DESIGN-tau-ext-xmpp-muc-lifecycle` after registration has already
+    /// succeeded for the tool caller.
     async fn send_post_register_notice(&self, agent_id: &AgentId, client: &mut Client) {
         if !self.cfg.muc.invite_default_recipient || self.shutdown_requested() {
             return;
@@ -1664,7 +1665,8 @@ impl WorkerState {
     }
 
     /// Apply state changes for a newly online stream and return direct-resource
-    /// registrations whose externally visible address changed.
+    /// registrations whose externally visible address changed, following
+    /// `DESIGN-tau-ext-xmpp-direct-resource-fallback`.
     fn apply_online_state(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
         self.bound_jid = Some(bound_jid.clone());
         self.occupant_real_jids.clear();

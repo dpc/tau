@@ -12760,7 +12760,8 @@ impl Harness {
     }
 
     /// Projects one core-validated successful compaction recovery into the
-    /// runtime checkpoint state used by provider-discovery reconciliation.
+    /// runtime checkpoint state used by provider-discovery reconciliation,
+    /// following `SPEC-compaction-and-context-recovery`.
     fn stage_restored_compaction_recovery(
         &mut self,
         cid: &AgentId,

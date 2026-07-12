@@ -2463,6 +2463,8 @@ where
     Ok(None)
 }
 
+/// Samples ChatGPT streaming progress according to
+/// `DESIGN-tau-provider-chatgpt-stream-update-sampling`.
 struct RateLimitedResponseUpdateEmitter {
     delta_emitter: common::StreamDeltaEmitter,
     started_at: Instant,
