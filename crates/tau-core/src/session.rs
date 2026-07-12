@@ -415,6 +415,8 @@ struct ManualCompactionRequestFold {
 }
 
 /// Durable state of an accepted model-requested compaction.
+///
+/// See `DESIGN-tau-core-manual-compaction-projection`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ManualCompactionRecovery {
     /// The accepted request has not started or failed.

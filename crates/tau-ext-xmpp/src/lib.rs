@@ -56,6 +56,8 @@ const DEFAULT_MESSAGE_LIMIT: usize = 16 * 1024;
 const MAX_MESSAGE_LIMIT: usize = 128 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
+// Keep command readiness semantics aligned with
+// `DESIGN-tau-ext-xmpp-readiness-waits`.
 const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
@@ -2156,6 +2158,8 @@ fn muc_presence_from(presence: &Presence, occupant: &Jid) -> bool {
 }
 
 async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Result<(), String> {
+    // See `DESIGN-tau-ext-xmpp-muc-preconditions` for the deliberately limited
+    // room configuration and its deployment implications.
     // XEP-0045 instant-room setup: an empty owner data-form submit unlocks a
     // newly-created room using server defaults. This is intentionally not a
     // full privacy or member-affiliation configuration flow.

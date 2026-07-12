@@ -152,9 +152,8 @@ struct ResolvedExtension {
 }
 
 /// Merge user-provided `extensions` entries on top of the supplied
-/// built-in extensions and produce a flat list of [`ExtensionConfig`]s
-/// ready for the harness to spawn.
-///
+/// built-in extensions and produce a flat list of [`ExtensionConfig`]s ready
+/// for the harness to spawn.
 /// Per-key merging:
 /// - Field-level overlay for built-in keys: only fields the user explicitly set
 ///   (`Some(_)` after deserialization) replace the built-in's value. Absent
@@ -219,6 +218,8 @@ fn resolve_extensions_with_environment_and_cli_overrides(
     environment_names: &[String],
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
+    // Keep the config → environment → CLI ordering aligned with
+    // `DESIGN-extension-availability-startup`.
     let (order, entries) = seed_builtin_extension_entries(builtins);
     let (order, mut entries) = apply_user_extension_entries(settings, order, entries);
     for name in environment_names {

@@ -4,6 +4,9 @@
 //!
 //! Events are facts — each component broadcasts what happened.
 //! There are no requests or responses, only announcements.
+//!
+//! The event-name, routing, replay, and selected payload contracts are
+//! specified by `SPEC-tau-proto-session-events`.
 
 use std::fmt;
 

@@ -1,4 +1,7 @@
 //! Harness-owned `agent_start`, `wait`, `cancel`, and `message` tools.
+//!
+//! Watch turn-state transitions follow
+//! `DESIGN-tau-harness-agent-watch-turn-lifecycle`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

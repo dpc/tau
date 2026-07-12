@@ -82,7 +82,7 @@ pub enum LlmError {
     /// Prompt cancellation observed from Tau's trusted local abort source.
     Canceled,
     /// Mutable URL, credential, or account configuration could not build a
-    /// request.
+    /// request; see `DESIGN-tau-provider-chatgpt-mutable-config-retries`.
     ReloadableConfig(String),
     /// Provider response was syntactically readable but unsafe to accept.
     InvalidResponse(String),
