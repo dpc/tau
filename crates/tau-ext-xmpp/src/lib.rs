@@ -4,6 +4,8 @@
 //! `DESIGN-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also uses
 //! a mandatory JID allowlist and treats XMPP text as external untrusted prompt
 //! input.
+//! Allowlist matching and default-recipient validation follow
+//! `DESIGN-tau-ext-xmpp-allowlist-and-default-recipient`.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
 //! The plaintext-over-TLS limitation is recorded in

@@ -1,6 +1,9 @@
 //! Drains the event stream from the harness socket and paints it into
 //! the terminal UI. Stateful: tracks per-prompt and per-tool-call UI
 //! state so streaming updates land in the right block.
+//!
+//! Provider delta ordering and accumulation follow
+//! `DESIGN-tau-cli-provider-delta-accumulation`.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};

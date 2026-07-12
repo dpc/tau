@@ -4,6 +4,7 @@
 //! and an `agent.prompt_submitted` interceptor. It deliberately has no user
 //! facing production role; its behavior exists to exercise extension
 //! supervision, tool dispatch, replay suppression, and prompt interception.
+//! See `ARCH-tau-ext-test-dummy` for the fixture boundary and invariants.
 
 use std::error::Error;
 use std::io::{Read, Write};

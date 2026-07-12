@@ -1,5 +1,8 @@
 //! User configuration loading.
 //!
+//! The crate's layering and validation boundaries are summarized in
+//! `ARCH-tau-config`.
+//!
 //! Settings live in `~/.config/tau/` as YAML: `cli.yaml` and
 //! `harness.yaml`, each with an optional `*.d/*.yaml` drop-in directory
 //! for layered overrides. See

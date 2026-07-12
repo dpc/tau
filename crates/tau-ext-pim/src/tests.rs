@@ -1,3 +1,5 @@
+//! Boundary-focused coverage follows `DESIGN-tau-ext-pim-testing-strategy`.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;

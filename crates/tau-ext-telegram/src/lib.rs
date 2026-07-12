@@ -4,6 +4,9 @@
 //! tools. It keeps listener registrations in memory and uses the Telegram Bot
 //! API only after an agent registers or another Telegram action needs the
 //! client.
+//! Update-stream ownership follows
+//! `DESIGN-tau-ext-telegram-stream-locking`, while instance-specific tool names
+//! follow `DESIGN-tau-ext-telegram-tool-namespacing`.
 //! Shared-token multi-session ownership follows
 //! `DESIGN-tau-ext-telegram-single-token-gateway`.
 //! The standalone daemon and sidecar split is described by
