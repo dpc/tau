@@ -514,8 +514,17 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|agent| self.model_for_agent_role(agent));
-        let activation_cut =
-            captured_activation_cut.or_else(|| self.activation_cut_before_current_head(cid));
+        let Some(model) = model else {
+            let role_name = self.role_name_for_agent_id(cid);
+            self.emit_info(&format!(
+                "role `{role_name}` has no available model — use /role to pick a role, /model <provider>/<model> to pick an agent model, or enable a provider"
+            ));
+            self.set_agent_turn_state(cid, crate::agent::AgentTurnState::Idle);
+            return;
+        };
+        let activation_cut = captured_activation_cut
+            .or_else(|| self.activation_cut_before_current_head(cid))
+            .or(Some(tau_proto::AgentHead::Root));
         let Some((durable_agent_id, prompt_id, through)) =
             self.agents.get_mut(cid).and_then(|agent| {
                 let durable_agent_id = agent.agent_id.clone()?;
@@ -532,7 +541,9 @@ impl Harness {
                         owner: crate::agent::InferenceCheckpointOwner::Inference,
                         agent_prompt_id: prompt_id.clone(),
                         through,
-                        model: model.clone(),
+                        model: Some(model.clone()),
+                        operation: Some(tau_proto::PromptOperation::Inference),
+                        activation_cut,
                     };
                 Some((durable_agent_id, prompt_id, through))
             })
@@ -546,7 +557,7 @@ impl Harness {
                 transaction_id: None,
                 agent_prompt_id: prompt_id,
                 through,
-                model,
+                model: Some(model),
                 operation: Some(tau_proto::PromptOperation::Inference),
                 activation_cut,
             }),

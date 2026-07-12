@@ -452,7 +452,11 @@ equals the boundary parent, and cut is its ancestor. Legacy boundaries have
 all six absent. Runtime connection ids are deliberately not persisted:
 they identify a daemon incarnation rather than durable provider work.
 Only the start's post-commit reaction sends one cut-local compact request with
-that exact prompt id and synthetic trigger. Success installs a
+that exact prompt id, provider-qualified model, operation, model parameters,
+tool surface, accounting identity, and synthetic trigger. Mutable `/model`
+selection applies only to future work; it cannot rewrite a committed start.
+If the captured model route disappears, the transaction durably fails
+before any provider request is published. Success installs a
 cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
 failure records a safe durable category, blocks the owed activation from
@@ -460,8 +464,13 @@ automatic retry, and leaves the agent addressable for explicit recovery.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
 `AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
-post-commit continuation sends the exact checkpointed prompt id and transcript
-head, and acknowledges only materialized typed-message wakes on that branch
+checkpoint owns its model, inference operation, activation cut, prompt id,
+transaction owner, and transcript head. Core rejects incomplete or
+transaction-mismatched ownership correlations. The post-commit continuation
+uses that exact model for route, parameters, tools, accounting, and prompt
+creation regardless of later selection changes; an unavailable route is
+durably terminalized before remote send. It acknowledges only materialized
+typed-message wakes on that branch
 through the watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.

@@ -56,6 +56,10 @@ pub(crate) enum ActivationDispatchState {
         through: tau_proto::AgentHead,
         /// Exact provider-qualified model captured by compaction.
         model: Option<ModelId>,
+        /// Provider operation captured before the checkpoint commit.
+        operation: Option<tau_proto::PromptOperation>,
+        /// Immutable activation cut captured before the checkpoint commit.
+        activation_cut: Option<tau_proto::AgentHead>,
     },
     /// The checkpoint committed; remote inference completion is not durable
     /// yet.
@@ -66,6 +70,12 @@ pub(crate) enum ActivationDispatchState {
         agent_prompt_id: AgentPromptId,
         /// Immutable inference snapshot sent to the provider.
         through: tau_proto::AgentHead,
+        /// Exact provider-qualified model owned by the durable checkpoint.
+        model: Option<ModelId>,
+        /// Provider operation owned by the durable checkpoint.
+        operation: Option<tau_proto::PromptOperation>,
+        /// Immutable activation cut owned by the durable checkpoint.
+        activation_cut: Option<tau_proto::AgentHead>,
     },
     /// A durable planned context recovery awaits authoritative provider model
     /// discovery before it can be claimed or terminalized.

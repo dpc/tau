@@ -10657,6 +10657,9 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         owner: crate::agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: "ap-uncertain".into(),
         through: tau_proto::AgentHead::Root,
+        model: Some("echo/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
     };
     h.request_agent_tool_compaction(
         &caller,
@@ -15419,6 +15422,15 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     set_available_provider_models(
         &mut h,
         [provider_model_info("test/role-model".into(), 8_000)],
+    );
+    let _provider = connect_test_client(
+        &mut h,
+        "explicit-role-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.provider_model_routes.insert(
+        "test/role-model".into(),
+        tau_proto::ConnectionId::from("explicit-role-provider"),
     );
     h.system_prompt_templates.insert(
         "explicit-template".to_owned(),

@@ -102,6 +102,13 @@ and allowed-value diagnostics for missing or invalid selectors.
 
 Status: confirmed, 2026-07-11, user
 
+A continuation inference checkpoint is accepted for a successful standalone
+transaction only when its provider-qualified model equals the start model, its
+operation is inference, and its activation cut equals the start cut. Ordinary
+new-format checkpoints likewise carry the model/operation/cut correlation as
+one complete tuple; legacy all-absent tuples remain replay-compatible but are
+not eligible to substitute current model ownership.
+
 New-format compaction boundaries carry one all-present metadata group:
 transaction id, cut, suffix end, compact prompt id, provider-qualified model,
 and operation. Replay resolves the transaction's Started fact; requires exact

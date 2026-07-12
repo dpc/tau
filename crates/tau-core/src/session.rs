@@ -1897,6 +1897,7 @@ impl AgentTree {
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
     ) -> Result<(), AgentEventValidationError> {
         let Some(transaction_id) = &checkpoint.transaction_id else {
+            self.validate_inference_checkpoint_correlations(checkpoint)?;
             return self.validate_inference_prompt_id_unique(checkpoint);
         };
         let transaction = self
@@ -1916,6 +1917,14 @@ impl AgentTree {
                 "inference checkpoint requires one successful uncheckpointed transaction",
             ));
         }
+        if checkpoint.model.as_ref() != Some(&transaction.started.model)
+            || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
+            || checkpoint.activation_cut != Some(transaction.started.cut)
+        {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint model, operation, or activation cut mismatches its transaction",
+            ));
+        }
         if !self.is_ancestor_head(transaction.started.cut, checkpoint.through) {
             return Err(AgentEventValidationError::new(
                 "inference checkpoint is not on the compacted branch",
@@ -1931,6 +1940,27 @@ impl AgentTree {
             ));
         }
         self.validate_inference_prompt_id_unique(checkpoint)
+    }
+
+    fn validate_inference_checkpoint_correlations(
+        &self,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> Result<(), AgentEventValidationError> {
+        match (
+            checkpoint.model.as_ref(),
+            checkpoint.operation,
+            checkpoint.activation_cut,
+        ) {
+            (None, None, None) => Ok(()),
+            (Some(_), Some(tau_proto::PromptOperation::Inference), Some(cut))
+                if self.is_ancestor_head(cut, checkpoint.through) =>
+            {
+                Ok(())
+            }
+            _ => Err(AgentEventValidationError::new(
+                "inference checkpoint must have one complete inference model/operation/cut correlation",
+            )),
+        }
     }
 
     fn validate_inference_prompt_id_unique(

@@ -229,6 +229,14 @@ impl Harness {
                     .agents
                     .get(&agent_id)
                     .and_then(|agent| self.model_for_agent_role(agent));
+                let Some(model) = model else {
+                    let role_name = self.role_name_for_agent_id(&agent_id);
+                    self.emit_info(&format!(
+                        "role `{role_name}` has no available model — use /role to pick a role, /model <provider>/<model> to pick an agent model, or enable a provider"
+                    ));
+                    self.set_agent_turn_state(&agent_id, crate::agent::AgentTurnState::Idle);
+                    return;
+                };
                 let Some((durable_agent_id, prompt_id, through, activation_cut)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;
@@ -240,18 +248,20 @@ impl Harness {
                         let through = agent
                             .head
                             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                        agent.activation_dispatch =
-                            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                                owner: crate::agent::InferenceCheckpointOwner::Inference,
-                                agent_prompt_id: prompt_id.clone(),
-                                through,
-                                model: model.clone(),
-                            };
                         let activation_cut = agent
                             .head
                             .and_then(|head| self.agent_store.agent(&durable_agent_id)?.node(head))
                             .and_then(|node| node.parent_id)
                             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                        agent.activation_dispatch =
+                            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                                owner: crate::agent::InferenceCheckpointOwner::Inference,
+                                agent_prompt_id: prompt_id.clone(),
+                                through,
+                                model: Some(model.clone()),
+                                operation: Some(tau_proto::PromptOperation::Inference),
+                                activation_cut: Some(activation_cut),
+                            };
                         Some((durable_agent_id, prompt_id, through, activation_cut))
                     })
                 else {
@@ -265,7 +275,7 @@ impl Harness {
                             transaction_id: None,
                             agent_prompt_id: prompt_id,
                             through,
-                            model,
+                            model: Some(model),
                             operation: Some(tau_proto::PromptOperation::Inference),
                             activation_cut: Some(activation_cut),
                         },

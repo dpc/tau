@@ -16,6 +16,15 @@ The harness must not account, sample, remap, strip, or project provider response
 
 Status: confirmed, 2026-07-11, user
 
+New inference checkpoints own a complete provider-qualified model, inference
+operation, and activation-cut tuple together with their prompt, transcript
+watermark, and optional compaction transaction. Post-commit materialization,
+parameters, tools, accounting, and point-to-point provider routing use that
+ownership rather than mutable model selection. A transaction checkpoint
+must match its standalone start's model and cut; if the exact route disappears
+before commit-time delivery, providers are excluded and the owner is durably
+terminalized without remote send.
+
 Standalone compaction binds durable Started and Compacted facts with the exact
 transaction, cut, suffix end, pre-minted prompt id, provider-qualified model,
 and standalone operation. New boundaries require all six fields: the

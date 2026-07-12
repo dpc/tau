@@ -344,6 +344,71 @@ fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
     );
 }
 
+/// A successful transaction accepts only the exact model, inference operation,
+/// and activation cut owned by its durable start.
+#[test]
+fn compaction_checkpoint_rejects_ownership_mismatches() {
+    let started = compaction_start("ct-owned-checkpoint");
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("start");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    let compacted = tau_proto::AgentCompacted {
+        agent_id: agent_id(),
+        replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::User,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        transaction_id: Some(started.transaction_id.clone()),
+        cut: Some(started.cut),
+        suffix_end: Some(started.cut),
+        compact_prompt_id: Some(started.compact_prompt_id.clone()),
+        model: Some(started.model.clone()),
+        operation: Some(started.operation),
+    };
+    tree.validate_event(&Event::AgentCompacted(compacted.clone()))
+        .expect("compaction outcome");
+    tree.apply_event(&Event::AgentCompacted(compacted));
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: Some(started.transaction_id),
+        agent_prompt_id: "ap-owned-inference".into(),
+        through: AgentHead::Root,
+        model: Some(started.model),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(started.cut),
+    };
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
+        .expect("exact checkpoint");
+    for mut mismatched in [
+        {
+            let mut value = checkpoint.clone();
+            value.model = Some("provider/other".into());
+            value
+        },
+        {
+            let mut value = checkpoint.clone();
+            value.operation = Some(tau_proto::PromptOperation::StandaloneCompaction);
+            value
+        },
+        {
+            let mut value = checkpoint.clone();
+            value.activation_cut = None;
+            value
+        },
+    ] {
+        mismatched.agent_prompt_id = format!("{}-mismatch", mismatched.agent_prompt_id).into();
+        assert!(
+            validation_error(&tree, Event::AgentInferenceDispatchStarted(mismatched))
+                .contains("mismatches its transaction")
+        );
+    }
+}
+
 /// Explicit-parent validation must compare suffix_end with the selected branch
 /// parent, not the tree's unrelated global write cursor.
 #[test]

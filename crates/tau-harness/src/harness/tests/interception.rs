@@ -14,6 +14,180 @@ fn prompt_created_count(h: &Harness) -> u64 {
     count
 }
 
+fn add_second_test_model(h: &mut Harness) {
+    let first: tau_proto::ModelId = "echo/model".into();
+    let second: tau_proto::ModelId = "other/model".into();
+    let mut info = h.provider_model_info[&first].clone();
+    info.id = second.clone();
+    let route = h.provider_model_routes[&first].clone();
+    h.provider_model_info.insert(second.clone(), info);
+    h.provider_model_routes.insert(second, route);
+}
+
+/// A checkpoint parked before commit owns its provider-qualified model even if
+/// `/model` timing changes the loaded agent before prompt materialization.
+#[test]
+fn intercepted_inference_checkpoint_pins_materialized_model() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    add_second_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let interceptor = connect_test_tool(&mut h, "checkpoint-model-owner");
+    h.handle_extension_event(
+        "checkpoint-model-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("owned by A".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentInferenceDispatchStarted(checkpoint) = parked else {
+        panic!("checkpoint intercepted");
+    };
+    assert_eq!(checkpoint.model, Some("echo/model".into()));
+    h.agents.get_mut(&cid).expect("agent").model_override = Some("other/model".into());
+    h.handle_extension_event(
+        "checkpoint-model-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release checkpoint");
+
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.agent_prompt_id, checkpoint.agent_prompt_id);
+    assert_eq!(prompt.model, checkpoint.model.expect("qualified model"));
+    h.shutdown().expect("shutdown");
+}
+
+/// If a checkpoint's captured route disappears while interception parks the
+/// materialized prompt, commit excludes providers and durably terminalizes it.
+#[test]
+fn intercepted_inference_checkpoint_fails_before_unroutable_send() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let provider_observer =
+        connect_test_client(&mut h, "unowned-provider", tau_proto::ClientKind::Provider);
+    h.bus
+        .set_subscriptions(
+            "unowned-provider",
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+        )
+        .expect("subscribe provider observer");
+    let interceptor = connect_test_tool(&mut h, "checkpoint-route-owner");
+    h.handle_extension_event(
+        "checkpoint-route-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("route vanishes".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentPromptCreated(prompt) = parked else {
+        panic!("materialized prompt intercepted");
+    };
+    h.provider_model_routes.remove(&prompt.model);
+    h.handle_extension_event(
+        "checkpoint-route-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release checkpoint");
+
+    assert!(
+        !provider_observer
+            .lock()
+            .expect("provider frames")
+            .iter()
+            .any(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::AgentPromptCreated(created))
+                    if created.agent_prompt_id == prompt.agent_prompt_id
+            )),
+        "an unroutable owned prompt must not be broadcast to providers"
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == prompt.agent_prompt_id
+                && response.stop_reason == tau_proto::ProviderStopReason::Error
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A standalone start parked before commit owns the compact request model even
+/// if model selection changes before its post-commit provider dispatch.
+#[test]
+fn intercepted_compaction_start_pins_materialized_model() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    add_second_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    {
+        let info = h
+            .provider_model_info
+            .get_mut(&tau_proto::ModelId::from("echo/model"))
+            .expect("model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(1);
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(1);
+        agent.context_usage_head = agent.head;
+        agent.context_usage_model = Some("echo/model".into());
+    }
+    let interceptor = connect_test_tool(&mut h, "compact-model-owner");
+    h.handle_extension_event(
+        "compact-model-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    assert!(h.schedule_standalone_auto_compaction(&cid));
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentStandaloneCompactionStarted(started) = parked else {
+        panic!("compaction start intercepted");
+    };
+    assert_eq!(started.model, tau_proto::ModelId::from("echo/model"));
+    h.agents.get_mut(&cid).expect("agent").model_override = Some("other/model".into());
+    h.handle_extension_event(
+        "compact-model-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release start");
+
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.agent_prompt_id, started.compact_prompt_id);
+    assert_eq!(prompt.model, started.model);
+    assert_eq!(
+        prompt.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A replay-drift claim parked by interception must remain uniquely pending;
 /// after commit its suppression is consumed and the correlated failure blocks
 /// recovery without ever creating a compact provider prompt.

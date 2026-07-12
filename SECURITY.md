@@ -5,6 +5,12 @@ classify canonical terminal context-window failures; they cannot authorize
 compaction, choose its transcript cut, or claim an inference checkpoint.
 Harness ingress clears recovery disposition before validating durable
 correlation, model capability, policy, branch, and absence of accepted output.
+Durable inference checkpoints and standalone-compaction starts also own their
+provider-qualified model and operation through provider dispatch. Interception
+timing and later `/model` changes cannot substitute another provider, parameter
+set, tool surface, or accounting identity. Missing captured routes fail
+durably before any remote send, and core rejects transaction checkpoints whose
+model, inference operation, or activation cut differs from the owning start.
 
 Prompt capability data is sparse. Tool names are only the model-visible,
 policy-authorized, provider-supported names advertised for that prompt; internal
