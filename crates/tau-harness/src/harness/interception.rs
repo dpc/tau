@@ -397,6 +397,32 @@ impl InterceptorRegistry {
 }
 
 impl Harness {
+    /// Remove canceled peer receives from current and deferred interception
+    /// without exposing their content to another interceptor or commit path.
+    pub(crate) fn discard_canceled_peer_receive_publishes(
+        &mut self,
+        canceled: &std::collections::HashSet<tau_proto::AgentMessageId>,
+    ) {
+        if self.pending_intercept.as_ref().is_some_and(|pending| {
+            matches!(
+                &pending.event,
+                Event::AgentMessageReceived(received)
+                    if canceled.contains(&received.message_id)
+            )
+        }) {
+            self.pending_intercept = None;
+        }
+        self.deferred_publishes.retain(|deferred| {
+            !matches!(
+                &deferred.event,
+                Event::AgentMessageReceived(received)
+                    if canceled.contains(&received.message_id)
+            )
+        });
+        self.drain_deferred_publishes();
+        self.drain_publish_idle_dispatches();
+    }
+
     /// True when no event is parked in interception and no publish is
     /// queued behind one.
     fn publish_chain_is_idle(&self) -> bool {

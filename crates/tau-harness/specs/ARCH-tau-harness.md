@@ -41,6 +41,16 @@ The harness also owns the bounded, redacted discovery snapshots specified by
 [SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).
 Runtime metadata advertises only an untrusted entrypoint hint; the live harness
 confirms its current session and effective policy through a narrow probe.
+The same event loop owns peer entrypoint admission, selection, and explicit-role
+auto-start. It admits bounded count/bytes/rate before creation, treats pending and
+busy eligible agents as reusable endpoints, and releases sender success only from
+the receive projection's post-commit continuation. This state is generation-bound
+and in-memory; crash ambiguity follows best-effort at-least-once semantics.
+The peer-created endpoint purpose itself is ordinary durable lifecycle state: the
+harness embeds a reserved, non-inheritable metadata marker in the immutable
+ordered `AgentStarted` creation fact and restores it before extension-query
+teardown classification. Interception cannot drop or rewrite the protected
+creation fact, and general metadata intake cannot set, unset, or inherit this key.
 
 ## Watch ownership
 

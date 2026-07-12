@@ -4,6 +4,7 @@
 - This project uses the Linked Specs convention; consult the `linked-specs`
   skill before working with specs or governed code.
 - `FEATURES.md` — major feature tour.
+- `SECURITY.md` — reporting guidance and technical trust-boundary entry points.
 - `docs/` — focused design and feature notes.
 - `**/README.md` — component-specific human-oriented documentation where
   present.

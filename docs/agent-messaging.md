@@ -82,8 +82,9 @@ Tau chooses one eligible entrypoint agent, preferring idle over running and
 least-recently routed then agent id. A busy eligible agent is reused; bare
 routing is never enumeration or broadcast. Success returns the resolved
 canonical `session/agent` address and whether it was started.
-Peer auto-start is not active yet, so this field is currently always `false`;
-the target must already have an eligible loaded or pending endpoint.
+If no eligible endpoint exists, the target may create only its separately
+configured `auto_start_role`; otherwise routing fails. Busy endpoints are reused,
+and concurrent live sends coalesce onto one newly created endpoint.
 
 Use `&<session-id>/@<agent-id>` for a typed exact address. The existing
 `<session-id>/<agent-id>` spelling remains accepted for compatibility and keeps
@@ -110,6 +111,9 @@ reports success only after the exact receive projection commits. If the target
 crashes or the connection is lost after that commit but before acknowledgement,
 a retry can deliver a duplicate prompt; Tau does not provide distributed
 exactly-once deduplication across sessions.
+The same crash ambiguity can duplicate an auto-started agent, model work, or spend.
+Before creation, each endpoint is limited to 32 queued peer inputs, 256 KiB of
+queued peer body, 60 accepted inputs per rolling minute, and 64 KiB per message.
 
 Roles that explicitly enable the `session_discovery` tool group can use
 `session_list({query?, limit?})` to find live sessions whose target harness

@@ -30,7 +30,8 @@ the scoped [Linked Specs](specs/ARCH-tau.md).
   trees, rewinds, detach, and resume.
 - **Multi-agent workflows:** agents can delegate to isolated sub-agents, exchange
   messages, discover explicitly advertised peer sessions or redacted local
-  agents through disabled-by-default tools, and collect background tool work
+  agents through disabled-by-default tools, auto-start an explicitly authorized
+  peer role with bounded best-effort delivery, and collect background tool work
   without blocking the main flow.
 - **PIM extensions:** controlled email and calendar tools expose useful personal
   information while keeping reads, writes, approvals, and logs explicit.

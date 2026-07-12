@@ -17882,9 +17882,9 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     sender.shutdown().expect("shutdown sender");
 }
 
-/// Two real harness event loops complete callback correlation over separate
-/// Unix sockets, and the target acknowledges only after its receive projection
-/// commits.
+/// Two real harness event loops complete callback correlation and auto-start
+/// over separate Unix sockets, and acknowledge only after the receive
+/// projection commits.
 #[test]
 fn external_agent_message_two_harness_live_success_commits_before_ack() {
     let td = TempDir::new().expect("tempdir");
@@ -17896,12 +17896,13 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .ensure_agent_id_for_agent(&sender_cid)
             .expect("sender id"),
     );
-    let target_cid = ensure_test_user_agent(&mut target);
-    let recipient_id = crate::parse_agent_id(
-        target
-            .ensure_agent_id_for_agent(&target_cid)
-            .expect("target id"),
-    );
+    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
     let message_id: tau_proto::AgentMessageId = "two-harness-message".into();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "two-harness-request".to_owned(),
@@ -17910,7 +17911,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         sender_session_id: sender.current_session_id.clone(),
         sender_id: sender_id.clone(),
         recipient_session_id: target.current_session_id.clone(),
-        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id.clone()),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
         message: "hello between harnesses".to_owned(),
     };
@@ -18005,8 +18006,10 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     };
 
     assert_eq!(result.error, None);
-    assert_eq!(result.recipient_id, Some(recipient_id));
-    assert!(!result.started);
+    let recipient_id = result.recipient_id.expect("resolved auto-start recipient");
+    assert!(result.started);
+    assert!(target.agent_routes.contains_key(recipient_id.as_str()));
+    assert_eq!(target.agents.len(), 1);
     assert_eq!(durable_agent_message_received_events(&target).len(), 1);
     accept_sender.join().expect("sender accept thread");
     target.shutdown().expect("shutdown target");
@@ -18352,11 +18355,11 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
-/// Phase-2 routing must keep the configured future auto-start grant inert:
-/// absence of an existing endpoint fails without creating or reserving an
-/// agent.
+/// The separate auto-start role grant creates one ordinary role-backed endpoint
+/// when no eligible endpoint exists and uses the peer input as its first
+/// prompt.
 #[test]
-fn bare_peer_route_never_spawns_when_auto_start_is_configured() {
+fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
@@ -18367,10 +18370,9 @@ fn bare_peer_route_never_spawns_when_auto_start_is_configured() {
         }),
     });
     let agents_before = h.agents.len();
-    let pending_before = h.pending_start_agent_requests.len();
     let request = tau_proto::ExternalAgentMessageRequest {
-        request_id: "no-auto-start".to_owned(),
-        message_id: "no-auto-start-message".into(),
+        request_id: "auto-start".to_owned(),
+        message_id: "auto-start-message".into(),
         capability: "test-only".to_owned(),
         sender_session_id: "sender-session".into(),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -18382,11 +18384,364 @@ fn bare_peer_route_never_spawns_when_auto_start_is_configured() {
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
-    assert_eq!(result.error.as_deref(), Some("peer route unavailable"));
-    assert!(!result.started);
+    assert_eq!(result.error, None);
+    assert!(result.started);
+    assert_eq!(h.agents.len(), agents_before + 1);
+    let recipient_id = result.recipient_id.expect("resolved recipient");
+    let cid = h
+        .agent_routes
+        .get(recipient_id.as_str())
+        .expect("auto-started route");
+    let agent = h.agents.get(cid).expect("auto-started agent");
+    assert_eq!(agent.role.as_deref(), Some("engineer"));
+    assert_eq!(agent.parent_agent_id, None);
+    assert_eq!(agent.parent_tool_call_id, None);
+    assert!(
+        !h.is_non_tool_extension_query(cid),
+        "peer endpoint must retain ordinary tools and loaded-agent lifecycle"
+    );
+    assert_eq!(durable_agent_message_received_events(&h).len(), 1);
+}
+
+/// The explicit durable peer-purpose marker survives a cold resume before any
+/// provider response and preserves ordinary tool-capable loaded-agent
+/// lifecycle.
+#[test]
+fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let recipient_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        let _interceptor = connect_test_tool(&mut h, "peer-marker-interceptor");
+        h.handle_extension_event(
+            "peer-marker-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register metadata interceptor");
+        h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+            name: "engineer".to_owned(),
+            roles: vec!["engineer".to_owned()],
+            peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+                auto_start_role: Some("engineer".to_owned()),
+            }),
+        });
+        let result = h.handle_external_agent_message_request_without_auth_for_test(
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "restore-peer".to_owned(),
+                message_id: "restore-peer-message".into(),
+                capability: "test-only".to_owned(),
+                sender_session_id: "sender-session".into(),
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: h.current_session_id.clone(),
+                recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "persist purpose before response".to_owned(),
+            },
+        );
+        let recipient_id = result.recipient_id.expect("auto-start recipient");
+        assert!(h.pending_intercept.is_some(), "creation fact is ordered");
+        h.handle_extension_event(
+            "peer-marker-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("attempt to drop protected creation fact");
+        assert!(h.pending_intercept.is_none());
+        h.shutdown().expect("shutdown");
+        recipient_id
+    };
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    let cid = h
+        .agent_routes
+        .get(recipient_id.as_str())
+        .cloned()
+        .expect("restored peer endpoint");
+
+    assert!(h.agents[&cid].peer_entrypoint_endpoint);
+    assert!(!h.is_non_tool_extension_query(&cid));
+    assert!(Harness::is_peer_entrypoint_agent(&h.agents[&cid]));
+    h.shutdown().expect("shutdown resumed harness");
+}
+
+/// Receive commit rejects a nominal auto-start reservation whose immutable
+/// creation fact lacks the reserved peer-purpose marker, as after persistence
+/// failure of that creation fact.
+#[test]
+fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    let agent_id = crate::parse_agent_id(
+        h.ensure_agent_id_for_agent(&cid)
+            .expect("ordinary agent id"),
+    );
+    h.uncommitted_peer_auto_starts.insert(agent_id.clone());
+
+    assert!(
+        !h.peer_auto_start_creation_committed(&agent_id),
+        "ordinary creation without reserved marker cannot establish auto-start"
+    );
+}
+
+/// A peer-created endpoint executes ordinary role-authorized tool calls and is
+/// not completed or unloaded as a one-shot extension query.
+#[test]
+fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let _tool = connect_test_tool(&mut h, "peer-tool-owner");
+    h.registry
+        .register("peer-tool-owner", shared_test_tool_spec("peer_test_tool"));
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "peer-tool".to_owned(),
+            message_id: "peer-tool-message".into(),
+            capability: "test-only".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "use the test tool".to_owned(),
+        },
+    );
+    let recipient = result.recipient_id.expect("peer recipient");
+    let cid = h
+        .agent_routes
+        .get(recipient.as_str())
+        .cloned()
+        .expect("peer route");
+    let prompt_id = h.agents[&cid]
+        .in_flight_prompt
+        .clone()
+        .expect("peer prompt in flight");
+    let originator = h.agents[&cid].originator.clone();
+    assert!(
+        !h.complete_failed_compaction_side_conversation(&cid),
+        "peer endpoint compaction failure follows ordinary blocked-agent recovery"
+    );
+    assert!(h.agents.contains_key(&cid));
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: prompt_id,
+        agent_id: recipient.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "peer-tool-call".into(),
+            name: ToolName::new("peer_test_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("dispatch peer tool call");
+
+    assert!(h.agent_routes.contains_key(recipient.as_str()));
+    assert!(h.agents.contains_key(&cid));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("peer-tool-call")
+            .map(|connection| connection.as_str()),
+        Some("peer-tool-owner")
+    );
+}
+
+/// Concurrent live requests coalesce through the endpoint inserted by the first
+/// auto-start, and a busy eligible endpoint is reused rather than fanning out.
+#[test]
+fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let target_session = h.current_session_id.clone();
+    let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
+        request_id: format!("single-flight-{suffix}"),
+        message_id: format!("single-flight-message-{suffix}").into(),
+        capability: "test-only".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: target_session.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: format!("hello {suffix}"),
+    };
+
+    let first = h.handle_external_agent_message_request_without_auth_for_test(request("one"));
+    let recipient = first.recipient_id.clone().expect("first recipient");
+    assert!(first.started);
+    let cid = h
+        .agent_routes
+        .get(recipient.as_str())
+        .cloned()
+        .expect("auto-started route");
+    h.agents
+        .get_mut(&cid)
+        .expect("auto-started agent")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+
+    let second = h.handle_external_agent_message_request_without_auth_for_test(request("two"));
+
+    assert_eq!(second.error, None);
+    assert_eq!(second.recipient_id, Some(recipient));
+    assert!(!second.started);
+    assert_eq!(h.agents.len(), 1);
+}
+
+/// Queue admission counts already queued peer prompts before any auto-start or
+/// receive projection can create additional model work.
+#[test]
+fn peer_input_queue_limit_rejects_before_auto_start_spend() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    for index in 0..32 {
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .pending_prompts
+            .push_back(
+                crate::agent::PendingPrompt::agent_message_received(format!("queued peer {index}"))
+                    .with_peer_admission_bytes(Some(1)),
+            );
+    }
+    let agents_before = h.agents.len();
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "queue-full".to_owned(),
+        message_id: "queue-full-message".into(),
+        capability: "test-only".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "rejected".to_owned(),
+    };
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(request);
+
+    assert_eq!(
+        result.error.as_deref(),
+        Some("peer input queue is full; retry later")
+    );
     assert_eq!(h.agents.len(), agents_before);
-    assert_eq!(h.pending_start_agent_requests.len(), pending_before);
     assert!(durable_agent_message_received_events(&h).is_empty());
+}
+
+/// Pending ordinary start-agent endpoints participate in the same peer queue
+/// count and byte accounting as already loaded endpoints.
+#[test]
+fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let pending_id = h
+        .enqueue_internal_start_agent_request_without_draining(StartAgentRequest {
+            query_id: "pending-peer-endpoint".to_owned(),
+            instruction: "ordinary pending task".to_owned(),
+            role: Some("engineer".to_owned()),
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+            parent_agent: None,
+        })
+        .expect("reserve pending endpoint");
+    let pending = h
+        .pending_start_agent_requests
+        .iter_mut()
+        .find(|pending| pending.agent_id == pending_id)
+        .expect("pending endpoint");
+    pending.pending_agent_messages.extend((0..32).map(|index| {
+        PendingPrompt::agent_message_received(format!("pending peer {index}"))
+            .with_peer_admission_bytes(Some(1))
+    }));
+    let recipient = crate::parse_agent_id(&pending_id);
+    assert_eq!(
+        h.admit_peer_input(&recipient, 1)
+            .expect_err("count boundary rejects"),
+        "peer input queue is full; retry later"
+    );
+
+    let pending = h
+        .pending_start_agent_requests
+        .iter_mut()
+        .find(|pending| pending.agent_id == pending_id)
+        .expect("pending endpoint");
+    pending.pending_agent_messages.clear();
+    pending.pending_agent_messages.extend((0..4).map(|_| {
+        PendingPrompt::agent_message_received("byte weight".to_owned())
+            .with_peer_admission_bytes(Some(64 * 1024))
+    }));
+    assert_eq!(
+        h.admit_peer_input(&recipient, 1)
+            .expect_err("byte boundary rejects"),
+        "peer input queue is full; retry later"
+    );
+}
+
+/// A live endpoint cannot accept an unbounded burst even when each prior prompt
+/// has already left its queue.
+#[test]
+fn peer_input_rate_limit_bounds_live_burst() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    let recipient =
+        crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("public agent id"));
+    for index in 0..60 {
+        h.admit_peer_input(&recipient, 7)
+            .unwrap_or_else(|error| panic!("request {index}: {error}"));
+    }
+    let rejected = h
+        .admit_peer_input(&recipient, 8)
+        .expect_err("61st input rejected");
+
+    assert_eq!(rejected, "peer input rate limit reached; retry later");
 }
 
 /// Sender authentication binds the typed route authority so an exact request
@@ -19599,6 +19954,38 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
         h.validate_agent_metadata_set(&unknown)
             .expect_err("unknown target rejected")
             .contains("unknown agent metadata target")
+    );
+
+    let reserved_key = tau_proto::AgentMetadataKey::new(
+        crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
+    );
+    let reserved_set = tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: reserved_key.clone(),
+        value: CborValue::Bool(false),
+        inheritable: false,
+    };
+    assert!(
+        h.validate_agent_metadata_set(&reserved_set)
+            .expect_err("reserved set rejected")
+            .contains("reserved")
+    );
+    assert!(
+        h.validate_agent_metadata_unset(&tau_proto::AgentMetadataUnset {
+            agent_id: agent_id.clone(),
+            key: reserved_key.clone(),
+        })
+        .expect_err("reserved unset rejected")
+        .contains("reserved")
+    );
+    assert!(
+        h.validate_initial_agent_metadata(&[tau_proto::AgentInitialMetadata {
+            key: reserved_key,
+            value: CborValue::Bool(true),
+            inheritable: false,
+        }])
+        .expect_err("reserved initial metadata rejected")
+        .contains("reserved")
     );
 
     h.shutdown().expect("shutdown");

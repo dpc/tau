@@ -36,14 +36,21 @@ target event loop revalidates the session and policy, then selects one eligible
 entrypoint endpoint, preferring idle/pending over running and least-recently
 routed then agent id. Busy eligible endpoints are reused rather than causing
 fan-out. Successful bare sends return the canonical resolved session/agent and
-whether an endpoint was started. Auto-start is currently inactive: successful
-phase-2 routing always selects an existing loaded or pending endpoint and
-returns `started: false`; absence of one fails without spawning.
+whether an endpoint was started. If no eligible endpoint exists, only the
+entrypoint's explicit `auto_start_role` may be constructed. Admission precedes
+creation, pending/live endpoints provide in-process single-flight coalescing, and
+busy eligible endpoints remain preferable to fan-out.
 
 Tests should cover the runtime metadata active-session contract, stale/ambiguous
 discovery, untrusted peer rejection, target-session and recipient validation,
 external prompt/UI labels, sender capability binding, non-blocking receiver-side
-authentication, and failure not publishing a sent projection.
+authentication, and failure not publishing a sent projection. Focused event-loop
+and interception tests cover auth/admission before spend, count/byte/rate
+boundaries (including pending endpoints), parked local/remote single-flight, busy
+reuse, ordinary tool-capable construction without remote inheritance,
+reselect-once, rollover/failure cleanup, and receive-commit ordering. Real
+two-harness socket tests cover callback correlation and auto-start acknowledgement
+parity.
 
 Outbound lookup and socket work likewise uses 16 non-queued process-wide slots
 and one absolute deadline. Runtime lookup counts at most 128 visited entries and
@@ -51,7 +58,10 @@ reads at most 16 KiB per candidate before connect/send/response work. A success
 projection is impossible until the target's exact receive projection commits.
 The acknowledgement continuation is bounded, in-memory, and generation-bound.
 Delivery is best-effort at-least-once: a crash after receive commit but before
-acknowledgement can lead to a duplicate prompt on retry.
+acknowledgement can lead to a duplicate prompt on retry. The same crash ambiguity
+may duplicate agent creation, model work, or spend; no distributed WAL, locator,
+restart deduplication, or durable transaction coordinator exists. Live commit-time
+authority is revalidated, with at most one bare-route reselection.
 
 Opt-in discovery, bare entrypoint routing, and its separate auto-start authority
 are governed by

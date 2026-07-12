@@ -223,6 +223,283 @@ fn local_peer_sent_projection_waits_for_receive_commit() {
     );
 }
 
+/// Current-session bare routing enforces the same 64 KiB body limit as socket
+/// routing before admission or auto-start creation.
+#[test]
+fn local_peer_oversized_message_rejects_before_auto_start() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let sender = ensure_test_user_agent(&mut h);
+    let peer_role = h.available_roles["engineer"].clone();
+    h.available_roles.insert("peer".to_owned(), peer_role);
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "peer".to_owned(),
+        roles: vec!["peer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("peer".to_owned()),
+        }),
+    });
+    let agents_before = h.agents.len();
+
+    let error = h
+        .publish_peer_entrypoint_message_from_agent(
+            &sender,
+            "x".repeat(64 * 1024 + 1),
+            "oversized-local-peer".into(),
+            ToolName::new("message"),
+            tau_proto::ToolType::Function,
+        )
+        .expect_err("oversized local peer message rejected");
+
+    assert_eq!(error, "peer message exceeds the 64 KiB limit");
+    assert_eq!(h.agents.len(), agents_before);
+    assert!(h.pending_external_receive_acks.is_empty());
+}
+
+/// Current-session routing uses the same admission, auto-start, and post-commit
+/// completion path as remote routing, while preserving local sender provenance.
+#[test]
+fn local_peer_auto_start_reports_started_only_after_receive_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let sender = ensure_test_user_agent(&mut h);
+    let peer_role = h.available_roles["engineer"].clone();
+    h.available_roles.insert("peer".to_owned(), peer_role);
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "peer".to_owned(),
+        roles: vec!["peer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("peer".to_owned()),
+        }),
+    });
+    let _interceptor = connect_test_tool(&mut h, "local-auto-start-interceptor");
+    h.handle_extension_event(
+        "local-auto-start-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.publish_peer_entrypoint_message_from_agent(
+        &sender,
+        "auto-start body".to_owned(),
+        "local-auto-start-call".into(),
+        ToolName::new("message"),
+        tau_proto::ToolType::Function,
+    )
+    .expect("queue local auto-start");
+
+    let pending = h
+        .pending_external_receive_acks
+        .values()
+        .next()
+        .expect("pending receive");
+    assert!(pending.started);
+    let recipient_id = pending.recipient_id.clone();
+    let recipient_cid = h
+        .agent_routes
+        .get(recipient_id.as_str())
+        .expect("auto-started route");
+    let recipient = &h.agents[recipient_cid];
+    assert_eq!(recipient.role.as_deref(), Some("peer"));
+    assert_eq!(recipient.parent_agent_id, None);
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentMessageSent(_)))
+    );
+
+    h.handle_extension_event(
+        "local-auto-start-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentMessageSent(_)))
+    );
+}
+
+/// A parked local auto-start is visible to a remote send immediately, so both
+/// precommit deliveries coalesce on one endpoint rather than creating fan-out.
+#[test]
+fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let sender = ensure_test_user_agent(&mut h);
+    let peer_role = h.available_roles["engineer"].clone();
+    h.available_roles.insert("peer".to_owned(), peer_role);
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "peer".to_owned(),
+        roles: vec!["peer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("peer".to_owned()),
+        }),
+    });
+    let _interceptor = connect_test_tool(&mut h, "coalesce-interceptor");
+    h.handle_extension_event(
+        "coalesce-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.publish_peer_entrypoint_message_from_agent(
+        &sender,
+        "local first".to_owned(),
+        "coalesce-local-call".into(),
+        ToolName::new("message"),
+        tau_proto::ToolType::Function,
+    )
+    .expect("queue local auto-start");
+    let recipient = h
+        .pending_external_receive_acks
+        .values()
+        .next()
+        .expect("local pending")
+        .recipient_id
+        .clone();
+    let connection_id = tau_proto::ConnectionId::from("coalesce-peer-client");
+    h.external_message_peers.insert(connection_id.clone());
+    let remote = h.complete_external_agent_message_auth(
+        connection_id,
+        h.current_session_generation,
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "coalesce-remote".to_owned(),
+            message_id: "coalesce-remote-message".into(),
+            capability: "capability".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "remote second".to_owned(),
+        },
+        Ok(()),
+    );
+
+    assert!(remote.is_none());
+    assert_eq!(h.agents.len(), 2, "sender plus exactly one peer endpoint");
+    assert_eq!(h.pending_external_receive_acks.len(), 2);
+    assert!(
+        h.pending_external_receive_acks
+            .values()
+            .all(|pending| pending.recipient_id == recipient)
+    );
+    assert_eq!(
+        h.pending_external_receive_acks
+            .values()
+            .filter(|pending| pending.started)
+            .count(),
+        1
+    );
+}
+
+/// Failed callback correlation cannot consume auto-start authority or create an
+/// endpoint, even when the target explicitly configured an auto-start role.
+#[test]
+fn peer_auto_start_authentication_failure_precedes_spend() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "auth-before-spend".to_owned(),
+        message_id: "auth-before-spend-message".into(),
+        capability: "invalid".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "must not create".to_owned(),
+    };
+
+    let result = h
+        .complete_external_agent_message_auth(
+            "peer-client".into(),
+            h.current_session_generation,
+            request,
+            Err("external message authentication failed".to_owned()),
+        )
+        .expect("terminal authentication result");
+
+    assert_eq!(
+        result.error.as_deref(),
+        Some("external message authentication failed")
+    );
+    assert!(h.agents.is_empty());
+    assert!(h.pending_external_receive_acks.is_empty());
+}
+
+/// A callback completion that outlives its session generation or peer socket is
+/// rejected before selection, admission, or auto-start creation.
+#[test]
+fn stale_or_disconnected_auth_completion_cannot_auto_start() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let target_session = h.current_session_id.clone();
+    let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
+        request_id: format!("stale-auth-{suffix}"),
+        message_id: format!("stale-auth-message-{suffix}").into(),
+        capability: "valid".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: target_session.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "must not create".to_owned(),
+    };
+    let peer: tau_proto::ConnectionId = "peer-client".into();
+    h.external_message_peers.insert(peer.clone());
+    let stale = h
+        .complete_external_agent_message_auth(
+            peer.clone(),
+            h.current_session_generation.saturating_add(1),
+            request("generation"),
+            Ok(()),
+        )
+        .expect("stale generation result");
+    h.external_message_peers.remove(&peer);
+    let disconnected = h
+        .complete_external_agent_message_auth(
+            peer,
+            h.current_session_generation,
+            request("disconnect"),
+            Ok(()),
+        )
+        .expect("disconnected result");
+
+    assert!(stale.error.is_some());
+    assert!(disconnected.error.is_some());
+    assert!(h.agents.is_empty());
+    assert!(h.pending_external_receive_acks.is_empty());
+}
+
 /// A canceled local continuation released after rollover retires silently and
 /// cannot publish old receive/sent/tool terminal facts into the new session.
 #[test]
@@ -330,6 +607,103 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
 
     assert!(h.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
+}
+
+/// Bare routing gets only one deterministic re-selection: invalidating the
+/// replacement fails terminally without a third selection or committed receive.
+#[test]
+fn peer_receive_bare_target_loss_reselects_once_before_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    ensure_test_user_agent(&mut h);
+    h.create_durable_user_agent("s1".into(), "engineer");
+    let _interceptor = connect_test_tool(&mut h, "bare-reselect-interceptor");
+    h.handle_extension_event(
+        "bare-reselect-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    h.external_message_peers.insert(connection_id.clone());
+    let result = h.complete_external_agent_message_auth(
+        connection_id,
+        h.current_session_generation,
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "bare-reselect".to_owned(),
+            message_id: "bare-reselect-message".into(),
+            capability: "capability".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "peer body".to_owned(),
+        },
+        Ok(()),
+    );
+    assert!(result.is_none());
+    let original = h
+        .pending_external_receive_acks
+        .values()
+        .next()
+        .expect("pending receive")
+        .recipient_id
+        .clone();
+    let original_cid = h
+        .agent_routes
+        .get(original.as_str())
+        .cloned()
+        .expect("original route");
+    h.remove_agent(&original_cid);
+
+    h.handle_extension_event(
+        "bare-reselect-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release stale receive");
+    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert!(committed_peer_receives(&h).is_empty());
+    let replacement = h
+        .pending_external_receive_acks
+        .values()
+        .next()
+        .expect("replacement receive")
+        .recipient_id
+        .clone();
+    assert_ne!(replacement, original);
+    let replacement_cid = h
+        .agent_routes
+        .get(replacement.as_str())
+        .cloned()
+        .expect("replacement route");
+    h.remove_agent(&replacement_cid);
+
+    h.handle_extension_event(
+        "bare-reselect-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release invalid replacement receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(committed_peer_receives(&h).is_empty());
+    assert!(
+        h.agent_routes.is_empty(),
+        "second invalidation must not reselect"
+    );
 }
 
 /// A parked old-generation receive retains a canceled tombstone across rollover

@@ -303,6 +303,9 @@ pub(crate) struct Agent {
     pub(crate) agent_id: Option<String>,
     /// Whether this agent's semantic transcript is durable or memory-only.
     pub(crate) persistence: AgentPersistenceMode,
+    /// Durable semantic lifecycle marker for a peer-created entrypoint
+    /// endpoint.
+    pub(crate) peer_entrypoint_endpoint: bool,
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
@@ -374,6 +377,12 @@ pub(crate) struct PendingPrompt {
     pub(crate) submission_source: tau_proto::PromptSubmissionSource,
     /// Optional caller correlation id carried with this exact prompt.
     pub(crate) ctx_id: Option<String>,
+    /// Original peer body bytes retained while this prompt awaits dispatch.
+    ///
+    /// This is present only for bounded peer-entrypoint inputs. Keeping the
+    /// admission weight on the queued prompt makes cancellation and queue
+    /// clearing release capacity without a second shadow queue.
+    pub(crate) peer_admission_bytes: Option<usize>,
 }
 
 impl From<String> for PendingPrompt {
@@ -403,6 +412,7 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -434,6 +444,7 @@ impl PendingPrompt {
                 name: extension_name,
             },
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -445,6 +456,7 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -456,6 +468,7 @@ impl PendingPrompt {
             source: PendingPromptSource::WatchNotification,
             ctx_id: None,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            peer_admission_bytes: None,
         }
     }
 
@@ -467,7 +480,14 @@ impl PendingPrompt {
             source: PendingPromptSource::AgentMessageReceived,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
+    }
+
+    /// Retain original peer body bytes while this prompt awaits dispatch.
+    pub(crate) fn with_peer_admission_bytes(mut self, bytes: Option<usize>) -> Self {
+        self.peer_admission_bytes = bytes;
+        self
     }
 
     /// Create an internal loop-guard pivot prompt.
@@ -478,6 +498,7 @@ impl PendingPrompt {
             source: PendingPromptSource::LoopGuard,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -490,6 +511,7 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveBackgroundCompletion,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -508,6 +530,7 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveRestoreNotice,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            peer_admission_bytes: None,
         }
     }
 
@@ -613,6 +636,7 @@ impl Agent {
             model_override: None,
             agent_id: None,
             persistence: AgentPersistenceMode::Durable,
+            peer_entrypoint_endpoint: false,
             tools_in_flight: 0,
             tools_total: 0,
             context_input_tokens: None,

@@ -36,6 +36,11 @@ behavior remains independent of entrypoint advertisement. Runtime lookup,
 connection, callback, and send work is bounded by shared absolute deadlines and
 non-queued process/connection admission. Disconnect or session rollover cancels
 the associated work, and stale-generation completions cannot publish projections.
+Callback correlation precedes peer input admission and any auto-start creation.
+The target event loop owns bounded live single-flight selection, and revalidates
+entrypoint role/provider/skill authority immediately before receive commit.
+Best-effort at-least-once delivery deliberately has no distributed crash
+transaction; an ambiguous retry may duplicate prompt, agent, model work, or spend.
 
 Peer-session discovery uses a metadata-schema-versioned `peer_entrypoint` hint
 only to select bounded probe candidates. A live target RPC confirms the active

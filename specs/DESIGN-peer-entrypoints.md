@@ -29,10 +29,14 @@ exactly-once deduplication is required. Selection, live single-flight auto-start
 bounded queued input, role availability, and active-session generation are
 target-harness-owned.
 
-Current implementation state: `auto_start_role` is validated configuration
-only. Bare routing uses an already loaded or pending eligible endpoint,
-always reports `started: false`, and fails privately when none exists. No peer
-message can start an agent until the separately reviewed auto-start phase lands.
+When no eligible loaded or pending endpoint exists, bare routing may create only
+the separately configured `auto_start_role`. Creation uses the ordinary target
+role/model/required-skill/tool-policy path, has no remote parent, watch, cwd, or
+transcript inheritance, and admits the input before creation. Concurrent live
+requests coalesce onto the created endpoint; busy eligible endpoints are reused.
+Commit-time authority loss causes one bare-route reselection, then private failure.
+Per-endpoint queued count/bytes and rolling-rate bounds include parked receive work.
+Rollover clears generation-bound reservations and admission state.
 
 Manager roles and task-brokering policy are deliberately outside this decision;
 they can compose these ordinary tools and role-group settings later without a

@@ -83,6 +83,14 @@ const MAX_OUTBOUND_PEER_IO_JOBS: usize = 16;
 const MAX_INBOUND_PEER_AUTH_JOBS: usize = 16;
 const MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION: usize = 2;
 const MAX_EXTERNAL_AGENT_MESSAGE_BYTES: usize = 64 * 1024;
+// Admission contract: SPEC-tau-harness-peer-routing.
+const MAX_QUEUED_PEER_INPUTS_PER_AGENT: usize = 32;
+const MAX_QUEUED_PEER_BYTES_PER_AGENT: usize = 256 * 1024;
+const MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE: usize = 60;
+/// Diagnostic `PromptOriginator` query prefix for peer auto-start correlation.
+const PEER_AUTO_START_QUERY_PREFIX: &str = "peer-auto-start-";
+/// Durable non-inheritable metadata key identifying peer-created endpoints.
+pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint_endpoint";
 
 static PEER_IO_ADMISSION: LazyLock<Mutex<PeerIoAdmission>> =
     LazyLock::new(|| Mutex::new(PeerIoAdmission::default()));
@@ -396,7 +404,9 @@ impl Harness {
             .ensure_agent_id_for_agent(conversation_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
         let sender_id = crate::parse_agent_id(&sender);
-        let recipient_id = self.select_peer_entrypoint_recipient()?;
+        if message.len() > MAX_EXTERNAL_AGENT_MESSAGE_BYTES {
+            return Err("peer message exceeds the 64 KiB limit".to_owned());
+        }
         let message_id = next_agent_message_id(&sender_id);
         if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
             return Err("peer receive commit queue is busy; retry later".to_owned());
@@ -404,6 +414,8 @@ impl Harness {
         if self.pending_external_receive_acks.contains_key(&message_id) {
             return Err("peer receive is already pending".to_owned());
         }
+        let (recipient_id, started, rate_admitted_at) =
+            self.resolve_peer_entrypoint_recipient(&message_id, message.len())?;
         let received = AgentMessageReceived {
             message_id: message_id.clone(),
             sender_id: sender_id.clone(),
@@ -422,6 +434,9 @@ impl Harness {
                 recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
                 expected_receive: received.clone(),
                 canceled: false,
+                started,
+                reselect_attempted: false,
+                rate_admitted_at,
                 completion: crate::harness::PendingPeerReceiveCompletion::Local {
                     conversation_id: conversation_id.clone(),
                     call_id,
@@ -1132,12 +1147,12 @@ impl Harness {
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), String> {
         self.validate_external_agent_message_target(&request)?;
-        let recipient_id = match &request.recipient {
-            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => agent_id.clone(),
-            tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
-                self.select_peer_entrypoint_recipient()?
-            }
-        };
+        if session_generation != self.current_session_generation {
+            return Err("target session changed before peer admission".to_owned());
+        }
+        if !self.external_message_peers.contains(&client_id) {
+            return Err("peer connection closed before peer admission".to_owned());
+        }
         if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
             return Err("peer receive commit queue is busy; retry later".to_owned());
         }
@@ -1145,6 +1160,15 @@ impl Harness {
         if self.pending_external_receive_acks.contains_key(&message_id) {
             return Err("peer receive is already pending".to_owned());
         }
+        let (recipient_id, started, rate_admitted_at) = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
+                let admitted_at = self.admit_peer_input(agent_id, request.message.len())?;
+                (agent_id.clone(), false, admitted_at)
+            }
+            tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
+                self.resolve_peer_entrypoint_recipient(&request.message_id, request.message.len())?
+            }
+        };
         let received = AgentMessageReceived {
             message_id: message_id.clone(),
             sender_id: request.sender_id,
@@ -1163,6 +1187,9 @@ impl Harness {
                 recipient: request.recipient,
                 expected_receive: received.clone(),
                 canceled: false,
+                started,
+                reselect_attempted: false,
+                rate_admitted_at,
                 completion: crate::harness::PendingPeerReceiveCompletion::Remote {
                     client_id,
                     request_id: request.request_id,
@@ -1201,10 +1228,13 @@ impl Harness {
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(AgentId, bool), String> {
         self.validate_external_agent_message_target(&request)?;
-        let recipient_id = match &request.recipient {
-            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => agent_id.clone(),
+        let (recipient_id, started, _rate_admitted_at) = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
+                let admitted_at = self.admit_peer_input(agent_id, request.message.len())?;
+                (agent_id.clone(), false, admitted_at)
+            }
             tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
-                self.select_peer_entrypoint_recipient()?
+                self.resolve_peer_entrypoint_recipient(&request.message_id, request.message.len())?
             }
         };
         self.publish_event(
@@ -1221,7 +1251,8 @@ impl Harness {
             }),
         );
         self.record_peer_route(&recipient_id);
-        Ok((recipient_id, false))
+        self.uncommitted_peer_auto_starts.remove(&recipient_id);
+        Ok((recipient_id, started))
     }
 
     fn validate_external_agent_message_target(
@@ -1328,6 +1359,126 @@ impl Harness {
             .ok_or_else(|| "peer route unavailable".to_owned())
     }
 
+    /// Select an existing endpoint or create the explicitly authorized role.
+    ///
+    /// The event loop serializes this operation. A newly created endpoint is
+    /// inserted before the next request is handled, which provides live
+    /// single-flight coalescing without durable crash deduplication.
+    pub(crate) fn resolve_peer_entrypoint_recipient(
+        &mut self,
+        message_id: &tau_proto::AgentMessageId,
+        message_bytes: usize,
+    ) -> Result<(AgentId, bool, Instant), String> {
+        if let Ok(recipient_id) = self.select_peer_entrypoint_recipient() {
+            let admitted_at = self.admit_peer_input(&recipient_id, message_bytes)?;
+            return Ok((recipient_id, false, admitted_at));
+        }
+        let role = self
+            .peer_entrypoint
+            .as_ref()
+            .and_then(|group| group.peer_entrypoint.as_ref())
+            .and_then(|entrypoint| entrypoint.auto_start_role.clone())
+            .ok_or_else(|| "peer route unavailable".to_owned())?;
+        // Resolve role, model, required skills, and the ordinary endpoint shape
+        // before spending. `prepare_start_agent_request` mints identity but does
+        // not create an agent or dispatch model work.
+        let query = tau_proto::StartAgentRequest {
+            query_id: format!("{PEER_AUTO_START_QUERY_PREFIX}{message_id}"),
+            instruction: String::new(),
+            role: Some(role),
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+            parent_agent: None,
+        };
+        let pending = self
+            .prepare_start_agent_request(HARNESS_CONNECTION_ID, query)?
+            .ok_or_else(|| "peer route unavailable".to_owned())?;
+        let recipient_id = crate::parse_agent_id(&pending.agent_id);
+        let admitted_at = self.admit_peer_input(&recipient_id, message_bytes)?;
+        if let Err(error) = self.start_peer_agent_request(pending) {
+            self.release_peer_input_rate(&recipient_id, admitted_at);
+            if let Some(cid) = self.agent_routes.get(recipient_id.as_str()).cloned() {
+                self.remove_agent(&cid);
+            }
+            return Err(format!("peer route unavailable: {error}"));
+        }
+        self.uncommitted_peer_auto_starts
+            .insert(recipient_id.clone());
+        Ok((recipient_id, true, admitted_at))
+    }
+
+    /// Enforce endpoint queue, byte, and rolling-rate limits before acceptance.
+    pub(crate) fn admit_peer_input(
+        &mut self,
+        recipient_id: &AgentId,
+        message_bytes: usize,
+    ) -> Result<Instant, String> {
+        let loaded_prompt_bytes = self
+            .agent_routes
+            .get(recipient_id.as_str())
+            .and_then(|cid| self.agents.get(cid))
+            .into_iter()
+            .flat_map(|agent| &agent.pending_prompts)
+            .filter_map(|prompt| prompt.peer_admission_bytes);
+        let pending_start_prompt_bytes = self
+            .pending_start_agent_requests
+            .iter()
+            .find(|pending| pending.agent_id == recipient_id.as_str())
+            .into_iter()
+            .flat_map(|pending| &pending.pending_agent_messages)
+            .filter_map(|prompt| prompt.peer_admission_bytes);
+        let parked_receive_bytes = self
+            .pending_external_receive_acks
+            .values()
+            .filter(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
+            .map(|pending| pending.expected_receive.message.len());
+        let (queued_count, queued_bytes) = loaded_prompt_bytes
+            .chain(pending_start_prompt_bytes)
+            .chain(parked_receive_bytes)
+            .fold((0usize, 0usize), |(count, bytes), message_bytes| {
+                (count.saturating_add(1), bytes.saturating_add(message_bytes))
+            });
+        if queued_count >= MAX_QUEUED_PEER_INPUTS_PER_AGENT
+            || queued_bytes.saturating_add(message_bytes) > MAX_QUEUED_PEER_BYTES_PER_AGENT
+        {
+            return Err("peer input queue is full; retry later".to_owned());
+        }
+        let now = Instant::now();
+        let accepted = self
+            .peer_input_rate
+            .entry(recipient_id.clone())
+            .or_default();
+        while accepted.front().is_some_and(|accepted_at| {
+            now.saturating_duration_since(*accepted_at) >= Duration::from_secs(60)
+        }) {
+            accepted.pop_front();
+        }
+        if accepted.len() >= MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE {
+            return Err("peer input rate limit reached; retry later".to_owned());
+        }
+        accepted.push_back(now);
+        Ok(now)
+    }
+
+    /// Release a rolling-rate slot for a receive rejected before commit.
+    pub(crate) fn release_peer_input_rate(&mut self, recipient_id: &AgentId, admitted_at: Instant) {
+        let Some(accepted) = self.peer_input_rate.get_mut(recipient_id) else {
+            return;
+        };
+        if let Some(index) = accepted
+            .iter()
+            .position(|timestamp| *timestamp == admitted_at)
+        {
+            accepted.remove(index);
+        }
+        if accepted.is_empty() {
+            self.peer_input_rate.remove(recipient_id);
+        }
+    }
+
+    /// Revalidate one concrete endpoint against current entrypoint role,
+    /// provider/model, skill, and termination authority.
     pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
         let Some(group) = &self.peer_entrypoint else {
             return false;
@@ -1351,6 +1502,8 @@ impl Harness {
         })
     }
 
+    /// Record a successful concrete route for deterministic
+    /// least-recently-routed selection.
     pub(crate) fn record_peer_route(&mut self, recipient_id: &AgentId) {
         self.peer_route_clock = self.peer_route_clock.saturating_add(1);
         self.peer_last_routed

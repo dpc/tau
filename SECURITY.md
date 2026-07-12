@@ -4,6 +4,13 @@ Tau is early-stage software, but security issues are important. Please report su
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
 
+Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
+sandbox or per-sender ACL. Callback correlation prevents accidental sender/route
+confusion before bounded admission or model-spending auto-start, while peer text
+remains model input rather than a harness instruction. Delivery is best-effort
+at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
+work, and spend.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:
