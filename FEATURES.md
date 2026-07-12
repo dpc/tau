@@ -588,7 +588,9 @@ real result or error later so the main turn can keep making progress. Unless the
 `agent_start` call supplies `role`, delegated sub-agents default to the
 `engineer` role. The `agent_start` placeholder and final result include
 `self_agent_id` and `sub_agent_id`; sub-agent responses arrive through distinct
-`agent_watch` async response notifications until the caller disables the watch.
+`agent_watch` async response notifications until the caller disables the watch
+or either endpoint unloads. Unload permanently retires the relation and its
+subscription/provider-delivery state; same-session reload requires a fresh watch.
 When a watched agent receives a direct user prompt, watchers also receive a
 hidden prompt notification when that prompt becomes the watched agent's active
 turn, so the matching watched response has clear context.
@@ -1033,7 +1035,7 @@ does not provide OMEMO or other end-to-end encryption.
 
 ### Watcher-visible provider work
 
-Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
+Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, endpoint unload, and session change stop delivery. Endpoint unload also clears the subscription identity, current provider snapshot, and dedupe state, so reload requires a fresh watch. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
 
 When an ordinary inference receives a canonical context-window rejection before producing output, Tau may automatically run one standalone compaction and retry the owed inference if the model supports standalone compaction and the role permits it. Partial-output, unsupported, disabled, ambiguous, post-compaction, and repeated overflow cases remain terminal rather than recursively compacting.
 ### Explicit agent compaction tools

@@ -1,4 +1,4 @@
-use super::dispatch::context_overflow_response;
+use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::{PendingTool, background_completion_prompt};
 
@@ -22,6 +22,67 @@ fn add_second_test_model(h: &mut Harness) {
     let route = h.provider_model_routes[&first].clone();
     h.provider_model_info.insert(second.clone(), info);
     h.provider_model_routes.insert(second, route);
+}
+
+/// A final response parked before commit must not fan out watch content after
+/// removing the watched sender has made that endpoint non-live.
+#[test]
+fn intercepted_final_response_cannot_fan_out_after_watched_agent_unload() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let interceptor = connect_test_tool(&mut h, "watch-final-interceptor");
+    h.handle_extension_event(
+        "watch-final-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.publish_for_agent(
+        &watched_cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &"sp-parked-watch-final".into(),
+            crate::parse_agent_id(&watched_id),
+            "must not cross unload",
+        )),
+    );
+    let (parked, _) = intercepted_payload(&interceptor);
+    assert!(matches!(parked, Event::ProviderResponseFinished(_)));
+
+    h.remove_agent(&watched_cid);
+    h.handle_extension_event(
+        "watch-final-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release final response");
+
+    assert!(
+        event_log_events(&h).iter().all(|event| !matches!(
+            event,
+            Event::AgentMessageReceived(message)
+                if message.kind == tau_proto::AgentMessageKind::WatchResponse
+                    && message.recipient_id.as_str() == watcher_id
+        )),
+        "parked final response must not append watch content after unload"
+    );
+    assert!(h.watchers_for_agent(&watched_id).is_empty());
+    h.shutdown().expect("shutdown");
 }
 
 /// A checkpoint parked before commit owns its provider-qualified model even if

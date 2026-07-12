@@ -4287,6 +4287,11 @@ impl Harness {
             }
         }
         if let Event::SessionAgentUnloaded(unloaded) = event
+            && unloaded.session_id == self.current_session_id
+        {
+            self.retire_agent_watch_endpoint(unloaded.agent_id.as_str());
+        }
+        if let Event::SessionAgentUnloaded(unloaded) = event
             && let Some(cid) = self
                 .agents
                 .iter()
@@ -12546,6 +12551,7 @@ impl Harness {
             return;
         };
         if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
+            self.retire_agent_watch_endpoint(&agent_id);
             self.agent_routes.remove(&agent_id);
             self.stopped_agent_ids.insert(agent_id);
             self.agents.remove(cid);

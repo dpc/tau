@@ -14525,6 +14525,249 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     h.shutdown().expect("shutdown");
 }
 
+/// Unloading a watcher during provider retry must retire all of its incoming
+/// and outgoing subscriptions before later recovery or terminal fanout can
+/// append durable recipient facts.
+#[test]
+fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(&td.path().join("state")).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        &watched_id,
+        &watcher_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let session_id = h.current_session_id.clone();
+    let status = |state| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 1,
+        agent_prompt_id: "watcher-unload-prompt".into(),
+        state,
+        initial: false,
+    };
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 1,
+            next_retry_delay_secs: 1,
+        }),
+    );
+    h.update_agent_watch_provider_status(
+        &watcher_id,
+        tau_proto::AgentWatchProviderStatusNotification {
+            session_id: session_id.clone(),
+            subscription_id: String::new(),
+            turn_generation: 1,
+            agent_prompt_id: "unloaded-watcher-status".into(),
+            state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+            initial: false,
+        },
+    );
+
+    h.remove_agent(&watcher_cid);
+    assert!(!h.agent_watches.contains_key(&watcher_id));
+    assert!(!h.agent_watchers.contains_key(&watcher_id));
+    // Exercise the local fallback after the committed unload reaction.
+    h.retire_agent_watch_endpoint(&watcher_id);
+    let durable_before = h
+        .agent_store
+        .agent_events(&watcher_id)
+        .expect("watcher durable log")
+        .len();
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 2 }),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::TerminalError {
+            failure_kind: tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            attempt: 2,
+        }),
+    );
+
+    assert_eq!(
+        h.agent_store
+            .agent_events(&watcher_id)
+            .expect("watcher durable log")
+            .len(),
+        durable_before,
+        "post-unload provider phases must not append recipient facts"
+    );
+    assert!(!h.agent_watches.contains_key(&watcher_id));
+    assert!(!h.agent_watchers.contains_key(&watcher_id));
+    assert!(
+        h.agent_watch_subscriptions
+            .keys()
+            .all(|(watcher, watched)| watcher != &watcher_id && watched != &watcher_id)
+    );
+    assert!(h.agent_watch_provider_status.get(&watcher_id).is_none());
+    assert!(
+        h.agent_watch_provider_deliveries
+            .keys()
+            .all(|subscription| h
+                .agent_watch_subscriptions
+                .values()
+                .any(|id| id == subscription))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Unloading a watched target during context recovery must remove its current
+/// provider snapshot and every subscription/dedupe bucket, and a late terminal
+/// update must neither recreate stale reload state nor append to the watcher.
+#[test]
+fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(&td.path().join("state")).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let session_id = h.current_session_id.clone();
+    let status = |state| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 1,
+        agent_prompt_id: "target-unload-prompt".into(),
+        state,
+        initial: false,
+    };
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 1,
+            next_retry_delay_secs: 1,
+        }),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 2 }),
+    );
+    let retired_subscription =
+        h.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())].clone();
+    let snapshots_before_unload = event_log_events(&h)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::AgentWatchesUpdated(snapshot)
+                    if snapshot.watcher_id.as_str() == watcher_id
+            )
+        })
+        .count();
+
+    h.remove_agent(&watched_cid);
+    assert!(h.watchers_for_agent(&watched_id).is_empty());
+    assert!(h.agent_watch_provider_status.get(&watched_id).is_none());
+    // Exercise the local fallback after the committed unload reaction.
+    h.retire_agent_watch_endpoint(&watched_id);
+    let durable_before = h
+        .agent_store
+        .agent_events(&watcher_id)
+        .expect("watcher durable log")
+        .len();
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::TerminalError {
+            failure_kind: tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            attempt: 2,
+        }),
+    );
+    h.notify_agent_watcher_turn_state(&watcher_id, &watched_id, false);
+    assert!(
+        h.publish_agent_watch_response_from_agent(
+            &watched_cid,
+            watcher_id.clone(),
+            "late final response".to_owned(),
+        )
+        .is_err(),
+        "an unloaded sender cannot publish final-response watch content"
+    );
+
+    assert_eq!(
+        h.agent_store
+            .agent_events(&watcher_id)
+            .expect("watcher durable log")
+            .len(),
+        durable_before,
+        "post-unload terminal status must not append a recipient fact"
+    );
+    assert!(h.agent_watch_provider_status.get(&watched_id).is_none());
+    assert!(h.watchers_for_agent(&watched_id).is_empty());
+    assert!(
+        h.agent_watch_subscriptions
+            .keys()
+            .all(|(_, watched)| watched != &watched_id)
+    );
+    assert!(h.agent_watch_provider_deliveries.is_empty());
+    assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
+    let replacement_snapshots: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentWatchesUpdated(snapshot) if snapshot.watcher_id.as_str() == watcher_id => {
+                Some(snapshot)
+            }
+            _ => None,
+        })
+        .skip(snapshots_before_unload)
+        .collect();
+    assert_eq!(replacement_snapshots.len(), 1);
+    assert!(replacement_snapshots[0].watched_agent_ids.is_empty());
+    assert_eq!(
+        replacement_snapshots[0].cause,
+        tau_proto::AgentWatchUpdateCause::WatcherPruned
+    );
+
+    let reloaded_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let minted_id = durable_agent_id_for_conversation(&h, &reloaded_cid).to_string();
+    h.agent_routes.remove(&minted_id);
+    h.agents
+        .get_mut(&reloaded_cid)
+        .expect("reloaded agent")
+        .agent_id = Some(watched_id.clone());
+    h.agent_routes
+        .insert(watched_id.clone(), reloaded_cid.clone());
+    h.ensure_loaded_agent_for_agent(&reloaded_cid, &watched_id);
+    assert!(h.watchers_for_agent(&watched_id).is_empty());
+    assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert_ne!(
+        h.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())],
+        retired_subscription,
+        "same-session reload requires a freshly minted subscription"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Per-agent turn generation cleanup must not erase another watched agent's
 /// active same-category dedupe bucket.
 #[test]

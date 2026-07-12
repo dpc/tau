@@ -40,6 +40,12 @@ Initial snapshots are not model input. Later model-visible transition wording
 is reconstructed from the typed state and watched identity, never trusted from
 the event's compatibility message field.
 
+Unloading either endpoint retires the complete watch relation and its current
+provider/delivery state before later fanout. Fanout additionally requires both
+endpoints to remain live, preventing durable recipient records from accumulating
+when live prompt delivery is impossible and preventing stale provider status
+from crossing a same-session reload.
+
 A turn caused only by lifecycle notifications suppresses both lifecycle edges
 to prevent cyclic watches from self-exciting. If ordinary input joins that
 generation during a tool/provider continuation, the harness first emits the

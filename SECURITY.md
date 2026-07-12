@@ -516,6 +516,13 @@ diagnostics must stay separate from assistant text deltas to avoid confusing
 diagnostics with model-authored transcript content; durable truth remains the
 final response event.
 
+Agent unload is also a watch authorization and delivery boundary. The harness
+retires every incoming and outgoing watch subscription, sanitized current
+provider snapshot, and per-subscription delivery state for either endpoint.
+Later retry, recovery, terminal, turn-state, or content fanout requires both
+endpoints to remain live and cannot append a durable notification for an
+unloaded recipient.
+
 First-party providers also run a bounded exact streaming repetition guard before accepting assistant text, reasoning summaries, or tool-argument deltas. This is a resource-safety guard for tight provider/model loops, not a semantic quality filter: it only checks substantial exact suffix repetitions inside one stream component and clears transient output before publishing a `repetition_detected` final response.
 Standalone compaction transaction controls are harness-owned, immutable,
 must-pass facts. Extensions and UIs cannot forge or suppress their cut,

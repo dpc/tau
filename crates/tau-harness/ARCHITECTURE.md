@@ -109,7 +109,11 @@ Session-local watch state is represented by authoritative
 `agent.watches_updated` snapshots keyed by watcher. The harness maintains the
 forward watch set and reverse watcher index only as runtime/session state,
 publishes complete replacement snapshots for each watcher, and does not persist
-watch relationships into agent display names.
+watch relationships into agent display names. Committed agent unload is an
+endpoint lifecycle boundary: it atomically retires every incoming and outgoing
+relation, subscription identity, provider snapshot, and delivery-dedupe bucket.
+Surviving watchers receive a replacement topology snapshot, while no event is
+addressed to the unloaded endpoint.
 
 Model-visible `agent_watch` notifications are deliberately narrow. A watcher may
 receive only a watched agent's final response notification (`Watched agent <id>

@@ -511,12 +511,14 @@ impl<'a> InternalToolHost<'a> {
     /// Generations caused only by watch notifications are suppressed to prevent
     /// mutual watches from creating response feedback. Ordinary input promotes
     /// the generation before completion and restores normal response fanout.
+    /// Missing or terminating watched endpoints are denied so a parked final
+    /// response cannot cross the unload boundary.
     pub fn agent_watch_response_allowed(&self, watched_agent_id: &str) -> bool {
         self.harness
             .agent_routes
             .get(watched_agent_id)
             .and_then(|cid| self.harness.agents.get(cid))
-            .is_none_or(|agent| !agent.lifecycle_notification_only_turn)
+            .is_some_and(|agent| !agent.terminating && !agent.lifecycle_notification_only_turn)
     }
 
     /// Prune a stale watch relationship after notification delivery failed.

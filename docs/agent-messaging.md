@@ -119,6 +119,10 @@ the attempt history. A terminal provider status is delivered before the matching
 turn-stop edge. Provider bodies, human status/error text, headers, account data,
 secrets, and prompt content never cross this boundary; see
 [Watched provider status](events.md#watched-provider-status) for the wire shape.
+Unloading either the watcher or watched agent disables every watch involving
+that endpoint and discards its current provider snapshot and notification
+dedupe state. These relations do not return if the same agent is loaded again;
+enable a new watch to create a fresh subscription.
 
 The CLI presents lifecycle records as compact status lines such as
 `Watching engineer_b · idle` and `engineer_b · turn started`. These statuses are

@@ -271,12 +271,20 @@ impl Harness {
         )
     }
 
+    /// Publish final-response watch content only while the watched sender
+    /// remains a live agent endpoint.
     pub(crate) fn publish_agent_watch_response_from_agent(
         &mut self,
         agent_id: &AgentId,
         recipient_id: String,
         message: String,
     ) -> Result<(), String> {
+        let sender_id = self
+            .ensure_agent_id_for_agent(agent_id)
+            .ok_or_else(|| "watched agent no longer exists".to_owned())?;
+        if self.agent_message_recipient_status(&sender_id) != AgentMessageRecipientStatus::Live {
+            return Err("watched agent is no longer live".to_owned());
+        }
         self.publish_agent_delivery_from_agent(
             agent_id,
             recipient_id,
@@ -345,13 +353,7 @@ impl Harness {
                     self.agent_watchers.remove(watched_agent_id);
                 }
             }
-            if let Some(subscription_id) = self
-                .agent_watch_subscriptions
-                .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
-            {
-                self.agent_watch_provider_deliveries
-                    .remove(&subscription_id);
-            }
+            self.retire_agent_watch_subscription(watcher_id, watched_agent_id);
         }
         self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
     }
@@ -384,6 +386,59 @@ impl Harness {
             false,
             AgentWatchUpdateCause::WatcherPruned,
         );
+    }
+
+    /// Retire every watch relation and provider snapshot involving an unloaded
+    /// endpoint.
+    ///
+    /// This operation is idempotent because both the durable unload reaction
+    /// and the local removal fallback may observe the same endpoint.
+    /// Surviving watchers receive an authoritative replacement snapshot;
+    /// the unloaded watcher does not receive another event addressed to it.
+    pub(crate) fn retire_agent_watch_endpoint(&mut self, agent_id: &str) {
+        let outgoing = self.agent_watches.remove(agent_id).unwrap_or_default();
+        let incoming = self.agent_watchers.remove(agent_id).unwrap_or_default();
+
+        for watched_agent_id in outgoing {
+            if let Some(watchers) = self.agent_watchers.get_mut(&watched_agent_id) {
+                watchers.remove(agent_id);
+                if watchers.is_empty() {
+                    self.agent_watchers.remove(&watched_agent_id);
+                }
+            }
+            self.retire_agent_watch_subscription(agent_id, &watched_agent_id);
+        }
+
+        for watcher_id in incoming {
+            if let Some(watched) = self.agent_watches.get_mut(&watcher_id) {
+                watched.remove(agent_id);
+                if watched.is_empty() {
+                    self.agent_watches.remove(&watcher_id);
+                }
+            }
+            self.retire_agent_watch_subscription(&watcher_id, agent_id);
+            if self.agent_message_recipient_status(&watcher_id) == AgentMessageRecipientStatus::Live
+            {
+                self.publish_agent_watches_snapshot(
+                    &watcher_id,
+                    Some(agent_id),
+                    AgentWatchUpdateCause::WatcherPruned,
+                );
+            }
+        }
+
+        self.agent_watch_provider_status.remove(agent_id);
+    }
+
+    /// Remove one subscription identity and all delivery-dedupe state it owns.
+    fn retire_agent_watch_subscription(&mut self, watcher_id: &str, watched_agent_id: &str) {
+        if let Some(subscription_id) = self
+            .agent_watch_subscriptions
+            .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
+        {
+            self.agent_watch_provider_deliveries
+                .remove(&subscription_id);
+        }
     }
 
     fn publish_agent_watches_snapshot(
@@ -421,6 +476,12 @@ impl Harness {
         watched_agent_id: &str,
         initial: bool,
     ) {
+        if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live
+            || self.agent_message_recipient_status(watched_agent_id)
+                != AgentMessageRecipientStatus::Live
+        {
+            return;
+        }
         let Some(subscription_id) = self
             .agent_watch_subscriptions
             .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
@@ -478,6 +539,11 @@ impl Harness {
         watched_agent_id: &str,
         mut status: tau_proto::AgentWatchProviderStatusNotification,
     ) {
+        if self.agent_message_recipient_status(watched_agent_id)
+            != AgentMessageRecipientStatus::Live
+        {
+            return;
+        }
         status.initial = false;
         if self
             .agent_watch_provider_status
@@ -533,6 +599,12 @@ impl Harness {
         status: &tau_proto::AgentWatchProviderStatusNotification,
         initial: bool,
     ) {
+        if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live
+            || self.agent_message_recipient_status(watched_agent_id)
+                != AgentMessageRecipientStatus::Live
+        {
+            return;
+        }
         let Some(subscription_id) = self
             .agent_watch_subscriptions
             .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
