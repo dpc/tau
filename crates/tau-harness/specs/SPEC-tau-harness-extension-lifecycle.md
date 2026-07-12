@@ -69,6 +69,16 @@ metadata pid is still live; dead-pid entries are eligible for cleanup on
 platforms where Tau has a safe pid-liveness backend, so a transient probe
 failure does not permanently hide a running daemon.
 
+## Extension configuration errors
+
+An extension that cannot parse or apply its `Configure.config` reports the
+failure with `HarnessInputMessage::ConfigError`. The harness converts every
+extension `ConfigError` into a mandatory `harness.notice`; it must not drop,
+downgrade, or restrict the diagnostic to startup delivery. As specified by
+[SPEC-tau-harness-event-processing](SPEC-tau-harness-event-processing.md), the
+notice is replayable so both initial and late UI subscribers see configuration
+failures, including failures reported before a terminal UI subscribes.
+
 ## Optional extension startup
 
 Extension startup availability is controlled by resolved `ExtensionConfig.require`.
