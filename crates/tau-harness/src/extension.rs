@@ -44,6 +44,8 @@ pub(crate) struct ExtensionEntry {
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
     pub(crate) connection_id: tau_proto::ConnectionId,
     pub(crate) kind: ClientKind,
+    /// Immutable structural tool prefix assigned to this instance.
+    pub(crate) tool_prefix: Option<tau_proto::ToolNamePrefix>,
     /// Whether startup requires this extension to initialize successfully.
     pub(crate) require: bool,
     /// Whether an unexpected supervised disconnect may be respawned.

@@ -63,6 +63,7 @@ use crate::tools::{
 #[derive(Clone)]
 pub(crate) struct Output {
     inner: OutputInner,
+    tool_name_scope: Option<(tau_proto::ToolName, tau_proto::ToolName)>,
 }
 
 #[derive(Clone)]
@@ -76,6 +77,7 @@ impl Output {
     fn client(handle: tau_client::ClientHandle) -> Self {
         Self {
             inner: OutputInner::Client(handle),
+            tool_name_scope: None,
         }
     }
 
@@ -83,15 +85,52 @@ impl Output {
     fn channel(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
         Self {
             inner: OutputInner::Channel(tx),
+            tool_name_scope: None,
         }
     }
 
-    fn send(&self, message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+    fn scoped_tool(&self, local: tau_proto::ToolName, wire: tau_proto::ToolName) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            tool_name_scope: Some((local, wire)),
+        }
+    }
+
+    fn send(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+        if let Some((local, wire)) = &self.tool_name_scope
+            && let HarnessInputMessage::Emit(emit) = &mut message
+        {
+            let tool_name = match emit.event.as_mut() {
+                Event::ToolProgress(event) => Some(&mut event.tool_name),
+                Event::ToolResult(event) => Some(&mut event.tool_name),
+                Event::ToolError(event) => Some(&mut event.tool_name),
+                Event::ToolCancelled(event) => Some(&mut event.tool_name),
+                _ => None,
+            };
+            if let Some(tool_name) = tool_name
+                && tool_name == local
+            {
+                *tool_name = wire.clone();
+            }
+        }
         match &self.inner {
             OutputInner::Client(handle) => handle.send_detached(message),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
                 .send(message)
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+        }
+    }
+
+    fn register_local_tool(
+        &self,
+        registration: tau_proto::ToolRegister,
+    ) -> tau_client::ClientResult<()> {
+        match &self.inner {
+            OutputInner::Client(handle) => handle.register_local_tool(registration),
+            #[cfg(test)]
+            OutputInner::Channel(tx) => tx
+                .send(HarnessInputMessage::emit(Event::ToolRegister(registration)))
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         }
     }
@@ -739,8 +778,9 @@ impl tau_client::TauExtension for ShellExtension {
                 shell_tool_group.clone()
             };
             builder.tool_with_group_and_prompt_fragment(tool, Some(tool_group), None, |cx| {
+                let local_tool_name = cx.local_tool_name().clone();
                 cx.state
-                    .handle_event(Event::ToolStarted(cx.invoke.clone()), false)
+                    .handle_scoped_tool_started(cx.invoke.clone(), &local_tool_name)
             });
         }
         builder
@@ -1080,7 +1120,7 @@ fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
 }
 
 fn schedule_tool_started(
-    invoke: tau_proto::ToolStarted,
+    (mut invoke, local_tool_name): (tau_proto::ToolStarted, &tau_proto::ToolName),
     scheduler: &WorkScheduler,
     tx: &Output,
     config: ExtConfig,
@@ -1088,6 +1128,9 @@ fn schedule_tool_started(
     running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     cwd_state: CwdState,
 ) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
+    let wire_invoke = invoke.clone();
+    let tx = tx.scoped_tool(local_tool_name.clone(), invoke.tool_name.clone());
+    invoke.tool_name = local_tool_name.clone();
     let priority = priority_for_tool(&invoke, &config);
     let meta = WorkMeta {
         call_id: Some(invoke.call_id.clone()),
@@ -1096,7 +1139,7 @@ fn schedule_tool_started(
         queued_bytes: approximate_tool_bytes(&invoke, scheduler.queued_bytes_limit()),
     };
     let tx_for_job = tx.clone();
-    let invoke_for_error = invoke.clone();
+    let invoke_for_error = wire_invoke;
     scheduler
         .enqueue(priority, meta, move || {
             let invoke = rewrite_invoke_for_cwd(invoke, &cwd_state, &tx_for_job);

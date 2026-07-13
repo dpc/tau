@@ -26,6 +26,16 @@ publish the original event so routing identities and durable folds stay aligned.
 Mutable prompt-text events may be rewritten only without changing their routing
 identity.
 
+“Less-trusted” here concerns protocol authority and integrity: extensions cannot
+author harness/provider-owned facts or bypass ownership and lifecycle validation.
+Configured extension processes remain trusted local executables, and their local
+stdio IPC is not an adversarial availability or sandbox boundary. Per-operation
+robustness limits remain useful, but generic hostile-frame, slowloris, and
+connection-flood hardening is outside this lifecycle contract unless an approved
+threat-model change says otherwise. See
+[`SECURITY.md`](../../../SECURITY.md) and
+[`SPEC-tau-harness-session-state`](SPEC-tau-harness-session-state.md#extension-data).
+
 The harness also tracks loaded session membership in runtime state before the
 corresponding must-pass `session.agent_loaded` publish commits. That keeps
 idempotency stable while an interceptor parks publication and prevents duplicate
@@ -77,6 +87,36 @@ failure does not permanently hide a running daemon.
 
 ## Extension configuration errors
 
+After `Hello`, the harness sends `Configure` before accepting declarations and
+`Ready`. Its optional tool prefix is retained with the configured instance
+across respawn. Registrations from a prefixed instance must place internal
+names, visible aliases, and groups inside the assigned exact component envelope.
+Final internal-name ownership is unique across live connections; prompt
+snapshots separately reject simultaneously visible alias collisions. These
+rules implement
+[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+Sending `Ready` records readiness but does not publish `extension.ready` or expose
+staged capabilities until every initial extension has either sent `Ready` or
+become terminal. The harness then resolves all final-name collisions in one
+deterministic preflight, disconnects optional losers without advancing prompts,
+activates every survivor as one barrier, marks and publishes all lifecycle
+readiness, replays globally ordered operational traffic received behind the
+barrier, and only then permits prompt/session advancement.
+Only the exhaustive set of capability declarations enters activation staging;
+all other emitted events are classified as operational by default. This keeps
+new state-mutating, reply, progress, and terminal events behind the barrier
+unless the protocol explicitly promotes them to declarations.
+Harness-internal tool handlers are installed before this preflight, so their names
+participate as reserved owners. Per-connection retained activation traffic is
+bounded by message-count and encoded-byte quotas; overflow follows the same
+initial required/optional or post-startup connection-isolation policy.
+
+One narrow bootstrap exception exists: an `ExtensionDataRequest` received before
+that peer's `Ready` is handled immediately because an initial Configure handler
+may need extension-owned storage before it can accept configuration. After that
+peer sends `Ready`, the same RPC is operational traffic and remains globally
+ordered behind any still-open activation barrier.
+
 An extension that cannot parse or apply its `Configure.config` reports the
 failure with `HarnessInputMessage::ConfigError`. The harness converts every
 extension `ConfigError` into a mandatory `harness.notice`; it must not drop,
@@ -96,8 +136,14 @@ fatal. Optional extensions (`require: false`) are skipped or disabled for
 startup/config/secret/pre-Ready failures, but the failure must still be emitted as
 a mandatory replayable `harness.notice` so initial and late UI subscribers see why
 the extension is absent. This policy is limited to startup/init availability; do
-not broaden it into new post-Ready respawn or runtime-failure semantics without a
-separate design change. Optional startup is degraded availability for trusted local code, not a sandbox. Diagnostics must not leak secrets; mandatory/critical notices remain replayable and protected from interceptor rewrite/drop, and extension-authored notices cannot spoof them.
+not treat it as a sandbox. Required pre-Ready protocol violations remain
+startup-fatal; optional pre-Ready violations disable that peer. A malformed frame
+is reported distinctly from clean EOF: required initial peers fail startup,
+optional initial peers are disabled, and an already-live extension is isolated to
+that connection and follows normal disconnect/respawn behavior rather than
+terminating the harness. Diagnostics must
+not leak secrets; mandatory/critical notices remain replayable and protected from
+interceptor rewrite/drop, and extension-authored notices cannot spoof them.
 
 ## Extension availability startup data flow
 

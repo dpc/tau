@@ -48,6 +48,7 @@ fn write_script(dir: &tempfile::TempDir, source: &str) -> std::path::PathBuf {
 
 fn configure_with_script(path: &Path) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         instance_name: None,
         config: CborValue::Map(vec![(
             CborValue::Text("script".to_owned()),
@@ -60,6 +61,7 @@ fn configure_with_script(path: &Path) -> HarnessOutputMessage {
 
 fn empty_configure() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         instance_name: None,
         config: CborValue::Map(Vec::new()),
         state_dir: None,
@@ -77,6 +79,7 @@ fn configure_with_script_and_extra(
     )];
     config.append(&mut extra);
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         instance_name: None,
         config: CborValue::Map(config),
         state_dir: None,
@@ -334,6 +337,7 @@ fn start_runs_after_ready_with_host_functions() {
         "#,
     );
     let configure = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         instance_name: None,
         config: CborValue::Map(vec![
             (
@@ -457,16 +461,7 @@ fn missing_script_config_reports_error_and_stays_inert() {
 
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
     assert!(matches!(frames[1], HarnessInputMessage::ConfigError(_)));
-    assert!(matches!(frames[2], HarnessInputMessage::Ready(_)));
-    let HarnessInputMessage::Ready(ready) = &frames[2] else {
-        panic!("expected ready");
-    };
-    assert!(
-        ready
-            .message
-            .as_deref()
-            .is_some_and(|m| m.contains("disabled"))
-    );
+    assert_eq!(frames.len(), 2);
 }
 
 #[test]
@@ -656,10 +651,11 @@ fn init_rejects_mixed_priority_intercepts() {
         frame,
         HarnessInputMessage::ConfigError(error) if error.message.contains("same priority")
     )));
-    assert!(frames.iter().any(|frame| matches!(
-        frame,
-        HarnessInputMessage::Ready(ready) if ready.message.as_deref().is_some_and(|m| m.contains("disabled"))
-    )));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(frame, HarnessInputMessage::Ready(_)))
+    );
     assert!(
         frames
             .iter()
@@ -790,6 +786,45 @@ fn register_tool_emits_registration_before_ready() {
     );
 }
 
+/// A late prefix-composition failure rejects the whole Rhai init plan before
+/// any earlier script declaration becomes visible.
+#[test]
+fn prefixed_init_composition_failure_emits_no_partial_declarations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let long_name = "a".repeat(ToolName::MAX_LEN);
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+                fn init(config) {{
+                    register_tool("early", #{{}}, Fn("early"));
+                    register_tool("{long_name}", #{{}}, Fn("late"));
+                }}
+                fn early(args, c) {{ "early"; }}
+                fn late(args, c) {{ "late"; }}
+            "#
+        ),
+    );
+    let mut configure = configure_with_script(&script);
+    let HarnessOutputMessage::Configure(configure) = &mut configure else {
+        unreachable!();
+    };
+    configure.tool_prefix = Some(tau_proto::ToolNamePrefix::parse("work").expect("valid prefix"));
+
+    let frames = run_frames(&[HarnessOutputMessage::Configure(configure.clone())]);
+
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    let HarnessInputMessage::ConfigError(error) = &frames[1] else {
+        panic!("expected ConfigError, got {:?}", frames[1]);
+    };
+    assert!(
+        error.message.contains("exceed") || error.message.contains("too long"),
+        "{}",
+        error.message
+    );
+    assert_eq!(frames.len(), 2);
+}
+
 #[test]
 fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     // Owned live tool.started events are consumed by the tool dispatcher and
@@ -806,10 +841,16 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
             fn on_event(event, meta) { tau_info("raw should not see owned tool"); }
         "#,
     );
+    let mut configure = configure_with_script(&script);
+    let HarnessOutputMessage::Configure(configure_frame) = &mut configure else {
+        unreachable!();
+    };
+    configure_frame.tool_prefix =
+        Some(tau_proto::ToolNamePrefix::parse("work").expect("valid prefix"));
     let live = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
         tool_started(
-            "echo_args",
+            "work_echo_args",
             CborValue::Map(vec![(
                 CborValue::Text("text".to_owned()),
                 CborValue::Text("hello".to_owned()),
@@ -818,11 +859,15 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     );
     let replay = HarnessOutputMessage::deliver_replay(
         UnixMicros::new(2),
-        tool_started("echo_args", CborValue::Map(Vec::new())),
+        tool_started("work_echo_args", CborValue::Map(Vec::new())),
     );
 
-    let frames = run_frames(&[configure_with_script(&script), live, replay]);
+    let frames = run_frames(&[configure, live, replay]);
 
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::ToolRegister(register)) if register.tool.name.as_str() == "work_echo_args"
+    )));
     let results: Vec<_> = frames
         .iter()
         .filter_map(|frame| match emitted_event(frame) {
@@ -835,6 +880,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
         results[0].result,
         CborValue::Text("saw hello via echo_args".to_owned())
     );
+    assert_eq!(results[0].tool_name.as_str(), "work_echo_args");
     assert!(frames.iter().all(|frame| !matches!(
         emitted_event(frame),
         Some(Event::HarnessNotice(info)) if info.message.contains("raw should not see")

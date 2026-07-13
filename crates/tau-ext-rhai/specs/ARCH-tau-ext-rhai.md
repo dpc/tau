@@ -4,7 +4,7 @@
 
 ## Init and registration
 
-`init(config)` is a staging phase. `register_tool_group` and `register_tool` are available only while init is active; other side-effecting host functions, including `shell_spawn`, are rejected. If init fails, the extension emits `ConfigError`, registers nothing, and then sends an inert `Ready`.
+`init(config)` is a staging phase. `register_tool_group` and `register_tool` are available only while init is active; other side-effecting host functions, including `shell_spawn`, are rejected. If init fails, the extension emits `ConfigError`, registers nothing, and terminates startup without `Ready`.
 
 Tool and group names are validated with Tau protocol newtypes. Tool groups use empty specs in v1; a tool referencing an undeclared group gets an empty group attached to that tool registration.
 
@@ -15,7 +15,7 @@ The main Rhai interpreter stays single-threaded. The extension uses
 initial `Configure`, run trusted `init(config)`, and only then emit the
 script-computed `Subscribe`, `Intercept`, tool registrations, and terminal
 `Ready`. If configuration or init fails, the deferred startup path emits one
-`ConfigError` followed by an inert `Ready`.
+`ConfigError` and terminates without `Ready`.
 
 After startup, `tau-client` owns protocol decoding and serialized writing while
 the Rhai runtime owns the policy loop. The loop is reactive rather than

@@ -6,3 +6,10 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 - Read `specs/ARCH-tau-harness.md` before changing or reviewing harness event sequencing, persistence, interception, extension boundaries, session semantics, or extension-data behavior.
 - Read the applicable trust-boundary records under `specs/` before changing daemon IPC, listener lifecycle, shutdown, runtime discovery, or security-sensitive harness behavior.
+- For IPC/resource review, state whether the path is trusted configured-extension
+  IPC, cooperative inter-harness IPC, or genuinely untrusted external ingress.
+  Start at [`../../SECURITY.md`](../../SECURITY.md), then
+  `specs/SPEC-tau-harness-extension-lifecycle.md`,
+  `specs/SPEC-tau-harness-session-state.md`, and
+  `specs/ARCH-tau-harness.md`. If wording appears to conflict, ask rather than
+  inferring a stronger threat model.

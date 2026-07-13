@@ -1,8 +1,10 @@
 # ARCH-tau-ext-telegram: tau-ext-telegram architecture
 
-`std-telegram` is a personal text bridge, not a generic chat abstraction. The extension process starts to register tools, but it does not contact Telegram until a Tau agent calls this instance's register tool (`telegram_register` for the legacy `std-telegram` instance) with `enabled: true`.
+`std-telegram` is a personal text bridge, not a generic chat abstraction. The extension process starts to register tools, but it does not contact Telegram until a Tau agent calls this instance's register tool (`telegram_register` without a generic tool prefix) with `enabled: true`.
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
+Structural tool naming follows
+[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
 
 ## State
 
@@ -58,7 +60,7 @@ Command designators always put the stable `agent_id` first, with display name
 only as context in listings and selection confirmations (`agent_id (display
 name)`). `/select` and `/to` resolve by full `agent_id` or unambiguous `agent_id`
 prefix, not by display name. Agent replies sent with this instance's send tool
-(`telegram_send` for the legacy `std-telegram` instance) are prefixed with
+(`telegram_send` when no generic `tool_prefix` is configured) are prefixed with
 `[agent_id]` only. Ambiguous plain text receives a Telegram reply and is not routed.
 
 The bridge has one active Telegram chat. If `chat_id` is configured, only that
@@ -77,7 +79,7 @@ config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
 shutdown lifecycle, advisory update-stream lock acquisition/contention/release,
 active-reconfigure lock contention, webhook-active registration refusal,
-`getUpdates` 409 conflict notices, tool namespace derivation/validation, and
+`getUpdates` 409 conflict notices, generic tool-prefix mapping, and
 bot-token/Bot API URL redaction. Live
 Telegram checks are manual only and should not be required for normal CI.
 

@@ -390,6 +390,12 @@ They are configured under `extensions.<name>` in `harness.yaml` and can be
 disabled with `enable: false`, marked optional with `require: false`, started
 from a configured `cwd:`, swapped via `command:` / `prefix:`, or given free-form
 `config:` payload that arrives at startup as a `LifecycleConfigure` message.
+Set `tool_prefix: work` on an instance to prefix structural tool names, visible
+aliases, and groups with `work_`; semantic tags and arbitrary prose or schemas
+are unchanged. `tool_prefix` is distinct from the argv-wrapper `prefix`, uses
+ASCII alphanumeric underscore-separated components, and requires restart to
+change. Exact tool/group policy uses final prefixed names. Omitting it preserves
+existing names exactly.
 Extension names must contain only
 ASCII letters, digits, `_`, and `-` so they are safe as state-directory path
 components and unambiguous in dotted `--harness-config` paths. Some core tools,
@@ -399,7 +405,7 @@ such as `agent_start`,
 ```json5
 extensions: {
   "core-shell":         { enable: false },                       // disable
-  "std-slack":          { enable: true, require: false },        // skip visibly if unavailable
+  "std-slack":          { enable: true, require: false, tool_prefix: "work" }, // distinct account tools
   "std-telegram":       { enable: true, require: false },        // skip visibly if unavailable
   "provider-builtin":   { prefix: ["ssh", "user@host"] },        // run remotely
   "custom-tool":        { command: ["./tool"], cwd: "/srv/tool" }, // run from cwd
@@ -678,7 +684,7 @@ in the parent UI alongside the delegate's task name and role. See
 
 Disabled by default, `std-telegram` lets allowlisted Telegram users send text to
 explicitly registered Tau agents and lets those agents reply with
-the legacy `telegram_send` tool. It requires a bot-token secret and non-empty
+the `telegram_send` tool (or its generically prefixed form). It requires a bot-token secret and non-empty
 `allowed_user_ids`;
 outgoing messages use only a configured or linked chat id, never a model-chosen
 destination. Runtime registrations and Telegram update offsets are in-memory,
@@ -687,8 +693,8 @@ protected by a same-state-root advisory lock for the singleton Telegram update
 stream. Activating Telegram polling fails visibly when Telegram reports an
 active webhook, and out-of-band `getUpdates` HTTP 409 conflicts are surfaced as
 warning notices that clear active registrations. Additional Telegram extension
-instances publish namespaced register/send tools instead of reusing the
-`std-telegram` legacy tool names.
+instances use per-extension `tool_prefix` values to publish distinct
+register/send tools.
 
 The same crate also ships the experimental `tau-telegram-gateway` daemon for the
 first single-token gateway slice. It owns polling and durable offsets for one bot

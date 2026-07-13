@@ -37,7 +37,12 @@ impl Write for SharedWriter {
 fn run_with_idle_output(input: Vec<u8>, idle_duration: Duration) -> Vec<u8> {
     let writer = SharedWriter::default();
     let output = writer.clone();
-    run_with_idle(Cursor::new(input), writer, idle_duration).expect("run");
+    run_with_idle(
+        Cursor::new(with_initial_configure(input)),
+        writer,
+        idle_duration,
+    )
+    .expect("run");
     output.bytes()
 }
 
@@ -48,9 +53,25 @@ fn run_with_idle_and_summary_output(
 ) -> Vec<u8> {
     let writer = SharedWriter::default();
     let output = writer.clone();
-    run_with_idle_and_summary_timeout(Cursor::new(input), writer, idle_duration, summary_timeout)
-        .expect("run");
+    run_with_idle_and_summary_timeout(
+        Cursor::new(with_initial_configure(input)),
+        writer,
+        idle_duration,
+        summary_timeout,
+    )
+    .expect("run");
     output.bytes()
+}
+
+fn with_initial_configure(input: Vec<u8>) -> Vec<u8> {
+    let mut framed = Vec::new();
+    let mut writer = EventWriter::new(&mut framed);
+    writer
+        .write_frame(&configure_frame(tau_proto::CborValue::Map(Vec::new())))
+        .expect("write initial configure");
+    writer.flush().expect("flush initial configure");
+    framed.extend(input);
+    framed
 }
 
 /// Corrupted protocol input should surface as a fatal decode/read error under
@@ -58,8 +79,12 @@ fn run_with_idle_and_summary_output(
 #[test]
 fn malformed_protocol_input_returns_error() {
     let writer = SharedWriter::default();
-    let error = run_with_idle(Cursor::new(vec![0x9f]), writer, Duration::from_secs(3600))
-        .expect_err("malformed input should fail");
+    let error = run_with_idle(
+        Cursor::new(with_initial_configure(vec![0x9f])),
+        writer,
+        Duration::from_secs(3600),
+    )
+    .expect_err("malformed input should fail");
 
     assert!(!error.to_string().is_empty());
 }
@@ -239,6 +264,7 @@ fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
 /// `Event::LifecycleConfigure`.
 fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
+        tool_prefix: None,
         instance_name: None,
         config,
         state_dir: None,

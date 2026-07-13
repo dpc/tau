@@ -155,6 +155,18 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         .expect("read")
         .expect("provider hello should arrive");
     assert!(matches!(provider_hello, HarnessInputMessage::Hello(_)));
+    bus.send_to(
+        &provider_id,
+        None,
+        HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            config: tau_proto::CborValue::Map(Vec::new()),
+            instance_name: Some("provider-builtin".into()),
+            state_dir: None,
+            secrets: Default::default(),
+        }),
+    )
+    .expect("configure provider");
     loop {
         let message = provider_reader
             .read_message()
@@ -179,6 +191,20 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         .expect("read")
         .expect("tool hello should arrive");
     assert!(matches!(tool_hello, HarnessInputMessage::Hello(_)));
+    let tool_state_dir = store_path.join("ext/tool");
+    std::fs::create_dir_all(&tool_state_dir).expect("create tool state directory");
+    bus.send_to(
+        &tool_id,
+        None,
+        HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            config: tau_proto::CborValue::Map(Vec::new()),
+            instance_name: Some("tool".into()),
+            state_dir: Some(tool_state_dir),
+            secrets: Default::default(),
+        }),
+    )
+    .expect("configure tool");
     let tool_subscribe = tool_reader
         .read_message()
         .expect("read")
@@ -199,7 +225,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             HarnessInputMessage::Emit(emit) => match *emit.event {
                 Event::ToolRegister(tool_register) => {
                     let register_report = registry.register(&tool_id, tool_register.tool.clone());
-                    assert!(register_report.warnings.is_empty());
+                    assert!(register_report.errors.is_empty());
                     registered_tool_names.push(tool_register.tool.name);
                 }
                 Event::ActionSchemaPublished(_)

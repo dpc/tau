@@ -54,7 +54,7 @@ const OUTBOUND_SEND_RATE_WINDOW: Duration = Duration::from_secs(60);
 const RECENT_UPDATE_LIMIT: usize = 128;
 
 /// Version of the local gateway status socket protocol.
-const SOCKET_PROTOCOL_VERSION: u32 = 1;
+const SOCKET_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum bytes read from one local socket request.
 const MAX_SOCKET_REQUEST_BYTES: usize = 8192;
@@ -1359,7 +1359,6 @@ impl GatewayRegistry {
             GatewayRegistration {
                 connection_id,
                 display_name: request.display_name,
-                tool_namespace: request.tool_namespace,
                 registered_at: now,
                 expires_at: now + REGISTRATION_LEASE_DURATION,
             },
@@ -1531,9 +1530,7 @@ impl GatewayRegistry {
         let registration_metadata = self
             .registrations
             .values()
-            .filter(|registration| {
-                registration.display_name.is_some() || registration.tool_namespace.is_some()
-            })
+            .filter(|registration| registration.display_name.is_some())
             .count();
         GatewayRegistryCounts {
             sidecars: self.sidecars.len(),
@@ -1583,8 +1580,6 @@ struct GatewayRegistration {
     connection_id: u64,
     /// Optional model/display name for diagnostics.
     display_name: Option<String>,
-    /// Tool namespace exposed by this sidecar.
-    tool_namespace: Option<String>,
     /// Registration creation time.
     registered_at: Instant,
     /// Lease expiry time extended by heartbeats.
@@ -1608,8 +1603,6 @@ struct GatewaySocketRequest {
     message: Option<String>,
     /// Optional display name supplied by the sidecar.
     display_name: Option<String>,
-    /// Optional tool namespace supplied by the sidecar.
-    tool_namespace: Option<String>,
 }
 
 impl Default for GatewaySocketRequest {
@@ -1621,7 +1614,6 @@ impl Default for GatewaySocketRequest {
             agent_id: None,
             message: None,
             display_name: None,
-            tool_namespace: None,
         }
     }
 }

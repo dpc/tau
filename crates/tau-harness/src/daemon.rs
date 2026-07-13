@@ -23,8 +23,9 @@ use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
-    Harness, HarnessSessionLaunch, InitialClient, InitialClientStartupErrorOutput,
-    assistant_text_from_output_items, tool_calls_from_output_items,
+    Harness, HarnessSessionLaunch, HarnessStartupPeers, InitialClient,
+    InitialClientStartupErrorOutput, assistant_text_from_output_items,
+    tool_calls_from_output_items,
 };
 use crate::runtime_dir;
 use crate::settings::{
@@ -1089,13 +1090,15 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 reason: session_start_reason(options.session_status),
                 session_persistence: options.session_persistence,
             },
-            initial_client,
+            HarnessStartupPeers {
+                initial_client,
+                internal_tool_handlers,
+            },
             &mut initial_client_error_stream,
         ),
         &mut initial_client_error_stream,
     )?;
     harness.set_runtime_harness_path(harness_paths.path().to_path_buf());
-    harness.install_internal_tool_handlers(internal_tool_handlers);
     harness_paths.set_peer_entrypoint(harness.has_peer_entrypoint());
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
 

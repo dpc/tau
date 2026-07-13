@@ -93,6 +93,13 @@ startup role is removed, startup fails rather than falling back silently.
 
 ## Daemon and provider reliability boundaries
 
+Configured extension children are trusted local executables with limited protocol
+authority, not hostile transport peers. The controlling boundary is linked from
+[`SECURITY.md`](../../../SECURITY.md) and
+[`SPEC-tau-harness-session-state`](SPEC-tau-harness-session-state.md#extension-data).
+Reviews must not conflate that boundary with external adapter payloads or
+cooperative cross-harness messaging.
+
 The harness daemon listener is local IPC for trusted same-user Tau clients and
 runtime discovery. Listener ownership and cleanup must preserve the socket
 identity checks in `tau-socket`; a daemon-owned listener should outlive cloned raw

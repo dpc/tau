@@ -46,6 +46,7 @@ fn replayed_restart() -> HarnessOutputMessage {
 
 fn restart_config(mode: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         instance_name: None,
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
@@ -62,6 +63,20 @@ fn run_restart_frames(
 ) -> Vec<HarnessInputMessage> {
     let mut input = Vec::new();
     let mut writer = HarnessOutputWriter::new(&mut input);
+    if !matches!(
+        input_frames.first(),
+        Some(HarnessOutputMessage::Configure(_))
+    ) {
+        writer
+            .write_message(&HarnessOutputMessage::Configure(Configure {
+                tool_prefix: None,
+                instance_name: None,
+                config: CborValue::Map(Vec::new()),
+                state_dir: None,
+                secrets: std::collections::BTreeMap::new(),
+            }))
+            .expect("write initial configure");
+    }
     for frame in input_frames {
         writer.write_message(frame).expect("write input frame");
     }
@@ -329,6 +344,15 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
 fn run_intercept(prompt: AgentPromptSubmitted) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
     let mut input = Vec::new();
     let mut writer = HarnessOutputWriter::new(&mut input);
+    writer
+        .write_message(&HarnessOutputMessage::Configure(Configure {
+            tool_prefix: None,
+            instance_name: None,
+            config: CborValue::Map(Vec::new()),
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        }))
+        .expect("write initial configure");
     writer
         .write_message(&intercepted_prompt(prompt))
         .expect("write intercepted prompt");

@@ -5,6 +5,8 @@ External ingress is constrained by [ARCH-external-message-boundary](../../../spe
 `std-xmpp` is a disabled-by-default personal XMPP text bridge. It exposes only
 `xmpp_register` and `xmpp_send`; the model never supplies arbitrary destination
 JIDs. The extension does not connect to XMPP until an agent registers.
+Per-instance generic `tool_prefix` values scope both tools and group `xmpp` for
+multi-account deployments; semantic XMPP tags remain shared.
 Configuration is applied only before the XMPP worker starts. Once an agent
 registration starts the bridge, the worker owns its cloned `RuntimeConfig`,
 including the resolved password and routing policy, and later `Configure`

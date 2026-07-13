@@ -101,6 +101,13 @@ startup-critical; absence inherits lower layers/built-in defaults, and user-adde
 entries ultimately default to required. Both fields are ordinary layered config,
 so file/drop-in/CLI override tests should cover parsing and precedence.
 
+`ExtensionEntry::tool_prefix` is presence-aware: absence inherits, explicit
+null clears, and a validated segmented ASCII string sets the immutable
+per-instance structural tool prefix. `toolPrefix` is normalized as a legacy
+camel-case alias in file and CLI layers. It is independent of the argv-wrapper
+`prefix`. See
+[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+
 ## Atomic writes
 
 `atomic_write_following_symlink` follows a destination symlink and replaces its

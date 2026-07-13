@@ -27,7 +27,7 @@ extensions:
 
 `script` is required. Absolute paths are preferred; relative paths are resolved from the extension process current working directory. `vars` is arbitrary JSON-compatible data passed into `init(config)` and `start(config)`. The harness-provided `state_dir`, when present, is also passed to both callbacks.
 
-If config parsing, script reading, compilation, or `init` fails, the extension sends `ConfigError`, then `Ready` with a `rhai disabled: ...` message, and stays alive inert instead of exiting in a restart loop.
+If config parsing, script reading, compilation, or `init` fails, the extension sends `ConfigError`, exposes no startup declarations, and remains rejected before `Ready` while it awaits harness disconnect.
 
 
 ## Script callbacks

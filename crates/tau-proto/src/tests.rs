@@ -1,5 +1,32 @@
 use super::*;
 
+/// Prefix syntax rejects ambiguous separators and non-provider-safe bytes.
+#[test]
+fn tool_prefix_validation_is_segmented_ascii() {
+    for valid in ["a", "Work2", "team_ops"] {
+        assert!(ToolNamePrefix::parse(valid).is_ok(), "{valid}");
+    }
+    for invalid in ["", "_a", "a_", "a__b", "a-b", "a b", "é"] {
+        assert!(ToolNamePrefix::parse(invalid).is_err(), "{invalid}");
+    }
+}
+
+/// Composition is exactly additive and envelope checks require a complete
+/// underscore-delimited prefix component.
+#[test]
+fn tool_prefix_composition_is_additive_and_envelope_is_exact() {
+    let prefix = ToolNamePrefix::parse("work").expect("prefix");
+    assert_eq!(
+        prefix
+            .compose_tool_name(&ToolName::new("work_send"))
+            .expect("compose")
+            .as_str(),
+        "work_work_send"
+    );
+    assert!(prefix.contains_tool_name(&ToolName::new("work_send")));
+    assert!(!prefix.contains_tool_name(&ToolName::new("workspace_send")));
+}
+
 fn test_message_envelope() -> MessageEnvelope {
     MessageEnvelope {
         message_id: MessageId::new("msg-1"),
@@ -1306,6 +1333,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
             instance_name: None,
+            tool_prefix: None,
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
             secrets: std::collections::BTreeMap::new(),
@@ -2350,6 +2378,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
 
     let with_state = Configure {
         instance_name: None,
+        tool_prefix: None,
         config: CborValue::Null,
         state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
         secrets: std::collections::BTreeMap::new(),
@@ -2364,6 +2393,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
 
     let without_state = serde_json::to_value(Configure {
         instance_name: None,
+        tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
@@ -2382,6 +2412,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
         instance_name: None,
+        tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
         secrets,
@@ -4131,4 +4162,21 @@ fn reactive_context_recovery_wire_contract() {
         "recovery_disposition"
     ));
     assert_eq!(decode_cbor_event(&legacy_response_cbor), none_event);
+}
+/// Streaming protocol readers reject a single oversized peer-controlled frame
+/// before handing it to higher-level routing or activation queues.
+#[test]
+fn streaming_reader_rejects_oversized_protocol_message() {
+    let message = HarnessInputMessage::ConfigError(ConfigError {
+        message: "x".repeat(MAX_PROTOCOL_MESSAGE_BYTES as usize + 1),
+    });
+    let mut encoded = Vec::new();
+    HarnessInputWriter::new(&mut encoded)
+        .write_message(&message)
+        .expect("encode oversized fixture");
+
+    let error = HarnessInputReader::new(std::io::Cursor::new(encoded))
+        .read_message()
+        .expect_err("oversized frame must fail");
+    assert!(error.to_string().contains("protocol message exceeds"));
 }

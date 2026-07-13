@@ -1390,6 +1390,13 @@ pub struct ExtensionEntry {
     /// `["bwrap", "--ro-bind", "/", "/", "--"]` to sandbox.
     pub prefix: Option<Vec<String>>,
 
+    /// Optional immutable prefix for this instance's structural tool names.
+    ///
+    /// The outer option preserves layering presence: an absent value inherits,
+    /// explicit `null` clears, and a string sets the prefix.
+    #[serde(default, alias = "toolPrefix", deserialize_with = "present_option")]
+    pub tool_prefix: Option<Option<tau_proto::ToolNamePrefix>>,
+
     /// argv of the extension itself. `command[0]` is the executable;
     /// the rest are arguments. For built-in extensions this defaults
     /// to `[<current-exe>]`; for new entries this must be set
@@ -2116,6 +2123,19 @@ fn normalize_harness_config_value(
     };
     normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
     normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
+    if let Some(serde_json::Value::Object(extensions)) = map.get_mut("extensions") {
+        for (extension_name, extension) in extensions {
+            if let serde_json::Value::Object(extension) = extension {
+                normalize_alias_key(
+                    extension,
+                    "toolPrefix",
+                    "tool_prefix",
+                    source,
+                    &format!("extensions.{extension_name}"),
+                )?;
+            }
+        }
+    }
     if let Some(tool_policy) = map.get_mut("tool_policy") {
         normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
     }
@@ -2316,6 +2336,9 @@ fn normalize_harness_config_override_key(key: &str) -> String {
     }
 
     parts[0] = canonical_top_level_key(parts[0]);
+    if parts[0] == "extensions" && parts.len() > 2 && parts[2] == "toolPrefix" {
+        parts[2] = "tool_prefix";
+    }
     if parts[0] == "agents" && parts.len() > 1 {
         parts[1] = canonical_agents_key(parts[1]);
         if parts[1] == "role_groups" && parts.len() > 3 {

@@ -42,6 +42,7 @@ impl DebugEventLog {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             } => {
                 let name = match message.as_ref() {
                     tau_proto::HarnessInputMessage::Emit(emit) => {
@@ -69,6 +70,17 @@ impl DebugEventLog {
                     "type": "disconnected",
                     "recorded_at_micros": recorded_at,
                     "source": connection_id,
+                })
+            }
+            HarnessEvent::ReadFailed {
+                connection_id,
+                error,
+            } => {
+                serde_json::json!({
+                    "type": "read_failed",
+                    "recorded_at_micros": recorded_at,
+                    "source": connection_id,
+                    "error": error,
                 })
             }
             HarnessEvent::NewClient(_) => {

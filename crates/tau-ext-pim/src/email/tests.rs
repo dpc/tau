@@ -332,17 +332,40 @@ impl EmailBackend for FakeBackend {
 }
 
 fn spawn_extension() -> FramePair {
+    spawn_extension_with_prefix(None)
+}
+
+fn spawn_extension_with_prefix(tool_prefix: Option<&str>) -> FramePair {
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
         let _ = run(reader_stream, ext_stream);
     });
-    FramePair {
+    let mut pair = FramePair {
         reader: HarnessInputReader::new(BufReader::new(
             harness_stream.try_clone().expect("harness clone"),
         )),
         writer: HarnessOutputWriter::new(BufWriter::new(harness_stream)),
-    }
+    };
+    let state_dir = std::env::temp_dir().join(format!(
+        "tau-pim-email-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    pair.writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: tool_prefix
+                .map(|prefix| tau_proto::ToolNamePrefix::parse(prefix).expect("tool prefix")),
+            instance_name: None,
+            config: CborValue::Map(Vec::new()),
+            state_dir: Some(state_dir),
+            secrets: configure_secrets(),
+        }))
+        .expect("initial configure");
+    pair.writer.flush().expect("flush initial configure");
+    pair
 }
 
 fn drain_startup_register(
@@ -706,6 +729,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
 
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(Vec::new()),
             state_dir: Some(temp.path().join("state")),
@@ -759,6 +783,74 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
     }
 }
 
+/// The public email-only runner classifies prefixed split tools by their local
+/// name while progress and terminal events retain the final wire name.
+#[test]
+fn email_run_dispatches_prefixed_split_tool_by_logical_name() {
+    let mut pair = spawn_extension_with_prefix(Some("work"));
+    drain_ready(&mut pair.reader);
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(3),
+            Event::ToolStarted(split_tool_started(
+                "work_email_list_recent",
+                vec![("folder", CborValue::Text("folder-1".to_owned()))],
+            )),
+        ))
+        .expect("write prefixed tool");
+    pair.writer.flush().expect("flush input");
+
+    let (progress_name, terminal) = loop {
+        let frame = pair.reader.read_message().expect("read").expect("frame");
+        match frame {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ToolProgress(progress) => {
+                    assert_eq!(progress.tool_name.as_str(), "work_email_list_recent");
+                    assert_eq!(
+                        progress
+                            .display
+                            .as_ref()
+                            .map(|display| display.args.as_str()),
+                        Some("folder-1")
+                    );
+                    let terminal = loop {
+                        let next = pair.reader.read_message().expect("read").expect("frame");
+                        if let HarnessInputMessage::Emit(emit) = next
+                            && matches!(
+                                emit.event.as_ref(),
+                                Event::ToolResult(_) | Event::ToolError(_)
+                            )
+                        {
+                            break *emit.event;
+                        }
+                    };
+                    break (progress.tool_name, terminal);
+                }
+                Event::ToolResult(_) | Event::ToolError(_) => {
+                    panic!("terminal email event arrived before required progress")
+                }
+                _ => {}
+            },
+            HarnessInputMessage::ConfigError(error) => {
+                panic!("valid prefixed config rejected: {}", error.message)
+            }
+            _ => {}
+        }
+    };
+
+    assert_eq!(progress_name.as_str(), "work_email_list_recent");
+    match terminal {
+        Event::ToolResult(result) => {
+            assert_eq!(result.tool_name.as_str(), "work_email_list_recent");
+        }
+        Event::ToolError(error) => {
+            assert_eq!(error.tool_name.as_str(), "work_email_list_recent");
+            assert!(!error.message.contains("command envelope"));
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Malformed email-only configuration must emit exactly one `ConfigError`,
 /// clear stale runtime state, and leave the tau-client dispatch loop alive.
 #[test]
@@ -769,6 +861,7 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
 
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(vec![(
                 CborValue::Text("unknown".to_owned()),
@@ -829,13 +922,17 @@ fn email_run_skips_replayed_actions_and_dispatches_live_action() {
         .expect("write live action");
     pair.writer.flush().expect("flush input");
 
-    let action_error = loop {
+    let (invocation_id, action_id) = loop {
         match pair.reader.read_message().expect("read").expect("frame") {
-            HarnessInputMessage::Emit(emit) => {
-                if let Event::ActionError(error) = *emit.event {
-                    break error;
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ActionError(error) => {
+                    break (error.invocation_id, error.action_id);
                 }
-            }
+                Event::ActionResult(result) => {
+                    break (result.invocation_id, result.action_id);
+                }
+                _ => {}
+            },
             HarnessInputMessage::ConfigError(error) => {
                 panic!(
                     "action dispatch should not emit ConfigError: {}",
@@ -847,10 +944,10 @@ fn email_run_skips_replayed_actions_and_dispatches_live_action() {
     };
 
     assert_eq!(
-        action_error.invocation_id,
+        invocation_id,
         tau_proto::ActionInvocationId::new("live-action")
     );
-    assert_eq!(action_error.action_id, "email.in.list");
+    assert_eq!(action_id, "email.in.list");
 }
 
 #[test]
@@ -4372,6 +4469,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     let _tool = drain_startup(&mut pair.reader);
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(Vec::new()),
             state_dir: None,

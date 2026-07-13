@@ -20,7 +20,7 @@ use crate::{
     AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, CompleteTransportSendRequest,
     CompleteTransportSendResult, Event, EventSelector, ExtensionName, InterceptionPriority,
     RegisterTransportCapabilityRequest, RegisterTransportCapabilityResult, SessionId,
-    ToolDefinition, TransportMessageIngressRequest, TransportMessageIngressResult,
+    ToolDefinition, ToolNamePrefix, TransportMessageIngressRequest, TransportMessageIngressResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,9 @@ pub struct Configure {
     /// Configured extension instance name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_name: Option<ExtensionName>,
+    /// Optional immutable prefix assigned to structural tool identifiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_prefix: Option<ToolNamePrefix>,
     /// Persistent directory reserved for this extension's runtime state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,

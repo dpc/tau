@@ -73,14 +73,16 @@ fn rejected_reconfigure_clears_previous_module_state() {
             .is_err()
     );
 
+    let invoke = tau_proto::ToolStarted {
+        call_id: tau_proto::ToolCallId::new("call-email"),
+        tool_name: tau_proto::ToolName::new("email_list_folders"),
+        arguments: CborValue::Map(vec![]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let local_tool_name = invoke.tool_name.clone();
     let event = runtime
-        .dispatch_tool(tau_proto::ToolStarted {
-            call_id: tau_proto::ToolCallId::new("call-email"),
-            tool_name: tau_proto::ToolName::new("email_list_folders"),
-            arguments: CborValue::Map(vec![]),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
-        })
+        .dispatch_tool(invoke, &local_tool_name)
         .expect("email tool is handled by PIM");
 
     let Event::ToolError(error) = event else {
@@ -94,14 +96,16 @@ fn rejected_reconfigure_clears_previous_module_state() {
             .contains("configuration was rejected")
     );
 
+    let invoke = tau_proto::ToolStarted {
+        call_id: tau_proto::ToolCallId::new("call-calendar"),
+        tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
+        arguments: CborValue::Map(vec![]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let local_tool_name = invoke.tool_name.clone();
     let event = runtime
-        .dispatch_tool(tau_proto::ToolStarted {
-            call_id: tau_proto::ToolCallId::new("call-calendar"),
-            tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
-            arguments: CborValue::Map(vec![]),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
-        })
+        .dispatch_tool(invoke, &local_tool_name)
         .expect("calendar tool is handled by PIM");
 
     let Event::ToolError(error) = event else {
@@ -141,14 +145,16 @@ fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
             .is_err()
     );
 
+    let invoke = tau_proto::ToolStarted {
+        call_id: tau_proto::ToolCallId::new("call-calendar"),
+        tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
+        arguments: CborValue::Map(vec![]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let local_tool_name = invoke.tool_name.clone();
     let event = runtime
-        .dispatch_tool(tau_proto::ToolStarted {
-            call_id: tau_proto::ToolCallId::new("call-calendar"),
-            tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
-            arguments: CborValue::Map(vec![]),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
-        })
+        .dispatch_tool(invoke, &local_tool_name)
         .expect("calendar tool is handled by PIM");
 
     let Event::ToolError(error) = event else {
@@ -165,6 +171,7 @@ fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
 
 fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Configure {
     tau_proto::Configure {
+        tool_prefix: None,
         config,
         instance_name: None,
         state_dir: Some(state_root.join("state")),
@@ -258,7 +265,8 @@ fn ignores_tool_started_for_tools_owned_by_other_extensions() {
             originator: tau_proto::PromptOriginator::User,
         };
 
-        assert!(runtime.dispatch_tool(invoke).is_none());
+        let local_tool_name = invoke.tool_name.clone();
+        assert!(runtime.dispatch_tool(invoke, &local_tool_name).is_none());
     }
 }
 
@@ -269,12 +277,27 @@ fn ignores_tool_started_for_tools_owned_by_other_extensions() {
 fn startup_registers_email_and_calendar_tools() {
     let writer = SharedWriter::default();
     let written = writer.clone();
+    let state_root = tempfile::TempDir::new().expect("state root");
+    let input = {
+        let mut bytes = Vec::new();
+        let mut input = HarnessOutputWriter::new(&mut bytes);
+        input
+            .write_message(&HarnessOutputMessage::Configure(configure(
+                CborValue::Map(Vec::new()),
+                state_root.path(),
+            )))
+            .expect("configure");
+        input.flush().expect("flush configure");
+        bytes
+    };
+    let state = RuntimeState {
+        storage: Some(Rc::new(storage::FsStorage::new(
+            state_root.path().join("pim-data"),
+        ))),
+        ..RuntimeState::default()
+    };
     tau_client::TauExtensionRunner::new(PimExtension)
-        .run(
-            std::io::Cursor::new(Vec::new()),
-            writer,
-            RuntimeState::default(),
-        )
+        .run(std::io::Cursor::new(input), writer, state)
         .expect("startup writes");
 
     let bytes = written.bytes();
@@ -373,6 +396,78 @@ fn startup_registers_email_and_calendar_tools() {
             .any(|tool| tool.as_str() == calendar::TOOL_NAME)
     );
     assert_eq!(tools.len(), 18);
+}
+
+/// Production tau-client dispatch maps a prefixed calendar wire name back to
+/// the logical handler while preserving the wire name on progress and terminal
+/// output.
+#[test]
+fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
+    let state_root = tempfile::TempDir::new().expect("state root");
+    let mut configure = configure(CborValue::Map(Vec::new()), state_root.path());
+    configure.tool_prefix = Some(tau_proto::ToolNamePrefix::parse("work").expect("valid prefix"));
+    let input = {
+        let mut bytes = Vec::new();
+        let mut writer = HarnessOutputWriter::new(&mut bytes);
+        writer
+            .write_message(&HarnessOutputMessage::Configure(configure))
+            .expect("configure");
+        writer
+            .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+                tau_proto::ToolStarted {
+                    call_id: tau_proto::ToolCallId::new("prefixed-calendar"),
+                    tool_name: tau_proto::ToolName::new("work_calendar_list_calendars"),
+                    arguments: CborValue::Map(Vec::new()),
+                    agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                    originator: tau_proto::PromptOriginator::User,
+                },
+            )))
+            .expect("invoke");
+        writer.flush().expect("flush");
+        bytes
+    };
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let state = RuntimeState {
+        storage: Some(Rc::new(storage::FsStorage::new(
+            state_root.path().join("pim-data"),
+        ))),
+        ..RuntimeState::default()
+    };
+    tau_client::TauExtensionRunner::new(PimExtension)
+        .run(std::io::Cursor::new(input), output, state)
+        .expect("run PIM");
+
+    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut registered = false;
+    let mut progress = false;
+    let mut terminal = false;
+    while let Some(frame) = reader.read_message().expect("frame") {
+        let HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        match emit.event.as_ref() {
+            Event::ToolRegister(register)
+                if register.tool.name.as_str() == "work_calendar_list_calendars" =>
+            {
+                registered = true;
+            }
+            Event::ToolProgress(event) if event.call_id.as_str() == "prefixed-calendar" => {
+                assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
+                progress = true;
+            }
+            Event::ToolResult(event) if event.call_id.as_str() == "prefixed-calendar" => {
+                assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
+                terminal = true;
+            }
+            Event::ToolError(event) if event.call_id.as_str() == "prefixed-calendar" => {
+                assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
+                terminal = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(registered && progress && terminal);
 }
 
 /// Ensures the public `run` path installs extension-data storage before

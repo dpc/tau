@@ -7,10 +7,10 @@
 //! logic here just drains one non-passive prompt per *runnable* agent and lets
 //! the agent interleave them on its side.
 //!
-//! [`Harness::dispatch_user_prompt`] is the direct entry point for interactive
-//! submissions and creates/reuses the session's durable user agent;
-//! [`Harness::dispatch_prompt_for_agent`] is the shared per-agent primitive
-//! (also used by side queries spawned via `StartAgentRequest`).
+//! [`Harness::dispatch_user_prompt`] creates/reuses the session's durable user
+//! agent and dispatches one interactive submission;
+//! [`Harness::dispatch_prompt_for_agent`] is the shared per-agent
+//! primitive (also used by side queries spawned via `StartAgentRequest`).
 //! [`Harness::try_advance_queue`] is the react-to-state- change drain that
 //! picks the next runnable agent and dispatches one prompt from its queue.
 //!
@@ -344,6 +344,7 @@ impl Harness {
     pub(crate) fn dispatch_blocked_for(&self, agent_id: &AgentId) -> bool {
         if self.selected_model.is_none()
             || !self.turn_state.is_idle()
+            || self.resolving_initial_extension_collisions
             || !self.extensions_all_ready()
             || !self.agent_context_ready_for(agent_id)
         {

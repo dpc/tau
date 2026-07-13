@@ -123,16 +123,14 @@ impl ShellRuntime {
             let _ = self.lock_manager.disable();
         }
         if dir_lock_changed {
-            self.send(HarnessInputMessage::emit(Event::ToolRegister(
-                tau_proto::ToolRegister {
-                    tool: dir_lock_tool_spec(self.config.dir_lock.enable),
-                    tool_group: Some(tau_proto::ToolGroup {
-                        name: tau_proto::ToolGroupName::new("shell"),
-                        prompt_fragment: None,
-                    }),
+            self.tx.register_local_tool(tau_proto::ToolRegister {
+                tool: dir_lock_tool_spec(self.config.dir_lock.enable),
+                tool_group: Some(tau_proto::ToolGroup {
+                    name: tau_proto::ToolGroupName::new("shell"),
                     prompt_fragment: None,
-                },
-            )))?;
+                }),
+                prompt_fragment: None,
+            })?;
         }
         Ok(())
     }
@@ -148,7 +146,8 @@ impl ShellRuntime {
                 apply_started_cwd_metadata(started, &self.tx, &self.cwd_state, is_replay);
             }
             Event::ToolStarted(invoke) => {
-                self.handle_tool_started(invoke, is_replay)?;
+                let local_tool_name = invoke.tool_name.clone();
+                self.handle_tool_started(invoke, &local_tool_name, is_replay)?;
             }
             Event::SessionStarted(started) => {
                 dispatch_session_started(started, &self.tx);
@@ -186,13 +185,14 @@ impl ShellRuntime {
     fn handle_tool_started(
         &self,
         invoke: tau_proto::ToolStarted,
+        local_tool_name: &tau_proto::ToolName,
         is_replay: bool,
     ) -> tau_client::ClientResult<()> {
-        if is_replay || !is_shell_tool(invoke.tool_name.as_str()) {
+        if is_replay || !is_shell_tool(local_tool_name.as_str()) {
             return Ok(());
         }
         if let Err(error) = schedule_tool_started(
-            invoke,
+            (invoke, local_tool_name),
             self.scheduler()?,
             &self.tx,
             self.config.clone(),
@@ -204,6 +204,15 @@ impl ShellRuntime {
             send_tool_failure(invoke, failure, &self.tx);
         }
         Ok(())
+    }
+
+    pub(super) fn handle_scoped_tool_started(
+        &mut self,
+        invoke: tau_proto::ToolStarted,
+        local_tool_name: &tau_proto::ToolName,
+    ) -> tau_client::ClientResult<()> {
+        self.runtime_started = true;
+        self.handle_tool_started(invoke, local_tool_name, false)
     }
 
     fn handle_session_agent_unloaded(&mut self, unloaded: tau_proto::SessionAgentUnloaded) {

@@ -258,6 +258,7 @@ fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
 
 fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
     tau_proto::Configure {
+        tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
         instance_name: Some(tau_proto::ExtensionName::new("std-xmpp")),
         state_dir: None,
@@ -282,6 +283,49 @@ fn malformed_config_message() -> HarnessOutputMessage {
     })))
 }
 
+/// Two XMPP account instances use the generic SDK scope for tools, aliases, and
+/// groups without changing semantic XMPP tags.
+#[test]
+fn generic_prefixes_scope_xmpp_instances() {
+    for prefix in ["personal", "work"] {
+        let HarnessOutputMessage::Configure(mut configure) = valid_config_message() else {
+            unreachable!()
+        };
+        configure.tool_prefix = Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix"));
+        let frames = run_protocol_messages(
+            &[
+                HarnessOutputMessage::Configure(configure),
+                HarnessOutputMessage::Disconnect(Default::default()),
+            ],
+            FakeBridge::new(),
+        );
+        let registrations = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                    Event::ToolRegister(register) => Some(register),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{REGISTER_TOOL_NAME}")
+                && registration
+                    .tool
+                    .model_visible_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == format!("{prefix}_{REGISTER_TOOL_NAME}"))
+                && registration.tool_group.as_ref().is_some_and(|group| {
+                    group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
+                })
+        }));
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{SEND_TOOL_NAME}")
+        }));
+    }
+}
+
 fn session_started_message(session_id: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
         session_id: session_id.into(),
@@ -295,6 +339,11 @@ fn run_protocol_messages(
 ) -> Vec<HarnessInputMessage> {
     let mut input = Vec::new();
     let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    if !matches!(messages.first(), Some(HarnessOutputMessage::Configure(_))) {
+        writer
+            .write_message(&valid_config_message())
+            .expect("write initial configure");
+    }
     for message in messages {
         writer.write_message(message).expect("write input");
     }
@@ -522,8 +571,8 @@ fn config_rejects_unsafe_shapes() {
     assert!(err.contains("domain-only"));
 }
 
-/// `xmpp_send` is gated on prior registration so an arbitrary agent cannot send
-/// XMPP messages without explicitly opting into the bridge first.
+/// The send tool is gated on prior registration so an arbitrary agent cannot
+/// send XMPP messages without explicitly opting into the bridge first.
 #[test]
 fn xmpp_send_fails_before_registration() {
     let (ext, rx, _bridge) = extension();
@@ -536,7 +585,7 @@ fn xmpp_send_fails_before_registration() {
     let Event::ToolError(error) = *emit.event else {
         panic!("tool error")
     };
-    assert!(error.message.contains("xmpp_register"));
+    assert!(error.message.contains("registration tool"));
 }
 
 /// Registering an agent starts the XMPP bridge lazily and records only

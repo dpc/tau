@@ -167,8 +167,17 @@ fn register_tools_with_prompt_fragment(
             None
         };
         builder.tool_with_group_and_prompt_fragment(tool, None, prompt_fragment, |cx| {
-            cx.handle.emit(initial_progress(cx.invoke))?;
-            let event = cx.state.dispatch(cx.invoke.clone());
+            let wire_tool_name = cx.invoke.tool_name.clone();
+            let mut local_invoke = cx.invoke.clone();
+            local_invoke.tool_name = cx.local_tool_name().clone();
+            cx.handle
+                .emit(initial_progress(cx.invoke, cx.local_tool_name()))?;
+            let mut event = cx.state.dispatch(local_invoke);
+            match &mut event {
+                Event::ToolResult(result) => result.tool_name = wire_tool_name,
+                Event::ToolError(error) => error.tool_name = wire_tool_name,
+                _ => debug_assert!(false, "email dispatch must return a terminal tool event"),
+            }
             cx.handle.emit(event)
         });
     }
@@ -6977,14 +6986,14 @@ pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
     }
 }
 
-fn initial_progress(invoke: &ToolStarted) -> Event {
+fn initial_progress(invoke: &ToolStarted, local_tool_name: &tau_proto::ToolName) -> Event {
     Event::ToolProgress(ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: None,
         progress: None,
         display: Some(initial_display_for_tool(
-            invoke.tool_name.as_str(),
+            local_tool_name.as_str(),
             &invoke.arguments,
         )),
     })

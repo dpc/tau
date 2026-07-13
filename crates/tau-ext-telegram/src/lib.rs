@@ -6,7 +6,7 @@
 //! client.
 //! Update-stream ownership follows
 //! `DESIGN-tau-ext-telegram-stream-locking`, while instance-specific tool names
-//! follow `DESIGN-tau-ext-telegram-tool-namespacing`.
+//! follow the workspace-wide `DESIGN-extension-tool-prefixes`.
 //! Shared-token multi-session ownership follows
 //! `DESIGN-tau-ext-telegram-single-token-gateway`.
 //! The standalone daemon and sidecar split is described by
@@ -41,15 +41,13 @@ use tau_proto::{
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "telegram";
 
-/// Legacy `std-telegram` tool name for registering the current agent as a
-/// Telegram listener.
+/// Logical tool name for registering the current agent as a Telegram listener.
 pub const REGISTER_TOOL_NAME: &str = "telegram_register";
 
-/// Legacy `std-telegram` tool name for sending a Telegram message from a
-/// registered agent.
+/// Logical tool name for sending a Telegram message from a registered agent.
 pub const SEND_TOOL_NAME: &str = "telegram_send";
 
-/// Legacy `std-telegram` tool group name shared by Telegram bridge tools.
+/// Logical tool group name shared by Telegram bridge tools.
 pub const TOOL_GROUP_NAME: &str = "telegram";
 
 /// Tag marking tools that register an agent with the Telegram bridge.
@@ -58,7 +56,6 @@ pub const REGISTER_TOOL_TAG: &str = "telegram:register";
 /// Tag marking tools that send messages through the Telegram bridge.
 pub const SEND_TOOL_TAG: &str = "telegram:send";
 
-const LEGACY_INSTANCE_NAME: &str = "std-telegram";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const DEFAULT_POLL_TIMEOUT_SECONDS: u64 = 25;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
@@ -179,45 +176,25 @@ struct ToolNames {
 }
 
 impl ToolNames {
-    /// Build the legacy un-namespaced tool set used by `std-telegram`.
-    fn legacy() -> Self {
-        Self::from_namespace(TOOL_GROUP_NAME).expect("legacy telegram namespace is valid")
-    }
-
-    /// Build tool names from the configured namespace.
-    fn from_namespace(namespace: &str) -> Result<Self, String> {
-        validate_tool_namespace(namespace)?;
-        let register = format!("{namespace}_register");
-        let send = format!("{namespace}_send");
-        let register = tau_proto::ToolName::try_new(&register).ok_or_else(|| {
-            format!("telegram `tool_namespace` produces invalid tool name `{register}`")
-        })?;
-        let send = tau_proto::ToolName::try_new(&send).ok_or_else(|| {
-            format!("telegram `tool_namespace` produces invalid tool name `{send}`")
-        })?;
-        let group = tau_proto::ToolGroupName::try_new(namespace).ok_or_else(|| {
-            format!("telegram `tool_namespace` produces invalid tool group `{namespace}`")
-        })?;
+    /// Build final names exclusively from the generic SDK scope.
+    fn from_scope(scope: &tau_client::ToolNameScope) -> ClientResult<Self> {
         Ok(Self {
-            namespace: namespace.to_owned(),
-            register,
-            send,
-            group,
+            namespace: scope
+                .wire_group_name(&tau_proto::ToolGroupName::new(TOOL_GROUP_NAME))?
+                .to_string(),
+            register: scope.wire_tool(REGISTER_TOOL_NAME)?,
+            send: scope.wire_tool(SEND_TOOL_NAME)?,
+            group: scope.wire_group_name(&tau_proto::ToolGroupName::new(TOOL_GROUP_NAME))?,
         })
     }
 
-    /// Choose explicit config namespace, legacy default, or instance-derived
-    /// namespace.
-    fn from_config_and_instance(
-        cfg: &ExtConfig,
-        instance_name: Option<&tau_proto::ExtensionName>,
-    ) -> Result<Self, String> {
-        if let Some(namespace) = cfg.tool_namespace.as_deref() {
-            return Self::from_namespace(namespace);
-        }
-        match instance_name.map(tau_proto::ExtensionName::as_ref) {
-            None | Some(LEGACY_INSTANCE_NAME) => Ok(Self::legacy()),
-            Some(name) => Self::from_namespace(&namespace_from_instance_name(name)?),
+    /// Build unprefixed logical names for direct unit-test instances.
+    fn logical() -> Self {
+        Self {
+            namespace: TOOL_GROUP_NAME.to_owned(),
+            register: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
+            send: tau_proto::ToolName::new(SEND_TOOL_NAME),
+            group: tau_proto::ToolGroupName::new(TOOL_GROUP_NAME),
         }
     }
 }
@@ -228,8 +205,6 @@ impl ToolNames {
 struct ExtConfig {
     /// Runtime mode for this Telegram sidecar.
     mode: ExtMode,
-    /// Optional model-visible tool namespace/prefix for multi-bot setups.
-    tool_namespace: Option<String>,
     /// Secret name carrying the Telegram bot token.
     bot_token_secret: Option<String>,
     /// Telegram user ids allowed to drive Tau agents.
@@ -595,7 +570,7 @@ struct Extension {
 
 impl Extension {
     fn new(client: Arc<dyn TelegramClient>, output: impl Into<Output>) -> Self {
-        Self::with_tool_names(client, output, ToolNames::legacy())
+        Self::with_tool_names(client, output, ToolNames::logical())
     }
 
     fn with_tool_names(
@@ -772,12 +747,7 @@ impl Extension {
             (session_id, agents)
         };
         for (agent_id, display_name) in agents {
-            let _ = gateway.register_agent(
-                session_id.as_ref(),
-                agent_id.as_ref(),
-                display_name,
-                &self.tool_names.namespace,
-            );
+            let _ = gateway.register_agent(session_id.as_ref(), agent_id.as_ref(), display_name);
         }
     }
 
@@ -932,12 +902,7 @@ impl Extension {
             (session_id, display_name)
         };
         let response = if enabled {
-            gateway.register_agent(
-                session_id.as_ref(),
-                invoke.agent_id.as_ref(),
-                display_name,
-                &self.tool_names.namespace,
-            )
+            gateway.register_agent(session_id.as_ref(), invoke.agent_id.as_ref(), display_name)
         } else {
             gateway.unregister_agent(session_id.as_ref(), invoke.agent_id.as_ref())
         };
@@ -980,7 +945,7 @@ impl Extension {
             Ok(_) => Ok(()),
             Err(message) => {
                 let message = format!(
-                    "telegram_register could not verify Telegram webhook status before polling; \
+                    "The Telegram registration tool could not verify Telegram webhook status before polling; \
                      registration was refused so Tau does not silently contend for the update \
                      stream: {message}"
                 );
@@ -1605,7 +1570,7 @@ fn poll_loop(
     output: Output,
     shutdown: Arc<AtomicBool>,
 ) {
-    poll_loop_with_tool_names(state, client, output, shutdown, ToolNames::legacy());
+    poll_loop_with_tool_names(state, client, output, shutdown, ToolNames::logical());
 }
 
 fn poll_loop_with_tool_names(
@@ -1744,14 +1709,13 @@ where
         state.ext.request_shutdown();
         return Ok(());
     };
-    match configure_tool_names(&configure, runtime.state_mut()) {
+    match configure_tool_names(&configure, &mut runtime) {
         Ok(tool_names) => {
             send_startup_declarations(&mut runtime, &tool_names)?;
         }
         Err(error) => {
             runtime.state().ext.clear_config_after_error();
             runtime.handle().config_error(error.to_string())?;
-            runtime.startup_ready(Some("telegram disabled".to_owned()))?;
         }
     }
     let exit = drive_manual_runtime(&mut runtime)?;
@@ -1774,9 +1738,8 @@ impl TauExtension for TelegramExtension {
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
-        // Tool declarations and subscriptions are emitted manually after the
-        // initial Configure message because Telegram tool names are
-        // configuration/instance dependent.
+        // This manual loop owns polling and gateway side channels. Generic
+        // tau-client scope helpers still own all structural tool naming.
         let _ = builder;
     }
 }
@@ -1794,6 +1757,9 @@ fn read_initial_config(
     loop {
         match runtime.recv()? {
             ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
+                runtime.dispatch_one(tau_proto::HarnessOutputMessage::Configure(
+                    configure.clone(),
+                ))?;
                 return Ok(Some(configure));
             }
             ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
@@ -1809,14 +1775,14 @@ fn read_initial_config(
 /// Apply initial config and install the tool names computed from that config.
 fn configure_tool_names(
     configure: &tau_proto::Configure,
-    runtime: &mut TelegramRuntime,
+    runtime: &mut tau_client::ManualExtensionRuntime<TelegramRuntime>,
 ) -> Result<ToolNames, Box<dyn Error>> {
     let parsed = parse_ext_config(&configure.config)?;
-    let tool_names =
-        ToolNames::from_config_and_instance(&parsed, configure.instance_name.as_ref())?;
+    let tool_names = ToolNames::from_scope(runtime.handle().tool_name_scope()?)?;
     let runtime_cfg = parsed.validate(&configure.secrets)?;
-    runtime.ext.tool_names = tool_names.clone();
+    runtime.state_mut().ext.tool_names = tool_names.clone();
     runtime
+        .state()
         .ext
         .apply_config(runtime_cfg, configure.state_dir.clone())?;
     Ok(tool_names)
@@ -1835,16 +1801,16 @@ fn send_startup_declarations(
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
     ])?;
-    runtime.startup_event(Event::ToolRegister(tau_proto::ToolRegister {
+    runtime.startup_local_tool(tau_proto::ToolRegister {
         tool: register_tool_spec_for(tool_names),
-        tool_group: Some(telegram_tool_group_for(tool_names)),
+        tool_group: Some(telegram_tool_group()),
         prompt_fragment: None,
-    }))?;
-    runtime.startup_event(Event::ToolRegister(tau_proto::ToolRegister {
+    })?;
+    runtime.startup_local_tool(tau_proto::ToolRegister {
         tool: send_tool_spec_for(tool_names),
-        tool_group: Some(telegram_tool_group_for(tool_names)),
+        tool_group: Some(telegram_tool_group()),
         prompt_fragment: None,
-    }))?;
+    })?;
     runtime.startup_ready(Some("telegram ready".to_owned()))
 }
 
@@ -1893,16 +1859,7 @@ fn drive_manual_runtime(
 /// Apply a runtime reconfiguration and report errors explicitly to the harness.
 fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto::Configure) {
     let result = parse_ext_config(&configure.config)
-        .and_then(|cfg| {
-            let requested = ToolNames::from_config_and_instance(&cfg, configure.instance_name.as_ref())?;
-            if requested != runtime.ext.tool_names {
-                return Err(
-                    "telegram tool namespace cannot change after extension startup; restart the extension to change tool names"
-                        .to_owned(),
-                );
-            }
-            cfg.validate(&configure.secrets)
-        })
+        .and_then(|cfg| cfg.validate(&configure.secrets))
         .and_then(|cfg| runtime.ext.apply_config(cfg, configure.state_dir));
     if let Err(message) = result {
         runtime.ext.clear_config_after_error();
@@ -1930,7 +1887,6 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
                     session_id.as_ref(),
                     name.agent_id.as_ref(),
                     Some(name.display_name),
-                    &runtime.ext.tool_names.namespace,
                 ) {
                     runtime.ext.apply_gateway_response(response);
                 }
@@ -2010,43 +1966,8 @@ fn parse_ext_config(value: &CborValue) -> Result<ExtConfig, String> {
     value.deserialized().map_err(|e| e.to_string())
 }
 
-fn namespace_from_instance_name(instance_name: &str) -> Result<String, String> {
-    let mut namespace = String::with_capacity(instance_name.len());
-    for byte in instance_name.bytes() {
-        match byte {
-            b'_' => namespace.push_str("__"),
-            b'-' => namespace.push_str("_d"),
-            byte if byte.is_ascii_alphanumeric() => namespace.push(byte as char),
-            _ => {
-                return Err(
-                    "telegram extension instance names may contain only ASCII letters, digits, '_' and '-'"
-                        .to_owned(),
-                );
-            }
-        }
-    }
-    validate_tool_namespace(&namespace)?;
-    Ok(namespace)
-}
-
-fn validate_tool_namespace(namespace: &str) -> Result<(), String> {
-    if namespace.is_empty() {
-        return Err("telegram `tool_namespace` must not be empty".to_owned());
-    }
-    if namespace.len() > tau_proto::ToolName::MAX_LEN.saturating_sub("_register".len()) {
-        return Err("telegram `tool_namespace` is too long".to_owned());
-    }
-    if tau_proto::ToolName::try_new(namespace).is_none() {
-        return Err(
-            "telegram `tool_namespace` may contain only ASCII letters, digits, and '_'".to_owned(),
-        );
-    }
-    Ok(())
-}
-
-#[cfg(test)]
 fn telegram_tool_group() -> tau_proto::ToolGroup {
-    telegram_tool_group_for(&ToolNames::legacy())
+    telegram_tool_group_for(&ToolNames::logical())
 }
 
 fn telegram_tool_group_for(tool_names: &ToolNames) -> tau_proto::ToolGroup {
@@ -2066,13 +1987,13 @@ fn example_text(value: &str) -> CborValue {
 
 #[cfg(test)]
 fn register_tool_spec() -> ToolSpec {
-    register_tool_spec_for(&ToolNames::legacy())
+    register_tool_spec_for(&ToolNames::logical())
 }
 
 fn register_tool_spec_for(tool_names: &ToolNames) -> ToolSpec {
     ToolSpec {
-        name: tool_names.register.clone(),
-        model_visible_name: Some(tool_names.register.clone()),
+        name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
+        model_visible_name: Some(tau_proto::ToolName::new(REGISTER_TOOL_NAME)),
         description: Some(format!(
             "Register or unregister this agent for Telegram messages through the `{}` bot namespace. Use enabled=true to allow an allowlisted Telegram user to send prompts to this agent; use enabled=false to stop listening. When replying to Telegram-originated prompts, use {}.",
             tool_names.namespace, tool_names.send
@@ -2100,13 +2021,13 @@ fn register_tool_spec_for(tool_names: &ToolNames) -> ToolSpec {
 
 #[cfg(test)]
 fn send_tool_spec() -> ToolSpec {
-    send_tool_spec_for(&ToolNames::legacy())
+    send_tool_spec_for(&ToolNames::logical())
 }
 
 fn send_tool_spec_for(tool_names: &ToolNames) -> ToolSpec {
     ToolSpec {
-        name: tool_names.send.clone(),
-        model_visible_name: Some(tool_names.send.clone()),
+        name: tau_proto::ToolName::new(SEND_TOOL_NAME),
+        model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
         description: Some(format!(
             "Send a text message to the configured or linked Telegram chat for the `{}` bot namespace. Only registered agents may use this tool; it cannot choose arbitrary chat ids. Use it to answer prompts prefixed with [telegram from ...].",
             tool_names.namespace

@@ -10,6 +10,11 @@
   present.
 - `**/AGENTS.md` — scoped agent instructions; read every applicable file before
   modifying code.
+- Before raising security or denial-of-service requirements for IPC, identify the
+  documented boundary in `SECURITY.md`: configured local extensions, cooperative
+  inter-harness peers, and genuinely untrusted external ingress are distinct.
+  Do not expand an unrelated feature into adversarial local-IPC hardening without
+  an approved threat-model change.
 
 ## Verification
 

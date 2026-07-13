@@ -48,7 +48,7 @@ pub use session_store::{
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentRepair, ToolArgumentValidationError, ToolProvider,
-    ToolProviderKind, ToolRegistrationError, ToolRegistry, ToolRegistryWarning, ToolRouteError,
-    ToolRouteReport, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
-    validate_tool_arguments, validate_tool_examples,
+    ToolProviderKind, ToolRegistrationError, ToolRegistry, ToolRouteError, ToolRouteReport,
+    ToolRouteTarget, repair_tool_arguments, tool_example_hint, validate_tool_arguments,
+    validate_tool_examples,
 };

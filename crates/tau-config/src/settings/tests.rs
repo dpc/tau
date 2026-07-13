@@ -736,6 +736,7 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
         ("customPrompts", "custom_prompts"),
         ("toolPolicy", "tool_policy"),
+        ("extensions.work.toolPrefix", "extensions.work.tool_prefix"),
         ("agents.defaultRole", "agents.default_role"),
         ("agents.promptFragments", "agents.prompt_fragments"),
         ("agents.requiredSkills", "agents.required_skills"),
@@ -1154,6 +1155,8 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
             .expect("override"),
         HarnessConfigCliOverride::from_str("extensions.core-shell.command=[\"tau\", \"ext\"]")
             .expect("override"),
+        HarnessConfigCliOverride::from_str("extensions.core-shell.toolPrefix=work")
+            .expect("override"),
     ];
 
     let s = load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
@@ -1172,6 +1175,14 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     assert_eq!(
         core_shell.command.as_ref().expect("command"),
         &vec!["tau".to_owned(), "ext".to_owned()]
+    );
+    assert_eq!(
+        core_shell
+            .tool_prefix
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(tau_proto::ToolNamePrefix::as_str),
+        Some("work")
     );
     assert_eq!(s.extensions["std-websearch"].enable, Some(false));
 }
@@ -3256,4 +3267,48 @@ extensions:
 
     let err = load_harness_settings_in(&dirs_with_config(dir)).expect_err("unknown field rejected");
     assert!(err.to_string().contains("bogus"), "unexpected error: {err}");
+}
+
+/// Per-extension tool prefixes accept the normalized camel-case spelling and
+/// explicit null clears a lower-precedence value.
+#[test]
+fn harness_extension_tool_prefix_layers_and_clears() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        "extensions:\n  work:\n    command: [demo]\n    toolPrefix: team_ops\n",
+    )
+    .expect("write base");
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load base");
+    assert_eq!(
+        settings.extensions["work"]
+            .tool_prefix
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(tau_proto::ToolNamePrefix::as_str),
+        Some("team_ops")
+    );
+    std::fs::create_dir(dir.join("harness.d")).expect("drop-in dir");
+    std::fs::write(
+        dir.join("harness.d/10-clear.yaml"),
+        "extensions:\n  work:\n    tool_prefix: null\n",
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(settings.extensions["work"].tool_prefix, Some(None));
+}
+
+/// Invalid segmented prefix syntax is rejected at the configuration boundary.
+#[test]
+fn harness_extension_tool_prefix_rejects_hyphens() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "extensions:\n  work:\n    command: [demo]\n    tool_prefix: team-ops\n",
+    )
+    .expect("write");
+    let error = load_harness_settings_in(&dirs_with_config(td.path())).expect_err("invalid prefix");
+    assert!(error.to_string().contains("invalid tool prefix"));
 }

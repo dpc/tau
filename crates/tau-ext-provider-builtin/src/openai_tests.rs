@@ -159,6 +159,17 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
         let mut writer = HarnessOutputWriter::new(&mut bytes);
+        if !matches!(frames.first(), Some(HarnessOutputMessage::Configure(_))) {
+            writer
+                .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                    tool_prefix: None,
+                    config: tau_proto::CborValue::Map(Vec::new()),
+                    instance_name: None,
+                    state_dir: None,
+                    secrets: std::collections::BTreeMap::new(),
+                }))
+                .expect("encode initial configure");
+        }
         for frame in frames {
             writer.write_message(frame).expect("encode frame");
         }
@@ -2754,7 +2765,8 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
     // ready.
     let writer = SharedWriter::default();
     let output = writer.clone();
-    run_with_auth(std::io::empty(), writer, chatgpt_auth()).expect("run provider extension");
+    run_with_auth(Cursor::new(encode_frames(&[])), writer, chatgpt_auth())
+        .expect("run provider extension");
 
     let frames = decode_frames(&output.bytes());
     assert!(

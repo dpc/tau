@@ -70,6 +70,8 @@ pub struct ExtensionConfig {
     pub command: String,
     pub args: Vec<String>,
     pub role: Option<String>,
+    /// Immutable structural tool prefix assigned to this instance.
+    pub tool_prefix: Option<tau_proto::ToolNamePrefix>,
     /// Whether harness startup requires this extension to initialize.
     pub require: bool,
     /// Current working directory used when starting the extension process. When
@@ -146,6 +148,7 @@ struct ResolvedExtension {
     enable: bool,
     require: bool,
     role: Option<String>,
+    tool_prefix: Option<tau_proto::ToolNamePrefix>,
     cwd: Option<PathBuf>,
     config: serde_json::Value,
     secrets: BTreeMap<String, ExtensionSecretEntry>,
@@ -256,6 +259,7 @@ impl ResolvedExtension {
             enable: builtin.enable,
             require: builtin.require,
             role: builtin.role,
+            tool_prefix: None,
             cwd: builtin.cwd,
             config: builtin.config,
             secrets: builtin.secrets,
@@ -270,6 +274,7 @@ impl ResolvedExtension {
             enable: user.enable.unwrap_or(true),
             require: user.require.unwrap_or(true),
             role: user.role.clone(),
+            tool_prefix: user.tool_prefix.clone().flatten(),
             cwd: user.cwd.clone().flatten(),
             config: user
                 .config
@@ -304,6 +309,9 @@ impl ResolvedExtension {
         if let Some(role) = user.role.as_ref() {
             self.role = Some(role.clone());
         }
+        if let Some(tool_prefix) = user.tool_prefix.as_ref() {
+            self.tool_prefix.clone_from(tool_prefix);
+        }
         if let Some(cwd) = user.cwd.as_ref() {
             self.cwd = cwd.clone();
         }
@@ -334,6 +342,7 @@ impl ResolvedExtension {
             command: program,
             args,
             role: self.role,
+            tool_prefix: self.tool_prefix,
             require: self.require,
             cwd: self.cwd,
             config: self.config,

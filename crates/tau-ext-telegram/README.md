@@ -12,6 +12,9 @@ the extension:
 extensions:
   std-telegram:
     enable: true
+    # Optional generic per-instance tool prefix. With `work`, tools are
+    # work_telegram_register and work_telegram_send.
+    # tool_prefix: work
     secrets:
       telegram_bot_token: {}
     config:
@@ -19,9 +22,6 @@ extensions:
       allowed_user_ids: [123456789]
       # Optional for a private chat; if omitted, send /start to link it.
       chat_id: 123456789
-      # Optional: override model-visible tool names for multi-bot setups.
-      # Tools become <tool_namespace>_register and <tool_namespace>_send.
-      # tool_namespace: telegram
 ```
 
 `allowed_user_ids` is mandatory and must not be empty. `chat_id` is optional for
@@ -32,7 +32,7 @@ configured.
 ## Usage
 
 Ask an agent to call this instance's register tool with `enabled: true`
-(`telegram_register` for the legacy `std-telegram` instance). The first
+(`telegram_register` when no `tool_prefix` is configured). The first
 registration that starts polling checks that Telegram has no active webhook
 before claiming success. If a webhook is active, Tau reports a tool error and
 does not delete the webhook or drop updates; remove the webhook yourself or
@@ -51,7 +51,7 @@ display names. Agent replies sent with the send tool are prefixed with
 `[agent_id]`.
 
 Agents should reply to Telegram-originated prompts with this instance's send tool
-(`telegram_send` for the legacy `std-telegram` instance). The model cannot choose
+(`telegram_send` when no `tool_prefix` is configured). The model cannot choose
 a destination chat; the send tool uses only the configured or linked chat.
 
 The bridge has a single active chat. When `chat_id` is configured, only that
@@ -67,15 +67,12 @@ tool names in the role configuration with `enable_tools` before asking that role
 to use the Telegram bridge. Role policy can also target this instance's tool
 group, or the shared `telegram:register` and `telegram:send` tool tags.
 
-When running multiple Telegram bot instances in one harness, give each extension
-instance a distinct name such as `telegram-work` or set `config.tool_namespace`.
-Non-`std-telegram` instances derive tool names from the instance name by
-escaping `_` as `__` and `-` as `_d`, for example `telegram-work` publishes
-`telegram_dwork_register`, `telegram_dwork_send`, and tool group
-`telegram_dwork`.
-The built-in `std-telegram` instance keeps the historical `telegram_register`,
-`telegram_send`, and `telegram` group names. The namespace is fixed at extension
-startup; restart the extension after changing it.
+When running multiple Telegram bot instances in one harness, assign each entry a
+distinct generic `tool_prefix`. Instance keys remain operational identity and do
+not change tool names. For example, `tool_prefix: work` publishes
+`work_telegram_register`, `work_telegram_send`, and group `work_telegram`.
+The prefix is fixed at extension startup; restart the extension after changing it.
+The removed Telegram-specific `config.tool_namespace` setting is rejected.
 
 ## Limitations
 
@@ -121,7 +118,9 @@ TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
 Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
 `--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The private
 same-UID local socket accepts a one-shot JSON-line
-`{"protocol_version":1,"kind":"status"}` request and returns a status snapshot.
+`{"protocol_version":2,"kind":"status"}` request and returns a status snapshot.
+Gateway and sidecar must be upgraded together because socket protocol v2 removes
+the obsolete Telegram tool-namespace metadata.
 It also accepts persistent sidecar requests: `hello`, `heartbeat`,
 `register_agent`, `unregister_agent`, `send_message`, and `goodbye`. The gateway
 treats registrations as live leases, refreshes them on heartbeat, removes them on
@@ -143,8 +142,8 @@ gateway_socket_path: /run/user/1000/tau/telegram-gateway/<stream>.sock
 In this mode the sidecar does not need `bot_token_secret`, does not use
 `allowed_user_ids`, and never calls Telegram `getUpdates`; the gateway owns the
 token, allowlist, chat policy, polling, and update offset. The sidecar still
-publishes the same `telegram_register`/`telegram_send` tool names (or the
-configured namespace), tracks the local session and registered agents, registers
+publishes the same logical `telegram_register`/`telegram_send` tools (with the
+generic `tool_prefix` when configured), tracks the local session and registered agents, registers
 live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
 deliveries locally as `extension.prompt_submit_request`. Outbound
 `telegram_send` goes back through the gateway, which checks that the calling

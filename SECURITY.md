@@ -16,6 +16,28 @@ remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
 work, and spend.
 
+## Local IPC and external ingress
+
+Configured extension processes are trusted local executables. “Less-trusted
+extension” means protocol authority is limited—the harness still validates phase,
+source ownership, routing identity, configuration, and collisions—not that the
+stdio stream is a hostile availability boundary or process sandbox. Operation
+quotas do not promise to bound protocol deserialization; see
+[`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md#extension-data)
+and [`ARCH-tau-supervisor`](crates/tau-supervisor/specs/ARCH-tau-supervisor.md#child-environment).
+Robust framing and cleanup improvements are welcome when scoped, but unrelated
+features must not be expanded into slowloris, connection-flood, or sandbox
+hardening without an approved threat-model design.
+
+Inter-harness/session communication is likewise cooperative same-UID IPC, with
+correlation and bounded model-spend admission rather than hostile-sender ACLs.
+Genuinely untrusted ingress is external network/service content received through
+Slack, XMPP, Telegram, providers, web fetches, and similar adapters. Authenticate
+and bound that adapter boundary where applicable and keep payloads untrusted model
+content; proxying them through an extension does not make the local extension
+transport itself adversarial. The boundary summary is recorded in
+[`ARCH-external-message-boundary`](specs/ARCH-external-message-boundary.md).
+
 ## Standalone compaction recovery reliability
 
 Standalone compaction and its continuation are harness-owned durable work. Every

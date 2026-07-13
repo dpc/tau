@@ -4,6 +4,7 @@ use super::*;
 
 fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
     ExtensionConfig {
+        tool_prefix: None,
         name: "test-extension".to_owned(),
         command: "tau-test-extension".to_owned(),
         args: vec!["--stdio".to_owned()],

@@ -318,6 +318,7 @@ fn valid_config_message() -> HarnessOutputMessage {
     secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
     HarnessOutputMessage::Configure(tau_proto::Configure {
+        tool_prefix: None,
         instance_name: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "app_token_secret": "app",
@@ -352,6 +353,7 @@ fn proactive_config_message() -> HarnessOutputMessage {
 
 fn malformed_config_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
+        tool_prefix: None,
         instance_name: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "unknown_field": true,
@@ -359,6 +361,49 @@ fn malformed_config_message() -> HarnessOutputMessage {
         state_dir: None,
         secrets: BTreeMap::new(),
     })
+}
+
+/// Two configured Slack instances expose disjoint structural names while
+/// retaining semantic Slack tags.
+#[test]
+fn generic_prefixes_scope_slack_instances() {
+    for prefix in ["personal", "work"] {
+        let HarnessOutputMessage::Configure(mut configure) = valid_config_message() else {
+            unreachable!()
+        };
+        configure.tool_prefix = Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix"));
+        let frames = run_protocol_messages(
+            &[
+                HarnessOutputMessage::Configure(configure),
+                HarnessOutputMessage::Disconnect(Default::default()),
+            ],
+            FakeClient::new(),
+        );
+        let registrations = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                    Event::ToolRegister(register) => Some(register),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{REGISTER_TOOL_NAME}")
+                && registration.tool_group.as_ref().is_some_and(|group| {
+                    group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
+                })
+                && registration
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == REGISTER_TOOL_TAG)
+        }));
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{SEND_TOOL_NAME}")
+        }));
+    }
 }
 
 fn run_protocol_messages(
@@ -1532,6 +1577,40 @@ fn run_config_refreshes_and_bad_config_removes_proactive_schema() {
         final_schema["required"],
         serde_json::json!(["message", "reply_to"])
     );
+}
+
+/// Initial configuration-derived tool refreshes are emitted after static
+/// declarations but before Ready, so the effective startup schema retains
+/// proactive destination aliases.
+#[test]
+fn initial_proactive_schema_override_is_final_before_ready() {
+    let frames = run_protocol_messages(&[proactive_config_message()], FakeClient::new());
+    let registrations = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegister(register) if register.tool.name.as_str() == SEND_TOOL_NAME => {
+                    Some((index, &register.tool))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (override_index, final_tool) = registrations.last().expect("send registration");
+    assert!(
+        final_tool
+            .parameters
+            .as_ref()
+            .and_then(|schema| schema["properties"]["destination"]["enum"].as_array())
+            .is_some_and(|aliases| aliases.as_slice() == [serde_json::json!("team-ops")])
+    );
+    let ready_index = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("Ready");
+    assert!(*override_index < ready_index);
 }
 
 /// Protocol migration regression: once Socket Mode has started, even malformed

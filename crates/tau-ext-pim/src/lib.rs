@@ -34,16 +34,14 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let mut runtime = tau_client::TauExtensionRunner::new(PimExtension).start_manual_loop(
-        reader,
-        writer,
-        RuntimeState::default(),
-    )?;
-    let storage: storage::SharedStorage = Rc::new(storage::RpcStorage::new(
-        tau_proto::ExtensionDataScope::User,
-        runtime.extension_data_client(),
-    ));
-    runtime.state_mut().storage = Some(storage);
+    let mut runtime = tau_client::TauExtensionRunner::new(PimExtension)
+        .start_manual_loop_with_extension_data_state(reader, writer, |_, client| RuntimeState {
+            storage: Some(Rc::new(storage::RpcStorage::new(
+                tau_proto::ExtensionDataScope::User,
+                client,
+            ))),
+            ..RuntimeState::default()
+        })?;
     loop {
         match runtime.recv()? {
             tau_client::ManualRuntimeInput::Message(message) => {
@@ -142,8 +140,12 @@ impl RuntimeState {
         self.calendar.reject(reason);
     }
 
-    fn initial_tool_progress(&self, invoke: &tau_proto::ToolStarted) -> Option<Event> {
-        match invoke.tool_name.as_str() {
+    fn initial_tool_progress(
+        &self,
+        invoke: &tau_proto::ToolStarted,
+        local_tool_name: &tau_proto::ToolName,
+    ) -> Option<Event> {
+        match local_tool_name.as_str() {
             name if email::is_tool_name(name) => {
                 Some(Event::ToolProgress(tau_proto::ToolProgress {
                     call_id: invoke.call_id.clone(),
@@ -151,22 +153,45 @@ impl RuntimeState {
                     message: None,
                     progress: None,
                     display: Some(email::initial_display_for_tool(
-                        invoke.tool_name.as_str(),
+                        local_tool_name.as_str(),
                         &invoke.arguments,
                     )),
                 }))
             }
-            name if calendar::is_tool_name(name) => Some(calendar::initial_progress(invoke)),
+            name if calendar::is_tool_name(name) => {
+                let mut local_invoke = invoke.clone();
+                local_invoke.tool_name = local_tool_name.clone();
+                let mut progress = calendar::initial_progress(&local_invoke);
+                if let Event::ToolProgress(progress) = &mut progress {
+                    progress.tool_name = invoke.tool_name.clone();
+                }
+                Some(progress)
+            }
             _ => None,
         }
     }
 
-    fn dispatch_tool(&mut self, invoke: tau_proto::ToolStarted) -> Option<Event> {
-        match invoke.tool_name.as_str() {
-            name if email::is_tool_name(name) => Some(self.email.dispatch(invoke)),
-            name if calendar::is_tool_name(name) => Some(self.calendar.dispatch(invoke)),
+    fn dispatch_tool(
+        &mut self,
+        invoke: tau_proto::ToolStarted,
+        local_tool_name: &tau_proto::ToolName,
+    ) -> Option<Event> {
+        let wire_tool_name = invoke.tool_name.clone();
+        let mut local_invoke = invoke;
+        local_invoke.tool_name = local_tool_name.clone();
+        let event = match local_tool_name.as_str() {
+            name if email::is_tool_name(name) => Some(self.email.dispatch(local_invoke)),
+            name if calendar::is_tool_name(name) => Some(self.calendar.dispatch(local_invoke)),
             _ => None,
-        }
+        };
+        event.map(|mut event| {
+            match &mut event {
+                Event::ToolResult(result) => result.tool_name = wire_tool_name,
+                Event::ToolError(error) => error.tool_name = wire_tool_name,
+                _ => {}
+            }
+            event
+        })
     }
 
     fn dispatch_action(&mut self, invoke: tau_proto::ActionInvoke) -> Event {
@@ -280,10 +305,12 @@ fn register_tools_with_prompt_fragment(
             Some(tool_group.clone()),
             prompt_fragment,
             |cx| {
-                if let Some(progress) = cx.state.initial_tool_progress(cx.invoke) {
+                let local_tool_name = cx.local_tool_name().clone();
+                if let Some(progress) = cx.state.initial_tool_progress(cx.invoke, &local_tool_name)
+                {
                     cx.handle.emit(progress)?;
                 }
-                if let Some(event) = cx.state.dispatch_tool(cx.invoke.clone()) {
+                if let Some(event) = cx.state.dispatch_tool(cx.invoke.clone(), &local_tool_name) {
                     cx.handle.emit(event)?;
                 }
                 Ok(())

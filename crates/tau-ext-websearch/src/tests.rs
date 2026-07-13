@@ -202,6 +202,17 @@ fn spawn_extension(
     EventReader<BufReader<UnixStream>>,
     EventWriter<BufWriter<UnixStream>>,
 ) {
+    spawn_extension_with_prefix(searcher, parallel_client, None)
+}
+
+fn spawn_extension_with_prefix(
+    searcher: Arc<dyn Searcher>,
+    parallel_client: Arc<dyn ParallelClient>,
+    tool_prefix: Option<tau_proto::ToolNamePrefix>,
+) -> (
+    EventReader<BufReader<UnixStream>>,
+    EventWriter<BufWriter<UnixStream>>,
+) {
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
@@ -210,12 +221,52 @@ fn spawn_extension(
         // test-thread panic that can abort a later test run.
         let _ = run_with_clients(reader_stream, ext_stream, searcher, parallel_client);
     });
-    (
-        EventReader::new(BufReader::new(
-            harness_stream.try_clone().expect("harness clone"),
-        )),
-        EventWriter::new(BufWriter::new(harness_stream)),
-    )
+    let reader = EventReader::new(BufReader::new(
+        harness_stream.try_clone().expect("harness clone"),
+    ));
+    let mut writer = EventWriter::new(BufWriter::new(harness_stream));
+    let mut configure = configure_message(serde_json::json!({}));
+    let HarnessOutputMessage::Configure(configure_frame) = &mut configure else {
+        unreachable!();
+    };
+    configure_frame.tool_prefix = tool_prefix;
+    writer
+        .write_message(&configure)
+        .expect("write initial configure");
+    writer.flush().expect("flush initial configure");
+    (reader, writer)
+}
+
+/// A configured namespace changes wire names without changing first-party
+/// dispatch, and terminal events retain the namespaced wire identity.
+#[test]
+fn prefixed_exa_invocation_dispatches_by_logical_name() {
+    let searcher = StubSearcher::ok("prefixed result");
+    let (mut reader, mut writer) = spawn_extension_with_prefix(
+        searcher.clone(),
+        StubParallelClient::ok("unused"),
+        Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+    );
+    let tools = drain_startup(&mut reader);
+    assert_eq!(tools[0].name.as_str(), "work_websearch_exa");
+
+    let mut started = exa_started("prefixed-call", "namespaced query");
+    let Event::ToolStarted(invoke) = &mut started else {
+        unreachable!();
+    };
+    invoke.tool_name = tau_proto::ToolName::new("work_websearch_exa");
+    writer.write_event(&started).expect("write");
+    writer.flush().expect("flush");
+
+    let event = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = event else {
+        panic!("expected ToolResult, got {event:?}");
+    };
+    assert_eq!(result.tool_name.as_str(), "work_websearch_exa");
+    assert_eq!(
+        searcher.calls.lock().expect("calls").as_slice(),
+        &[("namespaced query".to_owned(), DEFAULT_NUM_RESULTS)]
+    );
 }
 
 fn spawn_with_searcher(
@@ -242,6 +293,7 @@ fn exa_started(call_id: &str, query: &str) -> Event {
 
 fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
+        tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
         instance_name: None,
         state_dir: None,
@@ -600,6 +652,10 @@ fn disconnect_exits_promptly_while_searches_are_in_flight() {
         harness_stream.try_clone().expect("harness clone"),
     ));
     let mut writer = EventWriter::new(BufWriter::new(harness_stream));
+    writer
+        .write_message(&configure_message(serde_json::json!({})))
+        .expect("write initial configure");
+    writer.flush().expect("flush initial configure");
     drain_startup(&mut reader);
 
     for idx in 0..MAX_IN_FLIGHT {

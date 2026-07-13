@@ -39,6 +39,26 @@ use crate::truncate::{
 
 const TEST_SAFE_FILE_READ_LIMIT: u64 = 10 * 1024 * 1024;
 
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("writer").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().expect("writer").clone()
+    }
+}
+
 fn read_file(
     arguments: &CborValue,
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
@@ -211,6 +231,12 @@ fn spawn_extension() -> (TestExtensionReader, TestExtensionWriter) {
 }
 
 fn spawn_extension_with_exit() -> (TestExtensionReader, TestExtensionWriter, TestExtensionDone) {
+    spawn_extension_with_exit_and_prefix(None)
+}
+
+fn spawn_extension_with_exit_and_prefix(
+    tool_prefix: Option<tau_proto::ToolNamePrefix>,
+) -> (TestExtensionReader, TestExtensionWriter, TestExtensionDone) {
     let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair should open");
     let reader_stream = runtime_stream
         .try_clone()
@@ -221,15 +247,79 @@ fn spawn_extension_with_exit() -> (TestExtensionReader, TestExtensionWriter, Tes
             .map_err(|error| format!("extension should run: {error}"));
         let _ = done_tx.send(result);
     });
-    (
-        EventReader::new(BufReader::new(
-            harness_stream
-                .try_clone()
-                .expect("harness reader clone should succeed"),
-        )),
-        EventWriter::new(BufWriter::new(harness_stream)),
-        done_rx,
-    )
+    let reader = EventReader::new(BufReader::new(
+        harness_stream
+            .try_clone()
+            .expect("harness reader clone should succeed"),
+    ));
+    let mut writer = EventWriter::new(BufWriter::new(harness_stream));
+    writer
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix,
+            instance_name: None,
+            config: CborValue::Map(Vec::new()),
+            state_dir: None,
+            secrets: Default::default(),
+        }))
+        .expect("write initial configure");
+    writer.flush().expect("flush initial configure");
+    (reader, writer, done_rx)
+}
+
+/// Static dispatch and dynamic registration refreshes both preserve a
+/// configured wire namespace while matching logical Shell tool names
+/// internally.
+#[test]
+fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
+    let prefix = tau_proto::ToolNamePrefix::parse("work").expect("prefix");
+    let (mut reader, mut writer, done_rx) =
+        spawn_extension_with_exit_and_prefix(Some(prefix.clone()));
+    drain_startup(&mut reader);
+
+    writer
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: Some(prefix),
+            instance_name: None,
+            config: cbor_map(vec![(
+                "dir_lock",
+                cbor_map(vec![("enable", CborValue::Bool(true))]),
+            )]),
+            state_dir: None,
+            secrets: Default::default(),
+        }))
+        .expect("enable dir_lock");
+    writer.flush().expect("flush config");
+    let refreshed = reader.read_event().expect("read").expect("refresh");
+    let Event::ToolRegister(register) = refreshed else {
+        panic!("expected ToolRegister, got {refreshed:?}");
+    };
+    assert_eq!(register.tool.name.as_str(), "work_dir_lock");
+
+    writer
+        .write_event(&tool_started(
+            "prefixed-echo",
+            "work_echo",
+            cbor_map(vec![("text", CborValue::Text("hello".to_owned()))]),
+            "agent-a",
+        ))
+        .expect("invoke");
+    writer.flush().expect("flush invocation");
+    let result = loop {
+        let event = reader.read_event().expect("read").expect("result");
+        if let Event::ToolResult(result) = event {
+            break result;
+        }
+    };
+    assert_eq!(result.tool_name.as_str(), "work_echo");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("extension exit")
+        .expect("extension ok");
 }
 
 fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
@@ -312,6 +402,7 @@ fn read_range(start_line: i64, end_line: i64) -> CborValue {
 fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable: bool) {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: cbor_map(vec![(
                 "dir_lock",
@@ -1045,6 +1136,64 @@ fn dir_lock_config_re_registers_tool_enabled_when_config_true() {
     writer.flush().expect("flush");
 }
 
+/// Initial configuration refreshes override static default declarations before
+/// Ready, leaving the effective dir_lock registration enabled and tagged.
+#[test]
+fn initial_dir_lock_override_is_final_before_ready() {
+    let mut input = Vec::new();
+    let mut input_writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    input_writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: None,
+            config: cbor_map(vec![(
+                "dir_lock",
+                cbor_map(vec![("enable", CborValue::Bool(true))]),
+            )]),
+            state_dir: None,
+            secrets: Default::default(),
+        }))
+        .expect("configure");
+    input_writer.flush().expect("flush input");
+    let output = SharedWriter::default();
+    let written = output.clone();
+    run_impl(std::io::Cursor::new(input), output).expect("run shell");
+
+    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("frame") {
+        frames.push(frame);
+    }
+    let registrations = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegister(register)
+                    if register.tool.name.as_str() == DIR_LOCK_TOOL_NAME =>
+                {
+                    Some((index, &register.tool))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (override_index, final_tool) = registrations.last().expect("dir_lock registration");
+    assert!(final_tool.enabled_by_default);
+    assert!(
+        final_tool
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "shell:lock")
+    );
+    let ready_index = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("Ready");
+    assert!(*override_index < ready_index);
+}
+
 /// Ensures the dispatch path returns a clear bounded-backpressure ToolError
 /// when scheduler admission rejects excess work.
 #[test]
@@ -1070,9 +1219,10 @@ fn schedule_tool_started_reports_queue_full_error() {
     ) else {
         panic!("expected tool started");
     };
+    let local_tool_name = invoke.tool_name.clone();
 
     let Err(error) = schedule_tool_started(
-        invoke,
+        (invoke, &local_tool_name),
         &scheduler,
         &output,
         ExtConfig::default(),
@@ -1116,9 +1266,10 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
         panic!("expected tool started");
     };
     let call_id = invoke.call_id.clone();
+    let local_tool_name = invoke.tool_name.clone();
 
     schedule_tool_started(
-        invoke,
+        (invoke, &local_tool_name),
         &scheduler,
         &output,
         ExtConfig::default(),
@@ -5227,6 +5378,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
@@ -5352,6 +5504,7 @@ fn shell_extension_rejects_invalid_config() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
@@ -5393,6 +5546,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: CborValue::Map(vec![(
                 CborValue::Text("dir_lock".to_owned()),
@@ -5491,6 +5645,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
 
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: cbor_text_map(vec![(
                 "working_directory",

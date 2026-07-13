@@ -12,6 +12,12 @@
 //! subscriber helpers. First-party extensions now use this crate directly; the
 //! old compatibility startup helper crate has been removed after the migration
 //! completed.
+//!
+//! Every runner sends `Hello`, requires the harness's initial `Configure`,
+//! installs its immutable [`ToolNameScope`], and only then emits declarations
+//! and `Ready`. Builder tool APIs accept logical/local names and scope
+//! structural identifiers automatically. Raw [`ClientHandle::send`] and
+//! [`ClientHandle::emit`] are wire-level APIs and never rewrite names.
 
 mod builder;
 mod client_error;
@@ -26,6 +32,7 @@ mod logging;
 mod manual_runtime;
 mod protocol_io;
 mod runner;
+mod tool_name_scope;
 mod writer_thread;
 
 pub use builder::ExtensionBuilder;
@@ -51,6 +58,7 @@ pub use protocol_io::{
     output_message_key, sorted_protocol_io_frame_stats, total_protocol_io_frame_stats,
 };
 pub use runner::TauExtensionRunner;
+pub use tool_name_scope::ToolNameScope;
 
 #[cfg(test)]
 mod tests;

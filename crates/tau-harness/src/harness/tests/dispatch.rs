@@ -239,6 +239,55 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
 }
 
 #[test]
+fn late_prompt_surface_failure_terminalizes_running_compaction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-late-surface").expect("transaction id");
+    h.agents
+        .get_mut(&cid)
+        .expect("user agent")
+        .activation_dispatch = crate::agent::ActivationDispatchState::Running {
+        id: transaction_id.clone(),
+        cut: tau_proto::AgentHead::Root,
+        resume_through: None,
+        model: "test/model".into(),
+        branch_generation: 0,
+        compact_prompt_id: "ap-late-surface".into(),
+    };
+
+    for internal_name in ["first_internal", "second_internal"] {
+        h.registry.register(
+            "late-surface-test",
+            ToolSpec {
+                name: ToolName::new(internal_name),
+                model_visible_name: Some(ToolName::new("duplicate_visible")),
+                description: None,
+                tool_type: tau_proto::ToolType::Function,
+                parameters: None,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+    }
+
+    assert!(h.prepare_agent_prompt_for_dispatch(&cid).is_none());
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentStandaloneCompactionFailed(failed)
+            if failed.transaction_id == transaction_id
+                && failed.reason
+                    == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn queued_first_user_prompt_publishes_replayable_agent_target() {
     // Regression: if the first prompt queues before the provider/model is ready,
     // the agent id must already exist and be carried on the transient queued
@@ -13367,6 +13416,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
         h.extensions.entries.insert(
             connection_id.clone(),
             crate::extension::ExtensionEntry {
+                tool_prefix: None,
                 name: "delegate-ext".to_owned(),
                 instance_id: 42.into(),
                 connection_id: connection_id.clone(),
@@ -18824,6 +18874,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
             Ok(HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             }) => {
                 target
                     .handle_client_message(&connection_id, *message)
@@ -18953,6 +19004,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
                 Ok(HarnessEvent::FromConnection {
                     connection_id,
                     message,
+                    ..
                 }) => {
                     harness
                         .handle_client_message(&connection_id, *message)
@@ -19072,6 +19124,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
             Ok(HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             }) => {
                 target
                     .handle_client_message(&connection_id, *message)

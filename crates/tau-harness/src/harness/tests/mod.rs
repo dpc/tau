@@ -1486,6 +1486,7 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             } => {
                 let is_target = match message.as_ref() {
                     HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
@@ -1502,6 +1503,9 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
                 }
             }
             HarnessEvent::Disconnected { connection_id } => {
+                h.handle_disconnect(&connection_id);
+            }
+            HarnessEvent::ReadFailed { connection_id, .. } => {
                 h.handle_disconnect(&connection_id);
             }
             HarnessEvent::NewClient(_) => {}
@@ -1526,10 +1530,14 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             } => h
                 .handle_extension_message(&connection_id, *message)
                 .expect("handle"),
             HarnessEvent::Disconnected { connection_id } => {
+                h.handle_disconnect(&connection_id);
+            }
+            HarnessEvent::ReadFailed { connection_id, .. } => {
                 h.handle_disconnect(&connection_id);
             }
             HarnessEvent::NewClient(_) => {}

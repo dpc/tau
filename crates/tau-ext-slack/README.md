@@ -12,6 +12,8 @@ Create and install a Slack app manually. Store an app-level `xapp-...` token wit
 extensions:
   std-slack:
     enable: true
+    # Optional for multiple Slack accounts: work_slack_register/work_slack_send.
+    # tool_prefix: work
     secrets:
       slack_app_token: {}
       slack_bot_token: {}

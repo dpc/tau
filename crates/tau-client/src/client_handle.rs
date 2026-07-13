@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use crate::writer_thread::WriterCommand;
 use crate::{ClientError, ClientResult};
@@ -8,6 +9,24 @@ use crate::{ClientError, ClientResult};
 pub struct ClientHandle {
     /// Channel to the serialized writer thread.
     sender: Arc<Mutex<Option<mpsc::Sender<WriterCommand>>>>,
+    /// Immutable tool-name scope shared by every clone.
+    tool_name_scope: Arc<OnceLock<crate::ToolNameScope>>,
+    /// Public/background output remains gated until the runner writes `Ready`.
+    startup_complete: Arc<AtomicBool>,
+    /// Linearizes every pre-Ready ConfigError against the terminal Ready frame.
+    startup_gate: Arc<Mutex<StartupGate>>,
+    /// Detached output created by a state factory is released after `Ready`.
+    pending_detached: Arc<Mutex<Vec<tau_proto::HarnessInputMessage>>>,
+    /// Initial Configure callbacks may emit immediate diagnostics before Ready.
+    configuring: Arc<AtomicBool>,
+    /// Configuration-derived declarations replayed after static declarations.
+    pending_configure_outputs: Arc<Mutex<Vec<tau_proto::HarnessInputMessage>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupGate {
+    PreReady { rejected: bool },
+    Ready,
 }
 
 impl ClientHandle {
@@ -16,36 +35,241 @@ impl ClientHandle {
     pub(crate) fn new(sender: mpsc::Sender<WriterCommand>) -> Self {
         Self {
             sender: Arc::new(Mutex::new(Some(sender))),
+            tool_name_scope: Arc::new(OnceLock::new()),
+            startup_complete: Arc::new(AtomicBool::new(false)),
+            startup_gate: Arc::new(Mutex::new(StartupGate::PreReady { rejected: false })),
+            pending_detached: Arc::new(Mutex::new(Vec::new())),
+            configuring: Arc::new(AtomicBool::new(false)),
+            pending_configure_outputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Sends one raw peer-to-harness message and waits until it is flushed.
+    /// Install the immutable scope established by the initial `Configure`.
+    pub(crate) fn install_tool_name_scope(&self, scope: crate::ToolNameScope) -> ClientResult<()> {
+        if let Some(current) = self.tool_name_scope.get() {
+            if current == &scope {
+                return Ok(());
+            }
+            return Err(ClientError::handler(
+                "tool_prefix changed after initial Configure; restart the extension to change tool identity",
+            ));
+        }
+        self.tool_name_scope
+            .set(scope)
+            .map_err(|_| ClientError::handler("failed to establish tool-name scope"))
+    }
+
+    /// Return the immutable tool-name scope after initial configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error when the writer thread has stopped, the frame cannot be
-    /// encoded or flushed, or the writer reports an I/O failure.
+    /// Returns an error when called before the first `Configure`.
+    pub fn tool_name_scope(&self) -> ClientResult<&crate::ToolNameScope> {
+        self.tool_name_scope.get().ok_or_else(|| {
+            ClientError::handler("tool-name scope is unavailable before initial Configure")
+        })
+    }
+
+    /// Register a logical/local tool through the installed name scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scope installation, composition, or output fails.
+    pub fn register_local_tool(&self, registration: tau_proto::ToolRegister) -> ClientResult<()> {
+        let registration = self.tool_name_scope()?.scope_registration(registration)?;
+        self.emit(tau_proto::Event::ToolRegister(registration))
+    }
+
+    /// Registers a logical/local tool without waiting for protocol flush.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scope composition fails or the writer has stopped.
+    pub fn register_local_tool_detached(
+        &self,
+        registration: tau_proto::ToolRegister,
+    ) -> ClientResult<()> {
+        let registration = self.tool_name_scope()?.scope_registration(registration)?;
+        self.emit_detached(tau_proto::Event::ToolRegister(registration))
+    }
+
+    /// Unregister a logical/local tool through the installed name scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scope installation, composition, or output fails.
+    pub fn unregister_local_tool(&self, local: tau_proto::ToolName) -> ClientResult<()> {
+        let tool_name = self.tool_name_scope()?.wire_tool_name(&local)?;
+        self.emit(tau_proto::Event::ToolUnregister(
+            tau_proto::ToolUnregister { tool_name },
+        ))
+    }
+
+    /// Sends one raw peer-to-harness message and normally waits until it is
+    /// flushed.
+    ///
+    /// This wire-level API performs no logical-to-final tool-name mapping.
+    /// During the initial Configure callback, capability declarations are
+    /// buffered so static declarations can be written first; success then means
+    /// accepted into that startup buffer, and a later startup call reports any
+    /// encode/flush failure. `Ready` is always runner-owned and is rejected by
+    /// this raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when raw `Ready` is attempted, ordinary output is sent
+    /// before startup Ready outside the initial Configure callback, the writer
+    /// thread has stopped, the frame cannot be encoded or flushed, or the
+    /// writer reports an I/O failure.
     pub fn send(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        if matches!(&message, tau_proto::HarnessInputMessage::Ready(_)) {
+            return Err(ClientError::handler(
+                "startup Ready is runner-owned and cannot be sent through the raw handle",
+            ));
+        }
+        if matches!(&message, tau_proto::HarnessInputMessage::ConfigError(_)) {
+            return self.send_config_error(message);
+        }
+        let configure_derived_declaration = matches!(
+            &message,
+            tau_proto::HarnessInputMessage::Subscribe(_)
+                | tau_proto::HarnessInputMessage::Intercept(_)
+        ) || matches!(
+            &message,
+            tau_proto::HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    tau_proto::Event::ActionSchemaPublished(_)
+                        | tau_proto::Event::ToolRegister(_)
+                        | tau_proto::Event::ToolUnregister(_)
+                        | tau_proto::Event::ExtSkillAvailable(_)
+                        | tau_proto::Event::ExtAgentsMdAvailable(_)
+                        | tau_proto::Event::ProviderModelsUpdated(_)
+                        | tau_proto::Event::ExtensionContextProviderRegister(_)
+                        | tau_proto::Event::ExtensionSessionContextProviderRegister(_)
+                        | tau_proto::Event::ExtAgentContextPublish(_)
+                        | tau_proto::Event::ExtPromptFragmentPublish(_)
+                )
+        );
+        if self.configuring.load(Ordering::Acquire) && configure_derived_declaration {
+            self.pending_configure_outputs
+                .lock()
+                .expect("lock pending Configure output")
+                .push(message);
+            return Ok(());
+        }
+        if !self.startup_complete.load(Ordering::Acquire)
+            && !self.configuring.load(Ordering::Acquire)
+        {
+            return Err(ClientError::handler(
+                "client output is unavailable before startup Ready",
+            ));
+        }
+        self.send_immediate(message)
+    }
+
+    /// Sends one runner-owned startup frame before the public handle is
+    /// released.
+    pub(crate) fn send_startup(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        if matches!(&message, tau_proto::HarnessInputMessage::Ready(_)) {
+            return Err(ClientError::handler(
+                "startup Ready must use the synchronized startup gate",
+            ));
+        }
+        if matches!(&message, tau_proto::HarnessInputMessage::ConfigError(_)) {
+            return self.send_config_error(message);
+        }
+        self.send_immediate(message)
+    }
+
+    fn send_config_error(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        let mut gate = self.startup_gate.lock().expect("lock startup gate");
+        if let StartupGate::PreReady { rejected } = &mut *gate {
+            *rejected = true;
+        }
+        let ack = self.enqueue_immediate(message)?;
+        drop(gate);
+        Self::wait_for_ack(ack)
+    }
+
+    fn send_immediate(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        let ack = self.enqueue_immediate(message)?;
+        Self::wait_for_ack(ack)
+    }
+
+    fn enqueue_immediate(
+        &self,
+        message: tau_proto::HarnessInputMessage,
+    ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
         let (ack_sender, ack_receiver) = mpsc::channel();
         self.enqueue(WriterCommand::Send(message, ack_sender))?;
-        ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
+        Ok(ack_receiver)
+    }
+
+    fn wait_for_ack(ack: mpsc::Receiver<ClientResult<()>>) -> ClientResult<()> {
+        ack.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
     /// Enqueues one peer-to-harness message without waiting for it to flush.
     ///
     /// This is intended for detached background workers whose result should not
     /// block the protocol reader. Use [`Self::send`] when the caller must know
-    /// whether the frame was encoded and flushed before it continues.
+    /// whether the frame was encoded and flushed before it continues. Detached
+    /// `Ready` is rejected; a detached `ConfigError` immediately rejects
+    /// pending startup rather than waiting behind the Ready boundary.
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when raw `Ready` is attempted or the writer thread has
+    /// already stopped before the frame can be queued.
     pub fn send_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        if matches!(&message, tau_proto::HarnessInputMessage::Ready(_)) {
+            return Err(ClientError::handler(
+                "startup Ready is runner-owned and cannot be sent through the raw handle",
+            ));
+        }
+        if matches!(&message, tau_proto::HarnessInputMessage::ConfigError(_)) {
+            let mut gate = self.startup_gate.lock().expect("lock startup gate");
+            if let StartupGate::PreReady { rejected } = &mut *gate {
+                *rejected = true;
+            }
+            let result = self.enqueue(WriterCommand::SendDetached(message));
+            drop(gate);
+            return result;
+        }
+        if !self.startup_complete.load(Ordering::Acquire) {
+            let mut pending = self
+                .pending_detached
+                .lock()
+                .expect("lock pending detached startup output");
+            if !self.startup_complete.load(Ordering::Acquire) {
+                pending.push(message);
+                return Ok(());
+            }
+        }
         self.enqueue(WriterCommand::SendDetached(message))
     }
 
+    /// Releases factory-created detached output after the terminal `Ready`.
+    pub(crate) fn finish_startup(&self) -> ClientResult<()> {
+        let pending = {
+            let mut pending = self
+                .pending_detached
+                .lock()
+                .expect("lock pending detached startup output");
+            self.startup_complete.store(true, Ordering::Release);
+            std::mem::take(&mut *pending)
+        };
+        for message in pending {
+            self.enqueue(WriterCommand::SendDetached(message))?;
+        }
+        Ok(())
+    }
+
     /// Emits a durable event through the harness.
+    ///
+    /// This wire-level API performs no logical-to-final tool-name mapping. Use
+    /// [`Self::register_local_tool`] for a logical registration.
     ///
     /// # Errors
     ///
@@ -139,6 +363,64 @@ impl ClientHandle {
                 message: message.into(),
             },
         ))
+    }
+
+    /// Return whether startup has emitted a configuration rejection.
+    pub(crate) fn startup_rejected(&self) -> bool {
+        matches!(
+            *self.startup_gate.lock().expect("lock startup gate"),
+            StartupGate::PreReady { rejected: true }
+        )
+    }
+
+    pub(crate) fn set_configuring(&self, configuring: bool) {
+        self.configuring.store(configuring, Ordering::Release);
+    }
+
+    /// Atomically reject or publish the one terminal startup Ready frame.
+    pub(crate) fn send_ready(&self, message: Option<String>) -> ClientResult<()> {
+        let mut gate = self.startup_gate.lock().expect("lock startup gate");
+        match *gate {
+            StartupGate::PreReady { rejected: true } => {
+                return Err(ClientError::handler(
+                    "startup cannot send Ready after ConfigError",
+                ));
+            }
+            StartupGate::PreReady { rejected: false } => {}
+            StartupGate::Ready => {
+                return Err(ClientError::handler("startup Ready has already been sent"));
+            }
+        }
+        let ack =
+            self.enqueue_immediate(tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
+                message,
+            }))?;
+        *gate = StartupGate::Ready;
+        drop(gate);
+        Self::wait_for_ack(ack)?;
+        self.finish_startup()
+    }
+
+    /// Replays accepted configuration-derived output after static declarations.
+    pub(crate) fn flush_configure_outputs(&self) -> ClientResult<()> {
+        let pending = std::mem::take(
+            &mut *self
+                .pending_configure_outputs
+                .lock()
+                .expect("lock pending Configure output"),
+        );
+        for message in pending {
+            self.send_startup(message)?;
+        }
+        Ok(())
+    }
+
+    /// Drops output derived from a rejected initial configuration.
+    pub(crate) fn discard_configure_outputs(&self) {
+        self.pending_configure_outputs
+            .lock()
+            .expect("lock pending Configure output")
+            .clear();
     }
 
     /// Requests a clean peer disconnect with a reason string.

@@ -6,6 +6,18 @@ claim `HumanUi`, harness-internal, authenticated Tau-agent, or another extension
 instance authority. External payload always remains untrusted content; identity
 assurance and allowlist/lax routing policy are separate fields.
 
+## Boundary map
+
+| Path | Trust model | Required focus |
+| --- | --- | --- |
+| Configured local extension IPC | Trusted same-user executable; limited protocol authority | Lifecycle, source ownership, routing identity, config, collisions, accidental-failure isolation |
+| Inter-session/inter-harness IPC | Cooperative same-UID, best-effort coordination | Correlation, bounded model-spend admission, stale-generation rejection, duplicate tolerance |
+| External adapter/network input | Untrusted payload and sender metadata | Adapter authentication where applicable, strict parsing/bounds, identity separation, instruction isolation |
+
+External content remains untrusted when an extension proxies it, but that does not
+turn the configured local extension stream into a hostile-process sandbox. See
+[`SECURITY.md`](../SECURITY.md) for the review rule.
+
 Canonical `reply_to` ids are opaque selectors, not secrets or bearer
 capabilities. Send completion revalidates the owning live connection, active
 session generation, agent, reply tool, and originating route. Durable facts may

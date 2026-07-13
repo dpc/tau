@@ -736,6 +736,39 @@ impl TauExtension for StaticStartupDeclarationExtension {
     }
 }
 
+struct ConfigureDeclarationExtension {
+    reject: bool,
+}
+
+impl TauExtension for ConfigureDeclarationExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "configure-declaration"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        let mut static_tool = tool_spec("configured_tool");
+        static_tool.description = Some("static".to_owned());
+        builder
+            .tool(static_tool, |_cx| Ok(()))
+            .configure_raw(move |cx| {
+                let mut configured_tool = tool_spec("configured_tool");
+                configured_tool.description = Some("configured".to_owned());
+                cx.handle.register_local_tool(tau_proto::ToolRegister {
+                    tool: configured_tool,
+                    tool_group: None,
+                    prompt_fragment: None,
+                })?;
+                if self.reject {
+                    Err(ClientError::handler("reject configured declaration"))
+                } else {
+                    Ok(())
+                }
+            });
+    }
+}
+
 fn run_messages<E>(
     extension: E,
     state: E::State,
@@ -746,6 +779,11 @@ where
 {
     let mut input_bytes = Vec::new();
     let mut input_writer = HarnessOutputWriter::new(&mut input_bytes);
+    if !matches!(input.first(), Some(HarnessOutputMessage::Configure(_))) {
+        input_writer
+            .write_message(&configure_message())
+            .expect("write initial configure");
+    }
     for message in input {
         input_writer.write_message(message).expect("write input");
     }
@@ -768,11 +806,38 @@ where
 fn encode_output_messages(input: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut input_bytes = Vec::new();
     let mut input_writer = HarnessOutputWriter::new(&mut input_bytes);
+    if !matches!(input.first(), Some(HarnessOutputMessage::Configure(_))) {
+        input_writer
+            .write_message(&configure_message())
+            .expect("write initial configure");
+    }
     for message in input {
         input_writer.write_message(message).expect("write input");
     }
     input_writer.flush().expect("flush input");
     input_bytes
+}
+
+fn write_initial_configure(stream: &UnixStream) {
+    let mut writer = HarnessOutputWriter::new(stream.try_clone().expect("clone configure stream"));
+    writer
+        .write_message(&configure_message())
+        .expect("write initial configure");
+    writer.flush().expect("flush initial configure");
+}
+
+fn establish_deferred_initial_configure<State>(runtime: &mut ManualExtensionRuntime<State>) {
+    let ManualRuntimeInput::Message(message) = runtime.recv().expect("receive initial configure")
+    else {
+        panic!("expected initial Configure");
+    };
+    assert!(matches!(message, HarnessOutputMessage::Configure(_)));
+    assert_eq!(
+        runtime
+            .dispatch_one(message)
+            .expect("dispatch initial configure"),
+        DispatchOutcome::Continue
+    );
 }
 
 fn frames_from_writer(writer: &SharedWriter) -> Vec<HarnessInputMessage> {
@@ -812,6 +877,7 @@ fn tool_spec(name: &str) -> ToolSpec {
 
 fn config_with_unknown_field() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "unknown": 4 })),
         instance_name: None,
         state_dir: None,
@@ -852,6 +918,7 @@ fn ready_frame_index(frames: &[HarnessInputMessage]) -> usize {
 
 fn configure_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 3 })),
         instance_name: None,
         state_dir: None,
@@ -1069,8 +1136,8 @@ fn configure_parse_failure_sends_config_error() {
     assert!(error.message.contains("unknown"));
 }
 
-/// Ensures configuration application failures are reported as `ConfigError` and
-/// do not stop the runner.
+/// Ensures initial configuration application failures report `ConfigError`,
+/// suppress `Ready`, and stop before later deliveries.
 #[test]
 fn configure_application_failure_sends_config_error() {
     let (state, frames) = run_messages(
@@ -1078,6 +1145,7 @@ fn configure_application_failure_sends_config_error() {
         Counts::default(),
         &[
             HarnessOutputMessage::Configure(Configure {
+                tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
                 instance_name: None,
                 state_dir: None,
@@ -1095,7 +1163,12 @@ fn configure_application_failure_sends_config_error() {
         })
         .expect("ConfigError frame");
     assert_eq!(error.message, "apply failed");
-    assert_eq!(state.replay_aware, 1);
+    assert_eq!(state.replay_aware, 0);
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
 }
 
 /// Ensures typed configuration decode failures can run extension cleanup before
@@ -1116,6 +1189,7 @@ fn configure_application_failure_runs_error_hook() {
         ConfigApplyErrorHookExtension,
         0,
         &[HarnessOutputMessage::Configure(Configure {
+            tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
             instance_name: None,
             state_dir: None,
@@ -1145,6 +1219,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
         RawConfigState::default(),
         &[
             HarnessOutputMessage::Configure(Configure {
+                tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
                 instance_name: None,
                 state_dir: None,
@@ -1454,6 +1529,7 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (sender, receiver) = mpsc::channel();
     let handle = ClientHandle::new(sender);
+    handle.finish_startup().expect("finish test startup");
     let cloned = handle.clone();
     let writer_thread = std::thread::spawn({
         let blocked = Arc::clone(&blocked);
@@ -1622,15 +1698,45 @@ fn detached_writer_state_factory_can_store_client_handle() {
     )));
 }
 
-/// Ensures manual-loop startup reaches `Ready` before the state factory can use
-/// its handle, preserving startup staging for custom loops with background
-/// workers.
+/// A raw ConfigError emitted by a detached state factory belongs to the initial
+/// startup transaction and suppresses every declaration and Ready.
+#[test]
+fn detached_state_factory_config_error_withholds_declarations_and_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    TauExtensionRunner::new(FactoryHandleExtension)
+        .run_detached_writer_with_state(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            |handle| {
+                handle
+                    .send(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+                        message: "factory rejected configuration".to_owned(),
+                    }))
+                    .expect("raw config error");
+                FactoryHandleState { handle }
+            },
+        )
+        .expect("rejected detached startup exits cleanly");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::ConfigError(error)
+            if error.message == "factory rejected configuration"
+    ));
+    assert_eq!(frames.len(), 2);
+}
+
+/// Ensures detached state-factory output remains queued until `Ready`,
+/// preserving startup staging for custom loops with background workers.
 #[test]
 fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let runtime = TauExtensionRunner::new(FactoryHandleExtension)
-        .start_manual_loop_with_state(Cursor::new(Vec::new()), writer, |handle| {
+        .start_manual_loop_with_state(Cursor::new(encode_output_messages(&[])), writer, |handle| {
             handle
                 .emit_detached(notice("manual factory initialized"))
                 .expect("factory emit");
@@ -1649,6 +1755,37 @@ fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
     assert!(ready_index < factory_emit_index);
 }
 
+/// Static manual startup reports a state-factory rejection as an error instead
+/// of returning an unusable pre-Ready runtime.
+#[test]
+fn static_manual_state_factory_config_error_returns_error_without_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let error = match TauExtensionRunner::new(FactoryHandleExtension).start_manual_loop_with_state(
+        Cursor::new(encode_output_messages(&[])),
+        writer,
+        |handle| {
+            handle
+                .config_error("manual factory rejected configuration")
+                .expect("config error");
+            FactoryHandleState { handle }
+        },
+    ) {
+        Ok(_) => panic!("static manual startup rejection must be terminal"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("rejected before Ready"));
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::ConfigError(error)
+            if error.message == "manual factory rejected configuration"
+    ));
+    assert_eq!(frames.len(), 2);
+}
+
 /// Ensures deferred manual startup writes only `Hello`, lets the caller receive
 /// initial configuration, and then preserves explicit dynamic startup order
 /// before `Ready`.
@@ -1664,10 +1801,7 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
     let initial_frames = frames_from_writer(&written);
     assert_eq!(initial_frames.len(), 1);
     assert!(matches!(initial_frames[0], HarnessInputMessage::Hello(_)));
-    assert!(matches!(
-        runtime.recv().expect("receive initial configure"),
-        ManualRuntimeInput::Message(HarnessOutputMessage::Configure(_))
-    ));
+    establish_deferred_initial_configure(&mut runtime);
 
     runtime
         .startup_subscribe([EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)])
@@ -1704,23 +1838,54 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
     assert_eq!(frames.len(), 5);
 }
 
-/// Ensures config-gated extensions can report a startup configuration failure
-/// and then send one inert `Ready` frame without leaking other declarations.
+/// Deferred startup declarations cannot race ahead of the harness-provided
+/// scope because the initial Configure must be received first.
 #[test]
-fn manual_loop_deferred_startup_config_error_then_inert_ready() {
+fn manual_loop_deferred_startup_rejects_declarations_before_configure() {
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup(
+            Cursor::new(encode_output_messages(&[configure_message()])),
+            writer,
+            Counts::default(),
+        )
+        .expect("start deferred manual loop");
+
+    let error = runtime
+        .startup_subscribe([EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)])
+        .expect_err("declaration before Configure must fail");
+    assert!(error.to_string().contains("initial Configure"));
+
+    establish_deferred_initial_configure(&mut runtime);
+    runtime.startup_ready(None).expect("ready after Configure");
+    runtime.finish().expect("finish");
+}
+
+/// Ensures config-gated extensions cannot send `Ready` after reporting a
+/// startup configuration failure.
+#[test]
+fn manual_loop_deferred_startup_config_error_rejects_ready() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
-        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop_deferred_startup(
+            Cursor::new(encode_output_messages(&[configure_message()])),
+            writer,
+            Counts::default(),
+        )
         .expect("start deferred manual loop");
+    establish_deferred_initial_configure(&mut runtime);
 
     runtime
         .handle()
-        .config_error("dynamic config failed")
-        .expect("config error");
-    runtime
+        .send(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "dynamic config failed".to_owned(),
+        }))
+        .expect("raw config error");
+    let error = runtime
         .startup_ready(Some("disabled".to_owned()))
-        .expect("inert ready");
+        .expect_err("Ready after ConfigError must fail");
+    assert!(error.to_string().contains("ConfigError"));
     runtime.finish().expect("finish");
 
     let frames = frames_from_writer(&written);
@@ -1729,11 +1894,76 @@ fn manual_loop_deferred_startup_config_error_then_inert_ready() {
         &frames[1],
         HarnessInputMessage::ConfigError(error) if error.message == "dynamic config failed"
     ));
+    assert_eq!(frames.len(), 2);
+}
+
+/// Deferred startup cannot baseline away a ConfigError emitted by its state
+/// factory before the initial Configure is dispatched.
+#[test]
+fn deferred_state_factory_config_error_rejects_initial_configure_and_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup_with_state(
+            Cursor::new(encode_output_messages(&[configure_message()])),
+            writer,
+            |handle| {
+                handle
+                    .config_error("deferred factory rejected configuration")
+                    .expect("config error");
+                Counts::default()
+            },
+        )
+        .expect("start deferred manual loop");
+    establish_deferred_initial_configure(&mut runtime);
+
+    let error = runtime
+        .startup_ready(None)
+        .expect_err("factory ConfigError must reject Ready");
+    assert!(error.to_string().contains("initial Configure rejection"));
+    runtime.finish().expect("finish");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
     assert!(matches!(
-        &frames[2],
-        HarnessInputMessage::Ready(ready) if ready.message.as_deref() == Some("disabled")
+        &frames[1],
+        HarnessInputMessage::ConfigError(error)
+            if error.message == "deferred factory rejected configuration"
     ));
-    assert_eq!(frames.len(), 3);
+    assert_eq!(frames.len(), 2);
+}
+
+/// Ordinary manual startup preserves its Ready-before-return contract by
+/// returning an explicit error when initial Configure is rejected.
+#[test]
+fn ordinary_manual_configure_rejection_returns_error_without_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let error = match TauExtensionRunner::new(ConfigureDeclarationExtension { reject: true })
+        .start_manual_loop(Cursor::new(encode_output_messages(&[])), writer, ())
+    {
+        Ok(_) => panic!("ordinary manual startup rejection must return an error"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("rejected before Ready"));
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(!frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolRegister(_))
+    )));
 }
 
 /// Ensures deferred startup helpers enforce the one-way startup lifecycle and
@@ -1743,8 +1973,13 @@ fn manual_loop_deferred_startup_rejects_duplicate_ready() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
-        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop_deferred_startup(
+            Cursor::new(encode_output_messages(&[configure_message()])),
+            writer,
+            Counts::default(),
+        )
         .expect("start deferred manual loop");
+    establish_deferred_initial_configure(&mut runtime);
 
     runtime.startup_ready(None).expect("first ready");
     let duplicate_ready = runtime
@@ -1782,6 +2017,82 @@ fn manual_loop_deferred_startup_rejects_static_declarations() {
     assert!(error.to_string().contains("static startup declarations"));
 }
 
+/// All deferred receive APIs accept initial Configure or Disconnect uniformly
+/// and reject any other first protocol message.
+#[test]
+fn deferred_receive_apis_share_initial_configure_disconnect_gate() {
+    #[derive(Clone, Copy)]
+    enum Api {
+        Recv,
+        RecvTimeout,
+        TryRecv,
+    }
+
+    fn receive_first(
+        api: Api,
+        message: HarnessOutputMessage,
+    ) -> Result<HarnessOutputMessage, ClientError> {
+        let mut raw = Vec::new();
+        let mut input_writer = HarnessOutputWriter::new(&mut raw);
+        input_writer.write_message(&message).expect("write input");
+        input_writer.flush().expect("flush input");
+        let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+            .start_manual_loop_deferred_startup(
+                Cursor::new(raw),
+                SharedWriter::default(),
+                Counts::default(),
+            )
+            .expect("start deferred runtime");
+        let result = match api {
+            Api::Recv => runtime.recv().and_then(|input| match input {
+                ManualRuntimeInput::Message(message) => Ok(message),
+                other => Err(ClientError::handler(format!(
+                    "expected message, received {other:?}"
+                ))),
+            }),
+            Api::RecvTimeout => runtime
+                .recv_timeout(Duration::from_secs(1))
+                .and_then(|input| match input {
+                    ManualRuntimeInput::Message(message) => Ok(message),
+                    other => Err(ClientError::handler(format!(
+                        "expected message, received {other:?}"
+                    ))),
+                }),
+            Api::TryRecv => loop {
+                match runtime.try_recv() {
+                    Ok(ManualRuntimePoll::Message(message)) => break Ok(message),
+                    Ok(ManualRuntimePoll::Empty) => runtime.wait_for_wake(),
+                    Ok(other) => {
+                        break Err(ClientError::handler(format!(
+                            "expected message, received {other:?}"
+                        )));
+                    }
+                    Err(error) => break Err(error),
+                }
+            },
+        };
+        runtime.finish().expect("finish");
+        result
+    }
+
+    for api in [Api::Recv, Api::RecvTimeout, Api::TryRecv] {
+        assert!(matches!(
+            receive_first(api, configure_message()).expect("Configure accepted"),
+            HarnessOutputMessage::Configure(_)
+        ));
+        assert!(matches!(
+            receive_first(api, disconnect("startup stopped")).expect("Disconnect accepted"),
+            HarnessOutputMessage::Disconnect(_)
+        ));
+        let error = receive_first(
+            api,
+            HarnessOutputMessage::deliver_live(UnixMicros::new(1), notice("wrong first message")),
+        )
+        .expect_err("wrong first message rejected");
+        assert!(error.to_string().contains("expected initial Configure"));
+    }
+}
+
 /// Ensures the intercept-reply convenience helper emits the existing protocol
 /// frame shape for custom-loop extensions that own dynamic interception policy.
 #[test]
@@ -1789,14 +2100,19 @@ fn client_handle_intercept_reply_helper_emits_reply() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
-        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop_deferred_startup(
+            Cursor::new(encode_output_messages(&[configure_message()])),
+            writer,
+            Counts::default(),
+        )
         .expect("start deferred manual loop");
+    establish_deferred_initial_configure(&mut runtime);
 
+    runtime.startup_ready(None).expect("ready");
     runtime
         .handle()
         .intercept_reply(InterceptAction::Drop)
         .expect("intercept reply");
-    runtime.startup_ready(None).expect("ready");
     runtime.finish().expect("finish");
 
     let replies = frames_from_writer(&written)
@@ -1816,6 +2132,7 @@ fn client_handle_intercept_reply_helper_emits_reply() {
 #[test]
 fn manual_loop_recv_timeout_distinguishes_timeout_message_and_input_closed() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -1863,6 +2180,7 @@ fn manual_loop_recv_timeout_distinguishes_timeout_message_and_input_closed() {
 #[test]
 fn manual_loop_waker_reacts_to_harness_input_and_side_channel_work() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -1919,6 +2237,7 @@ fn manual_loop_waker_reacts_to_harness_input_and_side_channel_work() {
 #[test]
 fn manual_loop_finish_before_input_close_detaches_reader() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -1939,7 +2258,11 @@ fn manual_loop_allows_post_eof_output_before_finish() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            Counts::default(),
+        )
         .expect("start manual loop");
 
     assert!(matches!(
@@ -1964,6 +2287,7 @@ fn manual_loop_allows_post_eof_output_before_finish() {
 #[test]
 fn manual_loop_extension_data_request_preserves_unrelated_frames() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
@@ -2049,6 +2373,7 @@ fn manual_loop_extension_data_request_preserves_unrelated_frames() {
 #[test]
 fn manual_loop_extension_data_request_reports_harness_error() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
@@ -2088,6 +2413,7 @@ fn manual_loop_extension_data_request_reports_harness_error() {
 #[test]
 fn manual_loop_extension_data_request_preserves_disconnect() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -2127,6 +2453,7 @@ fn manual_loop_extension_data_request_preserves_disconnect() {
 #[test]
 fn manual_loop_extension_data_request_reports_input_closed() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -2155,6 +2482,7 @@ fn manual_loop_extension_data_request_reports_input_closed() {
 #[test]
 fn manual_loop_extension_data_request_restores_frames_on_reader_error() {
     let (reader, mut writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
@@ -2206,6 +2534,7 @@ fn manual_loop_extension_data_request_restores_frames_on_reader_error() {
 #[test]
 fn manual_loop_extension_data_request_timeout_keeps_runtime_usable() {
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
@@ -2310,6 +2639,7 @@ fn manual_loop_extension_data_client_works_inside_handler() {
     }
 
     let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(StorageExtension)
@@ -2348,21 +2678,21 @@ fn manual_loop_extension_data_client_works_inside_handler() {
 fn manual_loop_dispatch_config_error_continues() {
     let writer = SharedWriter::default();
     let written = writer.clone();
+    let initial = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
+        instance_name: None,
+        state_dir: None,
+        secrets: std::collections::BTreeMap::new(),
+    });
     let mut runtime = TauExtensionRunner::new(RawConfigureExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, RawConfigState::default())
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[initial])),
+            writer,
+            RawConfigState::default(),
+        )
         .expect("start manual loop");
 
-    assert_eq!(
-        runtime
-            .dispatch_one(HarnessOutputMessage::Configure(Configure {
-                config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
-                instance_name: None,
-                state_dir: None,
-                secrets: std::collections::BTreeMap::new(),
-            }))
-            .expect("valid config"),
-        DispatchOutcome::Continue
-    );
     assert_eq!(
         runtime
             .dispatch_one(config_with_unknown_field())
@@ -2398,7 +2728,11 @@ fn manual_loop_dispatch_config_error_continues() {
 fn manual_loop_dispatch_preserves_replay_filtering() {
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(ReplayExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            Counts::default(),
+        )
         .expect("start manual loop");
 
     runtime
@@ -2425,7 +2759,11 @@ fn manual_loop_dispatch_preserves_replay_filtering() {
 fn manual_loop_dispatch_reports_stop_requested() {
     let writer = SharedWriter::default();
     let mut runtime = TauExtensionRunner::new(StopToolExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            Counts::default(),
+        )
         .expect("start manual loop");
 
     assert_eq!(
@@ -2446,7 +2784,11 @@ fn manual_loop_intercept_error_sends_one_reply() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let mut runtime = TauExtensionRunner::new(InterceptErrorExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            Counts::default(),
+        )
         .expect("start manual loop");
 
     let error = runtime
@@ -2481,7 +2823,7 @@ fn manual_loop_detached_finish_does_not_wait_for_blocked_output() {
         blocked: Arc::clone(&blocked),
     };
     let mut runtime = TauExtensionRunner::new(BlockingDetachedExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, state)
+        .start_manual_loop(Cursor::new(encode_output_messages(&[])), writer, state)
         .expect("start manual loop");
 
     runtime
@@ -2505,7 +2847,11 @@ fn manual_loop_detached_finish_does_not_wait_for_blocked_output() {
 fn manual_loop_state_does_not_need_to_be_send() {
     let writer = SharedWriter::default();
     let runtime = TauExtensionRunner::new(NonSendStateExtension)
-        .start_manual_loop(Cursor::new(Vec::new()), writer, Rc::new(()))
+        .start_manual_loop(
+            Cursor::new(encode_output_messages(&[])),
+            writer,
+            Rc::new(()),
+        )
         .expect("start manual loop");
 
     let _state = runtime.finish().expect("finish");
@@ -2861,4 +3207,675 @@ fn protocol_io_cumulative_stats_format_uses_labels_and_sorting() {
         formatted.find("large.event").expect("large event line")
             < formatted.find("small.event").expect("small event line")
     );
+}
+
+/// Initial Configure structurally prefixes registration and handler matching
+/// while preserving logical builder declarations.
+#[test]
+fn configured_tool_prefix_maps_registration_and_dispatch() {
+    let configure = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+        config: CborValue::Null,
+        instance_name: None,
+        state_dir: None,
+        secrets: std::collections::BTreeMap::new(),
+    });
+    let (state, frames) = run_messages(
+        ToolExtension,
+        Counts::default(),
+        &[configure, tool_started("work_owned_tool")],
+    );
+    assert_eq!(state.tool_matches, 1);
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolRegister(register)
+                    if register.tool.name.as_str() == "work_owned_tool"
+            )
+    )));
+}
+
+#[test]
+fn configure_declaration_overrides_static_declaration_before_ready() {
+    let (_, frames) = run_messages(ConfigureDeclarationExtension { reject: false }, (), &[]);
+    let registrations = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegister(register) => Some((index, register)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(registrations.len(), 2);
+    assert_eq!(
+        registrations[0].1.tool.description.as_deref(),
+        Some("static")
+    );
+    assert_eq!(
+        registrations[1].1.tool.description.as_deref(),
+        Some("configured")
+    );
+    let ready = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("Ready");
+    assert!(registrations[1].0 < ready);
+}
+
+#[test]
+fn rejected_configure_discards_buffered_declaration_and_withholds_ready() {
+    let (_, frames) = run_messages(ConfigureDeclarationExtension { reject: true }, (), &[]);
+    assert!(frames.iter().all(|frame| !matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolRegister(register)
+                    if register.tool.description.as_deref() == Some("configured")
+            )
+    )));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+}
+
+/// Ordinary manual runtimes preserve the configured scope for buffered startup
+/// dispatch and subsequent tool calls.
+#[test]
+fn manual_loop_uses_configured_tool_scope() {
+    let configure = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+        config: CborValue::Map(Vec::new()),
+        instance_name: None,
+        state_dir: None,
+        secrets: std::collections::BTreeMap::new(),
+    });
+    let input = encode_output_messages(&[configure, tool_started("work_owned_tool")]);
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ToolExtension)
+        .start_manual_loop(Cursor::new(input), writer, Counts::default())
+        .expect("start manual runtime");
+    let ManualRuntimeInput::Message(message) = runtime.recv().expect("receive tool") else {
+        panic!("expected tool message");
+    };
+    assert_eq!(
+        runtime.dispatch_one(message).expect("dispatch tool"),
+        DispatchOutcome::Continue
+    );
+    assert_eq!(runtime.state().tool_matches, 1);
+    runtime.finish().expect("finish");
+}
+
+/// Blocking manual receive consumes a changed prefix with one ConfigError while
+/// keeping the original dispatch scope.
+#[test]
+fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
+    let configure = |prefix: &str| {
+        HarnessOutputMessage::Configure(Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
+            config: CborValue::Map(Vec::new()),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        })
+    };
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let input = encode_output_messages(&[
+        configure("work"),
+        configure("personal"),
+        tool_started("work_owned_tool"),
+        tool_started("personal_owned_tool"),
+    ]);
+    let mut runtime = TauExtensionRunner::new(ToolExtension)
+        .start_manual_loop(Cursor::new(input), writer, Counts::default())
+        .expect("start manual runtime");
+    for _ in 0..2 {
+        let ManualRuntimeInput::Message(message) = runtime.recv().expect("receive tool") else {
+            panic!("expected tool message");
+        };
+        runtime.dispatch_one(message).expect("dispatch tool");
+    }
+    assert_eq!(runtime.state().tool_matches, 1);
+    runtime.finish().expect("finish");
+    assert_eq!(
+        frames_from_writer(&written)
+            .iter()
+            .filter(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+            .count(),
+        1
+    );
+}
+
+/// Non-blocking manual polling applies the same immutable-prefix filter as the
+/// blocking receive path.
+#[test]
+fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
+    let configure = |prefix: &str| {
+        HarnessOutputMessage::Configure(Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
+            config: CborValue::Map(Vec::new()),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        })
+    };
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let input = encode_output_messages(&[
+        configure("work"),
+        configure("personal"),
+        tool_started("work_owned_tool"),
+        tool_started("personal_owned_tool"),
+    ]);
+    let mut runtime = TauExtensionRunner::new(ToolExtension)
+        .start_manual_loop(Cursor::new(input), writer, Counts::default())
+        .expect("start manual runtime");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match runtime.try_recv().expect("poll") {
+            ManualRuntimePoll::Message(message) => {
+                runtime.dispatch_one(message).expect("dispatch");
+            }
+            ManualRuntimePoll::InputClosed => break,
+            ManualRuntimePoll::Empty if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            ManualRuntimePoll::Empty => panic!("timed out waiting for input close"),
+        }
+    }
+    assert_eq!(runtime.state().tool_matches, 1);
+    runtime.finish().expect("finish");
+    assert_eq!(
+        frames_from_writer(&written)
+            .iter()
+            .filter(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+            .count(),
+        1
+    );
+}
+
+/// A later prefix change is diagnosed and withheld from configuration handlers
+/// while the original scope and applied configuration remain active.
+#[test]
+fn changed_tool_prefix_is_rejected_without_reconfiguring() {
+    let configure = |prefix: &str, value| {
+        HarnessOutputMessage::Configure(Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
+            config: tau_proto::json_to_cbor(&serde_json::json!({ "value": value })),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        })
+    };
+    let (state, frames) = run_messages(
+        ConfigExtension,
+        0,
+        &[configure("work", 3), configure("personal", 7)],
+    );
+    assert_eq!(state, 3);
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error)
+            if error.message.contains("tool_prefix changed")
+    )));
+}
+
+/// Rejecting a changed prefix leaves the original dispatch scope active.
+#[test]
+fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
+    let configure = |prefix: &str| {
+        HarnessOutputMessage::Configure(Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
+            config: CborValue::Map(Vec::new()),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        })
+    };
+    let (state, frames) = run_messages(
+        ToolExtension,
+        Counts::default(),
+        &[
+            configure("work"),
+            configure("personal"),
+            tool_started("work_owned_tool"),
+            tool_started("personal_owned_tool"),
+        ],
+    );
+    assert_eq!(state.tool_matches, 1);
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error)
+            if error.message.contains("tool_prefix changed")
+    )));
+}
+
+/// Dynamic registration and unregistration map logical names through the same
+/// installed scope.
+#[test]
+fn client_handle_scopes_dynamic_register_and_unregister() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .install_tool_name_scope(ToolNameScope::from_configure(&Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+            config: CborValue::Map(Vec::new()),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        }))
+        .expect("install scope");
+    handle.finish_startup().expect("finish test startup");
+    handle
+        .register_local_tool(tau_proto::ToolRegister {
+            tool: tool_spec("dynamic"),
+            tool_group: None,
+            prompt_fragment: None,
+        })
+        .expect("register local tool");
+    handle
+        .unregister_local_tool(ToolName::new("dynamic"))
+        .expect("unregister local tool");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(
+        &frames[0],
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolRegister(register)
+                    if register.tool.name.as_str() == "work_dynamic"
+            )
+    ));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolUnregister(unregister)
+                    if unregister.tool_name.as_str() == "work_dynamic"
+            )
+    ));
+}
+
+/// A configuration rejection after declarations have flushed still wins the
+/// startup-gate race and prevents the terminal Ready frame.
+#[test]
+fn config_error_between_declaration_flush_and_ready_withholds_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .send_startup(HarnessInputMessage::Subscribe(tau_proto::Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: Vec::new(),
+        }))
+        .expect("startup declaration");
+    handle
+        .send(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "late startup rejection".to_owned(),
+        }))
+        .expect("raw ConfigError");
+    let error = handle
+        .send_ready(None)
+        .expect_err("ConfigError must linearize before Ready");
+    assert!(error.to_string().contains("after ConfigError"));
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Subscribe(_)));
+    assert!(matches!(frames[1], HarnessInputMessage::ConfigError(_)));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+}
+
+/// Detached raw ConfigError output marks startup rejected immediately rather
+/// than being buffered until after an otherwise successful Ready.
+#[test]
+fn detached_config_error_before_ready_withholds_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .send_detached(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "detached startup rejection".to_owned(),
+        }))
+        .expect("detached ConfigError");
+    handle
+        .send_ready(None)
+        .expect_err("detached ConfigError must reject Ready");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::ConfigError(_)]
+    ));
+}
+
+/// Raw synchronous Ready is rejected even while a Configure callback has
+/// temporary access to other startup output.
+#[test]
+fn raw_ready_is_rejected_during_configure() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.set_configuring(true);
+    let error = handle
+        .send(HarnessInputMessage::Ready(tau_proto::Ready::default()))
+        .expect_err("raw Ready must be runner-owned");
+    handle.set_configuring(false);
+    assert!(error.to_string().contains("runner-owned"));
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(frames_from_writer(&written).is_empty());
+}
+
+/// Raw Ready cannot bypass an earlier ConfigError and resurrect a rejected
+/// startup transaction.
+#[test]
+fn raw_ready_after_config_error_is_rejected() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .config_error("rejected")
+        .expect("startup ConfigError");
+    handle.set_configuring(true);
+    handle
+        .send(HarnessInputMessage::Ready(tau_proto::Ready::default()))
+        .expect_err("raw Ready remains forbidden");
+    handle.set_configuring(false);
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::ConfigError(_)]
+    ));
+}
+
+/// Detached raw Ready is rejected instead of being buffered and released after
+/// the official Ready as a duplicate.
+#[test]
+fn detached_raw_ready_cannot_duplicate_official_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .send_detached(HarnessInputMessage::Ready(tau_proto::Ready::default()))
+        .expect_err("detached raw Ready must be runner-owned");
+    handle.send_ready(None).expect("official Ready");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::Ready(_)]
+    ));
+}
+
+/// Ready releases the startup gate before waiting on writer backpressure, so a
+/// concurrent detached ConfigError remains nonblocking and is ordered after it.
+#[test]
+fn ready_flush_backpressure_does_not_block_detached_config_error() {
+    /// Capturing writer whose first flush waits for explicit test release.
+    struct FirstFlushBlocks {
+        /// Encoded protocol bytes for final ordering assertions.
+        output: SharedWriter,
+        /// Signals that Ready reached the blocked flush.
+        entered: mpsc::Sender<()>,
+        /// Releases the first blocked flush.
+        release: mpsc::Receiver<()>,
+        /// Whether the one blocking flush has already run.
+        blocked: bool,
+    }
+    impl Write for FirstFlushBlocks {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if !self.blocked {
+                self.blocked = true;
+                self.entered.send(()).expect("signal blocked flush");
+                self.release.recv().expect("release blocked flush");
+            }
+            self.output.flush()
+        }
+    }
+
+    let written = SharedWriter::default();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_output = written.clone();
+    let writer_thread = std::thread::spawn(move || {
+        crate::writer_thread::run_writer(
+            FirstFlushBlocks {
+                output: writer_output,
+                entered: entered_tx,
+                release: release_rx,
+                blocked: false,
+            },
+            receiver,
+        )
+    });
+    let ready_handle = handle.clone();
+    let ready_thread = std::thread::spawn(move || ready_handle.send_ready(None));
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Ready reached blocked flush");
+
+    let detached_handle = handle.clone();
+    let (detached_done_tx, detached_done_rx) = mpsc::channel();
+    let detached_thread = std::thread::spawn(move || {
+        let result = detached_handle.send_detached(HarnessInputMessage::ConfigError(
+            tau_proto::ConfigError {
+                message: "post-Ready diagnostic".to_owned(),
+            },
+        ));
+        let _ = detached_done_tx.send(result);
+    });
+    let detached_result = detached_done_rx.recv_timeout(Duration::from_secs(1));
+    release_tx.send(()).expect("release Ready flush");
+    ready_thread.join().expect("Ready thread").expect("Ready");
+    let detached_result = match detached_result {
+        Ok(result) => result,
+        Err(error) => {
+            detached_thread.join().expect("detached thread");
+            panic!("detached ConfigError blocked behind Ready flush: {error}");
+        }
+    };
+    detached_result.expect("detached ConfigError");
+    detached_thread.join().expect("detached thread");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [
+            HarnessInputMessage::Ready(_),
+            HarnessInputMessage::ConfigError(_)
+        ]
+    ));
+}
+
+/// Once Ready wins the startup gate, later runtime ConfigError diagnostics
+/// remain valid protocol output and do not retroactively reject startup.
+#[test]
+fn config_error_after_ready_remains_allowed() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.send_ready(None).expect("Ready");
+    handle
+        .send(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "runtime configuration diagnostic".to_owned(),
+        }))
+        .expect("post-Ready ConfigError");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [
+            HarnessInputMessage::Ready(_),
+            HarnessInputMessage::ConfigError(_)
+        ]
+    ));
+}
+
+/// Scoped factories must return the same logical name paired with their
+/// handler.
+#[test]
+fn scoped_tool_factory_rejects_mismatched_logical_name() {
+    struct MismatchedScopedTool;
+    impl TauExtension for MismatchedScopedTool {
+        type State = ();
+
+        fn name(&self) -> &'static str {
+            "mismatched-scoped-tool"
+        }
+
+        fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+            builder.scoped_tool(
+                ToolName::new("declared"),
+                |_| {
+                    Ok(tau_proto::ToolRegister {
+                        tool: tool_spec("returned"),
+                        tool_group: None,
+                        prompt_fragment: None,
+                    })
+                },
+                |_| Ok(()),
+            );
+        }
+    }
+
+    let error = match TauExtensionRunner::new(MismatchedScopedTool).run(
+        Cursor::new(encode_output_messages(&[configure_message()])),
+        SharedWriter::default(),
+        (),
+    ) {
+        Ok(_) => panic!("mismatched factory unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("declared `declared` but returned `returned`")
+    );
+}
+
+/// Interleaved ordinary and scoped tool declarations retain public call order
+/// so same-name refresh remains last-registration-wins.
+#[test]
+fn scoped_and_static_tools_preserve_public_declaration_order() {
+    struct MixedToolOrder;
+    impl TauExtension for MixedToolOrder {
+        type State = ();
+
+        fn name(&self) -> &'static str {
+            "mixed-tool-order"
+        }
+
+        fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+            builder.scoped_tool(
+                ToolName::new("refresh"),
+                |_| {
+                    let mut tool = tool_spec("refresh");
+                    tool.description = Some("first scoped".to_owned());
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: None,
+                        prompt_fragment: None,
+                    })
+                },
+                |_| Ok(()),
+            );
+            let mut tool = tool_spec("refresh");
+            tool.description = Some("second static".to_owned());
+            builder.tool(tool, |_| Ok(()));
+        }
+    }
+
+    let (_, frames) = run_messages(MixedToolOrder, (), &[]);
+    let descriptions = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegister(register) => register.tool.description.as_deref(),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(descriptions, ["first scoped", "second static"]);
+}
+
+/// No declaration or Ready frame is emitted when the first harness response is
+/// not Configure.
+#[test]
+fn wrong_first_harness_message_fails_before_declarations() {
+    let mut raw = Vec::new();
+    let mut writer = HarnessOutputWriter::new(&mut raw);
+    writer
+        .write_message(&tool_started("owned_tool"))
+        .expect("write wrong first message");
+    writer.flush().expect("flush");
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let error = match TauExtensionRunner::new(ToolExtension).run(
+        Cursor::new(raw),
+        output,
+        Counts::default(),
+    ) {
+        Ok(_) => panic!("wrong first message unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("expected initial Configure"));
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::Hello(_)]
+    ));
 }

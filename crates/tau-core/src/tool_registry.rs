@@ -57,18 +57,16 @@ pub struct ToolProvider {
     pub prompt_fragment: Option<PromptFragment>,
 }
 
-/// Warning emitted by the tool registry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ToolRegistryWarning {
-    DuplicateRegistration {
-        tool_name: ToolName,
-        existing_provider_ids: Vec<ConnectionId>,
-    },
-}
-
 /// Error emitted by the tool registry while rejecting a bad registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolRegistrationError {
+    /// A different live connection already owns the final internal name.
+    DuplicateName {
+        /// Conflicting final internal name.
+        tool_name: ToolName,
+        /// Stable ids of the current owners.
+        existing_provider_ids: Vec<ConnectionId>,
+    },
     InvalidExample {
         tool_name: ToolName,
         example_id: String,
@@ -79,6 +77,18 @@ pub enum ToolRegistrationError {
 impl fmt::Display for ToolRegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateName {
+                tool_name,
+                existing_provider_ids,
+            } => write!(
+                f,
+                "tool `{tool_name}` is already owned by connection(s) {}",
+                existing_provider_ids
+                    .iter()
+                    .map(ConnectionId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::InvalidExample {
                 tool_name,
                 example_id,
@@ -96,7 +106,6 @@ impl Error for ToolRegistrationError {}
 /// Summary of one registration call.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RegisterToolReport {
-    pub warnings: Vec<ToolRegistryWarning>,
     pub errors: Vec<ToolRegistrationError>,
 }
 
@@ -1461,19 +1470,37 @@ impl ToolRegistry {
             return report;
         }
         let tool_name = tool.name.clone();
+        if kind == ToolProviderKind::Internal {
+            let displaced = self
+                .providers_by_tool
+                .get(&tool_name)
+                .into_iter()
+                .flatten()
+                .filter(|provider| provider.connection_id != connection_id)
+                .map(|provider| provider.connection_id.clone())
+                .collect::<Vec<_>>();
+            for displaced_id in displaced {
+                if let Some(tools) = self.tools_by_connection.get_mut(&displaced_id) {
+                    tools.retain(|name| name != &tool_name);
+                }
+            }
+            if let Some(providers) = self.providers_by_tool.get_mut(&tool_name) {
+                providers.retain(|provider| provider.connection_id == connection_id);
+            }
+        }
         let providers = self.providers_by_tool.entry(tool_name.clone()).or_default();
 
         let existing_provider_ids = providers
             .iter()
+            .filter(|provider| provider.connection_id != connection_id)
             .map(|provider| provider.connection_id.clone())
             .collect::<Vec<_>>();
         if !existing_provider_ids.is_empty() {
-            report
-                .warnings
-                .push(ToolRegistryWarning::DuplicateRegistration {
-                    tool_name: tool_name.clone(),
-                    existing_provider_ids,
-                });
+            report.errors.push(ToolRegistrationError::DuplicateName {
+                tool_name,
+                existing_provider_ids,
+            });
+            return report;
         }
 
         if let Some(existing_provider) = providers
@@ -1558,7 +1585,7 @@ impl ToolRegistry {
         self.providers_by_tool.keys().collect()
     }
 
-    /// Returns all unique tool specs, one per tool name (first provider wins).
+    /// Returns all unique tool specs under the single-owner invariant.
     #[must_use]
     pub fn all_tools(&self) -> Vec<&ToolSpec> {
         self.all_tool_providers()
@@ -1567,8 +1594,8 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Returns all unique tool providers, one per tool name (first provider
-    /// wins), sorted by tool name for deterministic prompt and tool assembly.
+    /// Returns the unique provider for each tool name, sorted by tool name for
+    /// deterministic prompt and tool assembly.
     #[must_use]
     pub fn all_tool_providers(&self) -> Vec<&ToolProvider> {
         let mut providers: Vec<_> = self
@@ -1580,7 +1607,7 @@ impl ToolRegistry {
         providers
     }
 
-    /// Picks one currently live provider for a tool name.
+    /// Returns the sole currently live provider for a tool name.
     #[must_use]
     pub fn resolve_provider(&self, tool_name: &str) -> Option<&ToolProvider> {
         self.providers_by_tool

@@ -13,6 +13,8 @@ pub struct ToolContext<'a, State> {
     pub invoke: &'a tau_proto::ToolStarted,
     /// Cloneable handle for sending frames to the harness.
     pub handle: ClientHandle,
+    /// Logical/local name declared for this handler.
+    pub(crate) local_tool_name: &'a tau_proto::ToolName,
     /// Stop flag checked by the runner after this handler returns.
     pub(crate) stop_requested: &'a mut bool,
 }
@@ -28,6 +30,13 @@ impl<'a, State> ToolContext<'a, State> {
     #[must_use]
     pub fn handle(&self) -> ClientHandle {
         self.handle.clone()
+    }
+
+    /// Returns the logical/local declared tool name, independent of the
+    /// configured wire prefix.
+    #[must_use]
+    pub fn local_tool_name(&self) -> &tau_proto::ToolName {
+        self.local_tool_name
     }
 
     /// Emits a durable event through the harness.

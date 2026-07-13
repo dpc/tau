@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// Version of the private gateway socket protocol used by sidecars.
-const SOCKET_PROTOCOL_VERSION: u32 = 1;
+const SOCKET_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum bytes accepted from one gateway response line.
 const MAX_GATEWAY_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -76,7 +76,6 @@ impl GatewayClient {
         session_id: &str,
         agent_id: &str,
         display_name: Option<String>,
-        tool_namespace: &str,
     ) -> Result<GatewaySocketResponse, String> {
         self.request(
             GatewayRequestKind::RegisterAgent,
@@ -85,7 +84,6 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: None,
                 display_name,
-                tool_namespace: Some(tool_namespace.to_owned()),
             },
         )
     }
@@ -103,7 +101,6 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: None,
                 display_name: None,
-                tool_namespace: None,
             },
         )
     }
@@ -122,7 +119,6 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: Some(message.to_owned()),
                 display_name: None,
-                tool_namespace: None,
             },
         )
     }
@@ -150,7 +146,6 @@ impl GatewayClient {
             agent_id: request.agent_id,
             message: request.message,
             display_name: request.display_name,
-            tool_namespace: request.tool_namespace,
         };
         let request = serde_json::to_string(&request)
             .map_err(|error| format!("encoding Telegram gateway request: {error}"))?;
@@ -239,8 +234,6 @@ struct GatewayClientRequest {
     message: Option<String>,
     /// Optional display name metadata.
     display_name: Option<String>,
-    /// Optional tool namespace metadata.
-    tool_namespace: Option<String>,
 }
 
 /// JSON-line request sent by the gateway-client sidecar.
@@ -262,9 +255,6 @@ struct GatewayWireRequest<'a> {
     /// Optional display name metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
-    /// Optional tool namespace metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_namespace: Option<String>,
 }
 
 /// JSON-line response returned by the gateway socket.

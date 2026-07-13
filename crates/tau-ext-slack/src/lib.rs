@@ -1,6 +1,7 @@
 //! Personal Slack Socket Mode bridge extension for Tau agents.
 //!
-//! The extension exposes `slack_register` and `slack_send` tools. Proactive
+//! The extension declares logical `slack_register` and `slack_send` tools,
+//! which `ToolNameScope` maps to final per-instance wire names. Proactive
 //! destination authorization follows `DESIGN-tau-ext-slack-proactive-sends`. It
 //! is disabled by default, requires Slack token secrets plus a non-empty
 //! allowlist, and treats Slack text as external untrusted prompt input.
@@ -61,13 +62,13 @@ fn finish_socket_ack(result: Result<(), String>, has_supported_event: bool) -> R
     }
 }
 
-/// Internal tool name for registering the current agent as a Slack listener.
+/// Logical tool name for registering the current agent as a Slack listener.
 pub const REGISTER_TOOL_NAME: &str = "slack_register";
 
-/// Internal tool name for sending a Slack message from a registered agent.
+/// Logical tool name for sending a Slack message from a registered agent.
 pub const SEND_TOOL_NAME: &str = "slack_send";
 
-/// Tool group name shared by all Slack bridge tools.
+/// Logical tool group name shared by all Slack bridge tools.
 pub const TOOL_GROUP_NAME: &str = "slack";
 
 /// Tag marking tools that register an agent with the Slack bridge.
@@ -794,6 +795,17 @@ impl From<ClientHandle> for Output {
 }
 
 impl Output {
+    /// Resolve a logical tool name through tau-client when running under the
+    /// SDK.
+    fn wire_tool_name(&self, local: &str) -> tau_proto::ToolName {
+        match self {
+            Self::Client(handle) => handle
+                .tool_name_scope()
+                .and_then(|scope| scope.wire_tool(local))
+                .expect("Slack runtime starts only after scoped tool declarations succeed"),
+            Self::Channel(_) => tau_proto::ToolName::new(local),
+        }
+    }
     /// Sends one protocol frame, intentionally ignoring closed-writer failures.
     ///
     /// Slack Socket Mode workers and tool output are best-effort once the
@@ -925,14 +937,14 @@ impl Extension {
                 RegisterTransportCapabilityRequest {
                     request_id,
                     transport_name: TRANSPORT_NAME.to_owned(),
-                    send_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
+                    send_tool: Some(self.output.wire_tool_name(SEND_TOOL_NAME)),
                     send_destinations,
                 },
             ));
     }
 
     /// Dispatch a Tau tool invocation owned by this extension.
-    fn dispatch_tool(&self, invoke: ToolStarted) {
+    fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
         self.output.emit(Event::ToolProgress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -944,7 +956,7 @@ impl Extension {
                 ..Default::default()
             }),
         }));
-        let event = match invoke.tool_name.as_str() {
+        let event = match local_tool_name.as_str() {
             REGISTER_TOOL_NAME => Some(self.handle_register(invoke)),
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => Some(tool_error(invoke, "unknown slack tool".to_owned())),
@@ -1121,13 +1133,14 @@ impl Extension {
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Option<Event> {
+        let send_tool = self.output.wire_tool_name(SEND_TOOL_NAME);
         {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(attempt) = state.accepted_send_attempts.get(&invoke.call_id) {
                 if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
                     return Some(tool_error(
                         invoke,
-                        "slack_send call id was replayed with conflicting arguments".to_owned(),
+                        format!("{send_tool} call id was replayed with conflicting arguments"),
                     ));
                 }
                 match &attempt.disposition {
@@ -1159,7 +1172,7 @@ impl Extension {
             (Ok(Some(_)), Ok(Some(_))) | (Ok(None), Ok(None)) => {
                 return Some(tool_error(
                     invoke,
-                    "slack_send requires exactly one of `reply_to` or `destination`".to_owned(),
+                    format!("{send_tool} requires exactly one of `reply_to` or `destination`"),
                 ));
             }
             (Err(message), _) | (_, Err(message)) => return Some(tool_error(invoke, message)),
@@ -1184,38 +1197,39 @@ impl Extension {
             if state.pending_posts.len() >= PENDING_SEND_LIMIT {
                 return Some(tool_error(
                     invoke,
-                    "slack_send has too many completions awaiting Tau; try again later".to_owned(),
+                    format!("{send_tool} has too many completions awaiting Tau; try again later"),
                 ));
             }
             if !state.capability_active {
                 return Some(tool_error(
                     invoke,
-                    "slack_send transport capability is not active".to_owned(),
+                    format!("{send_tool} transport capability is not active"),
                 ));
             }
             if let Some(reply_to) = &reply_to {
                 if !state.registered_agents.contains(&invoke.agent_id) {
+                    let register = self.output.wire_tool_name(REGISTER_TOOL_NAME);
                     return Some(tool_error(
                         invoke,
-                        "slack_send reply requires slack_register(enabled: true) first".to_owned(),
+                        format!("Slack reply requires {register}(enabled: true) first"),
                     ));
                 }
                 let Some(route) = state.reply_routes.get(reply_to).cloned() else {
                     return Some(tool_error(
                         invoke,
-                        "slack_send reply_to is unknown or stale".to_owned(),
+                        format!("{send_tool} reply_to is unknown or stale"),
                     ));
                 };
                 if route.agent_id != invoke.agent_id {
                     return Some(tool_error(
                         invoke,
-                        "slack_send reply_to belongs to another agent".to_owned(),
+                        format!("{send_tool} reply_to belongs to another agent"),
                     ));
                 }
                 if !is_authorized_conversation(&state, &cfg, &route.conversation.channel_id) {
                     return Some(tool_error(
                         invoke,
-                        "slack_send originating conversation is no longer authorized".to_owned(),
+                        format!("{send_tool} originating conversation is no longer authorized"),
                     ));
                 }
                 let endpoint = external_endpoint_for_route(&route);
@@ -1236,7 +1250,7 @@ impl Extension {
                 let Some(destination) = cfg.send_destinations.get(alias) else {
                     return Some(tool_error(
                         invoke,
-                        "slack_send destination is unknown or unauthorized".to_owned(),
+                        format!("{send_tool} destination is unknown or unauthorized"),
                     ));
                 };
                 let route = SlackConversation {
@@ -1310,6 +1324,7 @@ impl Extension {
                         dedup_key: Some(format!("send:{}:{}", route.channel_id, posted.ts)),
                     },
                     policy_status,
+                    self.output.wire_tool_name(SEND_TOOL_NAME),
                 );
                 let mut draft = draft;
                 draft.conversation = Some(conversation);
@@ -1918,10 +1933,10 @@ impl Extension {
                 .expect("one agent")
                 .clone())
         } else if state.registered_agents.is_empty() {
-            Err(
-                "No Tau agents are registered. Ask an agent to call slack_register(enabled: true)."
-                    .to_owned(),
-            )
+            Err(format!(
+                "No Tau agents are registered. Ask an agent to call {}(enabled: true).",
+                self.output.wire_tool_name(REGISTER_TOOL_NAME)
+            ))
         } else {
             Err(
                 "Multiple Tau agents are registered. Use agents then select <agent-id-or-prefix>."
@@ -2061,6 +2076,7 @@ impl Extension {
                         operation,
                         external_identity,
                         policy_status,
+                        self.output.wire_tool_name(SEND_TOOL_NAME),
                     ),
                 },
             )));
@@ -2149,6 +2165,7 @@ fn transport_draft(
     operation: MessageOperation,
     external_identity: ExternalMessageIdentity,
     policy_status: SenderPolicyStatus,
+    send_tool: tau_proto::ToolName,
 ) -> TransportMessageDraft {
     TransportMessageDraft {
         transport_name: TRANSPORT_NAME.to_owned(),
@@ -2160,7 +2177,7 @@ fn transport_draft(
         external_identity: Some(external_identity),
         ordering: None,
         occurred_at: None,
-        send_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
+        send_tool: Some(send_tool),
     }
 }
 
@@ -2609,10 +2626,20 @@ impl TauExtension for SlackExtension {
         builder
             .configure_raw(handle_configure)
             .on_output_message(handle_output_message)
-            .tool_with_group_and_prompt_fragment(
-                register_tool_spec(),
-                Some(slack_tool_group()),
-                None,
+            .scoped_tool(
+                tau_proto::ToolName::new(REGISTER_TOOL_NAME),
+                |scope| {
+                    let mut tool = register_tool_spec();
+                    let send = scope.wire_tool(SEND_TOOL_NAME)?;
+                    tool.description = Some(format!(
+                        "Register or unregister this agent for Slack messages. Use enabled=true to allow an allowlisted Slack user to send prompts to this agent; use enabled=false to stop listening. When replying to Slack-originated prompts, use {send}."
+                    ));
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: Some(slack_tool_group()),
+                        prompt_fragment: None,
+                    })
+                },
                 handle_tool_invocation,
             )
             .tool_with_group_and_prompt_fragment(
@@ -2686,11 +2713,11 @@ fn refresh_send_tool(
     handle: &ClientHandle,
     destinations: &BTreeMap<String, SendDestination>,
 ) -> ClientResult<()> {
-    handle.emit(Event::ToolRegister(tau_proto::ToolRegister {
+    handle.register_local_tool(tau_proto::ToolRegister {
         tool: send_tool_spec_for_destinations(destinations),
         tool_group: Some(slack_tool_group()),
         prompt_fragment: None,
-    }))
+    })
 }
 
 /// Apply commit-gated ingress/send results and capability registration results.
@@ -2787,7 +2814,10 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
 }
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> ClientResult<()> {
-    cx.state.ext.dispatch_tool(cx.invoke().clone());
+    let local = cx.local_tool_name().clone();
+    cx.state
+        .ext
+        .dispatch_scoped_tool(&local, cx.invoke().clone());
     Ok(())
 }
 

@@ -145,6 +145,9 @@ pub(crate) trait ToolHandler<State> {
         handle: &ClientHandle,
         stop_requested: &mut bool,
     ) -> ClientResult<()>;
+
+    /// Install the final wire name derived from the initial configuration.
+    fn apply_name_scope(&mut self, scope: &crate::ToolNameScope) -> ClientResult<()>;
 }
 
 /// Runtime handler for one live action declaration.
@@ -401,8 +404,10 @@ where
 
 /// Live tool handler implementation.
 pub(crate) struct NamedToolHandler<F> {
-    /// Tool name this handler owns.
-    tool_name: tau_proto::ToolName,
+    /// Logical tool name declared by extension code.
+    local_tool_name: tau_proto::ToolName,
+    /// Final wire name selected after initial configuration.
+    wire_tool_name: tau_proto::ToolName,
     /// User-provided tool handler.
     handler: F,
 }
@@ -411,7 +416,11 @@ impl<F> NamedToolHandler<F> {
     /// Creates a live tool handler wrapper.
     #[must_use]
     pub(crate) fn new(tool_name: tau_proto::ToolName, handler: F) -> Self {
-        Self { tool_name, handler }
+        Self {
+            local_tool_name: tool_name.clone(),
+            wire_tool_name: tool_name,
+            handler,
+        }
     }
 }
 
@@ -426,16 +435,22 @@ where
         handle: &ClientHandle,
         stop_requested: &mut bool,
     ) -> ClientResult<()> {
-        if invoke.tool_name != self.tool_name {
+        if invoke.tool_name != self.wire_tool_name {
             return Ok(());
         }
         let cx = ToolContext {
             state,
             invoke,
             handle: handle.clone(),
+            local_tool_name: &self.local_tool_name,
             stop_requested,
         };
         (self.handler)(cx)
+    }
+
+    fn apply_name_scope(&mut self, scope: &crate::ToolNameScope) -> ClientResult<()> {
+        self.wire_tool_name = scope.wire_tool_name(&self.local_tool_name)?;
+        Ok(())
     }
 }
 

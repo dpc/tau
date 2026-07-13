@@ -24,6 +24,9 @@ pub enum ClientError {
     WriterPanicked,
     /// The extension builder recorded an invalid startup declaration.
     Builder(String),
+    /// A logical tool identifier could not be mapped through the installed
+    /// scope.
+    NameScope(String),
 }
 
 impl ClientError {
@@ -38,6 +41,12 @@ impl ClientError {
     pub fn builder(message: impl Into<String>) -> Self {
         Self::Builder(message.into())
     }
+
+    /// Creates a structural tool-name scope error.
+    #[must_use]
+    pub fn name_scope(message: impl Into<String>) -> Self {
+        Self::NameScope(message.into())
+    }
 }
 
 impl fmt::Display for ClientError {
@@ -46,7 +55,9 @@ impl fmt::Display for ClientError {
             Self::Decode(error) => write!(f, "{error}"),
             Self::Encode(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
-            Self::Handler(message) | Self::Builder(message) => f.write_str(message),
+            Self::Handler(message) | Self::Builder(message) | Self::NameScope(message) => {
+                f.write_str(message)
+            }
             Self::WriterClosed => f.write_str("tau client writer thread is closed"),
             Self::ReaderClosed => f.write_str("tau client reader thread is closed"),
             Self::ReaderPanicked => f.write_str("tau client reader thread panicked"),
@@ -63,6 +74,7 @@ impl std::error::Error for ClientError {
             Self::Io(error) => Some(error),
             Self::Handler(_)
             | Self::Builder(_)
+            | Self::NameScope(_)
             | Self::WriterClosed
             | Self::ReaderClosed
             | Self::ReaderPanicked

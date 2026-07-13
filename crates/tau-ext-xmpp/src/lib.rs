@@ -1,6 +1,7 @@
 //! Personal XMPP bridge extension for Tau agents.
 //!
-//! The extension exposes `xmpp_register` and `xmpp_send`. Under
+//! The extension declares logical `xmpp_register` and `xmpp_send` tools, which
+//! `ToolNameScope` maps to final per-instance wire names. Under
 //! `DESIGN-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also uses
 //! a mandatory JID allowlist and treats XMPP text as external untrusted prompt
 //! input.
@@ -46,13 +47,13 @@ use xmpp_parsers::stanza_error::StanzaError;
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "xmpp";
 
-/// Internal tool name for registering the current agent as an XMPP listener.
+/// Logical tool name for registering the current agent as an XMPP listener.
 pub const REGISTER_TOOL_NAME: &str = "xmpp_register";
 
-/// Internal tool name for sending an XMPP message from a registered agent.
+/// Logical tool name for sending an XMPP message from a registered agent.
 pub const SEND_TOOL_NAME: &str = "xmpp_send";
 
-/// Tool group name shared by all XMPP bridge tools.
+/// Logical tool group name shared by all XMPP bridge tools.
 pub const TOOL_GROUP_NAME: &str = "xmpp";
 
 /// Tag marking tools that register an agent with the XMPP bridge.
@@ -760,7 +761,7 @@ impl Extension {
         }
     }
 
-    fn dispatch_tool(&self, invoke: ToolStarted) {
+    fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
         self.output.emit(Event::ToolProgress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -772,12 +773,18 @@ impl Extension {
                 ..Default::default()
             }),
         }));
-        let event = match invoke.tool_name.as_str() {
+        let event = match local_tool_name.as_str() {
             REGISTER_TOOL_NAME => self.handle_register(invoke),
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown xmpp tool".to_owned()),
         };
         self.output.emit(event);
+    }
+
+    #[cfg(test)]
+    fn dispatch_tool(&self, invoke: ToolStarted) {
+        let local = invoke.tool_name.clone();
+        self.dispatch_scoped_tool(&local, invoke);
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
@@ -797,7 +804,7 @@ impl Extension {
                 let Some(session_id) = state.current_session_id.clone() else {
                     return tool_error(
                         invoke,
-                        "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
+                        "The XMPP registration tool requires an active Tau session; no session_started event has been observed yet".to_owned(),
                     );
                 };
                 let room_localpart = match room_localpart_for_registration(
@@ -892,7 +899,8 @@ impl Extension {
             if !state.registered_agents.contains(&invoke.agent_id) {
                 return tool_error(
                     invoke,
-                    "xmpp_send requires xmpp_register(enabled: true) first".to_owned(),
+                    "The XMPP send tool requires the registration tool with enabled=true first"
+                        .to_owned(),
                 );
             }
         }
@@ -1713,10 +1721,9 @@ impl WorkerState {
         client: &mut Client,
     ) -> Result<(), String> {
         self.ensure_online(client).await?;
-        let conversation = self
-            .conversations
-            .get(agent_id)
-            .ok_or_else(|| "xmpp_send requires xmpp_register(enabled: true) first".to_owned())?;
+        let conversation = self.conversations.get(agent_id).ok_or_else(|| {
+            "The XMPP send tool requires the registration tool with enabled=true first".to_owned()
+        })?;
         match conversation {
             Conversation::Muc { room, .. } => {
                 send_groupchat(client, room.clone().into(), text).await
@@ -2307,16 +2314,36 @@ impl TauExtension for XmppExtension {
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
             .configure_raw(handle_configure)
-            .tool_with_group_and_prompt_fragment(
-                register_tool_spec(),
-                Some(xmpp_tool_group()),
-                None,
+            .scoped_tool(
+                tau_proto::ToolName::new(REGISTER_TOOL_NAME),
+                |scope| {
+                    let mut tool = register_tool_spec();
+                    let send = scope.wire_tool(SEND_TOOL_NAME)?;
+                    tool.description = Some(format!(
+                        "Register or unregister the current agent for XMPP messages. Incoming prompts are accepted only from configured allowed_jids. Use {send} to reply to XMPP-originated prompts."
+                    ));
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: Some(xmpp_tool_group()),
+                        prompt_fragment: None,
+                    })
+                },
                 handle_tool_invocation,
             )
-            .tool_with_group_and_prompt_fragment(
-                send_tool_spec(),
-                Some(xmpp_tool_group()),
-                None,
+            .scoped_tool(
+                tau_proto::ToolName::new(SEND_TOOL_NAME),
+                |scope| {
+                    let mut tool = send_tool_spec();
+                    let register = scope.wire_tool(REGISTER_TOOL_NAME)?;
+                    tool.description = Some(format!(
+                        "Send a text reply to this agent's registered XMPP room or direct conversation. There is no destination argument; use {register} first. Replies to room-message prompts are visible to room occupants."
+                    ));
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: Some(xmpp_tool_group()),
+                        prompt_fragment: None,
+                    })
+                },
                 handle_tool_invocation,
             )
             .on_raw_restore(
@@ -2387,7 +2414,10 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, XmppRuntime>) -> Cli
 }
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> ClientResult<()> {
-    cx.state.ext.dispatch_tool(cx.invoke().clone());
+    let local = cx.local_tool_name().clone();
+    cx.state
+        .ext
+        .dispatch_scoped_tool(&local, cx.invoke().clone());
     Ok(())
 }
 

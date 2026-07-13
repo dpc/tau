@@ -14,6 +14,10 @@ owning prompt. Mid-turn role/model switches or later staged tool registrations
 may affect future prompts, but they must not expand or shrink the set of tools
 accepted for an already-dispatched prompt.
 
+The registry may contain policy-exclusive tools with the same model-visible
+alias. Snapshot construction rejects an effective surface where two enabled
+tools expose the same visible name, rather than selecting by registry order.
+
 Model-visible rejection diagnostics for prompt-owned calls follow the same
 authority boundary. If a rejected call is tied to an `AgentPromptId`, unavailable
 or near-name diagnostic text must derive from that prompt's tool snapshot rather

@@ -5,10 +5,19 @@ above `tau-proto`, which owns the wire messages. First-party extensions now use
 `tau-client` directly; the former compatibility startup helper crate was removed
 after the migration completed without a protocol break.
 
-The runner writes startup frames in harness-defined order: `Hello`, optional
-`Subscribe`, optional `Intercept`, startup `Emit` frames, then `Ready`. After
-startup it reads harness messages and dispatches configuration, deliveries,
-intercept requests, and disconnects.
+The runner writes `Hello`, requires the initial harness `Configure`, installs an
+immutable logical-to-wire tool-name scope, constructs state, and dispatches
+initial Configure handlers exactly once. It then writes static declarations,
+accepted Configure-derived declarations, and `Ready`, in that order.
+Configure-derived declarations are buffered while handlers run so they override
+same-name static defaults without becoming visible before configuration is
+accepted. Rejection emits `ConfigError`, discards buffered declarations, and
+withholds `Ready`; any `ConfigError` emitted after `Hello` and before `Ready`,
+including from a state factory, rejects the same startup transaction. Ordinary
+manual startup returns that rejection as an error rather than returning a
+runtime that never became ready. Later configuration may change extension-owned
+settings but not the tool prefix. This implements
+[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
 
 The manual-loop runtime uses the same startup writer and dispatch machinery, but
 hands receive-loop ownership to the extension. It starts a reader thread, exposes
@@ -28,12 +37,18 @@ while coalescing exact structural duplicates. It does not collapse logical
 overlaps such as `Prefix("tool.")` plus an exact `tool.started` selector.
 
 Outbound frames go through a writer thread owned by `TauExtensionRunner`.
-`ClientHandle` is cloneable, serializes writes through that thread, and waits for
-each frame to be encoded and flushed before returning. A closed or panicked
+`ClientHandle` is cloneable, serializes writes through that thread, and normally
+waits for each frame to be encoded and flushed before returning. During initial
+Configure dispatch, capability declarations return after entering the startup
+buffer; the runner later reports their encode/flush failure while draining that
+buffer before `Ready`. A closed or panicked
 writer is reported as `ClientError`. Detached enqueue helpers are also available
 for background workers that must not block the protocol reader on output
-backpressure; those helpers report only queue-closed failures to the caller, then
-let the writer thread own any later encode/flush error.
+backpressure; after admission checks, those helpers report queue-closed failures
+to the caller and let the writer thread own any later encode/flush error. `Ready`
+is runner-owned, linearized with pre-Ready `ConfigError`, and rejected by raw
+synchronous or detached handle APIs rather than being admitted as ordinary
+output.
 
 `ProtocolIoMeter` is a protocol-mechanical frame counter shared by UI and
 extension transports. It groups already-decoded/encoded frames by delivered or
@@ -51,23 +66,22 @@ error reporting but does not join the writer at shutdown, so harness
 `Disconnect` latency does not depend on queued background output.
 
 Extensions whose background workers need a persistent outbound handle can use
-the detached-writer state-factory entry point. The runner writes the complete
-startup prelude through `Ready` before invoking the factory with a cloneable
-`ClientHandle`, preserving startup staging while letting runtime state retain a
-handle for later worker output.
+the detached-writer state-factory entry point. The factory runs after scope
+installation and before Configure dispatch; synchronous public output remains
+startup-gated and detached output is held until `Ready`.
 
-Manual-loop extensions use the same startup staging. Their state factory also
-runs only after `Ready`, and timer branches can use `ManualExtensionRuntime`'s
-separate `handle()` method to emit output without storing a handle in every
-state type.
+Manual-loop extensions use the same startup staging. Their state factory runs
+before Configure dispatch, with the same output gates, and timer branches can
+use `ManualExtensionRuntime`'s separate `handle()` method.
 
 Config-gated extensions that cannot know their startup declarations until after
 an initial `Configure` can use the deferred manual-startup entry point. That
 mode writes and flushes only `Hello`, starts the reader/writer threads, and
 returns before any `Subscribe`, `Intercept`, startup `Emit`, or `Ready` frames.
 The caller then receives configuration, sends explicit dynamic startup frames
-through `ManualExtensionRuntime` helpers, and completes startup exactly once
-with `startup_ready`. Static builder declarations are rejected in this mode so a
+through `ManualExtensionRuntime` helpers (including `startup_local_tool` for
+scope-aware logical registrations), and completes startup exactly once with
+`startup_ready`. Static builder declarations are rejected in this mode so a
 config-gated extension cannot accidentally leak pre-configuration subscriptions,
 intercepts, tool registrations, action schemas, or ready text. After `Ready`,
 the runtime has the same blocking receive, reactive wake, dispatch, finish, and

@@ -531,3 +531,123 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     assert!(!policy.harness.prompt_tool_specs.contains_key(&prompt_id));
     assert!(policy.harness.prompt_tool_call_prompts.is_empty());
 }
+
+/// Effective alias validation is snapshot-local: duplicates are diagnosed only
+/// among tools simultaneously supplied to one prompt.
+#[test]
+fn effective_tool_surface_detects_visible_alias_collision() {
+    let spec = |internal: &str| ToolSpec {
+        name: ToolName::new(internal),
+        model_visible_name: Some(ToolName::new("shared")),
+        description: None,
+        tool_type: ToolType::Function,
+        parameters: None,
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: None,
+        examples: Vec::new(),
+    };
+    assert_eq!(
+        super::duplicate_model_visible_tool_name(&[spec("provider_a"), spec("provider_b")]),
+        Some(ToolName::new("shared"))
+    );
+    assert_eq!(
+        super::duplicate_model_visible_tool_name(&[spec("provider_a")]),
+        None
+    );
+}
+
+/// Role policy may keep duplicate aliases exclusive, while production prompt
+/// construction rejects the same aliases when both become effective.
+#[test]
+fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    let aliased = |internal: &str| {
+        let mut spec = tagged_tool(internal, false, &[]);
+        spec.model_visible_name = Some(ToolName::new("shared_alias"));
+        spec
+    };
+    policy
+        .harness
+        .registry
+        .register_internal("harness", aliased("internal_a"));
+    policy
+        .harness
+        .registry
+        .register_internal("harness", aliased("internal_b"));
+    policy.harness.available_roles.insert(
+        ROLE.to_owned(),
+        AgentRole {
+            enable_tools: vec![ToolName::new("internal_a")],
+            ..AgentRole::default()
+        },
+    );
+    let model = policy.harness.selected_model.as_ref().expect("model");
+    let exclusive = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
+    assert!(
+        policy
+            .harness
+            .try_build_system_prompt_for_role_and_agent(ROLE, None, &exclusive)
+            .is_ok()
+    );
+    let (internal, visible) = policy
+        .harness
+        .resolve_enabled_tool_name_for_role(&ToolName::new("shared_alias"), ROLE)
+        .expect("exclusive alias resolves");
+    assert_eq!(internal.as_str(), "internal_a");
+    assert_eq!(visible.as_str(), "shared_alias");
+    let route = policy
+        .harness
+        .registry
+        .route_tool_request(tau_proto::ToolRequest {
+            call_id: "alias-call".into(),
+            tool_name: internal,
+            tool_type: ToolType::Function,
+            arguments: tau_proto::CborValue::Map(Vec::new()),
+            agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("route exclusive alias owner");
+    assert_eq!(route.target, tau_core::ToolRouteTarget::Internal);
+
+    policy.harness.available_roles.insert(
+        ROLE.to_owned(),
+        AgentRole {
+            enable_tools: vec![ToolName::new("internal_a"), ToolName::new("internal_b")],
+            ..AgentRole::default()
+        },
+    );
+    let joint = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
+    let error = policy
+        .harness
+        .try_build_system_prompt_for_role_and_agent(ROLE, None, &joint)
+        .expect_err("joint alias surface must fail");
+    assert!(error.to_string().contains("duplicate model-visible name"));
+}
+
+/// Prompt-owned model calls resolve only through advertised visible names, so
+/// an alias cannot be shadowed by another tool's internal name.
+#[test]
+fn prompt_alias_resolution_does_not_prefer_an_internal_name() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    let mut aliased = tagged_tool("internal_a", true, &[]);
+    aliased.model_visible_name = Some(ToolName::new("visible_b"));
+    let mut other = tagged_tool("visible_b", true, &[]);
+    other.model_visible_name = Some(ToolName::new("visible_c"));
+    let prompt_id: tau_proto::AgentPromptId = "alias-resolution".into();
+    policy
+        .harness
+        .prompt_tool_specs
+        .insert(prompt_id.clone(), vec![aliased, other]);
+
+    let resolved = policy
+        .harness
+        .resolve_enabled_tool_spec_for_prompt(&ToolName::new("visible_b"), &prompt_id)
+        .expect("visible alias resolves");
+    assert_eq!(resolved.name.as_str(), "internal_a");
+}

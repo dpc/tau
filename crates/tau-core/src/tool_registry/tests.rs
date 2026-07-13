@@ -668,6 +668,45 @@ fn internal_tools_preserve_independent_registration_groups() {
     );
 }
 
+/// Harness-owned tools are authoritative even if an extension registered the
+/// same name first, and the displaced connection no longer retains ownership.
+#[test]
+fn internal_registration_preempts_extension_owner() {
+    let mut registry = ToolRegistry::new();
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }));
+    tool.name = ToolName::new("message");
+
+    assert!(
+        registry
+            .register("extension", tool.clone())
+            .errors
+            .is_empty()
+    );
+    assert!(
+        registry
+            .register_internal("harness", tool)
+            .errors
+            .is_empty()
+    );
+
+    let provider = registry
+        .resolve_provider("message")
+        .expect("internal provider replaces extension provider");
+    assert_eq!(provider.connection_id.as_str(), "harness");
+    assert_eq!(provider.kind, ToolProviderKind::Internal);
+    assert!(registry.unregister_connection("extension").is_empty());
+    assert_eq!(
+        registry
+            .resolve_provider("message")
+            .map(|provider| provider.connection_id.as_str()),
+        Some("harness")
+    );
+}
+
 #[test]
 fn tool_example_hint_selects_matching_subcommand_deterministically() {
     let mut tool = strict_tool(serde_json::json!({

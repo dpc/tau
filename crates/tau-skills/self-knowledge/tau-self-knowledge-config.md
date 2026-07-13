@@ -95,6 +95,14 @@ Per-secret `optional: true` is narrower: it omits only that secret when absent.
 A missing non-optional secret skips the whole extension only when
 `extensions.<name>.require: false`; otherwise it remains fatal.
 
+Multiple instances of one tool extension can set a distinct `tool_prefix`, for
+example `tool_prefix: work`. Tau then prefixes the structural internal tool name,
+model-visible alias, and group (`work_slack_send` and group `work_slack`) while
+leaving semantic tags and arbitrary descriptions/schemas unchanged. Exact
+tool/group role policy uses the final names; tag policy still spans instances.
+The setting is unrelated to the argv-wrapper `prefix`, and changing it requires
+an extension restart. With no `tool_prefix`, names are unchanged.
+
 ## Agent IDs and display names
 
 Tau mints durable agent IDs from the harness setting `agents.id_template`. Tau can also name newly created agents with optional `agents.display_name_template`:

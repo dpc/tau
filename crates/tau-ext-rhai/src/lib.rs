@@ -244,6 +244,7 @@ struct ScriptRuntime {
     scope: Scope<'static>,
     host_state: HostStateRef,
     tools: HashMap<ToolName, FnPtr>,
+    wire_to_local_tools: HashMap<ToolName, ToolName>,
 }
 
 /// Tau-client declaration for the config-gated Rhai runtime.
@@ -366,13 +367,22 @@ fn load_initial_runtime(
 ) -> Result<Option<ScriptRuntime>, Box<dyn Error>> {
     match load_runtime(configure, output.clone(), runtime_sender) {
         Ok((mut runtime, init, config_json)) => {
-            send_init_messages(manual, &runtime, init)?;
+            let prepared = match prepare_init_messages(manual, &mut runtime, init) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let message = error.to_string();
+                    tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
+                    send_config_error(manual, message)?;
+                    return Ok(None);
+                }
+            };
+            send_init_messages(manual, prepared)?;
             runtime.start(config_json, &output);
             Ok(Some(runtime))
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
-            send_config_error_ready(manual, message)?;
+            send_config_error(manual, message)?;
             Ok(None)
         }
     }
@@ -534,7 +544,10 @@ fn read_initial_config(
     loop {
         match manual.recv()? {
             ManualRuntimeInput::Message(message) => match message {
-                HarnessOutputMessage::Configure(configure) => return Ok(Some(configure)),
+                HarnessOutputMessage::Configure(configure) => {
+                    manual.dispatch_one(HarnessOutputMessage::Configure(configure.clone()))?;
+                    return Ok(Some(configure));
+                }
                 HarnessOutputMessage::Disconnect(_) => return Ok(None),
                 _ => {}
             },
@@ -576,6 +589,7 @@ fn load_runtime(
         scope: Scope::new(),
         host_state,
         tools: HashMap::new(),
+        wire_to_local_tools: HashMap::new(),
     };
     let config_json = init_config_json(&cfg.vars, configure.state_dir.as_ref());
     let init = runtime.init(config_json.clone())?;
@@ -601,18 +615,55 @@ fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
     })
 }
 
+/// Fully scope-validated startup output ready for ordered emission.
+struct PreparedInitMessages {
+    /// Script-authored subscriptions, intercepts, and Ready text.
+    init: InitOutput,
+    /// Tool registrations after immutable prefix composition.
+    registrations: Vec<ToolRegister>,
+}
+
+/// Scope-compose every tool before emitting any init-derived declaration.
+///
+/// This preflight keeps a late composition failure from leaking an earlier
+/// Subscribe, Intercept, ToolRegister, or Ready frame.
+fn prepare_init_messages(
+    manual: &mut ManualExtensionRuntime<()>,
+    runtime: &mut ScriptRuntime,
+    init: InitOutput,
+) -> tau_client::ClientResult<PreparedInitMessages> {
+    let handle = manual.handle();
+    let scope = handle.tool_name_scope()?;
+    let mut registrations = Vec::new();
+    let mut names = Vec::new();
+    for registration in runtime.tool_register_events() {
+        let local_name = registration.tool.name.clone();
+        let registration = scope.scope_registration(registration)?;
+        names.push((registration.tool.name.clone(), local_name));
+        registrations.push(registration);
+    }
+    runtime.wire_to_local_tools.extend(names);
+    Ok(PreparedInitMessages {
+        init,
+        registrations,
+    })
+}
+
 fn send_init_messages(
     manual: &mut ManualExtensionRuntime<()>,
-    runtime: &ScriptRuntime,
-    init: InitOutput,
+    prepared: PreparedInitMessages,
 ) -> Result<(), Box<dyn Error>> {
+    let PreparedInitMessages {
+        init,
+        registrations,
+    } = prepared;
     if !init.subscribe.is_empty() {
         manual.startup_subscribe(init.subscribe)?;
     }
     for intercept in init.intercept {
         manual.startup_intercept(intercept.selectors, intercept.priority)?;
     }
-    for registration in runtime.tool_register_events() {
+    for registration in registrations {
         manual.startup_event(Event::ToolRegister(registration))?;
     }
     manual.startup_ready(Some(
@@ -640,12 +691,11 @@ fn normalize_init_output(mut init: InitOutput) -> Result<InitOutput, String> {
     }];
     Ok(init)
 }
-fn send_config_error_ready(
+fn send_config_error(
     manual: &mut ManualExtensionRuntime<()>,
     message: String,
 ) -> Result<(), Box<dyn Error>> {
-    manual.handle().config_error(message.clone())?;
-    manual.startup_ready(Some(format!("rhai disabled: {message}")))?;
+    manual.handle().config_error(message)?;
     Ok(())
 }
 
@@ -1100,10 +1150,10 @@ impl ScriptRuntime {
         // signal available to extensions, so Rhai dispatch is necessarily
         // name-based until the protocol grows an owner field.
         if let Event::ToolStarted(started) = &event
-            && self.tools.contains_key(&started.tool_name)
+            && let Some(local_tool_name) = self.wire_to_local_tools.get(&started.tool_name)
         {
             if !replay {
-                self.on_tool_started(started.clone(), output);
+                self.on_tool_started(started.clone(), local_tool_name.clone(), output);
             }
             return;
         }
@@ -1167,10 +1217,17 @@ impl ScriptRuntime {
         }
     }
 
-    fn on_tool_started(&mut self, started: ToolStarted, output: &Output) {
-        let Some(handler) = self.tools.get(&started.tool_name).cloned() else {
+    fn on_tool_started(
+        &mut self,
+        started: ToolStarted,
+        local_tool_name: ToolName,
+        output: &Output,
+    ) {
+        let Some(handler) = self.tools.get(&local_tool_name).cloned() else {
             return;
         };
+        let mut local_started = started.clone();
+        local_started.tool_name = local_tool_name;
         let args = match cbor_to_json(&started.arguments).and_then(|json| json_to_dynamic(&json)) {
             Ok(args) => args,
             Err(message) => {
@@ -1182,7 +1239,7 @@ impl ScriptRuntime {
                 return;
             }
         };
-        let call = match json_to_dynamic(&tool_call_json(&started)) {
+        let call = match json_to_dynamic(&tool_call_json(&local_started)) {
             Ok(call) => call,
             Err(message) => {
                 self.emit_tool_error(

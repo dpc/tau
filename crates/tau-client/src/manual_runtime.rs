@@ -9,7 +9,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::builder::ExtensionBuilder;
-use crate::runner::{dispatch_message, write_hello, write_ready, write_startup};
+use crate::runner::{
+    dispatch_initial_configure, dispatch_message, write_hello, write_ready,
+    write_startup_after_configure,
+};
 use crate::writer_thread::{WriterCommand, run_writer};
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
 
@@ -110,10 +113,17 @@ pub struct ManualRuntimeWaker {
 /// Startup phase tracked by manual runtimes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManualStartupState {
-    /// The runtime has written only `Hello`; the caller must send dynamic
-    /// startup frames and exactly one `Ready` before entering steady-state
-    /// dispatch.
+    /// Only Hello has been written; the first Configure has not established the
+    /// name scope yet.
+    AwaitingConfigure,
+    /// Initial Configure installed scope but has not yet been dispatched.
+    Configuring,
+    /// Initial Configure installed the scope; the caller may now send dynamic
+    /// startup frames and exactly one `Ready`.
     Deferred,
+    /// A state factory or initial Configure handler emitted ConfigError; Ready
+    /// is forbidden.
+    Rejected,
     /// Startup has completed through `Ready`.
     Complete,
 }
@@ -312,12 +322,13 @@ impl<State> ManualExtensionRuntime<State> {
     ) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
         let selectors: Vec<_> = selectors.into_iter().collect();
-        self.handle.send(tau_proto::HarnessInputMessage::Subscribe(
-            tau_proto::Subscribe {
-                historical_selectors: Vec::new(),
-                live_selectors: selectors,
-            },
-        ))
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::Subscribe(
+                tau_proto::Subscribe {
+                    historical_selectors: Vec::new(),
+                    live_selectors: selectors,
+                },
+            ))
     }
 
     /// Sends a dynamic startup `Subscribe` frame with explicit restore/live
@@ -328,12 +339,13 @@ impl<State> ManualExtensionRuntime<State> {
         live_selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
     ) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
-        self.handle.send(tau_proto::HarnessInputMessage::Subscribe(
-            tau_proto::Subscribe {
-                historical_selectors: historical_selectors.into_iter().collect(),
-                live_selectors: live_selectors.into_iter().collect(),
-            },
-        ))
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::Subscribe(
+                tau_proto::Subscribe {
+                    historical_selectors: historical_selectors.into_iter().collect(),
+                    live_selectors: live_selectors.into_iter().collect(),
+                },
+            ))
     }
 
     /// Sends a dynamic startup `Intercept` frame before `Ready`.
@@ -357,20 +369,23 @@ impl<State> ManualExtensionRuntime<State> {
         priority: tau_proto::InterceptionPriority,
     ) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
-        self.handle.send(tau_proto::HarnessInputMessage::Intercept(
-            tau_proto::Intercept {
-                selectors: selectors.into_iter().collect(),
-                priority,
-            },
-        ))
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::Intercept(
+                tau_proto::Intercept {
+                    selectors: selectors.into_iter().collect(),
+                    priority,
+                },
+            ))
     }
 
     /// Emits one dynamic startup event before `Ready`.
     ///
-    /// This is intended for declarations such as tool registrations or action
-    /// schemas that are computed after initial configuration. Runtime events
-    /// after `Ready` should use [`Self::handle`] and [`ClientHandle::emit`]
-    /// instead.
+    /// This is intended for wire-level declarations such as action schemas that
+    /// are computed after initial configuration. Tool registrations expressed
+    /// in logical/local names must use [`Self::startup_local_tool`]; raw
+    /// tool events passed here must already contain final wire identifiers.
+    /// Runtime events after `Ready` should use [`Self::handle`] and
+    /// [`ClientHandle::emit`] instead.
     ///
     /// # Errors
     ///
@@ -378,7 +393,29 @@ impl<State> ManualExtensionRuntime<State> {
     /// be queued and flushed.
     pub fn startup_event(&mut self, event: tau_proto::Event) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
-        self.handle.emit(event)
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::emit(event))
+    }
+
+    /// Register one logical/local tool during deferred startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if startup is complete, initial configuration has not
+    /// established a scope, composition fails, or output fails.
+    pub fn startup_local_tool(
+        &mut self,
+        registration: tau_proto::ToolRegister,
+    ) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        let registration = self
+            .handle
+            .tool_name_scope()?
+            .scope_registration(registration)?;
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::emit(
+                tau_proto::Event::ToolRegister(registration),
+            ))
     }
 
     /// Sends the terminal startup `Ready` frame for a deferred manual runtime.
@@ -409,9 +446,15 @@ impl<State> ManualExtensionRuntime<State> {
     /// # Errors
     ///
     /// Returns an error when the reader thread reports a protocol decode/read
-    /// failure or exits without sending its terminal status.
+    /// failure, exits without sending its terminal status, or a deferred
+    /// startup receives a first message other than Configure or Disconnect.
     pub fn recv(&mut self) -> ClientResult<ManualRuntimeInput> {
-        self.input.borrow_mut().recv()
+        loop {
+            let input = self.input.borrow_mut().recv()?;
+            if self.accept_received_input(&input)? {
+                return Ok(input);
+            }
+        }
     }
 
     /// Waits up to `timeout` for the next harness message or input EOF.
@@ -423,9 +466,22 @@ impl<State> ManualExtensionRuntime<State> {
     /// # Errors
     ///
     /// Returns an error when the reader thread reports a protocol decode/read
-    /// failure or exits without sending its terminal status.
+    /// failure, exits without sending its terminal status, or a deferred
+    /// startup receives a first message other than Configure or Disconnect.
     pub fn recv_timeout(&mut self, timeout: Duration) -> ClientResult<ManualRuntimeInput> {
-        self.input.borrow_mut().recv_timeout(timeout)
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            let remaining = deadline.map_or(timeout, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
+            let input = self.input.borrow_mut().recv_timeout(remaining)?;
+            if self.accept_received_input(&input)? {
+                return Ok(input);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Ok(ManualRuntimeInput::Timeout);
+            }
+        }
     }
 
     /// Attempts to receive a harness message or input EOF without blocking.
@@ -440,9 +496,19 @@ impl<State> ManualExtensionRuntime<State> {
     /// # Errors
     ///
     /// Returns an error when the reader thread reports a protocol decode/read
-    /// failure or exits without sending its terminal status.
+    /// failure, exits without sending its terminal status, or a deferred
+    /// startup receives a first message other than Configure or Disconnect.
     pub fn try_recv(&mut self) -> ClientResult<ManualRuntimePoll> {
-        self.input.borrow_mut().try_recv()
+        loop {
+            let input = self.input.borrow_mut().try_recv()?;
+            let accepted = match &input {
+                ManualRuntimePoll::Message(message) => self.accept_message(message)?,
+                ManualRuntimePoll::InputClosed | ManualRuntimePoll::Empty => true,
+            };
+            if accepted {
+                return Ok(input);
+            }
+        }
     }
 
     /// Blocks until harness input or caller-owned work signals this runtime.
@@ -530,6 +596,26 @@ impl<State> ManualExtensionRuntime<State> {
         &mut self,
         message: tau_proto::HarnessOutputMessage,
     ) -> ClientResult<DispatchOutcome> {
+        let initial_configure = self.startup == ManualStartupState::Configuring
+            && matches!(&message, tau_proto::HarnessOutputMessage::Configure(_));
+        if initial_configure {
+            let tau_proto::HarnessOutputMessage::Configure(configure) = message else {
+                unreachable!("initial Configure classification");
+            };
+            self.startup = if dispatch_initial_configure(
+                &configure,
+                &mut self.state,
+                &mut self.builder,
+                &self.handle,
+            )? {
+                self.handle.flush_configure_outputs()?;
+                ManualStartupState::Deferred
+            } else {
+                self.handle.discard_configure_outputs();
+                ManualStartupState::Rejected
+            };
+            return Ok(DispatchOutcome::Continue);
+        }
         dispatch_message(message, &mut self.state, &mut self.builder, &self.handle)
     }
 
@@ -604,10 +690,62 @@ impl<State> ManualExtensionRuntime<State> {
 
     fn ensure_deferred_startup(&self) -> ClientResult<()> {
         match self.startup {
-            ManualStartupState::Deferred => Ok(()),
+            ManualStartupState::Deferred if !self.handle.startup_rejected() => Ok(()),
+            ManualStartupState::Deferred => Err(ClientError::handler(
+                "deferred startup cannot continue after ConfigError",
+            )),
+            ManualStartupState::AwaitingConfigure | ManualStartupState::Configuring => Err(
+                ClientError::handler("deferred startup declarations require initial Configure"),
+            ),
+            ManualStartupState::Rejected => Err(ClientError::handler(
+                "deferred startup cannot continue after initial Configure rejection",
+            )),
             ManualStartupState::Complete => Err(ClientError::handler(
                 "deferred manual startup has already completed",
             )),
+        }
+    }
+
+    /// Reject changed-prefix Configure messages before caller-owned dispatch.
+    fn accept_received_input(&mut self, input: &ManualRuntimeInput) -> ClientResult<bool> {
+        match input {
+            ManualRuntimeInput::Message(message) => self.accept_message(message),
+            ManualRuntimeInput::Timeout | ManualRuntimeInput::InputClosed => Ok(true),
+        }
+    }
+
+    fn accept_message(&mut self, message: &tau_proto::HarnessOutputMessage) -> ClientResult<bool> {
+        if let tau_proto::HarnessOutputMessage::Configure(configure) = message {
+            return self.accept_configure(configure);
+        }
+        if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
+            return Ok(true);
+        }
+        if self.startup == ManualStartupState::AwaitingConfigure {
+            return Err(ClientError::handler(
+                "expected initial Configure after Hello in deferred startup",
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Establish the first scope or emit ConfigError and consume an immutable
+    /// identity change.
+    fn accept_configure(&mut self, configure: &tau_proto::Configure) -> ClientResult<bool> {
+        match self
+            .handle
+            .install_tool_name_scope(crate::ToolNameScope::from_configure(configure))
+        {
+            Ok(()) => {
+                if self.startup == ManualStartupState::AwaitingConfigure {
+                    self.startup = ManualStartupState::Configuring;
+                }
+                Ok(true)
+            }
+            Err(error) => {
+                self.handle.config_error(error.to_string())?;
+                Ok(false)
+            }
         }
     }
 }
@@ -798,8 +936,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error when builder validation fails, startup output cannot be
-    /// encoded or flushed.
+    /// Returns an error when builder validation fails, initial configuration is
+    /// rejected, or startup output cannot be encoded or flushed.
     pub fn start_manual_loop<R, W>(
         self,
         reader: R,
@@ -813,18 +951,19 @@ where
         self.start_manual_loop_with_state(reader, writer, |_| state)
     }
 
-    /// Starts the extension and constructs state after startup frames are
-    /// ready.
+    /// Starts the extension and constructs state after initial `Configure`
+    /// establishes tool identity but before declarations and `Ready`.
     ///
-    /// The supplied factory receives a cloneable [`ClientHandle`] only after
-    /// the complete startup prelude has been written through `Ready`,
-    /// preserving the normal startup staging while allowing caller-owned
-    /// loops or background workers to retain outbound handles.
+    /// The supplied factory receives a cloneable [`ClientHandle`] before
+    /// initial configuration handlers run. Synchronous output remains
+    /// rejected and detached output is queued until `Ready`, preserving
+    /// startup staging while allowing caller-owned loops or background
+    /// workers to retain the handle.
     ///
     /// # Errors
     ///
-    /// Returns an error when builder validation fails, startup output cannot be
-    /// encoded or flushed.
+    /// Returns an error when builder validation fails, initial configuration is
+    /// rejected, or startup output cannot be encoded or flushed.
     pub fn start_manual_loop_with_state<R, W, MakeState>(
         self,
         reader: R,
@@ -836,6 +975,34 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle) -> Extension::State,
     {
+        self.start_manual_loop_with_extension_data_state(reader, writer, |handle, _| {
+            make_state(handle)
+        })
+    }
+
+    /// Starts the extension and constructs state with an extension-data client
+    /// before initial configuration is dispatched.
+    ///
+    /// This variant supports configuration handlers that must install an
+    /// extension-data-backed service in state before they validate the initial
+    /// `Configure`. The supplied client shares the manual runtime's input
+    /// queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when builder validation fails, initial configuration is
+    /// rejected, or startup output cannot be encoded or flushed.
+    pub fn start_manual_loop_with_extension_data_state<R, W, MakeState>(
+        self,
+        reader: R,
+        writer: W,
+        make_state: MakeState,
+    ) -> ClientResult<ManualExtensionRuntime<Extension::State>>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+        MakeState: FnOnce(ClientHandle, ExtensionDataClient) -> Extension::State,
+    {
         let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
         self.extension.register(&mut builder);
         builder.validate()?;
@@ -844,31 +1011,89 @@ where
         let handle = ClientHandle::new(sender);
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
 
-        if let Err(error) = write_startup(&builder, &handle) {
+        if let Err(error) = write_hello(&builder, &handle) {
             let _ = handle.shutdown();
             let _ = writer_thread.join();
             return Err(error);
         }
-
-        let state = make_state(handle.clone());
+        let mut input_reader = tau_proto::PeerInputReader::new(reader);
+        let startup_result = (|| {
+            let configure = match input_reader.read_message()? {
+                Some(tau_proto::HarnessOutputMessage::Configure(configure)) => configure,
+                Some(message) => {
+                    return Err(ClientError::handler(format!(
+                        "expected initial Configure after Hello, received {message:?}"
+                    )));
+                }
+                None => {
+                    return Err(ClientError::handler(
+                        "harness input closed before initial Configure",
+                    ));
+                }
+            };
+            let scope = crate::ToolNameScope::from_configure(&configure);
+            handle.install_tool_name_scope(scope.clone())?;
+            if let Err(error) = builder.apply_tool_name_scope(&scope) {
+                handle.config_error(error.to_string())?;
+                return Err(error);
+            }
+            Ok(configure)
+        })();
+        let configure = match startup_result {
+            Ok(configure) => configure,
+            Err(error) => {
+                let _ = handle.shutdown();
+                let _ = writer_thread.join();
+                return Err(error);
+            }
+        };
         let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
-        let (input, reader_thread) = spawn_reader_thread(reader, wake_sender.clone());
+        let (input_receiver, reader_thread) =
+            spawn_peer_reader_thread(input_reader, wake_sender.clone());
+        let input = Rc::new(RefCell::new(ManualInput {
+            receiver: input_receiver,
+            pending: VecDeque::new(),
+            input_closed: false,
+        }));
+        let extension_data = ExtensionDataClient {
+            handle: handle.clone(),
+            input: Rc::clone(&input),
+        };
+        let mut state = make_state(handle.clone(), extension_data);
+        let configure_accepted =
+            dispatch_initial_configure(&configure, &mut state, &mut builder, &handle)?;
+        let startup = if configure_accepted {
+            if let Err(error) = write_startup_after_configure(&builder, &handle) {
+                let _ = handle.shutdown();
+                let _ = writer_thread.join();
+                return Err(error);
+            }
+            ManualStartupState::Complete
+        } else {
+            handle.discard_configure_outputs();
+            let shutdown_result = handle.shutdown();
+            let writer_result = writer_thread
+                .join()
+                .map_err(|_| ClientError::WriterPanicked)
+                .and_then(|result| result);
+            shutdown_result?;
+            writer_result?;
+            return Err(ClientError::handler(
+                "initial Configure was rejected before Ready",
+            ));
+        };
         Ok(ManualExtensionRuntime {
             state,
             builder,
-            handle,
-            input: Rc::new(RefCell::new(ManualInput {
-                receiver: input,
-                pending: VecDeque::new(),
-                input_closed: false,
-            })),
+            handle: handle.clone(),
+            input,
             wake_receiver,
             waker: ManualRuntimeWaker {
                 sender: wake_sender,
             },
             reader_thread,
             writer_thread,
-            startup: ManualStartupState::Complete,
+            startup,
         })
     }
 
@@ -877,11 +1102,14 @@ where
     /// This writes and flushes only the initial `Hello` frame, starts the
     /// reader and writer threads, constructs state, and returns before any
     /// `Subscribe`, `Intercept`, startup `Emit`, or `Ready` frames are sent.
-    /// Callers can then receive initial configuration, compute dynamic startup
-    /// declarations, send them with
+    /// Callers must first receive initial `Configure`, which establishes the
+    /// immutable tool-name scope. They can then compute dynamic startup
+    /// declarations and send them with
     /// [`ManualExtensionRuntime::startup_subscribe`],
     /// [`ManualExtensionRuntime::startup_intercept`], and
-    /// [`ManualExtensionRuntime::startup_event`], and finish exactly once with
+    /// [`ManualExtensionRuntime::startup_event`], using
+    /// [`ManualExtensionRuntime::startup_local_tool`] for logical tool names,
+    /// and finish exactly once with
     /// [`ManualExtensionRuntime::startup_ready`].
     ///
     /// Builders used with this mode may register dispatch handlers, but must
@@ -965,13 +1193,25 @@ where
             },
             reader_thread,
             writer_thread,
-            startup: ManualStartupState::Deferred,
+            startup: ManualStartupState::AwaitingConfigure,
         })
     }
 }
 
 fn spawn_reader_thread<R>(
     reader: R,
+    wake_sender: tau_blocking_notify_channel::Sender,
+) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
+where
+    R: Read + Send + 'static,
+{
+    spawn_peer_reader_thread(tau_proto::PeerInputReader::new(reader), wake_sender)
+}
+
+/// Spawn the background reader while preserving bytes already buffered during
+/// the synchronous Configure gate.
+fn spawn_peer_reader_thread<R>(
+    mut reader: tau_proto::PeerInputReader<R>,
     wake_sender: tau_blocking_notify_channel::Sender,
 ) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
 where
@@ -994,7 +1234,6 @@ where
         let _wake_on_exit = WakeOnDrop {
             sender: wake_sender.clone(),
         };
-        let mut reader = tau_proto::PeerInputReader::new(reader);
         loop {
             let message = match reader.read_message() {
                 Ok(Some(message)) => ReaderMessage::Message(message),

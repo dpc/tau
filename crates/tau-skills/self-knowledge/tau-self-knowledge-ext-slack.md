@@ -9,6 +9,9 @@ advertise: false
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
 `slack_register` and `slack_send`; agents never choose arbitrary Slack
 destinations. Incoming Slack text is always untrusted external content.
+For multiple accounts, configure distinct generic `tool_prefix` values; prefix
+`work` exposes `work_slack_register`, `work_slack_send`, and group `work_slack`.
+Without a prefix the logical names are unchanged.
 
 ## Configuration
 

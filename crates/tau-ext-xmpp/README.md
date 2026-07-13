@@ -76,6 +76,8 @@ server-side membership list is the intended authorization boundary.
 extensions:
   std-xmpp:
     enable: true
+    # Optional for multiple XMPP accounts: work_xmpp_register/work_xmpp_send.
+    # tool_prefix: work
     secrets:
       xmpp_password: {}
     config:

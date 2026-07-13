@@ -9,8 +9,8 @@ in rustdoc because downstream extension crates are expected to build on them.
 When changing this crate:
 
 - preserve the existing `tau-proto` wire format;
-- keep startup frame ordering stable (`Hello`, optional `Subscribe`, optional
-  `Intercept`, startup events, `Ready`);
+- keep startup ordering stable (`Hello`, initial `Configure` scope/state/handlers,
+  static declarations, accepted Configure-derived declarations, `Ready`);
 - add focused unit tests for new handler or protocol lifecycle behavior;
 - update `specs/ARCH-tau-client.md` when changing lifecycle, replay, writer-thread,
   config, or intercept semantics.

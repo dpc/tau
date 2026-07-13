@@ -334,62 +334,21 @@ fn telegram_tools_have_group_and_tags() {
     assert!(send.tags.iter().any(|tag| tag.as_str() == SEND_TOOL_TAG));
 }
 
-/// Custom Telegram instances derive distinct tool and group names from the
-/// configured extension instance name so multiple bot tokens can coexist in one
-/// harness without ambiguous `telegram_register`/`telegram_send` collisions.
+/// Telegram uses only the generic configured SDK prefix and never derives names
+/// from the operational instance key.
 #[test]
-fn telegram_custom_instance_derives_namespaced_tools() {
-    let cfg = ExtConfig {
-        tool_namespace: None,
-        ..ExtConfig::default()
-    };
-    let names =
-        ToolNames::from_config_and_instance(&cfg, Some(&"telegram-work".into())).expect("names");
-    assert_eq!(names.register.as_str(), "telegram_dwork_register");
-    assert_eq!(names.send.as_str(), "telegram_dwork_send");
-    assert_eq!(names.group.as_str(), "telegram_dwork");
-
-    let underscored =
-        ToolNames::from_config_and_instance(&cfg, Some(&"telegram_work".into())).expect("names");
-    assert_eq!(underscored.register.as_str(), "telegram__work_register");
-    assert_ne!(names.register, underscored.register);
-
-    let register = register_tool_spec_for(&names);
-    let send = send_tool_spec_for(&names);
-    assert_eq!(register.name.as_str(), "telegram_dwork_register");
-    assert_eq!(send.name.as_str(), "telegram_dwork_send");
-    assert_eq!(
-        telegram_tool_group_for(&names).name.as_str(),
-        "telegram_dwork"
-    );
-}
-
-/// The built-in `std-telegram` instance keeps the historical tool names, while
-/// an explicit `tool_namespace` lets users override instance-derived names when
-/// they need a shorter or more stable multi-bot policy surface.
-#[test]
-fn telegram_tool_namespace_defaults_and_overrides_are_validated() {
-    let legacy =
-        ToolNames::from_config_and_instance(&ExtConfig::default(), Some(&"std-telegram".into()))
-            .expect("legacy names");
-    assert_eq!(legacy.register.as_str(), REGISTER_TOOL_NAME);
-    assert_eq!(legacy.send.as_str(), SEND_TOOL_NAME);
-
-    let explicit = ExtConfig {
-        tool_namespace: Some("tg_ops".to_owned()),
-        ..ExtConfig::default()
-    };
-    let names = ToolNames::from_config_and_instance(&explicit, Some(&"telegram-work".into()))
-        .expect("names");
-    assert_eq!(names.register.as_str(), "tg_ops_register");
-    assert_eq!(names.send.as_str(), "tg_ops_send");
-
-    let bad = ExtConfig {
-        tool_namespace: Some("telegram-work".to_owned()),
-        ..ExtConfig::default()
-    };
-    let err = ToolNames::from_config_and_instance(&bad, None).expect_err("invalid namespace");
-    assert!(err.contains("tool_namespace"));
+fn telegram_uses_generic_tool_prefix() {
+    let scope = tau_client::ToolNameScope::from_configure(&tau_proto::Configure {
+        tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+        config: CborValue::Null,
+        instance_name: Some("arbitrary-instance".into()),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    });
+    let names = ToolNames::from_scope(&scope).expect("scoped names");
+    assert_eq!(names.register.as_str(), "work_telegram_register");
+    assert_eq!(names.send.as_str(), "work_telegram_send");
+    assert_eq!(names.group.as_str(), "work_telegram");
 }
 
 /// Provider-owned repair examples must stay schema-valid as bridge tool
@@ -467,14 +426,14 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
             seen_requests_thread.lock().expect("requests").push(request);
             let response = match index {
                 0 => serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "gateway_generation": "test",
                     "reannounce_required": true,
                     "deliveries": [],
                 }),
                 1 => serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [{
                         "request_id": "telegram-1",
@@ -486,7 +445,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                     }],
                 }),
                 _ => serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [],
                 }),
@@ -554,7 +513,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -616,7 +575,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -753,7 +712,7 @@ fn gateway_client_config_error_sends_goodbye() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -802,7 +761,7 @@ fn gateway_client_agent_unload_sends_unregister() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -1970,6 +1929,7 @@ fn run_exits_after_register_then_disconnect() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2008,6 +1968,7 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2053,6 +2014,7 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2106,11 +2068,12 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
 /// in deferred-startup mode, rather than becoming a silent extension startup
 /// failure before the harness can publish a replayable notice.
 #[test]
-fn run_initial_malformed_config_emits_config_error_and_ready() {
+fn run_initial_malformed_config_emits_config_error_without_ready() {
     let mut input = Vec::new();
     let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
@@ -2133,19 +2096,12 @@ fn run_initial_malformed_config_emits_config_error_and_ready() {
             HarnessInputMessage::ConfigError(error) if error.message.contains("unknown_field") => {
                 saw_config_error = true;
             }
-            HarnessInputMessage::Ready(ready)
-                if ready.message.as_deref() == Some("telegram disabled") =>
-            {
-                saw_ready = true;
-            }
+            HarnessInputMessage::Ready(_) => saw_ready = true,
             _ => {}
         }
     }
     assert!(saw_config_error, "initial config error should be reported");
-    assert!(
-        saw_ready,
-        "extension should finish startup after config error"
-    );
+    assert!(!saw_ready, "rejected initial config must withhold Ready");
 }
 
 /// The protocol startup path must publish and dispatch the dynamically computed
@@ -2158,6 +2114,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             instance_name: Some("telegram-work".into()),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2171,7 +2128,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
         .expect("config");
     writer
         .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
-            "telegram_dwork_register",
+            "work_telegram_register",
             "agent-1",
             bool_args(true),
         ))))
@@ -2190,21 +2147,21 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
                 Event::ToolRegister(register)
-                    if register.tool.name.as_str() == "telegram_dwork_register"
+                    if register.tool.name.as_str() == "work_telegram_register"
                         && register
                             .tool_group
                             .as_ref()
-                            .is_some_and(|group| group.name.as_str() == "telegram_dwork") =>
+                            .is_some_and(|group| group.name.as_str() == "work_telegram") =>
                 {
                     saw_register_tool = true;
                 }
                 Event::ToolRegister(register)
-                    if register.tool.name.as_str() == "telegram_dwork_send" =>
+                    if register.tool.name.as_str() == "work_telegram_send" =>
                 {
                     saw_send_tool = true;
                 }
                 Event::ToolResult(result)
-                    if result.tool_name.as_str() == "telegram_dwork_register" =>
+                    if result.tool_name.as_str() == "work_telegram_register" =>
                 {
                     saw_register_result = true;
                 }
@@ -2235,6 +2192,7 @@ fn run_ignores_unrelated_tool_started_events() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2288,6 +2246,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2308,6 +2267,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
         .expect("live register");
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
@@ -2357,17 +2317,17 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     assert!(client.sent.lock().expect("lock").is_empty());
 }
 
-/// Runtime namespace changes cannot update startup tool declarations, so they
-/// must be rejected as configuration errors and fail closed instead of letting
-/// the registered-agent state diverge from the published tool names.
+/// Removed legacy `tool_namespace` configuration is rejected rather than
+/// silently restoring the superseded Telegram-specific naming mechanism.
 #[test]
-fn run_runtime_tool_namespace_change_fails_closed() {
+fn run_legacy_tool_namespace_is_rejected() {
     let mut input = Vec::new();
     let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
     let mut secrets = BTreeMap::new();
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
@@ -2387,6 +2347,7 @@ fn run_runtime_tool_namespace_change_fails_closed() {
         .expect("register");
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
             instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "tool_namespace": "tg_ops",
@@ -2417,9 +2378,7 @@ fn run_runtime_tool_namespace_change_fails_closed() {
     let mut saw_send_error = false;
     while let Some(frame) = reader.read_message().expect("read output") {
         match frame {
-            HarnessInputMessage::ConfigError(error)
-                if error.message.contains("namespace cannot change") =>
-            {
+            HarnessInputMessage::ConfigError(error) if error.message.contains("tool_namespace") => {
                 saw_config_error = true;
             }
             HarnessInputMessage::Emit(emit) => {
@@ -2433,7 +2392,10 @@ fn run_runtime_tool_namespace_change_fails_closed() {
             _ => {}
         }
     }
-    assert!(saw_config_error, "namespace change should emit ConfigError");
+    assert!(
+        saw_config_error,
+        "legacy tool_namespace should emit ConfigError"
+    );
     assert!(
         saw_send_error,
         "send should fail after namespace config error"

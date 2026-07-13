@@ -5,9 +5,9 @@
 //! module names the extension-specific state machine separately from the rest
 //! of [`Harness`](super::Harness).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use tau_proto::{Event, PromptFragment, ToolRegister};
+use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegister};
 
 use crate::extension::ExtensionEntry;
 
@@ -18,6 +18,16 @@ pub(super) struct StagedExtensionPublish {
     pub(super) event: Event,
     /// Whether the staged event should skip durable session history.
     pub(super) transient: bool,
+}
+
+/// Operational message withheld behind activation with its global arrival
+/// order.
+#[derive(Clone, Debug)]
+pub(super) struct DeferredExtensionMessage {
+    /// Monotonic harness-local arrival order.
+    pub(super) order: u64,
+    /// Owned protocol message replayed after activation.
+    pub(super) message: HarnessInputMessage,
 }
 
 /// Extension-originated announcements accumulated until the extension reaches
@@ -59,6 +69,13 @@ pub(super) struct ExtensionActivationStage {
     pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.
     pub(super) emitted_events: Vec<StagedExtensionPublish>,
+    /// Operational protocol messages received after Ready but before the global
+    /// activation barrier closed.
+    pub(super) deferred_messages: Vec<DeferredExtensionMessage>,
+    /// Number of retained declaration/operational frames charged to this stage.
+    pub(super) retained_message_count: usize,
+    /// Encoded bytes charged to this stage.
+    pub(super) retained_message_bytes: usize,
 }
 
 /// Runtime state for extension process lifecycle and pre-`Ready` activation.
@@ -72,6 +89,9 @@ pub(crate) struct ExtensionRuntimeState {
     /// the extension sends `Ready`. Activation happens in the main harness loop
     /// so prompt assembly, routing, and subscribers see the full batch at once.
     pub(super) activation_staging: HashMap<tau_proto::ConnectionId, ExtensionActivationStage>,
+    /// Connections that sent `Ready` but are still waiting for the global
+    /// initial collision preflight or their atomic stage activation.
+    pub(super) ready_received: HashSet<tau_proto::ConnectionId>,
     /// Spawn-order list of connection ids into `entries`. Drives deterministic
     /// startup and shutdown loops that a `HashMap` alone cannot supply, and is
     /// updated in place whenever a supervised extension respawns with a fresh

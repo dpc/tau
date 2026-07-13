@@ -93,7 +93,8 @@ use crate::harness::extension_data::{
     rename_extension_data_file, sanitize_extension_data_path,
 };
 use crate::harness::extensions::{
-    ExtensionActivationStage, ExtensionRuntimeState, StagedExtensionPublish,
+    DeferredExtensionMessage, ExtensionActivationStage, ExtensionRuntimeState,
+    StagedExtensionPublish,
 };
 use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
@@ -120,6 +121,9 @@ const RENDERED_PROMPT_PREVIEW_AGENT_ID: &str = "dev-preview-agent";
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_EXTENSION_ACTIVATION_MESSAGES: usize = 1_024;
+const MAX_EXTENSION_ACTIVATION_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EXTENSION_CONFIG_ERROR_BYTES: usize = 4 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
@@ -132,6 +136,19 @@ const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
+
+fn bounded_extension_config_error(mut message: String) -> String {
+    if message.len() <= MAX_EXTENSION_CONFIG_ERROR_BYTES {
+        return message;
+    }
+    let mut end = MAX_EXTENSION_CONFIG_ERROR_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message.push_str("… [truncated]");
+    message
+}
 
 fn session_dir_status_from_reason(
     reason: tau_proto::SessionStartReason,
@@ -731,6 +748,18 @@ struct TransportDedupKey {
     extension_name: ExtensionName,
     transport_name: String,
     dedup_key: String,
+}
+
+/// Deferred events released after one extension's staged capabilities activate.
+struct ActivatedExtensionEvents {
+    /// Per-agent context acknowledgements.
+    context_ready: Vec<tau_proto::ExtensionContextReady>,
+    /// Session-wide context acknowledgements.
+    session_context_ready: Vec<tau_proto::ExtensionSessionContextReady>,
+    /// Extension-originated agent queries.
+    agent_queries: Vec<tau_proto::StartAgentRequest>,
+    /// Operational messages withheld behind the initial activation barrier.
+    deferred_messages: Vec<DeferredExtensionMessage>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1581,6 +1610,16 @@ pub(crate) enum InitialClient {
     Stdio,
 }
 
+/// Initial UI and harness-owned tool handlers installed before extension
+/// startup preflight.
+pub(crate) struct HarnessStartupPeers {
+    /// Optional UI transport accepted during startup.
+    pub(crate) initial_client: Option<InitialClient>,
+    /// Harness-owned tool handlers whose names must be reserved before
+    /// extensions.
+    pub(crate) internal_tool_handlers: InternalToolHandlers,
+}
+
 /// Output path used before an initial UI has been accepted by the normal bus.
 pub(crate) enum InitialClientStartupErrorOutput {
     #[cfg(test)]
@@ -1834,6 +1873,15 @@ pub struct Harness {
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
+    /// True after the one global initial-registration collision preflight has
+    /// completed. Respawns and later registrations never enter startup winner
+    /// selection.
+    initial_extension_tool_preflight_complete: bool,
+    /// True while collision losers are disconnected before survivor activation.
+    /// Prompt and session advancement remain suppressed during this interval.
+    resolving_initial_extension_collisions: bool,
+    /// Monotonic arrival order for operational frames held behind activation.
+    next_deferred_extension_message_order: u64,
     /// Names enabled by final startup resolution, including optional extensions
     /// that could not be started.
     pub(crate) enabled_extension_names: BTreeSet<String>,
@@ -2542,6 +2590,9 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             replayable_harness_notices: Vec::new(),
             extensions: ExtensionRuntimeState::default(),
+            initial_extension_tool_preflight_complete: false,
+            resolving_initial_extension_collisions: false,
+            next_deferred_extension_message_order: 0,
             enabled_extension_names: BTreeSet::new(),
             prompt_agents: HashMap::new(),
             agents: HashMap::new(),
@@ -2666,6 +2717,7 @@ impl Harness {
                 instance_id: next_iid(),
                 connection_id: provider_conn_id,
                 kind: ClientKind::Provider,
+                tool_prefix: None,
                 require: true,
                 respawn_allowed: true,
                 pid: Some(own_pid),
@@ -2692,6 +2744,7 @@ impl Harness {
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: ClientKind::Tool,
+                    tool_prefix: None,
                     require: true,
                     respawn_allowed: true,
                     pid: Some(own_pid),
@@ -2842,7 +2895,10 @@ impl Harness {
                 reason: eager_session_start_reason,
                 session_persistence,
             },
-            None,
+            HarnessStartupPeers {
+                initial_client: None,
+                internal_tool_handlers: Vec::new(),
+            },
             &mut initial_client_error_stream,
         )
         .map(|(harness, _)| harness)
@@ -2854,7 +2910,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         launch: HarnessSessionLaunch,
-        initial_client: Option<InitialClient>,
+        startup_peers: HarnessStartupPeers,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         let launch = launch.validate()?;
@@ -2862,12 +2918,13 @@ impl Harness {
         let state_dir = state_dir.into();
         let (mut harness, startup) =
             Self::build_configured_harness(config, state_dir, dirs, eager_session_id, launch)?;
+        harness.install_internal_tool_handlers(startup_peers.internal_tool_handlers);
 
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
-        let initial_client_id =
-            harness.accept_initial_client(initial_client, initial_client_error_stream)?;
+        let initial_client_id = harness
+            .accept_initial_client(startup_peers.initial_client, initial_client_error_stream)?;
         harness.publish_current_session_dir();
         harness.emit_extension_startup_diagnostics(&config.extension_startup_diagnostics);
         harness.emit_extension_startup_diagnostics(&startup.extension_secrets.diagnostics);
@@ -3224,6 +3281,7 @@ impl Harness {
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: kind.clone(),
+                    tool_prefix: ext_config.tool_prefix.clone(),
                     require: ext_config.require,
                     respawn_allowed: true,
                     pid: Some(spawned.child_pid),
@@ -3255,6 +3313,9 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(HarnessError::StartupTimeout);
+            }
             let harness_evt = self
                 .rx
                 .recv_timeout(remaining)
@@ -3264,13 +3325,23 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
+                    ..
                 } => {
                     if self.handle_startup_from_connection(&connection_id, *message)? {
+                        if STARTUP_TIMEOUT <= started_at.elapsed() {
+                            return Err(HarnessError::StartupTimeout);
+                        }
                         return Ok(());
                     }
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
+                }
+                HarnessEvent::ReadFailed {
+                    connection_id,
+                    error,
+                } => {
+                    self.handle_startup_read_failure(&connection_id, error)?;
                 }
                 HarnessEvent::NewClient(stream) => {
                     self.accept_client(stream)?;
@@ -3343,6 +3414,7 @@ impl Harness {
                 connection_id,
                 &format!("optional extension {name} did not initialize"),
             );
+            self.maybe_finish_extension_activation(connection_id)?;
             return Ok(());
         }
         self.handle_disconnect(connection_id);
@@ -3357,7 +3429,22 @@ impl Harness {
         if was_provider {
             return Err(provider_disconnected_error());
         }
+        self.maybe_finish_extension_activation(connection_id)?;
         Ok(())
+    }
+
+    fn handle_startup_read_failure(
+        &mut self,
+        connection_id: &str,
+        error: String,
+    ) -> Result<(), HarnessError> {
+        if self.extensions.entries.contains_key(connection_id) {
+            return self.handle_extension_protocol_failure(
+                connection_id,
+                format!("extension protocol decode failed: {error}"),
+            );
+        }
+        self.handle_startup_disconnect(connection_id)
     }
 
     fn log_event(&mut self, harness_event: &HarnessEvent) {
@@ -3547,6 +3634,7 @@ impl Harness {
         if let Some(replaced) = replaces {
             self.extensions.entries.remove(&replaced);
             self.extensions.activation_staging.remove(&replaced);
+            self.extensions.ready_received.remove(&replaced);
             if let Some(slot) = self.extensions.order.iter_mut().find(|id| **id == replaced) {
                 *slot = connection_id.clone();
             } else if !self.extensions.order.iter().any(|id| id == &connection_id) {
@@ -5524,6 +5612,9 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(HarnessError::StartupTimeout);
+            }
             let harness_evt = self
                 .rx
                 .recv_timeout(remaining)
@@ -5533,14 +5624,24 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
+                    ..
                 } => {
                     let _ = self.handle_startup_from_connection(&connection_id, *message)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
                 }
+                HarnessEvent::ReadFailed {
+                    connection_id,
+                    error,
+                } => {
+                    self.handle_startup_read_failure(&connection_id, error)?;
+                }
                 HarnessEvent::NewClient(_) => {}
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+            }
+            if STARTUP_TIMEOUT <= started_at.elapsed() {
+                return Err(HarnessError::StartupTimeout);
             }
         }
         Ok(())
@@ -5569,6 +5670,7 @@ impl Harness {
     /// state transitions are tracked per-extension so the same predicate
     /// can also gate runtime dispatch in `dispatch_blocked_for`.
     fn wait_for_extensions_ready(&mut self) -> Result<(), HarnessError> {
+        self.maybe_finish_extension_activation("")?;
         if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
             return Ok(());
         }
@@ -5577,23 +5679,44 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return self.handle_extensions_startup_timeout();
+            }
             let harness_evt = match self.rx.recv_timeout(remaining) {
                 Ok(event) => event,
                 Err(_) => return self.handle_extensions_startup_timeout(),
             };
             self.log_event(&harness_evt);
+            // Do not allow a frame received just before the deadline to activate
+            // an extension after the absolute startup deadline.
+            if STARTUP_TIMEOUT <= started_at.elapsed() {
+                return self.handle_extensions_startup_timeout();
+            }
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
+                    ..
                 } => {
                     let _ = self.handle_startup_from_connection(&connection_id, *message)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
                 }
+                HarnessEvent::ReadFailed {
+                    connection_id,
+                    error,
+                } => {
+                    self.handle_startup_read_failure(&connection_id, error)?;
+                }
                 HarnessEvent::NewClient(_) => {}
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+            }
+            if STARTUP_TIMEOUT <= started_at.elapsed() {
+                if self.extensions.pending_connects != 0 || !self.extensions_all_ready() {
+                    return self.handle_extensions_startup_timeout();
+                }
+                return Err(HarnessError::StartupTimeout);
             }
         }
         Ok(())
@@ -5604,11 +5727,11 @@ impl Harness {
             .extensions
             .entries
             .iter()
-            .filter(|(_, entry)| {
+            .filter(|(connection_id, entry)| {
                 !matches!(
                     entry.state,
                     ExtensionState::Ready | ExtensionState::Disconnected
-                )
+                ) && !self.extensions.ready_received.contains(*connection_id)
             })
             .map(|(connection_id, entry)| {
                 (connection_id.to_string(), entry.name.clone(), entry.require)
@@ -5640,6 +5763,7 @@ impl Harness {
                 &format!("optional extension {name} did not initialize"),
             );
         }
+        self.maybe_finish_extension_activation("")?;
 
         if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
             Ok(())
@@ -5774,6 +5898,7 @@ impl Harness {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             } => self.handle_runtime_connection_message(
                 connection_id,
                 message,
@@ -5782,6 +5907,19 @@ impl Harness {
             )?,
             HarnessEvent::Disconnected { connection_id } => {
                 self.handle_runtime_disconnect(connection_id, served_clients)?;
+            }
+            HarnessEvent::ReadFailed {
+                connection_id,
+                error,
+            } => {
+                if self.extensions.entries.contains_key(&connection_id) {
+                    self.handle_extension_protocol_failure(
+                        &connection_id,
+                        format!("extension protocol decode failed: {error}"),
+                    )?;
+                } else {
+                    self.handle_runtime_disconnect(connection_id, served_clients)?;
+                }
             }
             HarnessEvent::NewClient(stream) => {
                 self.accept_client(stream)?;
@@ -6030,10 +6168,22 @@ impl Harness {
         let (tools, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
-            (
-                Some(self.gather_tool_definitions_for_role(&request.role)),
-                None,
-            )
+            let model = model_for_role(
+                &self.provider_model_info,
+                &self.available_roles,
+                &request.role,
+            );
+            let specs =
+                self.gather_effective_tool_specs_for_role_model(&request.role, model.as_ref());
+            match duplicate_model_visible_tool_name(&specs) {
+                Some(name) => (
+                    None,
+                    Some(format!(
+                        "effective tool surface contains duplicate model-visible name `{name}`"
+                    )),
+                ),
+                None => (Some(self.tool_definitions_from_specs(&specs)), None),
+            }
         };
         let _ = self.bus.send_to(
             connection_id,
@@ -6185,6 +6335,54 @@ impl Harness {
         self.extension_activation_stage_mut(source_id)
             .tool_registrations
             .push(registration);
+    }
+
+    /// Validate that an extension with an assigned prefix kept every structural
+    /// registration identifier inside that prefix envelope.
+    fn validate_or_reject_assigned_prefix(
+        &mut self,
+        source_id: &str,
+        registration: &ToolRegister,
+    ) -> bool {
+        let Some(entry) = self.extensions.entries.get(source_id) else {
+            return true;
+        };
+        let Some(prefix) = entry.tool_prefix.as_ref() else {
+            return true;
+        };
+        let valid = prefix.contains_tool_name(&registration.tool.name)
+            && registration
+                .tool
+                .model_visible_name
+                .as_ref()
+                .is_none_or(|name| prefix.contains_tool_name(name))
+            && registration
+                .tool_group
+                .as_ref()
+                .is_none_or(|group| prefix.contains_group_name(&group.name));
+        if valid {
+            return true;
+        }
+        let extension_name = entry.name.clone();
+        let message = format!(
+            "Rejected tool registration `{}` from extension `{extension_name}`: assigned tool_prefix `{prefix}` requires internal names, visible aliases, and groups to use the exact `{prefix}_` envelope",
+            registration.tool.name
+        );
+        tracing::warn!(
+            target: "tau_harness",
+            connection_id = %source_id,
+            extension = %extension_name,
+            tool_name = %registration.tool.name,
+            tool_prefix = %prefix,
+            "rejected tool registration outside assigned prefix"
+        );
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+            tau_proto::NoticeLevel::Critical,
+            true,
+            &message,
+        );
+        false
     }
 
     fn remove_staged_tool_registration(&mut self, source_id: &str, tool_name: &ToolName) -> bool {
@@ -6705,13 +6903,14 @@ impl Harness {
     fn activate_staged_extension_capabilities(
         &mut self,
         source_id: &str,
-    ) -> (
-        Vec<tau_proto::ExtensionContextReady>,
-        Vec<tau_proto::ExtensionSessionContextReady>,
-        Vec<tau_proto::StartAgentRequest>,
-    ) {
+    ) -> ActivatedExtensionEvents {
         let Some(stage) = self.extensions.activation_staging.remove(source_id) else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return ActivatedExtensionEvents {
+                context_ready: Vec::new(),
+                session_context_ready: Vec::new(),
+                agent_queries: Vec::new(),
+                deferred_messages: Vec::new(),
+            };
         };
         if let Some(intercept) = stage.intercept {
             self.register_extension_interceptor(source_id, intercept);
@@ -6770,11 +6969,422 @@ impl Harness {
         for staged in stage.emitted_events {
             self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
         }
-        (
-            stage.context_ready_events,
-            stage.session_context_ready_events,
-            stage.agent_queries,
-        )
+        ActivatedExtensionEvents {
+            context_ready: stage.context_ready_events,
+            session_context_ready: stage.session_context_ready_events,
+            agent_queries: stage.agent_queries,
+            deferred_messages: stage.deferred_messages,
+        }
+    }
+
+    /// Activate one already-preflighted stage and publish its deferred events.
+    fn finish_staged_extension_activation(
+        &mut self,
+        source_id: &str,
+        activated: ActivatedExtensionEvents,
+    ) -> Result<(), HarnessError> {
+        for ready in activated.context_ready {
+            self.publish_extension_context_ready(source_id, ready)?;
+        }
+        for ready in activated.session_context_ready {
+            self.publish_extension_session_context_ready(source_id, ready)?;
+        }
+        for query in activated.agent_queries {
+            self.handle_start_agent_request(source_id, query)?;
+        }
+        for message in activated.deferred_messages {
+            self.handle_extension_message(source_id, message.message)?;
+        }
+        Ok(())
+    }
+
+    /// Return whether every initially configured extension has reached a
+    /// terminal startup state and the global registration preflight may
+    /// run.
+    fn initial_extension_preflight_ready(&self) -> bool {
+        self.extensions.pending_connects == 0
+            && self
+                .extensions
+                .entries
+                .iter()
+                .all(|(connection_id, entry)| {
+                    matches!(
+                        entry.state,
+                        ExtensionState::Ready | ExtensionState::Disconnected
+                    ) || self.extensions.ready_received.contains(connection_id)
+                })
+    }
+
+    /// Resolve all staged initial tool-name collisions independently of Ready
+    /// arrival order.
+    fn preflight_initial_extension_tools(&mut self) -> Result<(), HarnessError> {
+        #[derive(Clone)]
+        struct Owner {
+            connection_id: tau_proto::ConnectionId,
+            instance_name: String,
+            required: bool,
+            prefix: Option<tau_proto::ToolNamePrefix>,
+        }
+
+        for stage in self.extensions.activation_staging.values_mut() {
+            let mut seen = HashSet::new();
+            let mut registrations = stage
+                .tool_registrations
+                .drain(..)
+                .rev()
+                .filter(|registration| seen.insert(registration.tool.name.clone()))
+                .collect::<Vec<_>>();
+            registrations.reverse();
+            stage.tool_registrations = registrations;
+        }
+
+        let mut invalid = Vec::new();
+        for (connection_id, stage) in &self.extensions.activation_staging {
+            let Some(entry) = self.extensions.entries.get(connection_id) else {
+                continue;
+            };
+            for registration in &stage.tool_registrations {
+                if let Err(error) = tau_core::validate_tool_examples(&registration.tool) {
+                    invalid.push((
+                        connection_id.clone(),
+                        entry.name.clone(),
+                        entry.require,
+                        error.to_string(),
+                    ));
+                    break;
+                }
+            }
+        }
+        invalid.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        for (connection_id, name, required, error) in invalid {
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                tau_proto::NoticeLevel::Critical,
+                true,
+                &format!("Rejected tool registration from `{name}`: {error}"),
+            );
+            if required {
+                return Err(HarnessError::Participant(format!(
+                    "required extension `{name}` published an invalid tool registration: {error}"
+                )));
+            }
+            self.disable_optional_extension(
+                connection_id.as_str(),
+                &format!(
+                    "optional extension `{name}` disabled after invalid tool registration: {error}"
+                ),
+            );
+        }
+
+        let mut owners_by_tool = HashMap::<ToolName, Vec<Owner>>::new();
+        for (connection_id, stage) in &self.extensions.activation_staging {
+            let Some(entry) = self.extensions.entries.get(connection_id) else {
+                continue;
+            };
+            for registration in &stage.tool_registrations {
+                let owners = owners_by_tool
+                    .entry(registration.tool.name.clone())
+                    .or_default();
+                if owners
+                    .iter()
+                    .any(|owner| owner.connection_id == *connection_id)
+                {
+                    continue;
+                }
+                owners.push(Owner {
+                    connection_id: connection_id.clone(),
+                    instance_name: entry.name.clone(),
+                    required: entry.require,
+                    prefix: entry.tool_prefix.clone(),
+                });
+            }
+        }
+
+        let mut owners_by_tool = owners_by_tool.into_iter().collect::<Vec<_>>();
+        owners_by_tool.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        let mut disabled_optional = BTreeMap::<tau_proto::ConnectionId, String>::new();
+        for (tool_name, mut owners) in owners_by_tool {
+            owners.sort_by(|a, b| {
+                a.instance_name
+                    .cmp(&b.instance_name)
+                    .then_with(|| a.connection_id.cmp(&b.connection_id))
+            });
+            let internal_owner = self
+                .registry
+                .providers_for(tool_name.as_str())
+                .into_iter()
+                .any(|provider| provider.kind == tau_core::ToolProviderKind::Internal);
+            let required = owners
+                .iter()
+                .filter(|owner| owner.required)
+                .collect::<Vec<_>>();
+            let conflict = internal_owner || owners.len() > 1;
+            if !conflict {
+                continue;
+            }
+            let owner_label = |owner: &Owner| {
+                format!(
+                    "{}{}",
+                    owner.instance_name,
+                    owner
+                        .prefix
+                        .as_ref()
+                        .map_or_else(String::new, |prefix| format!(" (prefix `{prefix}`)"))
+                )
+            };
+            if internal_owner {
+                if let Some(owner) = required.first() {
+                    return Err(HarnessError::Participant(format!(
+                        "required extension `{}` conflicts with harness-internal tool `{tool_name}`",
+                        owner_label(owner)
+                    )));
+                }
+                for owner in owners {
+                    disabled_optional
+                        .entry(owner.connection_id.clone())
+                        .or_insert_with(|| {
+                            format!(
+                                "optional extension `{}` disabled because final tool name `{tool_name}` conflicts with a harness-internal tool",
+                                owner_label(&owner)
+                            )
+                        });
+                }
+                continue;
+            }
+            if required.len() > 1 {
+                return Err(HarnessError::Participant(format!(
+                    "required extensions {} register the same final tool name `{tool_name}`",
+                    required
+                        .iter()
+                        .map(|owner| owner_label(owner))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            if required.len() == 1 {
+                let winner = owner_label(required[0]);
+                for owner in owners.iter().filter(|owner| !owner.required) {
+                    disabled_optional
+                        .entry(owner.connection_id.clone())
+                        .or_insert_with(|| {
+                            format!(
+                                "optional extension `{}` disabled because final tool name `{tool_name}` conflicts with required extension `{winner}`",
+                                owner_label(owner)
+                            )
+                        });
+                }
+            } else {
+                let claimants = owners
+                    .iter()
+                    .map(&owner_label)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for owner in &owners {
+                    disabled_optional
+                        .entry(owner.connection_id.clone())
+                        .or_insert_with(|| {
+                            format!(
+                                "optional extension `{}` disabled because final tool name `{tool_name}` is also claimed by optional extensions {claimants}",
+                                owner_label(owner)
+                            )
+                        });
+                }
+            }
+        }
+
+        for (connection_id, message) in disabled_optional {
+            self.disable_optional_extension(connection_id.as_str(), &message);
+        }
+        Ok(())
+    }
+
+    /// Activate one extension that has sent Ready, then publish its lifecycle
+    /// readiness only after its complete staged batch succeeds.
+    fn finish_ready_extension_activation(&mut self, source_id: &str) -> Result<(), HarnessError> {
+        if !self.extensions.ready_received.contains(source_id) {
+            return Ok(());
+        }
+        let activated = self.activate_staged_extension_capabilities(source_id);
+        self.extensions.ready_received.remove(source_id);
+        self.set_extension_state(source_id, ExtensionState::Ready);
+        self.emit_extension_ready(source_id);
+        self.finish_staged_extension_activation(source_id, activated)
+    }
+
+    /// Complete the global initial stage barrier, or activate one post-startup
+    /// respawn stage without winner selection.
+    fn maybe_finish_extension_activation(&mut self, source_id: &str) -> Result<(), HarnessError> {
+        if self.initial_extension_tool_preflight_complete {
+            return self.finish_ready_extension_activation(source_id);
+        }
+        if !self.initial_extension_preflight_ready() {
+            return Ok(());
+        }
+        self.resolving_initial_extension_collisions = true;
+        let preflight = self.preflight_initial_extension_tools();
+        if let Err(error) = preflight {
+            self.resolving_initial_extension_collisions = false;
+            return Err(error);
+        }
+        self.initial_extension_tool_preflight_complete = true;
+        let mut ready = self
+            .extensions
+            .ready_received
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        ready.sort();
+        let mut activated = Vec::with_capacity(ready.len());
+        for connection_id in &ready {
+            activated.push((
+                connection_id.clone(),
+                self.activate_staged_extension_capabilities(connection_id.as_str()),
+            ));
+        }
+        for connection_id in &ready {
+            self.extensions.ready_received.remove(connection_id);
+            self.set_extension_state(connection_id.as_str(), ExtensionState::Ready);
+        }
+        for connection_id in &ready {
+            self.emit_extension_ready(connection_id.as_str());
+        }
+        let mut deferred_messages = Vec::new();
+        for (connection_id, events) in &mut activated {
+            deferred_messages.extend(
+                std::mem::take(&mut events.deferred_messages)
+                    .into_iter()
+                    .map(|deferred| (deferred.order, connection_id.clone(), deferred.message)),
+            );
+        }
+        for (connection_id, events) in activated {
+            self.finish_staged_extension_activation(connection_id.as_str(), events)?;
+        }
+        deferred_messages.sort_by_key(|(order, _, _)| *order);
+        for (_, connection_id, message) in deferred_messages {
+            self.handle_extension_message(connection_id.as_str(), message)?;
+        }
+        self.resolving_initial_extension_collisions = false;
+        self.drain_pending_tool_invocations()?;
+        self.try_advance_queue();
+        Ok(())
+    }
+
+    /// Apply initial required/optional policy to a malformed handshake. After
+    /// the initial barrier, isolate only the failed connection and retain
+    /// normal respawn policy.
+    fn handle_extension_protocol_failure(
+        &mut self,
+        source_id: &str,
+        message: String,
+    ) -> Result<(), HarnessError> {
+        let lifecycle = self
+            .extensions
+            .entries
+            .get(source_id)
+            .map(|entry| (entry.name.clone(), entry.require));
+        let Some((name, required)) = lifecycle else {
+            return Err(HarnessError::Participant(message));
+        };
+        let initial_startup = !self.initial_extension_tool_preflight_complete;
+        if required && initial_startup {
+            return Err(HarnessError::Participant(message));
+        }
+        tracing::warn!(
+            target: "tau_harness::startup",
+            connection_id = %source_id,
+            error = %message,
+            "isolating extension after protocol failure"
+        );
+        if initial_startup {
+            self.disable_optional_extension(
+                source_id,
+                &format!("optional extension `{name}` disabled after protocol failure: {message}"),
+            );
+        } else {
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                tau_proto::NoticeLevel::Critical,
+                true,
+                &format!("extension `{name}` disconnected after protocol failure: {message}"),
+            );
+            self.handle_disconnect(source_id);
+        }
+        self.maybe_finish_extension_activation(source_id)
+    }
+
+    /// Charge one retained pre-activation frame to bounded per-connection
+    /// quotas.
+    fn reserve_extension_activation_message(
+        &mut self,
+        source_id: &str,
+        message: &HarnessInputMessage,
+    ) -> Result<bool, HarnessError> {
+        struct BoundedCounter {
+            len: usize,
+            limit: usize,
+            exceeded: bool,
+        }
+        impl std::io::Write for BoundedCounter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let Some(next) = self.len.checked_add(bytes.len()) else {
+                    self.exceeded = true;
+                    return Err(std::io::Error::other("activation frame exceeds quota"));
+                };
+                if self.limit < next {
+                    self.exceeded = true;
+                    return Err(std::io::Error::other("activation frame exceeds quota"));
+                }
+                self.len = next;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (current_count, current_bytes) = {
+            let stage = self.extension_activation_stage_mut(source_id);
+            (stage.retained_message_count, stage.retained_message_bytes)
+        };
+        let mut counter = BoundedCounter {
+            len: 0,
+            limit: MAX_EXTENSION_ACTIVATION_BYTES.saturating_sub(current_bytes),
+            exceeded: false,
+        };
+        let encoded = ciborium::into_writer(message, &mut counter);
+        let next_count = current_count.saturating_add(1);
+        if counter.exceeded || next_count > MAX_EXTENSION_ACTIVATION_MESSAGES {
+            let message = format!(
+                "extension activation staging exceeds {} messages or {} encoded bytes",
+                MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
+            );
+            self.handle_extension_protocol_failure(source_id, message)?;
+            return Ok(false);
+        }
+        encoded.map_err(|error| {
+            HarnessError::Participant(format!(
+                "failed to size extension activation frame: {error}"
+            ))
+        })?;
+        let next_bytes = current_bytes + counter.len;
+        let stage = self.extension_activation_stage_mut(source_id);
+        stage.retained_message_count = next_count;
+        stage.retained_message_bytes = next_bytes;
+        Ok(true)
+    }
+
+    /// Retain one operational frame behind activation with global wire order.
+    fn defer_extension_activation_message(
+        &mut self,
+        source_id: &str,
+        message: HarnessInputMessage,
+    ) {
+        let order = self.next_deferred_extension_message_order;
+        self.next_deferred_extension_message_order =
+            self.next_deferred_extension_message_order.saturating_add(1);
+        self.extension_activation_stage_mut(source_id)
+            .deferred_messages
+            .push(DeferredExtensionMessage { order, message });
     }
 
     fn handle_extension_message(
@@ -6785,14 +7395,128 @@ impl Harness {
         let message = message.into();
         if let Some(entry) = self.extensions.entries.get(source_id) {
             entry.protocol_io.record_uplink_frame(&message);
+            let ready_received = self.extensions.ready_received.contains(source_id);
+            let legal = if ready_received {
+                matches!(
+                    message,
+                    HarnessInputMessage::Disconnect(_)
+                        | HarnessInputMessage::Subscribe(_)
+                        | HarnessInputMessage::Intercept(_)
+                        | HarnessInputMessage::Emit(_)
+                        | HarnessInputMessage::ConfigError(_)
+                        | HarnessInputMessage::InterceptReply(_)
+                        | HarnessInputMessage::GetAgentPromptCreated(_)
+                        | HarnessInputMessage::ExtensionDataRequest(_)
+                        | HarnessInputMessage::RegisterTransportCapability(_)
+                        | HarnessInputMessage::TransportMessageIngress(_)
+                        | HarnessInputMessage::CompleteTransportSend(_)
+                )
+            } else {
+                matches!(
+                    (&message, entry.state),
+                    (HarnessInputMessage::Hello(_), ExtensionState::Spawning)
+                        | (HarnessInputMessage::Disconnect(_), _)
+                        | (HarnessInputMessage::Ready(_), ExtensionState::Handshaking)
+                        | (
+                            HarnessInputMessage::Subscribe(_)
+                                | HarnessInputMessage::Intercept(_)
+                                | HarnessInputMessage::Emit(_)
+                                | HarnessInputMessage::ConfigError(_)
+                                | HarnessInputMessage::InterceptReply(_)
+                                | HarnessInputMessage::GetAgentPromptCreated(_)
+                                | HarnessInputMessage::ExtensionDataRequest(_)
+                                | HarnessInputMessage::RegisterTransportCapability(_)
+                                | HarnessInputMessage::TransportMessageIngress(_)
+                                | HarnessInputMessage::CompleteTransportSend(_),
+                            ExtensionState::Handshaking | ExtensionState::Ready,
+                        )
+                )
+            };
+            if !legal {
+                return self.handle_extension_protocol_failure(
+                    source_id,
+                    format!(
+                        "extension `{}` sent an out-of-order protocol message while {:?}: {:?}",
+                        entry.name, entry.state, message
+                    ),
+                );
+            }
+        }
+        let activation_pending = self
+            .extensions
+            .entries
+            .get(source_id)
+            .is_some_and(|entry| entry.state != ExtensionState::Ready);
+        let startup_declaration = matches!(
+            &message,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ActionSchemaPublished(_)
+                        | Event::ToolRegister(_)
+                        | Event::ToolUnregister(_)
+                        | Event::ExtSkillAvailable(_)
+                        | Event::ExtAgentsMdAvailable(_)
+                        | Event::ProviderModelsUpdated(_)
+                        | Event::ExtensionContextProviderRegister(_)
+                        | Event::ExtensionSessionContextProviderRegister(_)
+                        | Event::ExtAgentContextPublish(_)
+                        | Event::ExtPromptFragmentPublish(_)
+                )
+        );
+        let startup_extension_data_request =
+            matches!(&message, HarnessInputMessage::ExtensionDataRequest(_))
+                && !self.extensions.ready_received.contains(source_id);
+        let operational_message = match &message {
+            // Startup declarations are the only emitted events allowed to enter
+            // activation staging. Everything else can mutate live state, reply to
+            // an earlier request, or acknowledge work, so defer it behind the
+            // global activation barrier. Keeping this as a declaration allowlist
+            // makes new protocol events safe by default.
+            HarnessInputMessage::Emit(_) => !startup_declaration,
+            HarnessInputMessage::Hello(_)
+            | HarnessInputMessage::Disconnect(_)
+            | HarnessInputMessage::Ready(_)
+            | HarnessInputMessage::ConfigError(_)
+            | HarnessInputMessage::Subscribe(_)
+            | HarnessInputMessage::Intercept(_) => false,
+            // Initial Configure handlers may need extension-owned storage before
+            // they can accept configuration and send Ready (PIM persists its
+            // initial state here). Once this peer sends Ready, the same RPC is
+            // ordinary operational traffic and retains global barrier ordering.
+            HarnessInputMessage::ExtensionDataRequest(_) => !startup_extension_data_request,
+            _ => true,
+        };
+        let retained_message = activation_pending
+            && !matches!(
+                &message,
+                HarnessInputMessage::Hello(_)
+                    | HarnessInputMessage::Disconnect(_)
+                    | HarnessInputMessage::ConfigError(_)
+                    | HarnessInputMessage::Ready(_)
+            );
+        if retained_message && !self.reserve_extension_activation_message(source_id, &message)? {
+            return Ok(());
+        }
+        let declaration_after_ready =
+            startup_declaration && self.extensions.ready_received.contains(source_id);
+        if activation_pending && (operational_message || declaration_after_ready) {
+            self.defer_extension_activation_message(source_id, message);
+            return Ok(());
         }
         match message {
             HarnessInputMessage::Hello(hello) => {
-                validate_protocol_version(&hello)?;
+                if let Err(error) = validate_protocol_version(&hello) {
+                    return self.handle_extension_protocol_failure(
+                        source_id,
+                        format!("extension protocol handshake failed: {error}"),
+                    );
+                }
                 self.set_extension_state(source_id, ExtensionState::Handshaking);
                 self.send_lifecycle_configure(source_id);
             }
             HarnessInputMessage::ConfigError(err) => {
+                let diagnostic = bounded_extension_config_error(err.message);
                 let name = self
                     .extensions
                     .entries
@@ -6816,20 +7540,28 @@ impl Harness {
                         "extension {name} rejected its config: {}\ncheck \
                          `extensions.{name}.config` and `extensions.{name}.secrets` in harness.yaml; \
                          invalid values are being ignored",
-                        err.message,
+                        diagnostic,
                     ),
                 );
-                if optional {
+                if !self.initial_extension_tool_preflight_complete {
+                    if !optional {
+                        return Err(HarnessError::Participant(format!(
+                            "required extension `{name}` rejected its config: {diagnostic}"
+                        )));
+                    }
                     tracing::warn!(
                         target: "tau_harness::startup",
                         extension = %name,
-                        error = %err.message,
+                        error = %diagnostic,
                         "optional extension did not initialize: rejected config"
                     );
                     self.disable_optional_extension(
                         source_id,
                         &format!("optional extension {name} did not initialize"),
                     );
+                    self.maybe_finish_extension_activation(source_id)?;
+                } else {
+                    self.handle_disconnect(source_id);
                 }
             }
             HarnessInputMessage::Subscribe(subscribe) => {
@@ -6853,19 +7585,8 @@ impl Harness {
                 }
             }
             HarnessInputMessage::Ready(_ready) => {
-                let (context_ready_events, session_context_ready_events, agent_queries) =
-                    self.activate_staged_extension_capabilities(source_id);
-                self.set_extension_state(source_id, ExtensionState::Ready);
-                self.emit_extension_ready(source_id);
-                for ready in context_ready_events {
-                    self.publish_extension_context_ready(source_id, ready)?;
-                }
-                for ready in session_context_ready_events {
-                    self.publish_extension_session_context_ready(source_id, ready)?;
-                }
-                for query in agent_queries {
-                    self.handle_start_agent_request(source_id, query)?;
-                }
+                self.extensions.ready_received.insert(source_id.into());
+                self.maybe_finish_extension_activation(source_id)?;
                 self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
             }
@@ -6887,7 +7608,14 @@ impl Harness {
                 self.handle_extension_data_request(source_id, request);
             }
             HarnessInputMessage::RegisterTransportCapability(request) => {
-                self.handle_register_transport_capability(source_id, request);
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.defer_extension_activation_message(
+                        source_id,
+                        HarnessInputMessage::RegisterTransportCapability(request),
+                    );
+                } else {
+                    self.handle_register_transport_capability(source_id, request);
+                }
             }
             HarnessInputMessage::TransportMessageIngress(request) => {
                 self.handle_transport_message_ingress(source_id, *request);
@@ -6985,6 +7713,9 @@ impl Harness {
     ) -> Result<Option<Event>, HarnessError> {
         match event {
             Event::ToolRegister(registration) => {
+                if !self.validate_or_reject_assigned_prefix(source_id, &registration) {
+                    return Ok(None);
+                }
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_tool_registration(source_id, registration);
                 } else {
@@ -9351,6 +10082,7 @@ impl Harness {
             self.set_extension_state(connection_id, ExtensionState::Disconnected);
         }
         self.extensions.activation_staging.remove(connection_id);
+        self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
@@ -9456,12 +10188,14 @@ impl Harness {
         {
             self.refresh_provider_models_and_publish_state();
         }
-        self.drain_pending_tool_invocations_or_report();
-        for (call_id, cid) in completed_foreground_calls {
-            self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+        if !self.resolving_initial_extension_collisions {
+            self.drain_pending_tool_invocations_or_report();
+            for (call_id, cid) in completed_foreground_calls {
+                self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+            }
+            self.maybe_complete_session_init_for_disconnect(connection_id);
+            self.try_advance_queue();
         }
-        self.maybe_complete_session_init_for_disconnect(connection_id);
-        self.try_advance_queue();
         let Some(meta) = self.bus.disconnect(connection_id).or(meta) else {
             return;
         };
@@ -9888,6 +10622,7 @@ impl Harness {
         let name = entry.name.clone();
         let kind = entry.kind.clone();
         let secrets = entry.secrets.clone();
+        let tool_prefix = entry.tool_prefix.clone();
         self.publish_event(
             Some("harness"),
             Event::ExtensionRestarting(tau_proto::ExtensionRestarting {
@@ -9936,6 +10671,7 @@ impl Harness {
                 instance_id,
                 connection_id: new_connection_id,
                 kind,
+                tool_prefix,
                 require: config.require,
                 respawn_allowed: true,
                 pid: Some(spawned.child_pid),
@@ -10227,6 +10963,7 @@ impl Harness {
             .map(|cfg| cfg.config.clone())
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let secrets = entry.secrets.clone();
+        let tool_prefix = entry.tool_prefix.clone();
         let state_dir =
             match tau_config::settings::extension_state_dir_of(&self.state_dir, &entry.name) {
                 Ok(state_dir) => state_dir,
@@ -10264,6 +11001,7 @@ impl Harness {
                     .entries
                     .get(source_id)
                     .map(|entry| entry.name.clone().into()),
+                tool_prefix,
                 state_dir: Some(state_dir),
                 secrets,
             }),
@@ -15464,6 +16202,60 @@ impl Harness {
         }
     }
 
+    /// Durably close owned dispatch work that became invalid after its
+    /// pre-check but before the intercepted dispatch checkpoint committed.
+    fn terminalize_owned_dispatch_error(&mut self, cid: &AgentId, message: String) {
+        let Some(agent) = self.agents.get(cid) else {
+            return;
+        };
+        let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
+            return;
+        };
+        let originator = agent.originator.clone();
+        let failure = match &agent.activation_dispatch {
+            crate::agent::ActivationDispatchState::Running {
+                id,
+                cut,
+                resume_through,
+                ..
+            } => {
+                Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                    agent_id,
+                    transaction_id: id.clone(),
+                    cut: *cut,
+                    reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
+                    resume_through: *resume_through,
+                })
+            }
+            crate::agent::ActivationDispatchState::DispatchUncertain {
+                agent_prompt_id, ..
+            } => {
+                let agent_prompt_id = agent_prompt_id.clone();
+                self.local_route_failure_prompts
+                    .insert(agent_prompt_id.clone());
+                Event::ProviderResponseFinished(ProviderResponseFinished {
+                    agent_prompt_id,
+                    agent_id,
+                    output_items: Vec::new(),
+                    stop_reason: ProviderStopReason::Error,
+                    error: Some(message),
+                    failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
+                    context_limit_telemetry: None,
+                    recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                    originator,
+                    usage: None,
+                    compaction_original_input_tokens: None,
+                    compaction_compacted_input_tokens: None,
+                    backend: None,
+                    provider_response_id: None,
+                    ws_pool_delta: None,
+                })
+            }
+            _ => return,
+        };
+        self.publish_for_agent(cid, failure);
+    }
+
     /// Builds one prompt request and records the live in-flight bookkeeping
     /// needed to route the corresponding provider response. The prompt payload
     /// is returned to the caller instead of cached; it is a transient delivery
@@ -15579,6 +16371,14 @@ impl Harness {
             .as_deref()
             .and_then(|agent_id| self.agent_store.agent(agent_id));
         let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
+        if let Some(name) = duplicate_model_visible_tool_name(&tool_specs) {
+            let message = format!(
+                "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
+            );
+            self.emit_harness_failure(&message);
+            self.terminalize_owned_dispatch_error(cid, message);
+            return None;
+        }
         let target_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let live_send_tools = live_send_tools_for_prompt(
             &self.transport_reply_routes,
@@ -15613,21 +16413,10 @@ impl Harness {
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
-                self.emit_harness_failure(&format!(
-                    "failed to render system prompt for role `{role_name}`: {error}"
-                ));
-                if self.agents.get(cid).is_some_and(|agent| {
-                    matches!(
-                        agent.activation_dispatch,
-                        crate::agent::ActivationDispatchState::DispatchUncertain {
-                            owner: crate::agent::InferenceCheckpointOwner::Inference,
-                            ..
-                        }
-                    )
-                }) && let Some(agent) = self.agents.get_mut(cid)
-                {
-                    agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
-                }
+                let message =
+                    format!("failed to render system prompt for role `{role_name}`: {error}");
+                self.emit_harness_failure(&message);
+                self.terminalize_owned_dispatch_error(cid, message);
                 return None;
             }
         };
@@ -15720,6 +16509,12 @@ impl Harness {
             tau_proto::PromptOriginator::Extension { .. }
         ) && conv.parent_tool_call_id.is_none();
         let specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
+        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
+            self.emit_harness_failure(&format!(
+                "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
+            ));
+            return false;
+        }
         let capability_specs = if is_non_tool_ext_query {
             &[][..]
         } else {
@@ -15804,6 +16599,13 @@ impl Harness {
         agent_id: Option<&tau_proto::AgentId>,
         tool_specs: &[tau_proto::ToolSpec],
     ) -> Result<String, handlebars::RenderError> {
+        if let Some(name) = duplicate_model_visible_tool_name(tool_specs) {
+            return Err(handlebars::RenderError::from(
+                handlebars::RenderErrorReason::Other(format!(
+                    "effective tool surface contains duplicate model-visible name `{name}`"
+                )),
+            ));
+        }
         let (prompt_fragments, tool_prompt_fragments) =
             self.gather_prompt_fragment_groups_for_role_specs(role_name, tool_specs);
         let system_template = self.system_template_for_role(role_name)?;
@@ -15990,12 +16792,6 @@ impl Harness {
         (fragments, tool_fragments)
     }
 
-    fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
-        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
-        let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
-        self.tool_definitions_from_specs(&specs)
-    }
-
     fn tool_definitions_from_specs(&self, specs: &[tau_proto::ToolSpec]) -> Vec<ToolDefinition> {
         specs
             .iter()
@@ -16008,6 +16804,13 @@ impl Harness {
                 format: spec.format.clone(),
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
+        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+        self.tool_definitions_from_specs(&specs)
     }
 
     fn gather_effective_tool_specs_for_role_model(
@@ -16238,20 +17041,16 @@ impl Harness {
         requested_name: &ToolName,
         role_name: &str,
     ) -> Option<&tau_proto::ToolSpec> {
-        let mut visible_match: Option<&tau_proto::ToolSpec> = None;
         for provider in self.registry.all_tool_providers() {
             let spec = &provider.tool;
             if !self.is_tool_provider_enabled_for_role(provider, role_name) {
                 continue;
             }
-            if spec.name == *requested_name {
+            if self.tool_model_visible_name(spec) == requested_name {
                 return Some(spec);
             }
-            if self.tool_model_visible_name(spec) == requested_name && visible_match.is_none() {
-                visible_match = Some(spec);
-            }
         }
-        visible_match
+        None
     }
 
     fn resolve_enabled_tool_spec_for_prompt(
@@ -16259,17 +17058,10 @@ impl Harness {
         requested_name: &ToolName,
         agent_prompt_id: &AgentPromptId,
     ) -> Option<&tau_proto::ToolSpec> {
-        let mut visible_match: Option<&tau_proto::ToolSpec> = None;
         let specs = self.prompt_tool_specs.get(agent_prompt_id)?;
-        for spec in specs {
-            if spec.name == *requested_name {
-                return Some(spec);
-            }
-            if self.tool_model_visible_name(spec) == requested_name && visible_match.is_none() {
-                visible_match = Some(spec);
-            }
-        }
-        visible_match
+        specs
+            .iter()
+            .find(|spec| self.tool_model_visible_name(spec) == requested_name)
     }
 
     fn resolve_enabled_tool_name_for_role(
@@ -17774,12 +18566,13 @@ impl Harness {
     /// should not wedge fresh prompt dispatch. Provider disconnects are handled
     /// as fatal by the event loop before this predicate matters for new work.
     pub(crate) fn extensions_all_ready(&self) -> bool {
-        self.extensions.entries.values().all(|e| {
-            matches!(
-                e.state,
-                ExtensionState::Ready | ExtensionState::Disconnected
-            )
-        })
+        !self.resolving_initial_extension_collisions
+            && self.extensions.entries.values().all(|e| {
+                matches!(
+                    e.state,
+                    ExtensionState::Ready | ExtensionState::Disconnected
+                )
+            })
     }
 
     /// Update an extension's lifecycle state, looked up by connection id.
@@ -18909,6 +19702,16 @@ impl Harness {
     }
 }
 
+/// Return the first duplicate alias in a simultaneously advertised effective
+/// tool surface.
+fn duplicate_model_visible_tool_name(specs: &[tau_proto::ToolSpec]) -> Option<ToolName> {
+    let mut names = HashSet::new();
+    specs.iter().find_map(|spec| {
+        let name = spec.model_visible_name.as_ref().unwrap_or(&spec.name);
+        (!names.insert(name.clone())).then(|| name.clone())
+    })
+}
+
 fn escape_agent_message_for_prompt(message: &str) -> String {
     let mut escaped = String::with_capacity(message.len());
     for ch in message.chars() {
@@ -18927,6 +19730,7 @@ impl Harness {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    /// Runs one synchronous embedded interaction.
     pub(crate) fn send_user_message(
         &mut self,
         session_id: &str,
@@ -19004,6 +19808,23 @@ impl Harness {
                 HarnessEvent::Disconnected { connection_id } => {
                     let was_provider = self.is_provider_extension(&connection_id);
                     self.handle_disconnect(&connection_id);
+                    if was_provider {
+                        return Err(provider_disconnected_error());
+                    }
+                }
+                HarnessEvent::ReadFailed {
+                    connection_id,
+                    error,
+                } => {
+                    let was_provider = self.is_provider_extension(&connection_id);
+                    if self.extensions.entries.contains_key(&connection_id) {
+                        self.handle_extension_protocol_failure(
+                            &connection_id,
+                            format!("extension protocol decode failed: {error}"),
+                        )?;
+                    } else {
+                        self.handle_disconnect(&connection_id);
+                    }
                     if was_provider {
                         return Err(provider_disconnected_error());
                     }

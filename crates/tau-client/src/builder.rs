@@ -28,8 +28,8 @@ pub struct ExtensionBuilder<State> {
     pub(crate) force_subscribe: bool,
     /// Intercept declaration sent during startup.
     pub(crate) intercept: Option<tau_proto::Intercept>,
-    /// Startup events emitted before `Ready`.
-    pub(crate) startup_events: Vec<tau_proto::Event>,
+    /// Ordered startup declarations emitted before `Ready`.
+    pub(crate) startup_events: Vec<StartupDeclaration>,
     /// Human-readable message attached to `Ready`.
     pub(crate) ready_message: Option<String>,
     /// Typed and raw configuration handlers.
@@ -116,7 +116,8 @@ impl<State> ExtensionBuilder<State> {
 
     /// Emits one startup event before the terminal `Ready` frame.
     pub fn startup_event(&mut self, event: tau_proto::Event) -> &mut Self {
-        self.startup_events.push(event);
+        self.startup_events
+            .push(StartupDeclaration::Event(Box::new(event)));
         self
     }
 
@@ -392,8 +393,9 @@ impl<State> ExtensionBuilder<State> {
         self
     }
 
-    /// Registers one tool and a live dispatch handler for matching
-    /// `tool.started` events.
+    /// Registers one logical/local tool and a live dispatch handler for
+    /// matching final `tool.started` events. Structural names are scoped
+    /// after Configure.
     pub fn tool(
         &mut self,
         tool: tau_proto::ToolSpec,
@@ -402,8 +404,9 @@ impl<State> ExtensionBuilder<State> {
         self.tool_with_group_and_prompt_fragment(tool, None, None, handler)
     }
 
-    /// Registers one grouped tool and a live dispatch handler for matching tool
-    /// calls.
+    /// Registers one grouped logical/local tool and a live dispatch handler for
+    /// matching final tool calls. Tool, alias, and group names are scoped after
+    /// Configure.
     pub fn tool_with_group_and_prompt_fragment(
         &mut self,
         tool: tau_proto::ToolSpec,
@@ -419,6 +422,32 @@ impl<State> ExtensionBuilder<State> {
             tool_group,
             prompt_fragment,
         }))
+    }
+
+    /// Registers a tool whose arbitrary metadata needs explicit access to the
+    /// immutable name scope.
+    ///
+    /// The factory returns a registration expressed in logical structural
+    /// names; tau-client maps its internal name, visible alias, and group
+    /// exactly once. The scope is intended for explicit wire references
+    /// embedded in descriptions, schemas, or typed capability metadata.
+    pub fn scoped_tool(
+        &mut self,
+        local_tool_name: tau_proto::ToolName,
+        factory: impl FnOnce(&crate::ToolNameScope) -> ClientResult<tau_proto::ToolRegister> + 'static,
+        handler: impl for<'a> FnMut(ToolContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
+        self.subscribe([tau_proto::EventName::TOOL_STARTED]);
+        self.tool_handlers.push(Box::new(NamedToolHandler::new(
+            local_tool_name.clone(),
+            handler,
+        )));
+        self.startup_events
+            .push(StartupDeclaration::ScopedTool(ScopedToolDeclaration {
+                local_tool_name,
+                factory: Box::new(factory),
+            }));
+        self
     }
 
     /// Registers one intercept selector and the handler for incoming intercept
@@ -508,6 +537,42 @@ impl<State> ExtensionBuilder<State> {
         Ok(())
     }
 
+    /// Apply the immutable name scope to every structural startup declaration
+    /// and tool dispatch key.
+    pub(crate) fn apply_tool_name_scope(
+        &mut self,
+        scope: &crate::ToolNameScope,
+    ) -> ClientResult<()> {
+        for handler in &mut self.tool_handlers {
+            handler.apply_name_scope(scope)?;
+        }
+        let declarations = std::mem::take(&mut self.startup_events);
+        for declaration in declarations {
+            let event = match declaration {
+                StartupDeclaration::Event(mut event) => {
+                    if let tau_proto::Event::ToolRegister(registration) = event.as_mut() {
+                        *registration = scope.scope_registration(registration.clone())?;
+                    }
+                    event
+                }
+                StartupDeclaration::ScopedTool(declaration) => {
+                    let registration = (declaration.factory)(scope)?;
+                    if registration.tool.name != declaration.local_tool_name {
+                        return Err(ClientError::builder(format!(
+                            "scoped tool factory declared `{}` but returned `{}`",
+                            declaration.local_tool_name, registration.tool.name
+                        )));
+                    }
+                    Box::new(tau_proto::Event::ToolRegister(
+                        scope.scope_registration(registration)?,
+                    ))
+                }
+            };
+            self.startup_events.push(StartupDeclaration::Event(event));
+        }
+        Ok(())
+    }
+
     /// Adds one startup subscription selector unless it is already present.
     fn add_live_selector(&mut self, selector: tau_proto::EventSelector) {
         if !self.live_selectors.contains(&selector) {
@@ -521,4 +586,23 @@ impl<State> ExtensionBuilder<State> {
             self.historical_selectors.push(selector);
         }
     }
+}
+
+/// Delayed local registration factory used when arbitrary metadata embeds wire
+/// tool references.
+type ScopedToolFactory =
+    dyn FnOnce(&crate::ToolNameScope) -> ClientResult<tau_proto::ToolRegister> + 'static;
+
+/// Delayed logical registration paired with its handler's dispatch name.
+pub(crate) struct ScopedToolDeclaration {
+    /// Logical name used by the dispatch handler.
+    local_tool_name: tau_proto::ToolName,
+    /// Factory evaluated after the immutable scope is established.
+    factory: Box<ScopedToolFactory>,
+}
+
+/// One startup event or delayed tool declaration in public call order.
+pub(crate) enum StartupDeclaration {
+    Event(Box<tau_proto::Event>),
+    ScopedTool(ScopedToolDeclaration),
 }

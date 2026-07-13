@@ -101,9 +101,14 @@ pub(crate) enum HarnessEvent {
         connection_id: tau_proto::ConnectionId,
         message: Box<HarnessInputMessage>,
     },
-    /// A connection's reader hit EOF or decode error.
+    /// A connection's reader hit clean EOF.
     Disconnected {
         connection_id: tau_proto::ConnectionId,
+    },
+    /// A connection's reader rejected a malformed or oversized protocol frame.
+    ReadFailed {
+        connection_id: tau_proto::ConnectionId,
+        error: String,
     },
     /// Socket listener accepted a new client.
     NewClient(UnixStream),
@@ -179,9 +184,16 @@ fn spawn_reader_thread_inner(
                         return;
                     }
                 }
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     let _ = tx.send(HarnessEvent::Disconnected {
                         connection_id: connection_id.clone(),
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = tx.send(HarnessEvent::ReadFailed {
+                        connection_id: connection_id.clone(),
+                        error: error.to_string(),
                     });
                     return;
                 }

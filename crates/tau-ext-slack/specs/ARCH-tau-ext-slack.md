@@ -7,6 +7,8 @@ External ingress is constrained by [ARCH-external-message-boundary](../../../spe
 channel, user, or thread destinations. The extension starts, registers tools,
 and waits until an agent calls `slack_register(enabled: true)` before opening
 Slack Socket Mode.
+Per-instance generic `tool_prefix` values scope both tools and group `slack` for
+multi-account deployments; semantic Slack tags remain shared.
 
 Configuration is applied only before the Socket Mode worker starts. Once an
 agent registration starts the bridge, the worker owns a cloned `RuntimeConfig`,

@@ -38,9 +38,30 @@ fn extension_reader_waits_for_initialized_ack() {
             ));
         }
         HarnessEvent::Disconnected { .. }
+        | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_)
         | HarnessEvent::Command(_) => panic!("unexpected harness event"),
     }
+}
+
+#[test]
+fn reader_reports_decode_failure_separately_from_clean_disconnect() {
+    let (reader_stream, mut writer_stream) = UnixStream::pair().expect("stream pair");
+    let (tx, rx) = mpsc::channel();
+    spawn_reader_thread("conn-malformed".into(), reader_stream, tx);
+
+    writer_stream
+        .write_all(&[0xff])
+        .expect("write malformed cbor");
+    writer_stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("eof");
+
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ReadFailed { connection_id, .. })
+            if connection_id.as_str() == "conn-malformed"
+    ));
 }
 
 /// Test writer that fails every write to exercise supervised-child cleanup.

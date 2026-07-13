@@ -127,6 +127,18 @@ fn staged_tool_spec(name: &str) -> ToolSpec {
     }
 }
 
+fn staged_invalid_tool_spec(name: &str) -> ToolSpec {
+    let mut spec = staged_tool_spec(name);
+    spec.examples.push(tau_proto::ToolExample {
+        id: String::new(),
+        title: None,
+        arguments: CborValue::Map(Vec::new()),
+        note: None,
+        subcommand: None,
+    });
+    spec
+}
+
 fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
     tau_proto::ProviderModelInfo {
         id: id.into(),
@@ -244,6 +256,7 @@ fn connect_handshaking_extension(
     h.extensions.entries.insert(
         connection_id.clone(),
         ExtensionEntry {
+            tool_prefix: None,
             name: conn_id.to_owned(),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
@@ -278,6 +291,7 @@ fn insert_extension_entry_with_meter(
     h.extensions.entries.insert(
         connection_id.clone(),
         ExtensionEntry {
+            tool_prefix: None,
             name: name.to_owned(),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
@@ -399,6 +413,11 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let (ui_id, mut ui) = connect_socket_ui(&mut h);
     connect_handshaking_tool(&mut h, "std-shell");
+    h.extensions
+        .entries
+        .get_mut("std-shell")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
 
     h.handle_extension_event(
         "std-shell",
@@ -586,6 +605,11 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_handshaking_tool(&mut h, "std-email");
+    h.extensions
+        .entries
+        .get_mut("std-email")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
 
     h.handle_extension_event(
         "std-email",
@@ -628,6 +652,11 @@ fn configure_includes_only_resolved_extension_secrets() {
             "mail_password".to_owned(),
             tau_proto::SecretValue::new("secret"),
         );
+    h.extensions
+        .entries
+        .get_mut("std-email")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
 
     h.handle_extension_event(
         "std-email",
@@ -709,6 +738,41 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     )));
 }
 
+/// Extensions cannot skip the Hello/Configure gate by declaring capabilities
+/// or announcing readiness while their lifecycle state is still Spawning.
+#[test]
+fn extension_rejects_pre_hello_protocol_messages() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    let conn_id = "pre-hello-ext";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+    h.extensions
+        .entries
+        .get_mut(conn_id)
+        .expect("extension entry")
+        .state = ExtensionState::Spawning;
+
+    let declaration_error = h
+        .handle_extension_event(
+            conn_id,
+            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                tool: staged_tool_spec("too_early"),
+                tool_group: None,
+                prompt_fragment: None,
+            })),
+        )
+        .expect_err("pre-Hello declaration must fail");
+    assert!(declaration_error.to_string().contains("out-of-order"));
+    assert!(h.registry.providers_for("too_early").is_empty());
+
+    let ready_error = h
+        .handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
+        .expect_err("pre-Hello Ready must fail");
+    assert!(ready_error.to_string().contains("out-of-order"));
+}
+
 #[test]
 fn extension_authored_notice_kind_is_stable_and_sanitized() {
     let td = TempDir::new().expect("tempdir");
@@ -749,6 +813,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
     let conn_id = "optional-config-bad-ext";
     let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
     h.extensions
@@ -822,6 +887,37 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
 }
 
 #[test]
+fn required_initial_config_error_emits_diagnostic_then_fails_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    let conn_id = "required-config-bad-ext";
+    connect_handshaking_tool(&mut h, conn_id);
+
+    let error = h
+        .handle_extension_message(
+            conn_id,
+            TestMessage::ConfigError(tau_proto::ConfigError {
+                message: "required setting is invalid".to_owned(),
+            }),
+        )
+        .expect_err("required initial config rejection is startup-fatal");
+
+    assert!(error.to_string().contains("required extension"));
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
+                    && notice.message.contains("required setting is invalid")
+        )
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -833,6 +929,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
         extensions: BTreeMap::from([(
             "optional-spawn-bad".to_owned(),
             crate::settings::ExtensionConfig {
+                tool_prefix: None,
                 name: "optional-spawn-bad".to_owned(),
                 command: "/definitely/not/a/tau-extension".to_owned(),
                 args: Vec::new(),
@@ -1219,6 +1316,968 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     assert!(prompt.system_prompt.contains("STAGED EXTENSION PROMPT"));
 
     h.shutdown().expect("shutdown");
+}
+
+/// The initial barrier activates two simultaneously configured Slack-style
+/// instances only after both are ready, routes each final name to its exact
+/// owner, and preserves the survivor when one disconnects.
+#[test]
+fn two_prefixed_instances_coexist_and_disconnect_independently() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    let mut sinks = BTreeMap::new();
+    for (connection_id, prefix) in [("slack-personal", "personal"), ("slack-work", "work")] {
+        let sink = connect_handshaking_tool(&mut h, connection_id);
+        let prefix = tau_proto::ToolNamePrefix::parse(prefix).expect("prefix");
+        let entry = h
+            .extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension");
+        entry.tool_prefix = Some(prefix.clone());
+        entry.state = ExtensionState::Spawning;
+        h.handle_extension_message(
+            connection_id,
+            TestMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: connection_id.to_owned().into(),
+                client_kind: tau_proto::ClientKind::Tool,
+            }),
+        )
+        .expect("hello");
+        let configure = sink
+            .lock()
+            .expect("sink")
+            .iter()
+            .find_map(|routed| match &routed.frame {
+                HarnessOutputMessage::Configure(configure) => Some(configure.clone()),
+                _ => None,
+            })
+            .expect("configure");
+        assert_eq!(configure.tool_prefix.as_ref(), Some(&prefix));
+        let mut spec = staged_tool_spec("slack_send");
+        spec.model_visible_name = Some(ToolName::new("slack_send"));
+        let registration = tau_client::ToolNameScope::from_configure(&configure)
+            .scope_registration(tau_proto::ToolRegister {
+                tool: spec,
+                tool_group: Some(tau_proto::ToolGroup {
+                    name: tau_proto::ToolGroupName::new("slack"),
+                    prompt_fragment: None,
+                }),
+                prompt_fragment: None,
+            })
+            .expect("scope logical registration");
+        h.handle_extension_event(
+            connection_id,
+            TestProtocolItem::Event(Event::ToolRegister(registration)),
+        )
+        .expect("stage tool");
+        sinks.insert(connection_id, sink);
+    }
+
+    h.handle_extension_message("slack-work", TestMessage::Ready(Default::default()))
+        .expect("first ready");
+    assert!(h.registry.providers_for("work_slack_send").is_empty());
+    h.handle_extension_message("slack-personal", TestMessage::Ready(Default::default()))
+        .expect("second ready");
+
+    assert_eq!(
+        h.registry.providers_for("personal_slack_send")[0]
+            .connection_id
+            .as_str(),
+        "slack-personal"
+    );
+    assert_eq!(
+        h.registry.providers_for("work_slack_send")[0]
+            .connection_id
+            .as_str(),
+        "slack-work"
+    );
+    for (tool_name, owner, call_id) in [
+        ("personal_slack_send", "slack-personal", "personal-call"),
+        ("work_slack_send", "slack-work", "work-call"),
+    ] {
+        let route = h
+            .registry
+            .route_tool_request(tau_proto::ToolRequest {
+                call_id: call_id.into(),
+                tool_name: ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                agent_id: crate::parse_agent_id("agent"),
+                originator: tau_proto::PromptOriginator::User,
+            })
+            .expect("route prefixed tool");
+        assert_eq!(
+            route.target,
+            tau_core::ToolRouteTarget::Extension(owner.into())
+        );
+        h.bus
+            .send_to(
+                owner,
+                None,
+                HarnessOutputMessage::deliver(Event::ToolStarted(route.invoke)),
+            )
+            .expect("deliver invoke");
+        assert!(sink_has_tool_invoke(&sinks[owner], call_id));
+        let other = if owner == "slack-work" {
+            "slack-personal"
+        } else {
+            "slack-work"
+        };
+        assert!(!sink_has_tool_invoke(&sinks[other], call_id));
+    }
+    h.handle_disconnect("slack-personal");
+    assert!(h.registry.providers_for("personal_slack_send").is_empty());
+    assert_eq!(
+        h.registry.providers_for("work_slack_send")[0]
+            .connection_id
+            .as_str(),
+        "slack-work"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A disconnect that completes the initial terminal-state set releases already
+/// received Ready stages instead of leaving them permanently withheld.
+#[test]
+fn optional_disconnect_completes_initial_activation_barrier() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    connect_handshaking_tool(&mut h, "ready-owner");
+    connect_handshaking_tool(&mut h, "optional-blocker");
+    h.extensions
+        .entries
+        .get_mut("optional-blocker")
+        .expect("optional extension")
+        .require = false;
+    h.handle_extension_event(
+        "ready-owner",
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("barrier_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+
+    h.handle_extension_message("ready-owner", TestMessage::Ready(Default::default()))
+        .expect("ready received");
+    h.handle_extension_event(
+        "ready-owner",
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("post_ready_barrier_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("post-Ready declaration is deferred as runtime traffic");
+    assert!(h.registry.providers_for("barrier_tool").is_empty());
+    assert!(
+        h.registry
+            .providers_for("post_ready_barrier_tool")
+            .is_empty()
+    );
+    assert_eq!(
+        h.extensions.entries["ready-owner"].state,
+        ExtensionState::Handshaking
+    );
+
+    h.handle_startup_disconnect("optional-blocker")
+        .expect("optional disconnect degrades");
+
+    assert_eq!(
+        h.extensions.entries["ready-owner"].state,
+        ExtensionState::Ready
+    );
+    assert_eq!(
+        h.registry.providers_for("barrier_tool")[0]
+            .connection_id
+            .as_str(),
+        "ready-owner"
+    );
+    assert_eq!(
+        h.registry.providers_for("post_ready_barrier_tool")[0]
+            .connection_id
+            .as_str(),
+        "ready-owner"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Initial Configure handlers may synchronously use extension-owned storage
+/// before they can accept configuration and send Ready. That bootstrap RPC must
+/// complete immediately, while requests sent after this peer's Ready retain
+/// normal global activation ordering.
+#[test]
+fn pre_ready_extension_data_rpc_bypasses_only_activation_staging() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    let sink = connect_handshaking_tool(&mut h, "config-rpc");
+    connect_handshaking_tool(&mut h, "activation-blocker");
+    let request = |request_id: &str, op| {
+        HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
+            request_id: request_id.to_owned(),
+            scope: tau_proto::ExtensionDataScope::User,
+            op,
+        })
+    };
+    let has_result = |request_id: &str| {
+        sink.lock().expect("sink").iter().any(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::ExtensionDataResult(result)
+                    if result.request_id == request_id
+            )
+        })
+    };
+
+    h.handle_extension_message(
+        "config-rpc",
+        request(
+            "configure-write",
+            tau_proto::ExtensionDataRequestOp::WriteFile {
+                path: tau_proto::ExtensionDataPath::from("state.json"),
+                contents: b"configured".to_vec(),
+            },
+        ),
+    )
+    .expect("pre-Ready config storage request");
+    assert!(has_result("configure-write"));
+
+    h.handle_extension_message("config-rpc", TestMessage::Ready(Default::default()))
+        .expect("peer Ready waits on blocker");
+    h.handle_extension_message(
+        "config-rpc",
+        request(
+            "post-ready-read",
+            tau_proto::ExtensionDataRequestOp::ReadFile {
+                path: tau_proto::ExtensionDataPath::from("state.json"),
+            },
+        ),
+    )
+    .expect("post-Ready request is deferred");
+    assert!(!has_result("post-ready-read"));
+
+    h.handle_extension_message("activation-blocker", TestMessage::Ready(Default::default()))
+        .expect("release activation barrier");
+    assert!(has_result("post-ready-read"));
+    h.shutdown().expect("shutdown");
+}
+
+/// `Ready` freezes each peer's startup claims. A declaration received after it
+/// has sent `Ready` uses runtime collision handling whether another peer is
+/// still blocking initial activation or the barrier has already completed.
+#[test]
+fn post_ready_tool_registration_has_topology_independent_runtime_semantics() {
+    let run = |blocked_at_registration: bool| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        connect_handshaking_tool(&mut h, "late-claimant");
+        connect_handshaking_tool(&mut h, "startup-owner");
+        h.extensions
+            .entries
+            .get_mut("late-claimant")
+            .expect("claimant")
+            .require = false;
+        h.handle_extension_event(
+            "startup-owner",
+            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                tool: staged_tool_spec("ready_frozen_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            })),
+        )
+        .expect("stage startup owner");
+        h.handle_extension_message("late-claimant", TestMessage::Ready(Default::default()))
+            .expect("claimant Ready");
+        if !blocked_at_registration {
+            h.handle_extension_message("startup-owner", TestMessage::Ready(Default::default()))
+                .expect("complete initial barrier");
+        }
+        h.handle_extension_event(
+            "late-claimant",
+            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                tool: staged_tool_spec("ready_frozen_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            })),
+        )
+        .expect("late runtime claim is isolated");
+        if blocked_at_registration {
+            h.handle_extension_message("startup-owner", TestMessage::Ready(Default::default()))
+                .expect("release initial barrier");
+        }
+        assert_eq!(
+            h.registry.providers_for("ready_frozen_tool")[0]
+                .connection_id
+                .as_str(),
+            "startup-owner"
+        );
+        assert_eq!(
+            h.extensions.entries["late-claimant"].state,
+            ExtensionState::Ready
+        );
+        assert_eq!(h.registry.providers_for("ready_frozen_tool").len(), 1);
+        h.shutdown().expect("shutdown");
+    };
+
+    run(true);
+    run(false);
+}
+
+/// The compatibility path for a required non-provider tool disconnect also
+/// completes the barrier for peers that already sent Ready.
+#[test]
+fn required_tool_disconnect_completes_initial_activation_barrier() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    connect_handshaking_tool(&mut h, "ready-owner");
+    connect_handshaking_tool(&mut h, "required-tool-blocker");
+    h.handle_extension_event(
+        "ready-owner",
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("required_disconnect_barrier_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+    h.handle_extension_message("ready-owner", TestMessage::Ready(Default::default()))
+        .expect("ready received");
+
+    h.handle_startup_disconnect("required-tool-blocker")
+        .expect("required tool compatibility disconnect");
+
+    assert_eq!(
+        h.extensions.entries["ready-owner"].state,
+        ExtensionState::Ready
+    );
+    assert_eq!(
+        h.registry.providers_for("required_disconnect_barrier_tool")[0]
+            .connection_id
+            .as_str(),
+        "ready-owner"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Timeout classification excludes peers that already sent Ready, disables only
+/// the actual optional blocker, and then activates the ready peer.
+#[test]
+fn optional_timeout_completes_barrier_for_required_ready_peer() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    connect_handshaking_tool(&mut h, "required-ready");
+    connect_handshaking_tool(&mut h, "optional-timeout");
+    h.extensions
+        .entries
+        .get_mut("optional-timeout")
+        .expect("optional")
+        .require = false;
+    h.handle_extension_event(
+        "required-ready",
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("timeout_barrier_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+    h.handle_extension_message("required-ready", TestMessage::Ready(Default::default()))
+        .expect("ready received");
+
+    h.handle_extensions_startup_timeout()
+        .expect("optional timeout degrades");
+
+    assert_eq!(
+        h.extensions.entries["required-ready"].state,
+        ExtensionState::Ready
+    );
+    assert_eq!(
+        h.extensions.entries["optional-timeout"].state,
+        ExtensionState::Disconnected
+    );
+    assert_eq!(
+        h.registry.providers_for("timeout_barrier_tool")[0]
+            .connection_id
+            .as_str(),
+        "required-ready"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// An empty configured extension set still closes the one-time initial barrier.
+#[test]
+fn empty_extension_set_completes_initial_activation_barrier() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.extensions.entries.clear();
+    h.extensions.order.clear();
+    h.extensions.activation_staging.clear();
+    h.extensions.ready_received.clear();
+    h.extensions.pending_connects = 0;
+    h.initial_extension_tool_preflight_complete = false;
+
+    h.wait_for_extensions_ready().expect("empty barrier");
+
+    assert!(h.initial_extension_tool_preflight_complete);
+    h.shutdown().expect("shutdown");
+}
+
+/// Protocol-v10 handshake failures obey required/optional availability policy.
+#[test]
+fn optional_old_protocol_is_disabled_but_required_old_protocol_is_fatal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    for (connection_id, required) in [("optional-old", false), ("required-old", true)] {
+        connect_handshaking_tool(&mut h, connection_id);
+        let entry = h
+            .extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension");
+        entry.state = ExtensionState::Spawning;
+        entry.require = required;
+    }
+    let old_hello = |name: &str| {
+        TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION - 1,
+            client_name: name.to_owned().into(),
+            client_kind: tau_proto::ClientKind::Tool,
+        })
+    };
+
+    h.handle_extension_message("optional-old", old_hello("optional-old"))
+        .expect("optional old peer is disabled");
+    assert_eq!(
+        h.extensions.entries["optional-old"].state,
+        ExtensionState::Disconnected
+    );
+    let error = h
+        .handle_extension_message("required-old", old_hello("required-old"))
+        .expect_err("required old peer is fatal");
+    assert!(error.to_string().contains("protocol"));
+    h.shutdown().expect("shutdown");
+}
+
+/// Reader decode failures retain their provenance through startup and runtime
+/// policy instead of being mistaken for compatibility EOF disconnects.
+#[test]
+fn decode_failures_follow_required_optional_and_runtime_policy() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    for (connection_id, required) in [
+        ("optional-decode", false),
+        ("required-decode", true),
+        ("runtime-decode", true),
+    ] {
+        connect_handshaking_tool(&mut h, connection_id);
+        h.extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension")
+            .require = required;
+    }
+
+    h.handle_startup_read_failure("optional-decode", "malformed cbor".to_owned())
+        .expect("optional decode failure degrades");
+    assert_eq!(
+        h.extensions.entries["optional-decode"].state,
+        ExtensionState::Disconnected
+    );
+    assert!(!h.extensions.entries["optional-decode"].respawn_allowed);
+
+    let error = h
+        .handle_startup_read_failure("required-decode", "oversized frame".to_owned())
+        .expect_err("required initial decode failure is fatal");
+    assert!(error.to_string().contains("protocol decode failed"));
+
+    h.initial_extension_tool_preflight_complete = true;
+    h.extensions
+        .entries
+        .get_mut("runtime-decode")
+        .expect("runtime extension")
+        .state = ExtensionState::Ready;
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        HarnessEvent::ReadFailed {
+            connection_id: "runtime-decode".into(),
+            error: "malformed cbor".to_owned(),
+        },
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("runtime decode failure is isolated");
+    let runtime = &h.extensions.entries["runtime-decode"];
+    assert_eq!(runtime.state, ExtensionState::Disconnected);
+    assert!(runtime.respawn_allowed);
+    h.shutdown().expect("shutdown");
+}
+
+/// A malformed frame from an already-live extension isolates that peer rather
+/// than terminating the harness event loop.
+#[test]
+fn runtime_duplicate_ready_disconnects_only_the_extension() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    connect_handshaking_tool(&mut h, "runtime-bad");
+    h.extensions
+        .entries
+        .get_mut("runtime-bad")
+        .expect("extension")
+        .state = ExtensionState::Ready;
+    h.initial_extension_tool_preflight_complete = true;
+
+    h.handle_extension_message("runtime-bad", TestMessage::Ready(Default::default()))
+        .expect("runtime protocol failure is isolated");
+
+    assert_eq!(
+        h.extensions.entries["runtime-bad"].state,
+        ExtensionState::Disconnected
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Config rejection after the initial barrier isolates the live connection
+/// without applying optional-startup permanent-disable policy.
+#[test]
+fn runtime_config_error_disconnects_without_disabling_respawn_policy() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    connect_handshaking_tool(&mut h, "runtime-config-bad");
+    let entry = h
+        .extensions
+        .entries
+        .get_mut("runtime-config-bad")
+        .expect("extension");
+    entry.state = ExtensionState::Ready;
+    entry.require = false;
+    entry.respawn_allowed = true;
+    h.initial_extension_tool_preflight_complete = true;
+
+    h.handle_extension_message(
+        "runtime-config-bad",
+        TestMessage::ConfigError(tau_proto::ConfigError {
+            message: "runtime update rejected".to_owned(),
+        }),
+    )
+    .expect("runtime config failure isolated");
+
+    let entry = &h.extensions.entries["runtime-config-bad"];
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(entry.respawn_allowed);
+    h.shutdown().expect("shutdown");
+}
+
+/// Pre-activation storage is bounded by both retained frame count and encoded
+/// bytes; optional overflow isolates the claimant instead of growing without
+/// bound.
+#[test]
+fn optional_activation_staging_enforces_count_and_byte_quotas() {
+    let make_harness = |connection_id: &str| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        connect_handshaking_tool(&mut h, connection_id);
+        h.extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension")
+            .require = false;
+        (td, h)
+    };
+
+    let (_count_td, mut count_harness) = make_harness("count-overflow");
+    let subscribe = || {
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: Vec::new(),
+        })
+    };
+    let (_diagnostic_td, mut diagnostic_harness) = make_harness("diagnostic-at-limit");
+    for _ in 0..super::super::MAX_EXTENSION_ACTIVATION_MESSAGES {
+        diagnostic_harness
+            .handle_extension_message("diagnostic-at-limit", subscribe())
+            .expect("message within count limit");
+    }
+    diagnostic_harness
+        .handle_extension_message(
+            "diagnostic-at-limit",
+            TestMessage::ConfigError(tau_proto::ConfigError {
+                message: "configuration rejected at quota boundary".to_owned(),
+            }),
+        )
+        .expect("mandatory config diagnostic bypasses retained-message quota");
+    assert!(event_log_contains_source_event(
+        &diagnostic_harness,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
+                    && notice.message.contains("configuration rejected at quota boundary")
+        )
+    ));
+    diagnostic_harness.shutdown().expect("shutdown");
+
+    let (_ready_td, mut ready_harness) = make_harness("ready-at-limit");
+    ready_harness
+        .extension_activation_stage_mut("ready-at-limit")
+        .retained_message_count = super::super::MAX_EXTENSION_ACTIVATION_MESSAGES;
+    ready_harness
+        .handle_extension_message("ready-at-limit", TestMessage::Ready(Default::default()))
+        .expect("Ready does not consume retained-message quota");
+    assert_eq!(
+        ready_harness.extensions.entries["ready-at-limit"].state,
+        ExtensionState::Ready
+    );
+    ready_harness.shutdown().expect("shutdown");
+
+    let (_oversized_diagnostic_td, mut oversized_diagnostic_harness) =
+        make_harness("oversized-diagnostic");
+    oversized_diagnostic_harness
+        .handle_extension_message(
+            "oversized-diagnostic",
+            TestMessage::ConfigError(tau_proto::ConfigError {
+                message: "x".repeat(super::super::MAX_EXTENSION_ACTIVATION_BYTES + 1),
+            }),
+        )
+        .expect("oversized config diagnostic is bounded and emitted");
+    assert!(event_log_contains_source_event(
+        &oversized_diagnostic_harness,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
+                    && notice.message.contains("[truncated]")
+                    && notice.message.len()
+                        < super::super::MAX_EXTENSION_CONFIG_ERROR_BYTES * 2
+        )
+    ));
+    oversized_diagnostic_harness.shutdown().expect("shutdown");
+
+    for _ in 0..super::super::MAX_EXTENSION_ACTIVATION_MESSAGES {
+        count_harness
+            .handle_extension_message("count-overflow", subscribe())
+            .expect("message within count limit");
+    }
+    count_harness
+        .handle_extension_message("count-overflow", subscribe())
+        .expect("count overflow degrades");
+    assert_eq!(
+        count_harness.extensions.entries["count-overflow"].state,
+        ExtensionState::Disconnected
+    );
+    count_harness.shutdown().expect("shutdown");
+
+    let oversized = || {
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix(
+                "x".repeat(super::super::MAX_EXTENSION_ACTIVATION_BYTES + 1),
+            )],
+        })
+    };
+    let (_bytes_td, mut bytes_harness) = make_harness("bytes-overflow");
+    bytes_harness
+        .handle_extension_message("bytes-overflow", oversized())
+        .expect("byte overflow degrades");
+    assert_eq!(
+        bytes_harness.extensions.entries["bytes-overflow"].state,
+        ExtensionState::Disconnected
+    );
+    bytes_harness.shutdown().expect("shutdown");
+
+    let (_required_td, mut required_harness) = make_harness("required-overflow");
+    required_harness
+        .extensions
+        .entries
+        .get_mut("required-overflow")
+        .expect("required")
+        .require = true;
+    required_harness
+        .handle_extension_message("required-overflow", oversized())
+        .expect_err("required initial overflow is fatal");
+    required_harness.shutdown().expect("shutdown");
+
+    let (_runtime_td, mut runtime_harness) = make_harness("runtime-overflow");
+    runtime_harness.initial_extension_tool_preflight_complete = true;
+    runtime_harness
+        .handle_extension_message("runtime-overflow", oversized())
+        .expect("runtime overflow isolates");
+    let runtime_entry = &runtime_harness.extensions.entries["runtime-overflow"];
+    assert_eq!(runtime_entry.state, ExtensionState::Disconnected);
+    assert!(runtime_entry.respawn_allowed);
+    runtime_harness.shutdown().expect("shutdown");
+}
+
+/// Internal tool reservations are present before initial extension preflight:
+/// optional conflicts degrade and required conflicts fail startup.
+#[test]
+fn initial_internal_tool_conflicts_follow_availability_policy() {
+    let run = |required: bool| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        h.registry
+            .register_internal("harness", staged_tool_spec("reserved_tool"));
+        connect_handshaking_tool(&mut h, "claimant");
+        h.extensions
+            .entries
+            .get_mut("claimant")
+            .expect("claimant")
+            .require = required;
+        h.handle_extension_event(
+            "claimant",
+            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                tool: staged_tool_spec("reserved_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            })),
+        )
+        .expect("stage conflicting tool");
+        let result = h.handle_extension_message("claimant", TestMessage::Ready(Default::default()));
+        (h, result)
+    };
+
+    let (mut optional, result) = run(false);
+    result.expect("optional conflict degrades");
+    assert_eq!(
+        optional.extensions.entries["claimant"].state,
+        ExtensionState::Disconnected
+    );
+    assert_eq!(
+        optional.registry.providers_for("reserved_tool")[0].kind,
+        tau_core::ToolProviderKind::Internal
+    );
+    optional.shutdown().expect("shutdown");
+
+    let (mut required, result) = run(true);
+    assert!(result.is_err(), "required internal conflict is fatal");
+    assert_eq!(
+        required.registry.providers_for("reserved_tool")[0].kind,
+        tau_core::ToolProviderKind::Internal
+    );
+    required.shutdown().expect("shutdown");
+}
+
+/// Initial collision outcomes follow required/optional policy rather than Ready
+/// arrival order.
+#[test]
+fn initial_tool_collision_matrix_is_deterministic() {
+    let run = |requirements: &[(&str, bool)], reverse_ready: bool| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        for (connection_id, required) in requirements {
+            connect_handshaking_tool(&mut h, connection_id);
+            h.extensions
+                .entries
+                .get_mut(*connection_id)
+                .expect("extension")
+                .require = *required;
+            h.handle_extension_event(
+                connection_id,
+                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                    tool: staged_tool_spec("shared_startup_tool"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                })),
+            )
+            .expect("stage tool");
+        }
+        let mut result = Ok(());
+        let mut ready_order = requirements.iter().collect::<Vec<_>>();
+        if reverse_ready {
+            ready_order.reverse();
+        }
+        for (connection_id, _) in ready_order {
+            result =
+                h.handle_extension_message(connection_id, TestMessage::Ready(Default::default()));
+            if result.is_err() {
+                break;
+            }
+        }
+        (h, result)
+    };
+
+    for reverse_ready in [false, true] {
+        let (mut required_optional, result) = run(
+            &[("optional-owner", false), ("required-owner", true)],
+            reverse_ready,
+        );
+        result.expect("required wins");
+        assert_eq!(
+            required_optional
+                .registry
+                .providers_for("shared_startup_tool")[0]
+                .connection_id
+                .as_str(),
+            "required-owner"
+        );
+        assert_eq!(
+            required_optional.extensions.entries["optional-owner"].state,
+            ExtensionState::Disconnected
+        );
+        required_optional.shutdown().expect("shutdown");
+
+        let (mut optional_optional, result) = run(
+            &[("optional-a", false), ("optional-b", false)],
+            reverse_ready,
+        );
+        result.expect("optional conflicts degrade");
+        assert!(
+            optional_optional
+                .registry
+                .providers_for("shared_startup_tool")
+                .is_empty()
+        );
+        optional_optional.shutdown().expect("shutdown");
+
+        let (mut required_required, result) =
+            run(&[("required-a", true), ("required-b", true)], reverse_ready);
+        assert!(result.is_err(), "required collision must fail startup");
+        assert!(
+            required_required
+                .registry
+                .providers_for("shared_startup_tool")
+                .is_empty()
+        );
+        required_required.shutdown().expect("shutdown");
+    }
+}
+
+/// Invalid staged registrations are removed before name ownership is computed:
+/// they cannot make a valid peer lose a startup collision.
+#[test]
+fn invalid_initial_tool_registration_does_not_claim_collision_ownership() {
+    let run = |invalid_required: bool| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        for (connection_id, required, spec) in [
+            (
+                "invalid-owner",
+                invalid_required,
+                staged_invalid_tool_spec("invalid_collision_tool"),
+            ),
+            (
+                "valid-owner",
+                false,
+                staged_tool_spec("invalid_collision_tool"),
+            ),
+        ] {
+            connect_handshaking_tool(&mut h, connection_id);
+            h.extensions
+                .entries
+                .get_mut(connection_id)
+                .expect("extension")
+                .require = required;
+            h.handle_extension_event(
+                connection_id,
+                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                    tool: spec,
+                    tool_group: None,
+                    prompt_fragment: None,
+                })),
+            )
+            .expect("stage registration");
+        }
+        h.handle_extension_message("invalid-owner", TestMessage::Ready(Default::default()))
+            .expect("first Ready waits");
+        let result =
+            h.handle_extension_message("valid-owner", TestMessage::Ready(Default::default()));
+        (h, result)
+    };
+
+    let (mut optional_invalid, result) = run(false);
+    result.expect("invalid optional peer degrades");
+    assert_eq!(
+        optional_invalid
+            .registry
+            .providers_for("invalid_collision_tool")[0]
+            .connection_id
+            .as_str(),
+        "valid-owner"
+    );
+    assert_eq!(
+        optional_invalid.extensions.entries["invalid-owner"].state,
+        ExtensionState::Disconnected
+    );
+    optional_invalid.shutdown().expect("shutdown");
+
+    let (mut required_invalid, result) = run(true);
+    assert!(result.is_err(), "invalid required peer is fatal");
+    assert!(
+        required_invalid
+            .registry
+            .providers_for("invalid_collision_tool")
+            .is_empty()
+    );
+    required_invalid.shutdown().expect("shutdown");
+}
+
+/// Initial preflight validates only the final same-owner registration for a
+/// name, preserving last-refresh semantics in both validity directions.
+#[test]
+fn initial_tool_refresh_validates_only_last_same_owner_registration() {
+    let run = |first: ToolSpec, second: ToolSpec| {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        h.initial_extension_tool_preflight_complete = false;
+        connect_handshaking_tool(&mut h, "refresh-owner");
+        for tool in [first, second] {
+            h.handle_extension_event(
+                "refresh-owner",
+                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                    tool,
+                    tool_group: None,
+                    prompt_fragment: None,
+                })),
+            )
+            .expect("stage refresh");
+        }
+        let result =
+            h.handle_extension_message("refresh-owner", TestMessage::Ready(Default::default()));
+        (h, result)
+    };
+
+    let (mut valid_final, result) = run(
+        staged_invalid_tool_spec("refreshed_tool"),
+        staged_tool_spec("refreshed_tool"),
+    );
+    result.expect("valid final refresh wins");
+    assert_eq!(
+        valid_final.registry.providers_for("refreshed_tool").len(),
+        1
+    );
+    valid_final.shutdown().expect("shutdown");
+
+    let (mut invalid_final, result) = run(
+        staged_tool_spec("refreshed_tool"),
+        staged_invalid_tool_spec("refreshed_tool"),
+    );
+    assert!(result.is_err(), "invalid final refresh remains fatal");
+    assert!(
+        invalid_final
+            .registry
+            .providers_for("refreshed_tool")
+            .is_empty()
+    );
+    invalid_final.shutdown().expect("shutdown");
 }
 
 #[test]
@@ -2109,6 +3168,58 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
 }
 
 #[test]
+fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.initial_extension_tool_preflight_complete = false;
+    connect_handshaking_tool(&mut h, "operational-owner");
+    connect_handshaking_tool(&mut h, "activation-blocker");
+
+    h.handle_extension_event(
+        "operational-owner",
+        TestProtocolItem::Event(Event::ShellCommandFinished(
+            tau_proto::ShellCommandFinished {
+                command_id: "startup-shell".into(),
+                session_id: "s1".into(),
+                command: "printf held".to_owned(),
+                include_in_context: false,
+                target_agent_id: None,
+                output: "held".to_owned(),
+                exit_code: Some(0),
+                cancelled: false,
+            },
+        )),
+    )
+    .expect("defer shell completion");
+    h.handle_extension_message("operational-owner", TestMessage::Ready(Default::default()))
+        .expect("owner ready");
+
+    assert!(!event_log_contains_source_event(
+        &h,
+        "operational-owner",
+        |event| matches!(
+            event,
+            Event::ShellCommandFinished(finished)
+                if finished.command_id.as_str() == "startup-shell"
+        )
+    ));
+
+    h.handle_extension_message("activation-blocker", TestMessage::Ready(Default::default()))
+        .expect("complete barrier");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        "operational-owner",
+        |event| matches!(
+            event,
+            Event::ShellCommandFinished(finished)
+                if finished.command_id.as_str() == "startup-shell"
+        )
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn prompt_created_waits_for_registered_agent_context_provider() {
     // Context readiness is an explicit extension capability, not a side effect
     // of subscribing to `session.agent_loaded`. Once a provider registers, the
@@ -2795,20 +3906,21 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
 }
 
 #[test]
-fn duplicate_provider_keeps_tool_available_without_notice() {
-    // Removing one provider must not hide the tool if another provider for the
-    // same tool name remains registered.
+fn duplicate_provider_is_rejected_without_ambiguous_fallback() {
+    // A different connection cannot become a hidden fallback owner selected by
+    // registration arrival order.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
     let spec = shell_tool_spec(&h);
-    h.registry.register("conn-duplicate-shell", spec);
+    let report = h.registry.register("conn-duplicate-shell", spec);
+    assert!(!report.errors.is_empty());
     let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
 
     unregister_shell(&mut h);
-    assert_eq!(h.registry.providers_for("shell").len(), 1);
+    assert!(h.registry.providers_for("shell").is_empty());
 
     let cid = ensure_test_user_agent(&mut h);
     h.dispatch_prompt_for_agent(
@@ -2818,10 +3930,62 @@ fn duplicate_provider_keeps_tool_available_without_notice() {
     .expect("dispatch user prompt");
 
     let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(context_text_count(&prompt, &notice), 0);
-    assert_eq!(agent_prompt_text_count(&h, &notice), 0);
-    assert!(prompt_has_tool(&prompt, "shell"));
+    assert_eq!(context_text_count(&prompt, &notice), 1);
+    assert_eq!(agent_prompt_text_count(&h, &notice), 1);
+    assert!(!prompt_has_tool(&prompt, "shell"));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// An assigned prefix fails closed when an old or raw client attempts to
+/// register unprefixed structural identifiers.
+#[test]
+fn assigned_tool_prefix_rejects_unprefixed_registration() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    connect_handshaking_tool(&mut h, "prefixed-extension");
+    h.extensions
+        .entries
+        .get_mut("prefixed-extension")
+        .expect("extension")
+        .tool_prefix = Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix"));
+
+    for (name, alias, group) in [
+        ("slack_send", Some("work_visible"), Some("work_slack")),
+        ("work_slack_send", Some("visible"), Some("work_slack")),
+        ("work_slack_send", Some("work_visible"), Some("slack")),
+    ] {
+        let mut spec = shell_tool_spec(&h);
+        spec.name = ToolName::new(name);
+        spec.model_visible_name = alias.map(ToolName::new);
+        h.handle_extension_event_inner(
+            "prefixed-extension",
+            Event::ToolRegister(tau_proto::ToolRegister {
+                tool: spec,
+                tool_group: group.map(|name| tau_proto::ToolGroup {
+                    name: tau_proto::ToolGroupName::new(name),
+                    prompt_fragment: None,
+                }),
+                prompt_fragment: None,
+            }),
+        )
+        .expect("handle registration");
+        assert!(h.registry.providers_for(name).is_empty());
+    }
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut saw_notice = false;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if matches!(
+            &entry.event,
+            Event::HarnessNotice(notice)
+                if notice.message.contains("assigned tool_prefix `work`")
+        ) {
+            saw_notice = true;
+            break;
+        }
+    }
+    assert!(saw_notice);
     h.shutdown().expect("shutdown");
 }
 
@@ -3044,6 +4208,7 @@ fn disconnected_tool_is_removed_cleanly() {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                ..
             } => {
                 let _ = h.handle_extension_message(&connection_id, *message);
             }
@@ -3166,6 +4331,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     let conn_id = spawned.connection_id.clone();
     h.queue_extension_connect(ExtensionConnectCommand {
         entry: ExtensionEntry {
+            tool_prefix: None,
             name: "late-tool".to_owned(),
             instance_id: 999.into(),
             connection_id: conn_id.clone(),
@@ -3197,6 +4363,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         HarnessEvent::FromConnection { .. }
         | HarnessEvent::Disconnected { .. }
+        | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_) => panic!("reader forwarded before connect command"),
     }
 
@@ -3215,12 +4382,14 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         HarnessEvent::FromConnection {
             connection_id,
             message,
+            ..
         } => {
             assert_eq!(connection_id, conn_id);
             assert!(matches!(message.as_ref(), HarnessInputMessage::Hello(_)));
         }
         HarnessEvent::Command(_)
         | HarnessEvent::Disconnected { .. }
+        | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_) => panic!("unexpected harness event after connect ack"),
     }
 

@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    CborValue, Event, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStats, ToolUseStatus,
+    CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
+    ToolUseState, ToolUseStats, ToolUseStatus,
 };
 use url::Url;
 /// `tracing` target for events emitted from this extension.
@@ -343,13 +343,20 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> ClientResult<()> {
     let invoke = cx.invoke().clone();
+    let local_tool_name = cx.local_tool_name().clone();
     let handle = cx.handle();
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
     if let Some(permit) = cx.state.sem.try_acquire() {
         std::thread::spawn(move || {
             let _permit = permit;
-            dispatch_tool_invoke(invoke, searcher.as_ref(), parallel_client.as_ref(), &handle);
+            dispatch_tool_invoke(
+                invoke,
+                &local_tool_name,
+                searcher.as_ref(),
+                parallel_client.as_ref(),
+                &handle,
+            );
         });
     } else {
         cx.handle().emit_detached(tool_error(
@@ -362,11 +369,12 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
 
 fn dispatch_tool_invoke(
     invoke: ToolStarted,
+    local_tool_name: &ToolName,
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
     handle: &ClientHandle,
 ) {
-    if let Some(display) = initial_display(&invoke) {
+    if let Some(display) = initial_display(&invoke, local_tool_name) {
         let _ = handle.emit_detached(Event::ToolProgress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -375,7 +383,7 @@ fn dispatch_tool_invoke(
             display: Some(display),
         }));
     }
-    let event = match invoke.tool_name.as_str() {
+    let event = match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
         PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
             invoke,
@@ -399,8 +407,8 @@ fn dispatch_tool_invoke(
     let _ = handle.emit_detached(event);
 }
 
-fn initial_display(invoke: &ToolStarted) -> Option<ToolUseState> {
-    let args = match invoke.tool_name.as_str() {
+fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<ToolUseState> {
+    let args = match local_tool_name.as_str() {
         EXA_TOOL_NAME => parse_exa_args(&invoke.arguments)
             .map(|(query, _)| query)
             .unwrap_or_default(),

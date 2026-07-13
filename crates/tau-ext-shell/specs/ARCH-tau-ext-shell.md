@@ -41,8 +41,10 @@ Worker and scheduler output goes through a shell-local `Output` adapter backed
 by `ClientHandle::send_detached` in production. This preserves the historical
 enqueue-to-writer behavior: worker threads do not block on protocol flush, while
 the tau-client writer still reports encode/flush failures during graceful
-shutdown. Tests can use an mpsc-backed adapter for direct state-machine
-coverage.
+shutdown. Configure-time tool re-registration deliberately uses synchronous
+`register_local_tool`: tau-client buffers that declaration behind static startup
+defaults and flushes the configured override before `Ready`. Tests can use an
+mpsc-backed adapter for direct state-machine coverage.
 
 ## Scheduler and shutdown ordering
 

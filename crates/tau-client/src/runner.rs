@@ -25,6 +25,9 @@ where
     /// Runs the extension over the supplied protocol streams and returns final
     /// state.
     ///
+    /// Startup is `Hello` → initial `Configure` → scoped declarations →
+    /// `Ready`.
+    ///
     /// # Errors
     ///
     /// Returns an error when builder validation fails, protocol input cannot be
@@ -94,13 +97,14 @@ where
     }
 
     /// Runs the extension without joining the writer after harness disconnect,
-    /// constructing state after startup frames are written.
+    /// constructing state after initial Configure establishes the name scope.
     ///
     /// The supplied factory receives a cloneable [`ClientHandle`] that can be
     /// stored in runtime state for background workers. The runner writes
-    /// `Hello`/subscriptions/startup events/`Ready` before calling the factory,
-    /// so stored handles cannot accidentally send frames before the startup
-    /// prelude.
+    /// `Hello`, waits for initial `Configure`, constructs state, dispatches
+    /// configuration, writes static declarations followed by accepted
+    /// configuration-derived declarations, then writes `Ready`. Public handle
+    /// output remains gated until that prelude completes.
     ///
     /// # Errors
     ///
@@ -127,10 +131,8 @@ where
         let handle = ClientHandle::new(sender);
 
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
-        let run_result = write_startup(&builder, &handle).and_then(|()| {
-            let state = make_state(handle.clone());
-            run_message_loop(reader, state, builder, handle.clone())
-        });
+        let run_result =
+            run_client_loop_with_state_factory(reader, builder, handle.clone(), make_state);
         if let Ok((state, LoopExit::Disconnect)) = run_result {
             return Ok(state);
         }
@@ -164,19 +166,58 @@ enum LoopExit {
 fn run_client_loop<R, State>(
     reader: R,
     state: State,
-    builder: ExtensionBuilder<State>,
+    mut builder: ExtensionBuilder<State>,
     handle: ClientHandle,
 ) -> ClientResult<(State, LoopExit)>
 where
     R: Read,
 {
-    write_startup(&builder, &handle)?;
-    run_message_loop(reader, state, builder, handle)
+    write_hello(&builder, &handle)?;
+    let mut reader = tau_proto::PeerInputReader::new(reader);
+    let Some(configure) = read_initial_configure(&mut reader)? else {
+        return Ok((state, LoopExit::Disconnect));
+    };
+    install_scope(&mut builder, &handle, &configure)?;
+    let mut state = state;
+    if !dispatch_initial_configure(&configure, &mut state, &mut builder, &handle)? {
+        handle.discard_configure_outputs();
+        return Ok((state, LoopExit::StopRequested));
+    }
+    write_startup_after_configure(&builder, &handle)?;
+    run_message_loop_reader(&mut reader, state, builder, handle)
+}
+
+/// Runs the initial gate while constructing state before Configure dispatch.
+fn run_client_loop_with_state_factory<R, State, MakeState>(
+    reader: R,
+    mut builder: ExtensionBuilder<State>,
+    handle: ClientHandle,
+    make_state: MakeState,
+) -> ClientResult<(State, LoopExit)>
+where
+    R: Read,
+    MakeState: FnOnce(ClientHandle) -> State,
+{
+    write_hello(&builder, &handle)?;
+    let mut reader = tau_proto::PeerInputReader::new(reader);
+    let Some(configure) = read_initial_configure(&mut reader)? else {
+        return Err(ClientError::handler(
+            "harness disconnected before detached state initialization",
+        ));
+    };
+    install_scope(&mut builder, &handle, &configure)?;
+    let mut state = make_state(handle.clone());
+    if !dispatch_initial_configure(&configure, &mut state, &mut builder, &handle)? {
+        handle.discard_configure_outputs();
+        return Ok((state, LoopExit::StopRequested));
+    }
+    write_startup_after_configure(&builder, &handle)?;
+    run_message_loop_reader(&mut reader, state, builder, handle)
 }
 
 /// Runs harness message dispatch after startup frames have been written.
-fn run_message_loop<R, State>(
-    reader: R,
+fn run_message_loop_reader<R, State>(
+    reader: &mut tau_proto::PeerInputReader<R>,
     mut state: State,
     mut builder: ExtensionBuilder<State>,
     handle: ClientHandle,
@@ -184,7 +225,6 @@ fn run_message_loop<R, State>(
 where
     R: Read,
 {
-    let mut reader = tau_proto::PeerInputReader::new(reader);
     while let Some(message) = reader.read_message()? {
         match dispatch_message(message, &mut state, &mut builder, &handle)? {
             DispatchOutcome::Continue => {}
@@ -195,17 +235,63 @@ where
     Ok((state, LoopExit::InputClosed))
 }
 
-/// Writes the startup prelude in harness-defined order.
-pub(crate) fn write_startup<State>(
+/// Require the first harness response after `Hello` to be `Configure`.
+fn read_initial_configure<R: Read>(
+    reader: &mut tau_proto::PeerInputReader<R>,
+) -> ClientResult<Option<tau_proto::Configure>> {
+    match reader.read_message()? {
+        Some(tau_proto::HarnessOutputMessage::Configure(configure)) => Ok(Some(configure)),
+        Some(tau_proto::HarnessOutputMessage::Disconnect(_)) | None => Ok(None),
+        Some(message) => Err(ClientError::handler(format!(
+            "expected initial Configure after Hello, received {message:?}"
+        ))),
+    }
+}
+
+/// Install the immutable scope before configuration handlers run.
+fn install_scope<State>(
+    builder: &mut ExtensionBuilder<State>,
+    handle: &ClientHandle,
+    configure: &tau_proto::Configure,
+) -> ClientResult<()> {
+    let scope = crate::ToolNameScope::from_configure(configure);
+    handle.install_tool_name_scope(scope.clone())?;
+    if let Err(error) = builder.apply_tool_name_scope(&scope) {
+        handle.config_error(error.to_string())?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Deliver the buffered initial configuration before declarations and `Ready`.
+pub(crate) fn dispatch_initial_configure<State>(
+    configure: &tau_proto::Configure,
+    state: &mut State,
+    builder: &mut ExtensionBuilder<State>,
+    handle: &ClientHandle,
+) -> ClientResult<bool> {
+    handle.set_configuring(true);
+    let result = dispatch_message(
+        tau_proto::HarnessOutputMessage::Configure(configure.clone()),
+        state,
+        builder,
+        handle,
+    );
+    handle.set_configuring(false);
+    result?;
+    Ok(!handle.startup_rejected())
+}
+
+/// Writes startup declarations after the initial configuration gate.
+pub(crate) fn write_startup_after_configure<State>(
     builder: &ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
-    write_hello(builder, handle)?;
     if builder.force_subscribe
         || !builder.historical_selectors.is_empty()
         || !builder.live_selectors.is_empty()
     {
-        handle.send(tau_proto::HarnessInputMessage::Subscribe(
+        handle.send_startup(tau_proto::HarnessInputMessage::Subscribe(
             tau_proto::Subscribe {
                 historical_selectors: builder.historical_selectors.clone(),
                 live_selectors: builder.live_selectors.clone(),
@@ -213,11 +299,17 @@ pub(crate) fn write_startup<State>(
         ))?;
     }
     if let Some(intercept) = &builder.intercept {
-        handle.send(tau_proto::HarnessInputMessage::Intercept(intercept.clone()))?;
+        handle.send_startup(tau_proto::HarnessInputMessage::Intercept(intercept.clone()))?;
     }
-    for event in &builder.startup_events {
-        handle.emit(event.clone())?;
+    for declaration in &builder.startup_events {
+        let crate::builder::StartupDeclaration::Event(event) = declaration else {
+            return Err(ClientError::builder(
+                "startup declaration was not resolved after initial Configure",
+            ));
+        };
+        handle.send_startup(tau_proto::HarnessInputMessage::emit(event.as_ref().clone()))?;
     }
+    handle.flush_configure_outputs()?;
     write_ready(handle, builder.ready_message.clone())?;
     Ok(())
 }
@@ -227,7 +319,7 @@ pub(crate) fn write_hello<State>(
     builder: &ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
-    handle.send(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+    handle.send_startup(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: builder.name.clone(),
         client_kind: builder.kind.clone(),
@@ -236,9 +328,7 @@ pub(crate) fn write_hello<State>(
 
 /// Writes the terminal startup `Ready` frame.
 pub(crate) fn write_ready(handle: &ClientHandle, message: Option<String>) -> ClientResult<()> {
-    handle.send(tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
-        message,
-    }))
+    handle.send_ready(message)
 }
 
 /// Dispatches one harness-to-peer message and reports whether the caller should
@@ -249,6 +339,13 @@ pub(crate) fn dispatch_message<State>(
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<DispatchOutcome> {
+    if let tau_proto::HarnessOutputMessage::Configure(configure) = &message
+        && let Err(error) =
+            handle.install_tool_name_scope(crate::ToolNameScope::from_configure(configure))
+    {
+        handle.config_error(error.to_string())?;
+        return Ok(DispatchOutcome::Continue);
+    }
     for handler in &mut builder.output_message_handlers {
         handler.handle(&message, state, handle)?;
     }

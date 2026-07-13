@@ -20,6 +20,7 @@ fn config_with_secret(optional: bool) -> Config {
         extensions: BTreeMap::from([(
             "std-email".to_owned(),
             ExtensionConfig {
+                tool_prefix: None,
                 name: "std-email".to_owned(),
                 command: "tau".to_owned(),
                 args: Vec::new(),

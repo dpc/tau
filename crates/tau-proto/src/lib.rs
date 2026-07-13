@@ -26,6 +26,7 @@ mod prompt_fragment;
 mod provider_quota;
 mod suggestion;
 mod token_usage;
+mod tool_name_prefix;
 
 use std::io::{BufReader, Cursor, Read, Write};
 use std::marker::PhantomData;
@@ -45,6 +46,9 @@ use serde::de::DeserializeOwned;
 pub use suggestion::*;
 pub use tau_actions::*;
 pub use token_usage::*;
+pub use tool_name_prefix::{
+    InvalidToolNamePrefix, ToolNameCompositionError, ToolNamePrefix, ToolNameTarget,
+};
 
 /// Current protocol version implemented by this crate.
 ///
@@ -65,7 +69,11 @@ pub use token_usage::*;
 /// successful-send completion RPCs.
 ///
 /// Version 9 adds transient bounded provider quota current-state events.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// Version 10 requires the harness to answer extension `Hello` with `Configure`
+/// before accepting declarations or `Ready`, and adds the optional immutable
+/// per-instance tool-name prefix carried by that configuration.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
@@ -969,6 +977,12 @@ pub type EncodeError = ciborium::ser::Error<std::io::Error>;
 /// CBOR deserialization error used by protocol decoders and readers.
 pub type DecodeError = ciborium::de::Error<std::io::Error>;
 
+/// Maximum encoded size accepted for one streaming protocol message.
+///
+/// This bounds peer-controlled buffering before higher-level connection and
+/// activation quotas can apply.
+pub const MAX_PROTOCOL_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Codec
 // ---------------------------------------------------------------------------
@@ -1233,10 +1247,22 @@ where
         match std::io::BufRead::fill_buf(&mut self.inner) {
             Ok([]) => return Ok(None),
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(DecodeError::Io(e)),
         }
-        ciborium::from_reader(&mut self.inner).map(Some)
+        let limit = MAX_PROTOCOL_MESSAGE_BYTES + 1;
+        let mut limited = (&mut self.inner).take(limit);
+        let decoded = ciborium::from_reader(&mut limited);
+        let consumed = limit - limited.limit();
+        if MAX_PROTOCOL_MESSAGE_BYTES < consumed {
+            return Err(DecodeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "protocol message exceeds {} encoded bytes",
+                    MAX_PROTOCOL_MESSAGE_BYTES
+                ),
+            )));
+        }
+        decoded.map(Some)
     }
 }
 

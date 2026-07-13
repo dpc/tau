@@ -9,6 +9,13 @@ contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
+Protocol version 10 requires an extension's first harness response after
+`Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
+the connection's immutable structural name scope as specified by
+[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+Streaming readers reject a single encoded protocol message larger than 16 MiB
+before higher-level connection or activation queues receive it.
+
 Provider-visible images are transport-neutral binary values attached to tool
 results, separate from message authorship. CBOR is the durable/IPC byte
 transport; provider-specific data URLs are never protocol truth. Debug

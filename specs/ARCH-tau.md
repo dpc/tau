@@ -4,6 +4,12 @@ Tau is a Rust workspace whose end-user `tau` binary composes first-party compone
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 
+Local configured extensions are trusted host executables with limited protocol
+authority, cooperative inter-harness IPC is a separate same-UID coordination
+boundary, and adapter-facing external content is untrusted ingress. Reviewers must
+select the applicable boundary through [`SECURITY.md`](../SECURITY.md) before
+turning robustness observations into feature-blocking security requirements.
+
 Opt-in same-UID peer rendezvous authority is governed by
 [DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).
 

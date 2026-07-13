@@ -65,7 +65,7 @@ fn gateway_error_response_is_rejected() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "ok": false,
                 "error": "denied",
             })
@@ -104,7 +104,7 @@ fn heartbeat_interval_is_updated_from_response() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "ok": true,
                 "heartbeat_interval_seconds": 2,
                 "deliveries": [],
