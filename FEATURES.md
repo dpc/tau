@@ -310,8 +310,10 @@ missing required skills, startup fails instead of silently choosing another role
 
 Standalone-capable models use durable compaction transactions with immutable
 branch cuts. Replacement windows preserve facts committed while compaction is
-running, terminal failures remain explicitly recoverable without automatic retry,
-and resumed inference is checkpointed before provider dispatch.
+running, terminal failures remain blocked without automatic retry, and resumed
+inference is checkpointed before provider dispatch. `/compact` and an authorized
+cross-agent `agent_compact` are the explicit recovery authorities; queued input
+does not clear the block, and `/cancel` does not abandon the owed activation.
 Tools start from extension defaults, matching `tool_policy.rules` apply by tag,
 then role overrides run broad-to-specific: disable tags, enable tags, disable
 groups, enable groups, disable tools, enable tools. `tools` remains an explicit

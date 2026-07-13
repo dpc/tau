@@ -1,6 +1,6 @@
 # DESIGN-tau-harness-compaction-activation-binding: Durable compaction and activation binding
 
-Status: confirmed, 2026-07-11, user
+Status: confirmed, 2026-07-12, user
 
 New inference checkpoints own a complete provider-qualified model, inference
 operation, and activation-cut tuple together with their prompt, transcript
@@ -19,6 +19,22 @@ match Started; operation is standalone; `suffix_end` equals the boundary
 parent; and cut is its ancestor. Legacy boundaries have all six absent. The
 provider connection id is runtime-only and must not be persisted.
 
+Every provisional activation or standalone-compaction cut is normalized to a
+provider-valid closed prefix before it is committed. In the validated transcript
+shape, a tool-calling assistant node is followed by one whole terminal-results
+node, so a cut at that assistant retreats to its parent. Threshold selection,
+pending-message wake selection, ordinary inference checkpoints, reactive
+overflow, and explicit blocked recovery all use this same normalization.
+`resume_through` remains the complete owed watermark, preserving the exact
+assistant call plus function/custom/mixed results in the suffix.
+
+A blocked retry through `/compact` or authorized `agent_compact` supersedes the
+failed transaction at its normalized cut. New input does not clear the block,
+and `/cancel` does not abandon it. This preserves exact activation ownership
+until the explicit successor succeeds. Recovery refuses a selected head that no
+longer descends from both the normalized failed cut and the failed resume
+watermark.
+
 Canonical submitted, injected, and steered facts contain a harness-owned,
 default-false `inference_activation` marker. Typed harness provenance marks
 passive background/restore context false and actual activators true; neither
@@ -32,6 +48,11 @@ all-six group, exact mismatches, duplicate/unknown outcomes, and legacy
 boundaries; and `tau-harness` covers Started-before-dispatch and terminal
 correlation, interception/peer ownership, typed passive replay, crash restart,
 checkpoint ranges, and dispatch uncertainty.
+Closed-prefix coverage adds core normalization and ancestor/same-branch
+supersession validation; harness threshold, reactive, warm/cold, cross-agent,
+queued-input, cancellation, and replay ownership scenarios; a strict in-process
+provider/tool vertical slice that rejects unbalanced compact input; and ChatGPT
+request serialization assertions for exact function/custom call-output pairs.
 Restored post-compaction continuation coverage includes captured-route success,
 staggered unrelated discovery, discovery-complete absence, explicit model
 removal, warm resume, mutable role/model drift, sanitized terminal visibility,

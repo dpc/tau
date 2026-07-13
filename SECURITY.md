@@ -11,6 +11,21 @@ remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
 work, and spend.
 
+## Standalone compaction recovery reliability
+
+Standalone compaction and its continuation are harness-owned durable work. Every
+new provider cut must be a closed transcript prefix; a tool-calling assistant
+response and its complete terminal results node are indivisible. A failed
+transaction with a resume watermark remains fail-closed until an explicit
+successor preserves same-branch coverage of that watermark. A successor may
+retreat its cut to retain more exact suffix, but it must not replace the owed
+watermark with an ancestor or sibling selected by later head navigation.
+Ordinary input and `/cancel` do not abandon this ownership; if the selected head
+no longer descends from the owed watermark, explicit recovery must remain
+blocked. Core validation and warm/cold replay regressions enforce these rules.
+Revisit them when adding any explicit abandon/rewind operation or changing
+compaction replay ownership.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:

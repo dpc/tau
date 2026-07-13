@@ -622,11 +622,11 @@ impl Harness {
         let agent = self.agents.get(cid)?;
         let head = agent.head?;
         let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
-        Some(
-            tree.node(head)
-                .and_then(|node| node.parent_id)
-                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-        )
+        let provisional = tree
+            .node(head)
+            .and_then(|node| node.parent_id)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        Some(self.closed_provider_prefix_for_agent(agent.agent_id.as_deref()?, provisional))
     }
 
     /// Entry point for any publish call. Defers if interception is

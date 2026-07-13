@@ -58,6 +58,385 @@ fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
     }
 }
 
+fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
+    tree.apply_event(&Event::AgentPromptSubmitted(
+        tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id(),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        },
+    ));
+    AgentHead::Node(tree.head().expect("input node"))
+}
+
+fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCompactionStarted) {
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    tree.apply_event(&Event::AgentStandaloneCompactionFailed(
+        tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: agent_id(),
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+        },
+    ));
+}
+
+/// Provider-prefix normalization must keep function, custom, and mixed parallel
+/// tool rounds indivisible while leaving every already-closed boundary intact.
+#[test]
+fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
+    for tool_types in [
+        vec![ToolType::Function],
+        vec![ToolType::Custom],
+        vec![ToolType::Function, ToolType::Custom],
+    ] {
+        let mut tree = AgentTree::from_events(agent_id(), &[]);
+        let parent = append_user_input(&mut tree, "parent");
+        let response = tau_proto::ProviderResponseFinished {
+            agent_prompt_id: "ap-tool-prefix".into(),
+            agent_id: agent_id(),
+            output_items: tool_types
+                .iter()
+                .enumerate()
+                .map(|(index, tool_type)| {
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: format!("call-{index}").into(),
+                        name: ToolName::new(format!("tool_{index}")),
+                        tool_type: *tool_type,
+                        arguments: tau_proto::CborValue::Null,
+                        raw_arguments_json: None,
+                        responses_envelope: None,
+                    })
+                })
+                .collect(),
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        };
+        tree.apply_event(&Event::ProviderResponseFinished(response));
+        let assistant = AgentHead::Node(tree.head().expect("assistant node"));
+        assert_eq!(tree.closed_provider_prefix_at_or_before(assistant), parent);
+        assert_eq!(
+            tree.closed_provider_prefix_at_or_before(parent),
+            parent,
+            "ordinary input is already a closed prefix"
+        );
+        assert_eq!(
+            tree.closed_provider_prefix_at_or_before(AgentHead::Root),
+            AgentHead::Root
+        );
+        for (index, tool_type) in tool_types.iter().enumerate() {
+            tree.apply_event(&Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: format!("call-{index}").into(),
+                tool_name: ToolName::new(format!("tool_{index}")),
+                tool_type: *tool_type,
+                result: tau_proto::CborValue::Text(format!("result {index}")),
+                kind: ToolResultKind::Final,
+                display: None,
+                originator: PromptOriginator::User,
+            }));
+        }
+        let results = AgentHead::Node(tree.head().expect("whole results node"));
+        assert_eq!(
+            tree.closed_provider_prefix_at_or_before(results),
+            results,
+            "the whole results node is already closed"
+        );
+        tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id: agent_id(),
+            transaction_id: None,
+            cut: None,
+            suffix_end: None,
+            compact_prompt_id: None,
+            model: None,
+            operation: None,
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "compacted".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }));
+        let compaction = AgentHead::Node(tree.head().expect("compaction node"));
+        assert_eq!(
+            tree.closed_provider_prefix_at_or_before(compaction),
+            compaction,
+            "a compaction boundary is already closed"
+        );
+    }
+
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.apply_event(&Event::ProviderResponseFinished(
+        tau_proto::ProviderResponseFinished {
+            agent_prompt_id: "ap-text-prefix".into(),
+            agent_id: agent_id(),
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "closed".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    ));
+    let text_response = AgentHead::Node(tree.head().expect("text response"));
+    assert_eq!(
+        tree.closed_provider_prefix_at_or_before(text_response),
+        text_response
+    );
+}
+
+/// Failed transaction successors may compact less history, but must never move
+/// their cut forward, cross branches, or discard a retained resume obligation.
+#[test]
+fn superseding_compaction_allows_only_ancestor_cut_retreat() {
+    let build_failed =
+        |original_cut: AgentHead, resume: Option<AgentHead>, tree: &mut AgentTree| {
+            let mut started = compaction_start("ct-failed-boundary");
+            started.cut = original_cut;
+            started.resume_through = resume;
+            fail_compaction(tree, &started);
+            started
+        };
+
+    let mut retreat_tree = AgentTree::from_events(agent_id(), &[]);
+    let ancestor = append_user_input(&mut retreat_tree, "ancestor");
+    let descendant = append_user_input(&mut retreat_tree, "descendant");
+    let failed = build_failed(descendant, Some(descendant), &mut retreat_tree);
+    let mut retreat = compaction_start("ct-retreat");
+    retreat.cut = ancestor;
+    retreat.resume_through = Some(descendant);
+    retreat.supersedes = Some(failed.transaction_id);
+    retreat_tree
+        .validate_event(&Event::AgentStandaloneCompactionStarted(retreat))
+        .expect("ancestor retreat preserves more exact suffix");
+
+    let mut equal_tree = AgentTree::from_events(agent_id(), &[]);
+    let equal_cut = append_user_input(&mut equal_tree, "equal");
+    let failed = build_failed(equal_cut, Some(equal_cut), &mut equal_tree);
+    let mut equal = compaction_start("ct-equal");
+    equal.cut = equal_cut;
+    equal.resume_through = Some(equal_cut);
+    equal.supersedes = Some(failed.transaction_id);
+    equal_tree
+        .validate_event(&Event::AgentStandaloneCompactionStarted(equal))
+        .expect("equal retry remains valid");
+
+    let mut advance_tree = AgentTree::from_events(agent_id(), &[]);
+    let original = append_user_input(&mut advance_tree, "original");
+    let advanced = append_user_input(&mut advance_tree, "advanced");
+    let failed = build_failed(original, Some(advanced), &mut advance_tree);
+    let mut advanced_start = compaction_start("ct-advanced");
+    advanced_start.cut = advanced;
+    advanced_start.resume_through = Some(advanced);
+    advanced_start.supersedes = Some(failed.transaction_id.clone());
+    assert!(
+        validation_error(
+            &advance_tree,
+            Event::AgentStandaloneCompactionStarted(advanced_start)
+        )
+        .contains("preserve or retreat")
+    );
+
+    let mut dropped = compaction_start("ct-dropped-resume");
+    dropped.cut = original;
+    dropped.resume_through = None;
+    dropped.supersedes = Some(failed.transaction_id);
+    assert!(
+        validation_error(
+            &advance_tree,
+            Event::AgentStandaloneCompactionStarted(dropped)
+        )
+        .contains("preserve or retreat")
+    );
+
+    let mut sibling_tree = AgentTree::from_events(agent_id(), &[]);
+    let branch_point = append_user_input(&mut sibling_tree, "branch point");
+    let original_branch = append_user_input(&mut sibling_tree, "original branch");
+    sibling_tree.apply_event(&Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+        agent_id: agent_id(),
+        head: branch_point,
+    }));
+    let sibling = append_user_input(&mut sibling_tree, "sibling branch");
+    let failed = build_failed(branch_point, Some(original_branch), &mut sibling_tree);
+    let mut sibling_start = compaction_start("ct-sibling");
+    sibling_start.cut = branch_point;
+    sibling_start.resume_through = Some(sibling);
+    sibling_start.supersedes = Some(failed.transaction_id);
+    assert!(
+        validation_error(
+            &sibling_tree,
+            Event::AgentStandaloneCompactionStarted(sibling_start)
+        )
+        .contains("preserve or retreat")
+    );
+
+    let unknown_tree = AgentTree::from_events(agent_id(), &[]);
+    let mut unknown = compaction_start("ct-unknown-successor");
+    unknown.supersedes = Some(tau_proto::CompactionTransactionId::parse("ct-unknown").expect("id"));
+    assert!(
+        validation_error(
+            &unknown_tree,
+            Event::AgentStandaloneCompactionStarted(unknown)
+        )
+        .contains("unknown transaction")
+    );
+
+    let mut successful_tree = AgentTree::from_events(agent_id(), &[]);
+    let successful = compaction_start("ct-successful-predecessor");
+    successful_tree.apply_event(&Event::AgentStandaloneCompactionStarted(successful.clone()));
+    successful_tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: agent_id(),
+        transaction_id: Some(successful.transaction_id.clone()),
+        cut: Some(successful.cut),
+        suffix_end: Some(AgentHead::Root),
+        compact_prompt_id: Some(successful.compact_prompt_id),
+        model: Some(successful.model),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    }));
+    let mut supersedes_success = compaction_start("ct-after-success");
+    supersedes_success.supersedes = Some(successful.transaction_id);
+    assert!(
+        validation_error(
+            &successful_tree,
+            Event::AgentStandaloneCompactionStarted(supersedes_success)
+        )
+        .contains("only a failed transaction")
+    );
+}
+
+/// Replay of a historical failed open cut followed by a corrected successful
+/// successor must transfer continuation ownership to the successor checkpoint
+/// and clear blocked recovery after its terminal inference response.
+#[test]
+fn corrected_compaction_successor_owns_replay_checkpoint() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let prefix = append_user_input(&mut tree, "prefix");
+    let historical_cut = append_user_input(&mut tree, "historical open cut");
+    let resume = append_user_input(&mut tree, "owed activation");
+    let mut failed = compaction_start("ct-historical-failed");
+    failed.cut = historical_cut;
+    failed.resume_through = Some(resume);
+    fail_compaction(&mut tree, &failed);
+    assert!(matches!(
+        tree.standalone_compaction_recovery(),
+        Some(StandaloneCompactionRecovery::Blocked { .. })
+    ));
+
+    let mut successor = compaction_start("ct-corrected-successor");
+    successor.compact_prompt_id = "ap-agent-metadata-test-successor".into();
+    successor.cut = prefix;
+    successor.resume_through = Some(resume);
+    successor.supersedes = Some(failed.transaction_id);
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(successor.clone()))
+        .expect("corrected ancestor successor");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(successor.clone()));
+    let compacted = tau_proto::AgentCompacted {
+        agent_id: agent_id(),
+        transaction_id: Some(successor.transaction_id.clone()),
+        cut: Some(successor.cut),
+        suffix_end: Some(resume),
+        compact_prompt_id: Some(successor.compact_prompt_id.clone()),
+        model: Some(successor.model.clone()),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "corrected summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    };
+    tree.validate_event(&Event::AgentCompacted(compacted.clone()))
+        .expect("corrected successor success");
+    tree.apply_event(&Event::AgentCompacted(compacted));
+    let through = AgentHead::Node(tree.head().expect("compaction boundary"));
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: Some(successor.transaction_id.clone()),
+        agent_prompt_id: "ap-successor-continuation".into(),
+        through,
+        model: Some(successor.model),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(successor.cut),
+    };
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
+        .expect("successor-owned checkpoint");
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()));
+    assert_eq!(
+        tree.standalone_compaction_recovery(),
+        Some(StandaloneCompactionRecovery::DispatchUncertain(
+            checkpoint.clone()
+        ))
+    );
+    tree.apply_event(&Event::ProviderResponseFinished(
+        tau_proto::ProviderResponseFinished {
+            agent_prompt_id: checkpoint.agent_prompt_id,
+            agent_id: agent_id(),
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "continued".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    ));
+    assert_eq!(tree.standalone_compaction_recovery(), None);
+}
+
 /// A canonical planned overflow must project one unclaimed recovery and accept
 /// exactly one model/cut-correlated standalone transaction claim.
 #[test]

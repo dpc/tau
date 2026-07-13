@@ -8597,11 +8597,10 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         tau_proto::AgentWatchProviderState::RecoveringContext { .. }
     ));
 
-    h.handle_provider_response_finished(provider_text_response(
-        &compact.agent_prompt_id,
-        compact.agent_id,
-        "replacement",
-    ))
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact)
+            .expect("strict fake provider accepts only a balanced compact timeline"),
+    )
     .expect("accept compact response");
     let continuation = read_nth_prompt_created(&h, 2);
     assert_eq!(
@@ -9653,11 +9652,10 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
             ctx_id: None,
         }),
     );
-    h.handle_provider_response_finished(provider_text_response(
-        &compact.agent_prompt_id,
-        compact.agent_id,
-        "replacement",
-    ))
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact)
+            .expect("strict fake provider accepts the corrected mixed-round cut"),
+    )
     .expect("accept compact");
     let continuation = read_nth_prompt_created(&h, 2);
     let context = serde_json::to_string(&continuation.context).expect("context");
@@ -10233,6 +10231,376 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     h.shutdown().expect("shutdown");
 }
 
+/// A threshold reached immediately after a mixed parallel tool round must
+/// compact only a closed provider prefix and preserve every success, error, and
+/// cancellation result exactly in the one resumed inference.
+#[test]
+fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "prefix".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = h.agents[&cid].head.expect("prefix head");
+    let calls = [
+        (
+            "call-success",
+            "success_tool",
+            tau_proto::ToolType::Function,
+        ),
+        ("call-error", "error_tool", tau_proto::ToolType::Custom),
+        ("call-cancel", "cancel_tool", tau_proto::ToolType::Function),
+    ];
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: "ap-mixed-round".into(),
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: calls
+                .iter()
+                .map(|(call_id, name, tool_type)| {
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: (*call_id).into(),
+                        name: ToolName::new(*name),
+                        tool_type: *tool_type,
+                        arguments: CborValue::Map(Vec::new()),
+                        raw_arguments_json: None,
+                        responses_envelope: None,
+                    })
+                })
+                .collect(),
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    let assistant = h.agents[&cid].head.expect("assistant head");
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "call-success".into(),
+            tool_name: ToolName::new("success_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("success output".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolError(tau_proto::ToolError {
+            call_id: "call-error".into(),
+            tool_name: ToolName::new("error_tool"),
+            tool_type: tau_proto::ToolType::Custom,
+            message: "expected failure".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: "call-cancel".into(),
+            tool_name: ToolName::new("cancel_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+    );
+    let results = h.agents[&cid].head.expect("results head");
+    assert_ne!(results, assistant);
+
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("compaction start");
+    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
+    assert_eq!(
+        started.resume_through,
+        Some(tau_proto::AgentHead::Node(results))
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    assert!(
+        compact
+            .context
+            .flatten_iter()
+            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_))),
+        "compact input must end before the complete mixed tool round"
+    );
+
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact)
+            .expect("strict fake provider accepts the corrected mixed-round cut"),
+    )
+    .expect("accept compaction");
+    let inference = read_nth_prompt_created(&h, 1);
+    let timeline: Vec<_> = inference.context.flatten_iter().collect();
+    let call_types: std::collections::HashMap<_, _> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => Some((call.call_id.clone(), call.tool_type)),
+            _ => None,
+        })
+        .collect();
+    let result_types: std::collections::HashMap<_, _> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some((result.call_id.clone(), result.tool_type)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(call_types, result_types);
+    assert_eq!(call_types.len(), 3);
+    let results_by_id: std::collections::HashMap<_, _> = timeline
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some((result.call_id.as_str(), result)),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(
+        results_by_id["call-success"].status,
+        ToolResultStatus::Success
+    ));
+    assert_eq!(
+        results_by_id["call-success"].output.render(),
+        "success output"
+    );
+    assert!(matches!(
+        results_by_id["call-error"].status,
+        ToolResultStatus::Error { ref message } if message == "expected failure"
+    ));
+    assert!(matches!(
+        results_by_id["call-cancel"].status,
+        ToolResultStatus::Cancelled { ref reason } if reason == "cancelled"
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// The real in-process provider/tool route must reject any unbalanced compact
+/// timeline, accept the normalized post-tool threshold request, and complete a
+/// later queued user prompt after the recovered continuation.
+#[test]
+fn strict_provider_vertical_slice_accepts_closed_post_tool_compaction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = strict_compaction_provider_harness(td.path().join("state")).expect("start");
+    h.submit_user_prompt("s1".into(), "first tool round".to_owned())
+        .expect("submit first prompt");
+    h.submit_user_prompt("s1".into(), "later queued prompt".to_owned())
+        .expect("queue later prompt");
+
+    let error = h
+        .run_event_loop(None, false)
+        .expect_err("test provider disconnects after completing the later prompt");
+    assert!(matches!(
+        error,
+        HarnessError::Participant(message) if message == "provider disconnected"
+    ));
+    let events = event_log_events(&h);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.resume_through.is_some()
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AgentCompacted(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionFailed(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ProviderResponseFinished(response)
+            if response.output_items.iter().any(|item| matches!(
+                item,
+                ContextItem::Message(message)
+                    if message.content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "later prompt complete"
+                    ))
+            ))
+    )));
+}
+
+/// A tool-result activation checkpoint must capture the normalized prefix so a
+/// reactive overflow cannot resend a compact request ending in a dangling call.
+#[test]
+fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "reactive prefix".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("prefix"));
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: "ap-reactive-tool".into(),
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-reactive".into(),
+                name: ToolName::new("reactive_tool"),
+                tool_type: tau_proto::ToolType::Custom,
+                arguments: CborValue::Text("input".to_owned()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "call-reactive".into(),
+            tool_name: ToolName::new("reactive_tool"),
+            tool_type: tau_proto::ToolType::Custom,
+            result: CborValue::Text("reactive output".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    let results = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("results"));
+    h.dispatch_activation_after_publish_idle(&cid);
+    let inference = read_nth_prompt_created(&h, 0);
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == inference.agent_prompt_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("inference checkpoint");
+    assert_eq!(checkpoint.activation_cut, Some(prefix));
+    assert_eq!(checkpoint.through, results);
+
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start reactive compaction");
+    let compact = read_nth_prompt_created(&h, 1);
+    assert!(
+        compact
+            .context
+            .flatten_iter()
+            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_)))
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("reactive compaction start");
+    assert_eq!(started.cut, prefix);
+    assert_eq!(started.resume_through, Some(results));
+
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id,
+        "reactive replacement",
+    ))
+    .expect("accept reactive compaction");
+    let continuation = read_nth_prompt_created(&h, 2);
+    let timeline: Vec<_> = continuation.context.flatten_iter().collect();
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|item| matches!(item, ContextItem::ToolCall(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|item| matches!(item, ContextItem::ToolResult(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A readiness-deferred activation must re-project usage at the actual dispatch
 /// boundary so growth committed while parked cannot bypass compaction.
 #[test]
@@ -10312,6 +10680,378 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             standalone_compaction_threshold: None,
         },
     );
+}
+
+fn strict_fake_compact_response(
+    prompt: &tau_proto::AgentPromptCreated,
+) -> Result<ProviderResponseFinished, String> {
+    validate_closed_tool_timeline(&prompt.context).map_err(str::to_owned)?;
+    Ok(provider_text_response(
+        &prompt.agent_prompt_id,
+        prompt.agent_id.clone(),
+        "strict fake replacement",
+    ))
+}
+
+fn seed_historical_open_prefix_failure(
+    h: &mut Harness,
+    cid: &AgentId,
+    model: &str,
+) -> (
+    tau_proto::AgentHead,
+    tau_proto::AgentHead,
+    tau_proto::AgentHead,
+) {
+    let agent_id = h.agents[cid].agent_id.clone().expect("durable agent");
+    h.publish_for_agent(
+        cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "historical prefix".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = tau_proto::AgentHead::Node(h.agents[cid].head.expect("prefix"));
+    h.publish_for_agent(
+        cid,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: "ap-historical-inference".into(),
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-historical".into(),
+                name: ToolName::new("historical_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    let assistant = tau_proto::AgentHead::Node(h.agents[cid].head.expect("assistant"));
+    h.publish_for_agent(
+        cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "call-historical".into(),
+            tool_name: ToolName::new("historical_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("historical output".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    let results = tau_proto::AgentHead::Node(h.agents[cid].head.expect("results"));
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-historical-open-prefix").expect("id");
+    h.publish_for_agent(
+        cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            compact_prompt_id: format!("ap-{agent_id}-historical-open-prefix").into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            agent_id: crate::parse_agent_id(&agent_id),
+            transaction_id: transaction_id.clone(),
+            cut: assistant,
+            resume_through: Some(results),
+            model: model.into(),
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    h.publish_for_agent(
+        cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: crate::parse_agent_id(&agent_id),
+            transaction_id,
+            cut: assistant,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: Some(results),
+        }),
+    );
+    (prefix, assistant, results)
+}
+
+/// Explicit `/compact` must repair a warm historical open-prefix failure,
+/// retain queued activation ownership, and dispatch the exact tool round once.
+#[test]
+fn compact_repairs_warm_historical_open_prefix_failure() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let (prefix, assistant, results) =
+        seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&agent_id)),
+        agent_prompt_id: None,
+    });
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::HarnessNotice(notice) if notice.message == "no active turn to cancel"
+    )));
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("queued while blocked".to_owned()))
+        .expect("queue activating input");
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1,
+        "new input must not implicitly retry or clear the block"
+    );
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let starts: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0].cut, assistant);
+    assert_eq!(starts[0].resume_through, Some(results));
+    assert_eq!(starts[1].cut, prefix);
+    assert_eq!(
+        starts[1].supersedes.as_ref(),
+        Some(&starts[0].transaction_id)
+    );
+    assert!(starts[1].resume_through.is_some());
+
+    let retry = read_nth_prompt_created(&h, 1);
+    assert!(
+        retry
+            .context
+            .flatten_iter()
+            .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_)))
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &retry.agent_prompt_id,
+        retry.agent_id,
+        "recovered summary",
+    ))
+    .expect("accept corrected retry");
+    let inference = read_nth_prompt_created(&h, 2);
+    let rendered = serde_json::to_string(&inference.context).expect("context");
+    assert_eq!(rendered.matches("call-historical").count(), 2);
+    assert_eq!(rendered.matches("queued while blocked").count(), 1);
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold replay must retain the failed transaction and allow `/compact` to
+/// supersede its historical open cut with the normalized ancestor.
+#[test]
+fn compact_repairs_cold_historical_open_prefix_failure() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (agent_id, prefix, failed_transaction);
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
+        failed_transaction = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(started) => Some(started.transaction_id),
+                _ => None,
+            })
+            .expect("historical start");
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    enable_remote_compaction_for_test_model(&mut resumed);
+    resumed
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("model")
+        .supports_standalone_compaction = true;
+    resumed.handle_compact_request("s1".into(), Some(&agent_id));
+    let successor = event_log_events(&resumed)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .next_back()
+        .expect("successor start");
+    assert_eq!(successor.cut, prefix);
+    assert_eq!(successor.supersedes, Some(failed_transaction));
+    assert!(successor.resume_through.is_some());
+    let retry = read_nth_prompt_created(&resumed, 0);
+    resumed
+        .handle_provider_response_finished(provider_text_response(
+            &retry.agent_prompt_id,
+            retry.agent_id,
+            "cold recovered summary",
+        ))
+        .expect("accept cold recovery");
+    let continuation = read_nth_prompt_created(&resumed, 1);
+    assert_eq!(
+        continuation.operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert!(!matches!(
+        resumed
+            .agents
+            .values()
+            .find(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()))
+            .expect("recovered agent")
+            .activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    resumed.shutdown().expect("shutdown");
+}
+
+/// `/compact` must remain fail-closed when navigation moves a warm blocked
+/// agent before the transaction's owed resume watermark.
+#[test]
+fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: crate::parse_agent_id(&agent_id),
+            head: prefix,
+        }),
+    );
+
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.message.contains("navigating away from its owed branch")
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold replay must retain the same off-branch recovery refusal and must not
+/// create provider work after a blocked head move.
+#[test]
+fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id;
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
+        h.publish_for_agent(
+            &cid,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: crate::parse_agent_id(&agent_id),
+                head: prefix,
+            }),
+        );
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    enable_remote_compaction_for_test_model(&mut resumed);
+    resumed
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("model")
+        .supports_standalone_compaction = true;
+    resumed.handle_compact_request("s1".into(), Some(&agent_id));
+    assert_eq!(
+        event_log_events(&resumed)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        0,
+        "cold recovery must emit no successor start"
+    );
+    let recovered = resumed
+        .agents
+        .values()
+        .find(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()))
+        .expect("replayed agent");
+    assert!(matches!(
+        recovered.activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    resumed.shutdown().expect("shutdown");
 }
 
 /// A self-compaction request must remain accepted-but-unstarted while any
@@ -10838,6 +11578,103 @@ fn manual_cross_compaction_starts_for_unrelated_loaded_agent() {
             })
             .collect::<Vec<_>>()
     );
+    h.shutdown().expect("shutdown");
+}
+
+/// Authorized `agent_compact` must repair an unrelated loaded target whose
+/// historical failed transaction cut through a complete provider tool round.
+#[test]
+fn manual_cross_compaction_repairs_blocked_open_prefix_target() {
+    let (_td, mut h, caller_cid, target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    let (prefix, assistant, results) =
+        seed_historical_open_prefix_failure(&mut h, &target_cid, "echo/model");
+
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    let starts: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) if started.agent_id == target_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0].cut, assistant);
+    assert_eq!(starts[0].resume_through, Some(results));
+    assert_eq!(starts[1].cut, prefix);
+    assert_eq!(starts[1].resume_through, Some(results));
+    assert_eq!(
+        starts[1].supersedes.as_ref(),
+        Some(&starts[0].transaction_id)
+    );
+    assert!(matches!(
+        starts[1].trigger,
+        tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+    ));
+    let retry = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(provider_text_response(
+        &retry.agent_prompt_id,
+        retry.agent_id,
+        "cross-agent recovered summary",
+    ))
+    .expect("accept cross-agent recovery");
+    assert!(!matches!(
+        h.agents[&target_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// Authorized `agent_compact` must fail once with `stale_branch` when the
+/// blocked target no longer selects the owed resume branch.
+#[test]
+fn manual_cross_compaction_refuses_blocked_target_off_owed_branch() {
+    let (_td, mut h, caller_cid, target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &target_cid, "echo/model");
+    h.publish_for_agent(
+        &target_cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: target_id.clone(),
+            head: prefix,
+        }),
+    );
+
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.agent_id == target_id
+            ))
+            .count(),
+        1
+    );
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentManualCompactionRequestFailed(failed)
+            if failed.target_agent_id == target_id
+                && failed.reason
+                    == tau_proto::ManualCompactionRequestFailureReason::StaleBranch
+    )));
+    assert!(matches!(
+        h.agents[&target_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
     h.shutdown().expect("shutdown");
 }
 

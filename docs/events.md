@@ -529,10 +529,17 @@ the UI is the only consumer. Components without a terminal silently no-op.
 ## Standalone compaction control
 
 - **`agent.standalone_compaction_started`** — Harness-owned durable transaction
-  start capturing the immutable branch cut, optional resume watermark, pre-minted
+  start. Newly emitted starts capture a provider-valid closed branch cut,
+  optional resume watermark, pre-minted
   compact prompt id, provider-qualified model, standalone operation, originator,
-  and explicit retry predecessor. New successful boundaries repeat the
-  prompt/model/operation tuple for replay validation.
+  and explicit retry predecessor. A cut never separates a tool-calling assistant
+  response from its complete terminal results node. A successor may preserve or
+  retreat along the failed cut's ancestor path, but cannot advance, cross
+  branches, or replace an existing resume watermark with a sibling branch. New
+  successful boundaries repeat the prompt/model/operation tuple for replay
+  validation. Historical failed open-prefix starts remain replay-valid only for
+  explicit recovery by a normalized successor; their immutable events are not
+  rewritten.
 - **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
   failure with a safe categorical reason and retained resume obligation. Raw
   provider diagnostics are deliberately excluded.

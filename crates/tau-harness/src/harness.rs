@@ -10736,22 +10736,33 @@ impl Harness {
                 .activation_dispatch
                 .blocked_recovery()
                 .map(|(failed_id, cut, resume)| (failed_id.clone(), cut, resume));
+            let current_head = conv
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+            let normalized_blocked_cut =
+                blocked_recovery
+                    .as_ref()
+                    .and_then(|(_, failed_cut, resume)| {
+                        self.normalized_blocked_recovery_cut(
+                            &agent_id,
+                            *failed_cut,
+                            *resume,
+                            current_head,
+                        )
+                    });
+            if blocked_recovery.is_some() && normalized_blocked_cut.is_none() {
+                self.emit_info(
+                    "cannot recover blocked compaction after navigating away from its owed branch",
+                );
+                return;
+            }
             let (cut, resume_through, supersedes) = blocked_recovery.map_or_else(
-                || {
+                || (current_head, None, None),
+                |(failed_id, _, resume)| {
                     (
-                        conv.head
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                        None,
-                        None,
-                    )
-                },
-                |(failed_id, cut, resume)| {
-                    (
-                        cut,
-                        resume.map(|_| {
-                            conv.head
-                                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-                        }),
+                        normalized_blocked_cut
+                            .expect("validated blocked recovery has a normalized cut"),
+                        resume.map(|_| current_head),
                         Some(failed_id),
                     )
                 },
@@ -11137,6 +11148,17 @@ impl Harness {
         let current_head = target
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let normalized_blocked_cut =
+            blocked_recovery
+                .as_ref()
+                .and_then(|(_, failed_cut, resume)| {
+                    self.normalized_blocked_recovery_cut(
+                        accepted.request.target_agent_id.as_str(),
+                        *failed_cut,
+                        *resume,
+                        current_head,
+                    )
+                });
         let safe_boundary = self
             .agent_store
             .agent(accepted.request.target_agent_id.as_str())
@@ -11150,8 +11172,10 @@ impl Harness {
                         &accepted.request.initiating_tool_call_id,
                     )
                 } else {
-                    blocked_recovery.is_some()
-                        || current_head == accepted.request.requested_target_head
+                    blocked_recovery.as_ref().map_or_else(
+                        || current_head == accepted.request.requested_target_head,
+                        |_| normalized_blocked_cut.is_some(),
+                    )
                 }
             });
         if !safe_boundary {
@@ -11170,7 +11194,13 @@ impl Harness {
                     None,
                 )
             },
-            |(failed_id, cut, resume)| (cut, resume.map(|_| current_head), Some(failed_id)),
+            |(failed_id, _, resume)| {
+                (
+                    normalized_blocked_cut.expect("safe blocked recovery has a normalized cut"),
+                    resume.map(|_| current_head),
+                    Some(failed_id),
+                )
+            },
         );
         let target_public_id = accepted.request.target_agent_id.clone();
         let next_prompt_index = target.next_prompt_index;
@@ -11283,6 +11313,35 @@ impl Harness {
             .is_some_and(|info| info.supports_compaction || info.supports_standalone_compaction)
     }
 
+    /// Normalizes one provisional cut against the agent's durable transcript.
+    fn closed_provider_prefix_for_agent(
+        &self,
+        agent_id: &str,
+        provisional_cut: tau_proto::AgentHead,
+    ) -> tau_proto::AgentHead {
+        self.agent_store
+            .agent(agent_id)
+            .map_or(provisional_cut, |tree| {
+                tree.closed_provider_prefix_at_or_before(provisional_cut)
+            })
+    }
+
+    /// Returns the normalized failed cut only when the selected head still
+    /// covers both that boundary and its exact owed resume watermark.
+    fn normalized_blocked_recovery_cut(
+        &self,
+        agent_id: &str,
+        failed_cut: tau_proto::AgentHead,
+        resume_through: Option<tau_proto::AgentHead>,
+        current_head: tau_proto::AgentHead,
+    ) -> Option<tau_proto::AgentHead> {
+        let tree = self.agent_store.agent(agent_id)?;
+        let normalized = tree.closed_provider_prefix_at_or_before(failed_cut);
+        (tree.contains_head_ancestry(normalized, current_head)
+            && resume_through.is_none_or(|owed| tree.contains_head_ancestry(owed, current_head)))
+        .then_some(normalized)
+    }
+
     /// Inserts one automatic standalone compaction boundary before inference
     /// when the last accepted context usage reaches the role/model threshold.
     pub(crate) fn schedule_standalone_auto_compaction(&mut self, cid: &AgentId) -> bool {
@@ -11362,7 +11421,7 @@ impl Harness {
                 conv.head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
             );
-        let cut = activation_cut.unwrap_or_else(|| {
+        let provisional_cut = activation_cut.unwrap_or_else(|| {
             resume_through.map_or_else(
                 || {
                     conv.head
@@ -11396,6 +11455,7 @@ impl Harness {
                 },
             )
         });
+        let cut = self.closed_provider_prefix_for_agent(&agent_id, provisional_cut);
         let originator = conv.originator.clone();
         let transaction_id =
             tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))

@@ -605,6 +605,37 @@ impl AgentTree {
         self.is_ancestor_head(ancestor, descendant)
     }
 
+    /// Returns the nearest provider-valid closed prefix at or before `cut`.
+    ///
+    /// Validated transcript branches materialize a complete tool round as one
+    /// tool-calling assistant node followed by one whole results node. A cut at
+    /// that assistant node would expose calls without their outputs, so it
+    /// retreats to the assistant node's parent and keeps the complete round in
+    /// the exact suffix. Callers must supply a root or node from this tree; an
+    /// unknown node is returned unchanged so durable validation remains the
+    /// authority rather than silently substituting another branch.
+    #[must_use]
+    pub fn closed_provider_prefix_at_or_before(&self, cut: AgentHead) -> AgentHead {
+        let AgentHead::Node(node_id) = cut else {
+            return cut;
+        };
+        let Some(node) = self.node(node_id) else {
+            return cut;
+        };
+        let has_tool_call = matches!(
+            &node.entry,
+            AgentEntry::AssistantResponse { output_items, .. }
+                if output_items
+                    .iter()
+                    .any(|item| matches!(item, ContextItem::ToolCall(_)))
+        );
+        if has_tool_call {
+            node.parent_id.map_or(AgentHead::Root, AgentHead::Node)
+        } else {
+            cut
+        }
+    }
+
     /// Returns whether the branch ending at `head` contains an exact user-input
     /// text item.
     #[must_use]
@@ -1783,11 +1814,17 @@ impl AgentTree {
                     "standalone compaction may supersede only a failed transaction",
                 ));
             }
-            if previous.started.cut != started.cut
-                || previous.started.resume_through.is_some() && started.resume_through.is_none()
-            {
+            let preserves_resume = previous
+                .started
+                .resume_through
+                .is_none_or(|previous_resume| {
+                    started
+                        .resume_through
+                        .is_some_and(|resume| self.is_ancestor_head(previous_resume, resume))
+                });
+            if !self.is_ancestor_head(started.cut, previous.started.cut) || !preserves_resume {
                 return Err(AgentEventValidationError::new(
-                    "superseding compaction must preserve cut and resume obligation",
+                    "superseding compaction must preserve or retreat the cut and preserve the owed resume branch",
                 ));
             }
         }

@@ -940,6 +940,86 @@ fn build_compact_request_uses_lite_schema() {
     );
 }
 
+/// Standalone Lite compact input must preserve balanced function and custom
+/// call/output pairs with exact call ids and transport-specific wire types.
+#[test]
+fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-terra".to_owned(),
+        ..chain_test_config()
+    };
+    let items = vec![
+        assistant_tool_call(
+            "call-function",
+            "function_tool",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Map(Vec::new()),
+        ),
+        assistant_tool_call(
+            "call-custom",
+            "custom_tool",
+            tau_proto::ToolType::Custom,
+            tau_proto::CborValue::Text("custom input".to_owned()),
+        ),
+        ContextItem::ToolResult(ToolResultItem {
+            call_id: "call-function".into(),
+            tool_type: tau_proto::ToolType::Function,
+            status: ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                "function output".to_owned(),
+            )),
+        }),
+        ContextItem::ToolResult(ToolResultItem {
+            call_id: "call-custom".into(),
+            tool_type: tau_proto::ToolType::Custom,
+            status: ToolResultStatus::Error {
+                message: "custom error".to_owned(),
+            },
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                "custom output".to_owned(),
+            )),
+        }),
+    ];
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context(&items),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
+    };
+
+    let body = build_compact_request(&config, &request).expect("compact body");
+    let input = body["input"].as_array().expect("input");
+    let item_for = |call_id: &str, item_type: &str| {
+        input
+            .iter()
+            .find(|item| item["call_id"] == call_id && item["type"] == item_type)
+            .unwrap_or_else(|| panic!("missing {item_type} for {call_id}"))
+    };
+    assert_eq!(
+        item_for("call-function", "function_call")["id"],
+        "fc_call-function"
+    );
+    assert_eq!(
+        item_for("call-function", "function_call_output")["output"],
+        "function output"
+    );
+    assert_eq!(
+        item_for("call-custom", "custom_tool_call")["id"],
+        "ctc_call-custom"
+    );
+    assert_eq!(
+        item_for("call-custom", "custom_tool_call_output")["output"],
+        "error: custom error\n\ncustom output"
+    );
+}
+
 /// Unary compact output must preserve provider order and unknown raw items so
 /// the accepted replacement window can be replayed without semantic loss.
 #[test]

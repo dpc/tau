@@ -1650,3 +1650,8 @@ mod mode;
 mod model;
 mod replay;
 mod reply_projection;
+mod strict_compaction_provider;
+
+use strict_compaction_provider::{
+    strict_compaction_provider_harness, validate_closed_tool_timeline,
+};

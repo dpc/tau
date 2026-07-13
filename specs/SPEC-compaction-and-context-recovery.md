@@ -15,6 +15,15 @@ Accepted model requests are harness-owned durable facts correlated to the
 originating prompt and tool call. Provider and extension input cannot select a
 cut, model, or caller, and exactly one durable start or pre-start failure may
 claim an accepted request.
+Every newly selected compact cut is a provider-valid closed prefix. A tool-calling assistant
+response and the one terminal results node that closes its complete function,
+custom, or mixed parallel round are indivisible at this boundary. A provisional
+pre-activation cut at the assistant response retreats to its parent, retaining
+the exact call-and-result round in the suffix rather than consuming the owed
+activation.
+Immutable historical failed starts with an open prefix remain replay-valid only
+so explicit recovery can supersede them at a normalized closed ancestor without
+rewriting durable history.
 Context-limit diagnostics are sanitized at the harness trust boundary. They
 retain only bounded numeric/model/operation categories under normal session
 event retention and never prompt content, provider bodies, credentials,
@@ -35,6 +44,15 @@ busy or dispatch-uncertain work. The target-scoped standalone transaction is
 the provider-work authority; its terminal event produces exactly one
 background completion for the original call before any self continuation
 checkpoint.
+An explicit `/compact` or authorized `agent_compact` request may recover a
+terminally blocked standalone transaction. Its successor may preserve the
+failed cut or retreat it along the same ancestor path to obtain a closed
+provider prefix, but may never advance or cross branches and may not drop a
+retained resume obligation. Its resume watermark must remain on the original
+owed branch, and explicit recovery refuses a current head reached by navigating
+away from that branch. Ordinary activating input remains queued and does
+not clear or implicitly retry the block; `/cancel` does not abandon this idle
+durable obligation.
 Context-window rejection records may include sanitized, harness-owned
 `context_limit_telemetry`. Correlation is the enclosing prompt plus exact
 provider-qualified model and operation. Projection is accepted only from a
@@ -103,7 +121,8 @@ before any provider request is published. Success installs a
 cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
 failure records a safe durable category, blocks the owed activation from
-automatic retry, and leaves the agent addressable for explicit recovery.
+automatic retry, and leaves the agent addressable for explicit `/compact` or
+authorized `agent_compact` recovery.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
 `AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
