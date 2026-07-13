@@ -64,14 +64,15 @@ bounded provider-independent reasons rather than provider-authored prose.
 Prompt cancellation is cooperative. Queued prompts can be removed immediately,
 active prompt retry sleeps can be aborted, and backend transports may register
 per-prompt abort wakers to wake their own blocking waits. ChatGPT/Codex
-WebSocket turns use that waker to leave an idle provider-event receive and
-return the normal canceled terminal path; other backend network reads remain
-transport-owned and must not be treated as hard-interrupted unless their backend
-documents such a wake path. Harness input EOF should stop accepting new input
-while allowing active prompt workers to finish and flush their messages. Explicit
-disconnect/shutdown must abort retry sleeps, wake registered backend abort
-wakers, and detach/finish without leaving the harness waiting for a provider
-terminal path.
+WebSocket turns use that waker to leave an idle provider-event receive and return
+the normal canceled terminal path. Targeted cancellation wakes the matching
+registered backend; broadcast cancellation and disconnect/shutdown wake all
+registered backends. Other backend network reads remain transport-owned and must
+not be treated as hard-interrupted unless their backend documents such a wake
+path. Harness input EOF should stop accepting new input while allowing active
+prompt workers to finish and flush their messages. Explicit disconnect/shutdown
+must abort retry sleeps, wake registered backend abort wakers, and detach/finish
+without leaving the harness waiting for a provider terminal path.
 
 ## Terminal provider failures
 

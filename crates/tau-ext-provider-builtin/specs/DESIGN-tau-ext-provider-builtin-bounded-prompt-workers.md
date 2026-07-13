@@ -22,11 +22,16 @@ and worker messages until both are empty before blocking in
 Cancellation state is shared between the event loop and workers. Targeted
 cancels remove queued prompts immediately, abort retry sleeps for matching active
 prompts, and notify any backend transport that registered a per-prompt abort
-waker. Disconnect/shutdown aborts retry sleeps and wakes all registered backend
-abort wakers. Backend network reads remain transport-owned and cancellation is
-cooperative rather than a hard socket interruption; ChatGPT/Codex WebSocket turns
-use the abort-waker path to wake an idle provider-event receive and return the
-normal harness cancellation result promptly.
+waker. Broadcast cancellation aborts all active retry sleeps and wakes every
+registered backend abort waker. Disconnect/shutdown likewise aborts retry sleeps
+and wakes all registered backend abort wakers. Backend network reads remain
+transport-owned and cancellation is cooperative rather than a hard socket
+interruption; ChatGPT/Codex WebSocket turns use the abort-waker path to wake an
+idle provider-event receive and return the normal harness cancellation result
+promptly. Broadcast cancellation and abort-waker registration linearize under
+the same cancellation mutex: either cancellation snapshots an existing waker or
+a later old-generation registration observes the generation change and wakes
+immediately. Callbacks run after releasing the mutex.
 
 Built-in providers batch `provider.response_updated` output. They may emit the
 first non-empty streamed output sample promptly, then emit later non-terminal

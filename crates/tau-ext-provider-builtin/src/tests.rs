@@ -451,13 +451,14 @@ fn cancellation_waker_fires_for_matching_prompt_only() {
     let matching = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let other = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let _matching_guard = cancellation.register_abort_waker(&target_apid, {
+    let cancel_generation = cancellation.retry_generation();
+    let _matching_guard = cancellation.register_abort_waker(&target_apid, cancel_generation, {
         let matching = Arc::clone(&matching);
         Arc::new(move || {
             matching.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })
     });
-    let _other_guard = cancellation.register_abort_waker(&other_apid, {
+    let _other_guard = cancellation.register_abort_waker(&other_apid, cancel_generation, {
         let other = Arc::clone(&other);
         Arc::new(move || {
             other.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -468,6 +469,57 @@ fn cancellation_waker_fires_for_matching_prompt_only() {
 
     assert_eq!(matching.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(other.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Ensures broadcast cancellation wakes every registered active backend while
+/// advancing the generation observed by retry and transport abort checks.
+#[test]
+fn cancellation_global_cancel_wakes_all_registered_abort_wakers() {
+    let cancellation = Arc::new(CancellationState::default());
+    let first_apid = tau_proto::AgentPromptId::from("ap-first");
+    let second_apid = tau_proto::AgentPromptId::from("ap-second");
+    let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let initial_generation = cancellation.retry_generation();
+
+    let _first_guard = cancellation.register_abort_waker(&first_apid, initial_generation, {
+        let first = Arc::clone(&first);
+        Arc::new(move || {
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+    let _second_guard = cancellation.register_abort_waker(&second_apid, initial_generation, {
+        let second = Arc::clone(&second);
+        Arc::new(move || {
+            second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+
+    cancellation.cancel_all();
+
+    assert_ne!(cancellation.retry_generation(), initial_generation);
+    assert_eq!(first.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(second.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Ensures a backend registering after broadcast cancellation observes its
+/// stale generation immediately instead of losing the cancellation wakeup.
+#[test]
+fn cancellation_global_cancel_wakes_late_old_generation_registration() {
+    let cancellation = Arc::new(CancellationState::default());
+    let prompt_id = tau_proto::AgentPromptId::from("ap-late-registration");
+    let stale_generation = cancellation.retry_generation();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    cancellation.cancel_all();
+    let _guard = cancellation.register_abort_waker(&prompt_id, stale_generation, {
+        let calls = Arc::clone(&calls);
+        Arc::new(move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -481,13 +533,14 @@ fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
     let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let _first_guard = cancellation.register_abort_waker(&first_apid, {
+    let cancel_generation = cancellation.retry_generation();
+    let _first_guard = cancellation.register_abort_waker(&first_apid, cancel_generation, {
         let first = Arc::clone(&first);
         Arc::new(move || {
             first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })
     });
-    let _second_guard = cancellation.register_abort_waker(&second_apid, {
+    let _second_guard = cancellation.register_abort_waker(&second_apid, cancel_generation, {
         let second = Arc::clone(&second);
         Arc::new(move || {
             second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -509,7 +562,7 @@ fn cancellation_waker_guard_unregisters_on_drop() {
     let apid = tau_proto::AgentPromptId::from("ap-drop");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let guard = cancellation.register_abort_waker(&apid, {
+    let guard = cancellation.register_abort_waker(&apid, cancellation.retry_generation(), {
         let calls = Arc::clone(&calls);
         Arc::new(move || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

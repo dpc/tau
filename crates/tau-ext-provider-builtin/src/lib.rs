@@ -1136,7 +1136,8 @@ struct ProviderRuntime<F> {
     active_prompts: usize,
     /// True after the harness input stream disconnects or reaches EOF.
     input_closed: bool,
-    /// Generation used to reject retry outcomes created before global cancel.
+    /// Generation used to reject worker output and retry outcomes created
+    /// before broadcast cancellation.
     cancel_generation: u64,
     /// Single-loop owner for ephemeral provider quota state.
     quota: QuotaCoordinator,
@@ -1409,7 +1410,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let Some(apid) = cancel.agent_prompt_id else {
-            self.cancellation.cancel_retry_sleeps();
+            self.cancellation.cancel_all();
             self.cancel_generation = self.cancel_generation.saturating_add(1);
             if let Some(scheduler) = &self.retry_scheduler {
                 scheduler.cancel_all();
@@ -2053,6 +2054,7 @@ impl RetryScheduler {
         let _ = self.commands.send(SchedulerCommand::Cancel(prompt_id));
     }
 
+    /// Requests cancellation of every delayed retry job owned by the scheduler.
     fn cancel_all(&self) {
         let _ = self.commands.send(SchedulerCommand::CancelAll);
     }
@@ -2448,11 +2450,27 @@ impl CancellationState {
         self.changed.notify_all();
     }
 
-    fn cancel_retry_sleeps(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
+    /// Advances broadcast cancellation and wakes every currently registered
+    /// backend.
+    ///
+    /// Registration compares its captured generation under this same mutex, so
+    /// either this snapshot contains a waker or a later registration invokes it
+    /// immediately. Callbacks run after unlocking to permit safe reentrancy.
+    fn cancel_all(&self) {
+        let wakers = if let Ok(mut inner) = self.inner.lock() {
             inner.retry_cancel_generation = inner.retry_cancel_generation.saturating_add(1);
-            self.changed.notify_all();
+            inner
+                .abort_wakers
+                .values()
+                .flat_map(|entries| entries.iter().cloned())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for waker in wakers {
+            (waker.waker)();
         }
+        self.changed.notify_all();
     }
 
     fn shutdown(&self) {
@@ -2496,13 +2514,15 @@ impl CancellationState {
     fn register_abort_waker(
         self: &Arc<Self>,
         current_apid: &tau_proto::AgentPromptId,
+        cancel_generation: u64,
         waker: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> CancellationAbortWaker {
         let (id, call_now) = if let Ok(mut inner) = self.inner.lock() {
             let id = inner.next_abort_waker_id;
             inner.next_abort_waker_id = inner.next_abort_waker_id.saturating_add(1);
-            let call_now =
-                inner.shutdown || inner.canceled_apids.iter().any(|apid| apid == current_apid);
+            let call_now = inner.shutdown
+                || inner.retry_cancel_generation != cancel_generation
+                || inner.canceled_apids.iter().any(|apid| apid == current_apid);
             inner
                 .abort_wakers
                 .entry(current_apid.clone())
@@ -2897,10 +2917,11 @@ impl TurnAbort for SharedRetryContext {
         &mut self,
         waker: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Box<dyn TurnAbortWaker> {
-        Box::new(
-            self.cancellation
-                .register_abort_waker(&self.current_apid, waker),
-        )
+        Box::new(self.cancellation.register_abort_waker(
+            &self.current_apid,
+            self.cancel_generation,
+            waker,
+        ))
     }
 }
 

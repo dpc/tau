@@ -1899,9 +1899,18 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
     }
 }
 
-/// Runs the mixed delayed/active/queued lifecycle fixture for global cancel or
-/// input EOF, both of which must close every accepted prompt exactly once.
-fn assert_mixed_state_shutdown(global_cancel: bool) {
+/// Termination boundary exercised by the mixed-state runtime fixture.
+#[derive(Clone, Copy)]
+enum MixedStateShutdown {
+    /// Broadcast prompt cancellation while input remains open.
+    GlobalCancel,
+    /// Harness input EOF and provider-loop shutdown.
+    Eof,
+}
+
+/// Runs the mixed delayed/active/queued lifecycle fixture for broadcast cancel
+/// or input EOF, both of which must close every accepted prompt exactly once.
+fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let input = BlockingInput::default();
     let mut delayed = prompt();
     delayed.agent_prompt_id = "mixed-delayed".into();
@@ -1916,8 +1925,8 @@ fn assert_mixed_state_shutdown(global_cancel: bool) {
     ]));
     let (delayed_tx, delayed_rx) = mpsc::sync_channel(1);
     let (active_tx, active_rx) = mpsc::sync_channel(1);
-    let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let release_rx = Mutex::new(release_rx);
+    let (active_cancel_tx, active_cancel_rx) = mpsc::channel();
+    let active_cancel_rx = Mutex::new(active_cancel_rx);
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let executor_calls = Arc::clone(&calls);
     let executor: PromptExecutor = Arc::new(move |execution| {
@@ -1938,20 +1947,29 @@ fn assert_mixed_state_shutdown(global_cancel: bool) {
                 delayed_tx.send(()).expect("report delayed state");
             }
             "mixed-active" => {
+                let cancel_tx = active_cancel_tx.clone();
+                let _active_abort_waker_guard = execution.cancellation.register_abort_waker(
+                    &execution.job.agent_prompt_id,
+                    execution.job.cancel_generation,
+                    Arc::new(move || {
+                        cancel_tx.send(()).expect("report active cancellation");
+                    }),
+                );
                 active_tx.send(()).expect("report active state");
-                if !global_cancel {
+                if matches!(shutdown, MixedStateShutdown::Eof) {
                     while !execution
                         .cancellation
                         .is_canceled(&execution.job.agent_prompt_id)
                     {
                         thread::yield_now();
                     }
+                } else {
+                    active_cancel_rx
+                        .lock()
+                        .expect("active cancel receiver")
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("global cancel did not wake active backend");
                 }
-                release_rx
-                    .lock()
-                    .expect("release receiver")
-                    .recv()
-                    .expect("release active prompt");
                 let mut writer = execution.frame_writer();
                 writer
                     .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
@@ -1991,22 +2009,21 @@ fn assert_mixed_state_shutdown(global_cancel: bool) {
     active_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("active state");
-    if global_cancel {
-        input.push(encode_frames(&[live_event(
-            20,
-            Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-                session_id: tau_proto::SessionId::new("test-session"),
-                target_agent_id: None,
-                agent_prompt_id: None,
-            }),
-        )]));
-        input.wait_for_reader_waiting(Duration::from_secs(1));
-    } else {
-        input.close();
+    match shutdown {
+        MixedStateShutdown::GlobalCancel => {
+            input.push(encode_frames(&[live_event(
+                20,
+                Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                    session_id: tau_proto::SessionId::new("test-session"),
+                    target_agent_id: None,
+                    agent_prompt_id: None,
+                }),
+            )]));
+        }
+        MixedStateShutdown::Eof => input.close(),
     }
-    release_tx.send(()).expect("release active");
 
-    if global_cancel {
+    if matches!(shutdown, MixedStateShutdown::GlobalCancel) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
@@ -2075,13 +2092,13 @@ fn assert_mixed_state_shutdown(global_cancel: bool) {
 /// once.
 #[test]
 fn global_cancel_closes_mixed_prompt_states_exactly_once() {
-    assert_mixed_state_shutdown(true);
+    assert_mixed_state_shutdown(MixedStateShutdown::GlobalCancel);
 }
 
 /// Harness EOF closes delayed, active-late-success, and queued work once.
 #[test]
 fn eof_closes_mixed_prompt_states_exactly_once() {
-    assert_mixed_state_shutdown(false);
+    assert_mixed_state_shutdown(MixedStateShutdown::Eof);
 }
 
 /// A real Chat Completions transport repetition reaches the production
