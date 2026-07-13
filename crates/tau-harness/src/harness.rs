@@ -33,6 +33,22 @@ use tau_proto::{
     ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
 };
 
+/// Harness-owned validated quota state for one provider extension route.
+#[derive(Clone)]
+pub(crate) struct CurrentProviderQuota {
+    /// Extension connection that established this state.
+    source_id: tau_proto::ConnectionId,
+    /// Latest full provider-neutral snapshot.
+    pub(crate) snapshot: tau_proto::HarnessProviderQuotaChanged,
+}
+
+#[derive(Clone)]
+struct ProviderQuotaTombstone {
+    source_id: tau_proto::ConnectionId,
+    profile_epoch: tau_proto::ProviderQuotaEpoch,
+    sequence: u64,
+}
+
 use self::context_limit_telemetry::{
     MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, context_limit_observation,
     context_projection_reserve, projected_input_tokens, serialized_transcript_delta_bytes,
@@ -1902,6 +1918,15 @@ pub struct Harness {
     /// selected by the deterministic sorted-source, last-advertisement-wins
     /// registry rebuild.
     pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
+    /// Ephemeral validated account-quota snapshots keyed by provider namespace.
+    pub(crate) provider_quota: HashMap<tau_proto::ProviderName, CurrentProviderQuota>,
+    /// Last cleared upstream position, allowing a later authoritative full
+    /// replacement to recover after temporary route ownership loss.
+    provider_quota_tombstones: HashMap<tau_proto::ProviderName, ProviderQuotaTombstone>,
+    /// Bounded retired epochs rejected if a late source tries to re-establish
+    /// them after clear or replacement.
+    provider_quota_retired_epochs:
+        HashMap<tau_proto::ProviderName, VecDeque<tau_proto::ProviderQuotaEpoch>>,
     /// Provider connection that received each in-flight prompt request.
     /// Incoming provider execution events must match this owner before the
     /// harness will publish streaming updates or accept the final response.
@@ -2538,6 +2563,9 @@ impl Harness {
             pending_publish_idle_dispatches: VecDeque::new(),
             available_models: Vec::new(),
             provider_models_by_extension: HashMap::new(),
+            provider_quota: HashMap::new(),
+            provider_quota_tombstones: HashMap::new(),
+            provider_quota_retired_epochs: HashMap::new(),
             provider_model_info: HashMap::new(),
             provider_model_routes: HashMap::new(),
             pending_provider_prompts: HashMap::new(),
@@ -6414,16 +6442,21 @@ impl Harness {
     /// Applies one authoritative snapshot from a ready provider and reconciles
     /// restored work against models explicitly removed by that provider.
     fn apply_provider_models_snapshot(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
-        let previous_models = self
+        let previous_model_info = self
             .provider_models_by_extension
             .get(source_id)
             .map(|models| {
                 models
                     .iter()
-                    .map(|model| model.id.clone())
-                    .collect::<HashSet<_>>()
+                    .map(|model| (model.id.clone(), model.clone()))
+                    .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
+        let previous_models = previous_model_info.keys().cloned().collect::<HashSet<_>>();
+        let updated_model_info = models
+            .iter()
+            .map(|model| (model.id.clone(), model.clone()))
+            .collect::<HashMap<_, _>>();
         let updated_models = models
             .iter()
             .map(|model| model.id.clone())
@@ -6432,11 +6465,67 @@ impl Harness {
             .difference(&updated_models)
             .cloned()
             .collect::<HashSet<_>>();
+        let changed_models = updated_model_info
+            .iter()
+            .filter(|(model, info)| {
+                previous_model_info
+                    .get(*model)
+                    .is_some_and(|previous| previous != *info)
+            })
+            .map(|(model, _)| model.clone())
+            .chain(removed_models.iter().cloned())
+            .collect::<HashSet<_>>();
         self.set_provider_models(source_id, models);
+        self.clear_changed_quota_bindings(source_id, &changed_models);
+        self.clear_unowned_provider_quota();
         self.reconcile_pending_context_recoveries(false);
         self.resume_restored_compaction_checkpoints(
             RestoredCheckpointAuthority::ExplicitlyRemoved(&removed_models),
         );
+    }
+
+    fn clear_unowned_provider_quota(&mut self) {
+        let providers = self
+            .provider_quota
+            .iter()
+            .filter(|(provider, current)| {
+                !self.source_owns_quota_provider(current.source_id.as_str(), provider)
+            })
+            .map(|(provider, _)| provider.clone())
+            .collect::<Vec<_>>();
+        for provider in providers {
+            self.remove_provider_quota(&provider);
+        }
+    }
+
+    fn clear_changed_quota_bindings(&mut self, source_id: &str, changed_models: &HashSet<ModelId>) {
+        if changed_models.is_empty() {
+            return;
+        }
+        let providers = self
+            .provider_quota
+            .iter()
+            .filter(|(_, current)| current.source_id.as_str() == source_id)
+            .filter(|(_, current)| {
+                current
+                    .snapshot
+                    .route_bindings
+                    .iter()
+                    .any(|binding| changed_models.contains(&binding.model))
+            })
+            .map(|(provider, _)| provider.clone())
+            .collect::<Vec<_>>();
+        for provider in providers {
+            let Some(current) = self.provider_quota.get_mut(&provider) else {
+                continue;
+            };
+            current
+                .snapshot
+                .route_bindings
+                .retain(|binding| !changed_models.contains(&binding.model));
+            let changed = current.snapshot.clone();
+            self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+        }
     }
 
     /// Reconciles restored checkpoints against discovered models.
@@ -7279,6 +7368,18 @@ impl Harness {
                 } else {
                     self.publish_provider_models_update(source_id, updated);
                 }
+                Ok(None)
+            }
+            Event::ProviderQuotaReplace(replace) => {
+                self.handle_provider_quota_replace(source_id, replace);
+                Ok(None)
+            }
+            Event::ProviderQuotaPatch(patch) => {
+                self.handle_provider_quota_patch(source_id, patch);
+                Ok(None)
+            }
+            Event::ProviderQuotaClear(clear) => {
+                self.handle_provider_quota_clear(source_id, clear);
                 Ok(None)
             }
             Event::ExtensionContextProviderRegister(_) => {
@@ -9338,6 +9439,15 @@ impl Harness {
                     cancellation.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
+        }
+        let removed_providers = self
+            .provider_quota
+            .iter()
+            .filter(|(_, quota)| quota.source_id.as_str() == connection_id)
+            .map(|(provider, _)| provider.clone())
+            .collect::<Vec<_>>();
+        for provider in removed_providers {
+            self.remove_provider_quota(&provider);
         }
         if self
             .provider_models_by_extension
@@ -12220,6 +12330,289 @@ impl Harness {
                 .insert(source_id.to_owned(), models);
         }
         self.refresh_provider_models_and_publish_state();
+    }
+
+    fn source_owns_quota_provider(
+        &self,
+        source_id: &str,
+        provider: &tau_proto::ProviderName,
+    ) -> bool {
+        let owners = self
+            .provider_model_routes
+            .iter()
+            .filter(|(model, _)| &model.provider == provider)
+            .map(|(_, route)| route.as_str())
+            .collect::<HashSet<_>>();
+        owners.len() == 1 && owners.contains(source_id)
+    }
+
+    fn quota_event_is_valid(
+        &self,
+        source_id: &str,
+        provider: &tau_proto::ProviderName,
+        windows: &[tau_proto::ProviderQuotaWindow],
+        bindings: &[tau_proto::ProviderQuotaRouteBinding],
+    ) -> bool {
+        self.source_owns_quota_provider(source_id, provider)
+            && bindings.iter().all(|binding| {
+                self.provider_model_routes
+                    .get(&binding.model)
+                    .is_some_and(|route| route.as_str() == source_id)
+            })
+            && tau_proto::validate_provider_quota_state(provider, windows, bindings).is_ok()
+    }
+
+    fn handle_provider_quota_replace(
+        &mut self,
+        source_id: &str,
+        replace: tau_proto::ProviderQuotaReplace,
+    ) {
+        if !self.quota_event_is_valid(
+            source_id,
+            &replace.provider,
+            &replace.windows,
+            &replace.route_bindings,
+        ) {
+            tracing::warn!(
+                target: "tau_harness",
+                source_id,
+                provider = %replace.provider,
+                "discarding invalid or unowned provider quota replacement"
+            );
+            return;
+        }
+        let current = self.provider_quota.get(&replace.provider);
+        let accepted = if replace.establishes_new_epoch {
+            !self
+                .provider_quota_retired_epochs
+                .get(&replace.provider)
+                .is_some_and(|epochs| epochs.contains(&replace.profile_epoch))
+                && current.is_none_or(|current| {
+                    current.source_id.as_str() != source_id
+                        || current.snapshot.profile_epoch != replace.profile_epoch
+                })
+        } else {
+            current.is_some_and(|current| {
+                current.source_id.as_str() == source_id
+                    && current.snapshot.profile_epoch == replace.profile_epoch
+                    && replace.sequence > current.snapshot.sequence
+            }) || (current.is_none()
+                && self
+                    .provider_quota_tombstones
+                    .get(&replace.provider)
+                    .is_some_and(|tombstone| {
+                        tombstone.source_id.as_str() == source_id
+                            && tombstone.profile_epoch == replace.profile_epoch
+                            && replace.sequence > tombstone.sequence
+                    }))
+                || (current.is_none()
+                    && !self
+                        .provider_quota_retired_epochs
+                        .get(&replace.provider)
+                        .is_some_and(|epochs| epochs.contains(&replace.profile_epoch)))
+        };
+        if !accepted {
+            return;
+        }
+        if let Some(previous) = current.cloned()
+            && previous.snapshot.profile_epoch != replace.profile_epoch
+        {
+            self.retire_provider_quota_epoch(&replace.provider, previous.snapshot.profile_epoch);
+        }
+        let changed = tau_proto::HarnessProviderQuotaChanged {
+            provider: replace.provider.clone(),
+            profile_epoch: replace.profile_epoch,
+            sequence: replace.sequence,
+            windows: replace.windows,
+            route_bindings: replace.route_bindings,
+        };
+        self.provider_quota_tombstones.remove(&replace.provider);
+        self.provider_quota.insert(
+            replace.provider,
+            CurrentProviderQuota {
+                source_id: source_id.into(),
+                snapshot: changed.clone(),
+            },
+        );
+        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+    }
+
+    fn handle_provider_quota_patch(
+        &mut self,
+        source_id: &str,
+        patch: tau_proto::ProviderQuotaPatch,
+    ) {
+        let patch_window_keys = patch
+            .windows
+            .iter()
+            .map(|window| &window.key)
+            .collect::<HashSet<_>>();
+        let removed_keys = patch.removed_window_keys.iter().collect::<HashSet<_>>();
+        let binding_models = patch
+            .route_bindings
+            .iter()
+            .map(|binding| &binding.model)
+            .collect::<HashSet<_>>();
+        if patch.windows.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+            || patch.removed_window_keys.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+            || patch.route_bindings.len() > tau_proto::MAX_PROVIDER_QUOTA_BINDINGS
+            || patch_window_keys.len() != patch.windows.len()
+            || removed_keys.len() != patch.removed_window_keys.len()
+            || binding_models.len() != patch.route_bindings.len()
+            || patch_window_keys
+                .iter()
+                .any(|key| removed_keys.contains(key))
+            || !self.source_owns_quota_provider(source_id, &patch.provider)
+        {
+            return;
+        }
+        let Some(current) = self.provider_quota.get(&patch.provider) else {
+            return;
+        };
+        if current.source_id.as_str() != source_id
+            || current.snapshot.profile_epoch != patch.profile_epoch
+            || patch.sequence <= current.snapshot.sequence
+        {
+            return;
+        }
+        let mut windows = current
+            .snapshot
+            .windows
+            .iter()
+            .cloned()
+            .map(|window| (window.key.clone(), window))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for key in patch.removed_window_keys {
+            windows.remove(&key);
+        }
+        for window in patch.windows {
+            windows.insert(window.key.clone(), window);
+        }
+        let mut bindings = current
+            .snapshot
+            .route_bindings
+            .iter()
+            .cloned()
+            .map(|binding| (binding.model.clone(), binding))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for binding in patch.route_bindings {
+            bindings.insert(binding.model.clone(), binding);
+        }
+        let changed = tau_proto::HarnessProviderQuotaChanged {
+            provider: patch.provider.clone(),
+            profile_epoch: patch.profile_epoch,
+            sequence: patch.sequence,
+            windows: windows.into_values().collect(),
+            route_bindings: bindings.into_values().collect(),
+        };
+        if tau_proto::validate_provider_quota_state(
+            &changed.provider,
+            &changed.windows,
+            &changed.route_bindings,
+        )
+        .is_err()
+        {
+            return;
+        }
+        self.provider_quota.insert(
+            patch.provider,
+            CurrentProviderQuota {
+                source_id: source_id.into(),
+                snapshot: changed.clone(),
+            },
+        );
+        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+    }
+
+    fn handle_provider_quota_clear(
+        &mut self,
+        source_id: &str,
+        clear: tau_proto::ProviderQuotaClear,
+    ) {
+        let matches = self
+            .provider_quota
+            .get(&clear.provider)
+            .is_some_and(|current| {
+                current.source_id.as_str() == source_id
+                    && current.snapshot.profile_epoch == clear.profile_epoch
+                    && clear.sequence > current.snapshot.sequence
+            });
+        if matches {
+            self.remove_provider_quota_at(&clear.provider, clear.sequence, false);
+            return;
+        }
+        let tombstone_matches = self
+            .provider_quota_tombstones
+            .get(&clear.provider)
+            .is_some_and(|tombstone| {
+                tombstone.source_id.as_str() == source_id
+                    && tombstone.profile_epoch == clear.profile_epoch
+                    && clear.sequence > tombstone.sequence
+            });
+        if tombstone_matches {
+            self.provider_quota_tombstones.remove(&clear.provider);
+            self.retire_provider_quota_epoch(&clear.provider, clear.profile_epoch);
+        }
+    }
+
+    fn remove_provider_quota(&mut self, provider: &tau_proto::ProviderName) {
+        let sequence = self
+            .provider_quota
+            .get(provider)
+            .map_or(0, |current| current.snapshot.sequence);
+        self.remove_provider_quota_at(provider, sequence, true);
+    }
+
+    fn remove_provider_quota_at(
+        &mut self,
+        provider: &tau_proto::ProviderName,
+        sequence: u64,
+        allow_recovery: bool,
+    ) {
+        let Some(current) = self.provider_quota.remove(provider) else {
+            return;
+        };
+        self.retire_provider_quota_epoch(provider, current.snapshot.profile_epoch.clone());
+        if allow_recovery {
+            self.provider_quota_tombstones.insert(
+                provider.clone(),
+                ProviderQuotaTombstone {
+                    source_id: current.source_id,
+                    profile_epoch: current.snapshot.profile_epoch.clone(),
+                    sequence,
+                },
+            );
+        } else {
+            self.provider_quota_tombstones.remove(provider);
+        }
+        self.publish_event(
+            None,
+            Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
+                provider: provider.clone(),
+                profile_epoch: current.snapshot.profile_epoch,
+                sequence,
+                windows: Vec::new(),
+                route_bindings: Vec::new(),
+            }),
+        );
+    }
+
+    fn retire_provider_quota_epoch(
+        &mut self,
+        provider: &tau_proto::ProviderName,
+        epoch: tau_proto::ProviderQuotaEpoch,
+    ) {
+        const MAX_RETIRED_EPOCHS: usize = 8;
+        let epochs = self
+            .provider_quota_retired_epochs
+            .entry(provider.clone())
+            .or_default();
+        if !epochs.contains(&epoch) {
+            epochs.push_back(epoch);
+        }
+        while epochs.len() > MAX_RETIRED_EPOCHS {
+            epochs.pop_front();
+        }
     }
 
     #[cfg(test)]

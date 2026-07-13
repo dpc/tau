@@ -190,6 +190,15 @@ It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `pr
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 
+ChatGPT profiles also fetch bounded account quota from `/wham/usage` and merge
+supported HTTP/WebSocket rolling observations. Quota telemetry is best-effort
+and never delays inference or consumes prompt retry budget. The compact status
+chip is shown only after an in-band observation explicitly binds the exact
+selected `ModelId` to a weekly pool; Tau never guesses from a default or sole
+account pool. Colored state is fresh for 15 minutes, becomes neutral `Q?` while
+stale/untrusted, disappears after 60 minutes, and expires rather than locally
+resetting when the server reset boundary passes.
+
 Required LLM work has no attempt-count or elapsed-time retry limit during the
 running session. Transport/server failures, throttling, usage windows,
 billing/quota/credits, reloadable auth/configuration, and unknown remote

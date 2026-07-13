@@ -631,6 +631,12 @@ fn responses_stream_live_with_idle_timeout(
         ),
         error => LlmError::Http(Box::new(error)),
     })?;
+    let quota_observation = crate::quota::parse_http_headers(response.headers());
+    if !quota_observation.windows.is_empty() || quota_observation.active_limit_id.is_some() {
+        let mut quota_state = StreamState::new();
+        quota_state.quota_observation = Some(quota_observation);
+        on_update(&quota_state);
+    }
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let retry_after = response
@@ -646,7 +652,6 @@ fn responses_stream_live_with_idle_timeout(
             None => LlmError::HttpStatus(code, body),
         });
     }
-
     read_sse_response_to_terminal_event(
         response.body_mut().as_reader(),
         SseReadContext {
@@ -1054,6 +1059,11 @@ pub(super) fn apply_raw_json_event(
     data: &str,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
+    if let Some(observation) = crate::quota::parse_ws_event(data) {
+        state.quota_observation = Some(observation);
+        on_update(state);
+        return Ok(false);
+    }
     let event: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(_) => return Ok(false),

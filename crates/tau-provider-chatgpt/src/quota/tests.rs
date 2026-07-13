@@ -1,0 +1,230 @@
+use super::*;
+
+/// The full account read uses the isolated `/wham/usage` endpoint and sends
+/// bearer/account headers while returning only normalized quota facts.
+#[test]
+fn full_fetch_uses_expected_endpoint_and_auth_headers() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind usage server");
+    let address = listener.local_addr().expect("usage server address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept usage request");
+        let mut request = vec![0_u8; 8192];
+        let read = std::io::Read::read(&mut stream, &mut request).expect("read usage request");
+        request.truncate(read);
+        request_tx
+            .send(String::from_utf8(request).expect("HTTP request is UTF-8"))
+            .expect("send captured request");
+        let body = r#"{"rate_limit":{"secondary_window":{"used_percent":42,"limit_window_seconds":604800,"reset_after_seconds":300000,"reset_at":2000000000}}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write usage response");
+    });
+    let snapshot = fetch_usage(
+        &format!("http://{address}/backend-api/"),
+        "test-token",
+        Some("account-123"),
+    )
+    .expect("fetch usage");
+    let request = request_rx.recv().expect("captured usage request");
+    assert!(request.starts_with("GET /backend-api/wham/usage HTTP/1.1\r\n"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token\r\n")
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("chatgpt-account-id: account-123\r\n")
+    );
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].used_basis_points, 4_200);
+}
+
+/// Full snapshots retain primary/secondary identity, relative and absolute
+/// timing, and independent additional pools while ignoring unrelated account
+/// metadata.
+#[test]
+fn full_usage_normalizes_all_supported_windows() {
+    let snapshot = parse_full_usage_json(
+        r#"{
+          "plan_type":"pro",
+          "rate_limit":{
+            "primary_window":{"used_percent":12.5,"limit_window_seconds":18000,"reset_after_seconds":9000,"reset_at":20000},
+            "secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_after_seconds":302400,"reset_at":700000}
+          },
+          "credits":{"balance":"secret"},
+          "additional_rate_limits":[{
+            "metered_feature":"Codex-Fast",
+            "limit_name":"provider prose",
+            "rate_limit":{"secondary_window":{"used_percent":90,"limit_window_seconds":604800,"reset_after_seconds":100,"reset_at":800000}}
+          }]
+        }"#,
+    )
+    .expect("valid quota test value");
+    assert_eq!(snapshot.windows.len(), 3);
+    assert!(snapshot.windows.iter().any(|window| {
+        window.limit_id.as_str() == "codex"
+            && window.window_id.as_str() == "secondary"
+            && window.used_basis_points == 4_000
+            && window.remaining_seconds == Some(302_400)
+    }));
+    assert!(snapshot.windows.iter().any(|window| {
+        window.limit_id.as_str() == "codex_fast" && window.used_basis_points == 9_000
+    }));
+}
+
+/// A malformed pool is rejected independently, and normalization collisions
+/// reject both aliases instead of accidentally merging their quotas.
+#[test]
+fn malformed_and_colliding_additional_pools_fail_closed() {
+    let snapshot = parse_full_usage_json(
+        r#"{
+          "rate_limit":{"primary_window":{"used_percent":150,"limit_window_seconds":1}},
+          "additional_rate_limits":[
+            {"metered_feature":"codex-fast","rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":604800}}},
+            {"metered_feature":"codex_fast","rate_limit":{"primary_window":{"used_percent":2,"limit_window_seconds":604800}}},
+            {"metered_feature":7,"rate_limit":"malformed"},
+            {"metered_feature":"good","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800}}}
+          ]
+        }"#,
+    )
+    .expect("valid quota test value");
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].limit_id.as_str(), "good");
+    assert_eq!(snapshot.windows[0].used_basis_points, 0);
+}
+
+/// HTTP quota headers enumerate sparse account pools but bind a model only when
+/// the server supplies the explicit active-limit header.
+#[test]
+fn http_headers_parse_default_additional_and_active_limit() {
+    let mut headers = ureq::http::HeaderMap::new();
+    headers.insert(
+        "x-codex-secondary-used-percent",
+        "42.5".parse().expect("valid quota test value"),
+    );
+    headers.insert(
+        "x-codex-secondary-window-minutes",
+        "10080".parse().expect("valid quota test value"),
+    );
+    headers.insert(
+        "x-codex-fast-primary-used-percent",
+        "7".parse().expect("valid quota test value"),
+    );
+    headers.insert(
+        "x-codex-active-limit",
+        "codex-fast".parse().expect("valid quota test value"),
+    );
+    let observation = parse_http_headers(&headers);
+    assert_eq!(observation.windows.len(), 2);
+    assert_eq!(
+        observation
+            .active_limit_id
+            .expect("valid quota test value")
+            .as_str(),
+        "codex_fast"
+    );
+}
+
+/// Empty default HTTP header families are no-ops rather than zero-use updates
+/// that could erase a good account snapshot.
+#[test]
+fn empty_http_headers_do_not_create_a_window_or_binding() {
+    let observation = parse_http_headers(&ureq::http::HeaderMap::new());
+    assert!(observation.windows.is_empty());
+    assert!(observation.active_limit_id.is_none());
+}
+
+/// WebSocket and Lite-compatible `codex.rate_limits` events create the same
+/// normalized sparse record and explicit route binding.
+#[test]
+fn websocket_event_normalizes_and_binds_named_pool() {
+    let observation = parse_ws_event(
+        r#"{"type":"codex.rate_limits","metered_limit_name":"codex_bengalfox","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"reset_at":1700000000},"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}}}"#,
+    )
+    .expect("valid quota test value");
+    assert_eq!(
+        observation
+            .active_limit_id
+            .expect("valid quota test value")
+            .as_str(),
+        "codex_bengalfox"
+    );
+    assert_eq!(observation.windows.len(), 2);
+    assert_eq!(observation.windows[1].window_seconds, Some(604_800));
+}
+
+/// A WebSocket event without a valid explicit pool cannot establish model
+/// applicability, even if `codex` is the only familiar account pool.
+#[test]
+fn websocket_event_never_falls_back_to_default_pool() {
+    assert!(
+        parse_ws_event(
+            r#"{"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}}}"#
+        )
+        .is_none()
+    );
+    assert!(
+        parse_ws_event(
+            r#"{"type":"codex.rate_limits","metered_limit_name":"bad pool","rate_limits":{}}"#
+        )
+        .is_none()
+    );
+}
+
+/// A full response that cannot fit the protocol window bound is rejected
+/// atomically rather than truncated and mislabeled as complete.
+#[test]
+fn oversized_full_snapshot_is_rejected_atomically() {
+    let additional = (0..17)
+        .map(|index| {
+            format!(
+                r#"{{"metered_feature":"pool_{index}","rate_limit":{{"primary_window":{{"used_percent":1,"limit_window_seconds":18000}},"secondary_window":{{"used_percent":2,"limit_window_seconds":604800}}}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(r#"{{"additional_rate_limits":[{additional}]}}"#);
+    assert!(parse_full_usage_json(&body).is_err());
+}
+
+/// Secondary-only additional header families are discovered and normalized;
+/// enumeration alone still supplies no applicability binding.
+#[test]
+fn http_discovers_secondary_only_additional_pool() {
+    let mut headers = ureq::http::HeaderMap::new();
+    headers.insert(
+        "x-codex-fast-secondary-used-percent",
+        "7".parse().expect("header value"),
+    );
+    let observation = parse_http_headers(&headers);
+    assert_eq!(observation.windows.len(), 1);
+    assert_eq!(observation.windows[0].limit_id.as_str(), "codex_fast");
+    assert!(observation.active_limit_id.is_none());
+}
+
+/// Non-finite and materially out-of-range percentages never cross the provider
+/// boundary, while the documented half-point rounding tolerance is clamped.
+#[test]
+fn percentage_validation_accepts_only_small_rounding_error() {
+    for invalid in ["101", "-1"] {
+        let body = format!(
+            r#"{{"rate_limit":{{"primary_window":{{"used_percent":{invalid},"limit_window_seconds":604800}}}}}}"#
+        );
+        assert!(
+            parse_full_usage_json(&body)
+                .expect("valid quota test value")
+                .windows
+                .is_empty()
+        );
+    }
+    let snapshot = parse_full_usage_json(
+        r#"{"rate_limit":{"primary_window":{"used_percent":100.5,"limit_window_seconds":604800}}}"#,
+    )
+    .expect("valid quota test value");
+    assert_eq!(snapshot.windows[0].used_basis_points, 10_000);
+}

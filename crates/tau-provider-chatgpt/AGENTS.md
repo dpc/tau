@@ -3,6 +3,8 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 # tau-provider-chatgpt
 
 - Read the repository root `AGENTS.md` before making changes.
+- Read `SECURITY.md` before changing authenticated quota acquisition or
+  model-to-pool applicability.
 - Read `specs/ARCH-tau-provider-chatgpt.md`, the applicable `specs/DESIGN-*.md` records, and the applicable trust-boundary records under `specs/` before changing
   transport behavior, cancellation, retry/error mapping, diagnostics, cache
   identity, or model metadata.

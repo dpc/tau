@@ -546,6 +546,18 @@ impl Harness {
                 self.send_catch_up_event(client_id, Some(source_id.as_str()), provider_event);
             }
         }
+        let mut quota_snapshots = self
+            .provider_quota
+            .values()
+            .map(|current| current.snapshot.clone())
+            .collect::<Vec<_>>();
+        quota_snapshots.sort_by(|left, right| left.provider.cmp(&right.provider));
+        for snapshot in quota_snapshots {
+            let event = Event::HarnessProviderQuotaChanged(snapshot);
+            if selector_matches_event(selectors, &event) {
+                self.send_catch_up_event(client_id, Some("harness"), event);
+            }
+        }
 
         for published in self.action_registry.published_schemas() {
             let action_event = Event::ActionSchemaPublished(ActionSchemaPublished {

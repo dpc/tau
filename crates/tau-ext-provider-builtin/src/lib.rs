@@ -14,6 +14,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -108,6 +109,449 @@ const RETRY_BASE_DELAY: Duration = Duration::from_secs(10);
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
 const RESET_BOUNDARY_JITTER_MAX: Duration = Duration::from_secs(5);
 const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const QUOTA_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
+const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Clone)]
+struct QuotaWindowRecord {
+    window: tau_proto::ProviderQuotaWindow,
+    updated_sequence: u64,
+}
+
+struct QuotaProfileState {
+    identity: u64,
+    epoch: tau_proto::ProviderQuotaEpoch,
+    sequence: u64,
+    windows: BTreeMap<tau_proto::ProviderQuotaWindowKey, QuotaWindowRecord>,
+    bindings: BTreeMap<ModelId, tau_proto::ProviderQuotaRouteBinding>,
+    fetch_in_flight: bool,
+    last_fetch_started: Option<Instant>,
+    refresh_generation: u64,
+    failure_attempt: u8,
+}
+
+/// Single-runtime-loop quota epoch, merge, and fetch-coalescing owner.
+#[derive(Default)]
+struct QuotaCoordinator {
+    profiles: BTreeMap<ProviderName, QuotaProfileState>,
+    next_epoch: u64,
+}
+
+impl QuotaCoordinator {
+    fn profile_epoch(&self, provider: &ProviderName) -> Option<tau_proto::ProviderQuotaEpoch> {
+        self.profiles
+            .get(provider)
+            .map(|current| current.epoch.clone())
+    }
+
+    fn epoch_matches(
+        &self,
+        provider: &ProviderName,
+        epoch: &tau_proto::ProviderQuotaEpoch,
+    ) -> bool {
+        self.profiles
+            .get(provider)
+            .is_some_and(|current| &current.epoch == epoch)
+    }
+
+    fn ensure_profile(&mut self, provider: ProviderName, identity: u64) -> Option<Event> {
+        if self
+            .profiles
+            .get(&provider)
+            .is_some_and(|current| current.identity == identity)
+        {
+            return None;
+        }
+        self.next_epoch = self.next_epoch.saturating_add(1);
+        let epoch =
+            tau_proto::ProviderQuotaEpoch::parse(format!("q-{}-{}", now_ms(), self.next_epoch))
+                .expect("generated quota epoch is valid");
+        self.profiles.insert(
+            provider.clone(),
+            QuotaProfileState {
+                identity,
+                epoch: epoch.clone(),
+                sequence: 1,
+                windows: BTreeMap::new(),
+                bindings: BTreeMap::new(),
+                fetch_in_flight: false,
+                last_fetch_started: None,
+                refresh_generation: 0,
+                failure_attempt: 0,
+            },
+        );
+        Some(Event::ProviderQuotaReplace(
+            tau_proto::ProviderQuotaReplace {
+                provider,
+                profile_epoch: epoch,
+                sequence: 1,
+                establishes_new_epoch: true,
+                windows: Vec::new(),
+                route_bindings: Vec::new(),
+            },
+        ))
+    }
+
+    fn clear_profile(&mut self, provider: &ProviderName) -> Option<Event> {
+        let current = self.profiles.remove(provider)?;
+        Some(Event::ProviderQuotaClear(tau_proto::ProviderQuotaClear {
+            provider: provider.clone(),
+            profile_epoch: current.epoch,
+            sequence: current.sequence.saturating_add(1),
+        }))
+    }
+
+    fn refresh_delay(&self, provider: &ProviderName) -> Duration {
+        let now = now_ms();
+        self.profiles
+            .get(provider)
+            .into_iter()
+            .flat_map(|current| current.windows.values())
+            .filter_map(|record| {
+                let (remaining, anchor) = (
+                    record.window.remaining_seconds_at_timing_anchor?,
+                    record.window.timing_anchor_observed_at_unix_ms?,
+                );
+                let age = i64::try_from(now.saturating_sub(anchor).div_ceil(1_000)).ok()?;
+                u64::try_from(remaining.saturating_sub(age)).ok()
+            })
+            .map(|seconds| Duration::from_secs(seconds).saturating_add(Duration::from_secs(1)))
+            .min()
+            .unwrap_or(QUOTA_REFRESH_INTERVAL)
+            .min(QUOTA_REFRESH_INTERVAL)
+            .max(Duration::from_secs(1))
+    }
+
+    fn begin_fetch(
+        &mut self,
+        provider: &ProviderName,
+    ) -> Option<(tau_proto::ProviderQuotaEpoch, u64)> {
+        let current = self.profiles.get_mut(provider)?;
+        let reset_due = current.windows.values().any(|record| {
+            record
+                .window
+                .remaining_seconds_at_timing_anchor
+                .zip(record.window.timing_anchor_observed_at_unix_ms)
+                .is_some_and(|(remaining, anchor)| {
+                    let age_seconds = now_ms().saturating_sub(anchor).div_ceil(1_000);
+                    u64::try_from(remaining)
+                        .ok()
+                        .is_none_or(|remaining| age_seconds >= remaining)
+                })
+        });
+        if current.fetch_in_flight
+            || current.last_fetch_started.is_some_and(|started| {
+                started.elapsed() < QUOTA_FETCH_MIN_INTERVAL
+                    || (!current.windows.is_empty()
+                        && !reset_due
+                        && started.elapsed() < QUOTA_REFRESH_INTERVAL)
+            })
+        {
+            return None;
+        }
+        current.fetch_in_flight = true;
+        current.last_fetch_started = Some(Instant::now());
+        Some((current.epoch.clone(), current.sequence))
+    }
+
+    fn schedule_refresh(
+        &mut self,
+        provider: &ProviderName,
+        epoch: &tau_proto::ProviderQuotaEpoch,
+    ) -> Option<u64> {
+        let current = self.profiles.get_mut(provider)?;
+        if &current.epoch != epoch {
+            return None;
+        }
+        current.refresh_generation = current.refresh_generation.saturating_add(1);
+        Some(current.refresh_generation)
+    }
+
+    fn refresh_is_current(
+        &self,
+        provider: &ProviderName,
+        epoch: &tau_proto::ProviderQuotaEpoch,
+        generation: u64,
+    ) -> bool {
+        self.profiles.get(provider).is_some_and(|current| {
+            &current.epoch == epoch && current.refresh_generation == generation
+        })
+    }
+
+    fn failure_delay(&self, provider: &ProviderName) -> Duration {
+        let attempt = self
+            .profiles
+            .get(provider)
+            .map_or(0, |current| current.failure_attempt.min(4));
+        QUOTA_FETCH_MIN_INTERVAL
+            .saturating_mul(1_u32 << u32::from(attempt))
+            .min(QUOTA_REFRESH_INTERVAL)
+    }
+
+    fn fail_fetch(&mut self, provider: &ProviderName, epoch: &tau_proto::ProviderQuotaEpoch) {
+        if let Some(current) = self.profiles.get_mut(provider)
+            && &current.epoch == epoch
+        {
+            current.fetch_in_flight = false;
+            current.failure_attempt = current.failure_attempt.saturating_add(1);
+        }
+    }
+
+    fn finish_fetch(
+        &mut self,
+        provider: ProviderName,
+        epoch: tau_proto::ProviderQuotaEpoch,
+        fetch_start_sequence: u64,
+        snapshot: tau_provider_chatgpt::quota::FullQuotaSnapshot,
+        observed_at_unix_ms: u64,
+    ) -> Option<Event> {
+        let current = self.profiles.get_mut(&provider)?;
+        if current.epoch != epoch {
+            return None;
+        }
+        current.fetch_in_flight = false;
+        let mut fetched = BTreeMap::new();
+        for observation in snapshot.windows {
+            let window = full_quota_window(observation, observed_at_unix_ms)?;
+            fetched.insert(window.key.clone(), window);
+        }
+        let mut candidate = current.windows.clone();
+        candidate.retain(|key, record| {
+            record.updated_sequence > fetch_start_sequence || fetched.contains_key(key)
+        });
+        for (key, window) in fetched {
+            if candidate
+                .get(&key)
+                .is_some_and(|record| record.updated_sequence > fetch_start_sequence)
+            {
+                continue;
+            }
+            candidate.insert(
+                key,
+                QuotaWindowRecord {
+                    window,
+                    updated_sequence: current.sequence.saturating_add(1),
+                },
+            );
+        }
+        if candidate.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
+            current.failure_attempt = current.failure_attempt.saturating_add(1);
+            return None;
+        }
+        current.sequence = current.sequence.saturating_add(1);
+        current.failure_attempt = 0;
+        let sequence = current.sequence;
+        current.windows = candidate;
+        Some(Event::ProviderQuotaReplace(
+            tau_proto::ProviderQuotaReplace {
+                provider,
+                profile_epoch: epoch,
+                sequence,
+                establishes_new_epoch: false,
+                windows: current
+                    .windows
+                    .values()
+                    .map(|record| record.window.clone())
+                    .collect(),
+                route_bindings: current.bindings.values().cloned().collect(),
+            },
+        ))
+    }
+
+    fn merge_rolling(
+        &mut self,
+        model: ModelId,
+        profile_identity: u64,
+        observation: tau_provider_chatgpt::quota::RollingQuotaObservation,
+        observed_at_unix_ms: u64,
+    ) -> Option<Event> {
+        let provider = model.provider.clone();
+        let current = self.profiles.get_mut(&provider)?;
+        if current.identity != profile_identity {
+            return None;
+        }
+        let incoming_keys = observation
+            .windows
+            .iter()
+            .map(|window| tau_proto::ProviderQuotaWindowKey {
+                limit_id: window.limit_id.clone(),
+                window_id: window.window_id.clone(),
+            })
+            .collect::<HashSet<_>>();
+        let resulting_window_count = current
+            .windows
+            .keys()
+            .filter(|key| !incoming_keys.contains(*key))
+            .count()
+            .saturating_add(incoming_keys.len());
+        let adding_binding =
+            observation.active_limit_id.is_some() && !current.bindings.contains_key(&model);
+        if observation.windows.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+            || incoming_keys.len() != observation.windows.len()
+            || resulting_window_count > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+            || (adding_binding && current.bindings.len() >= tau_proto::MAX_PROVIDER_QUOTA_BINDINGS)
+            || observation.active_limit_id.is_some() != observation.binding_provenance.is_some()
+        {
+            return None;
+        }
+        current.sequence = current.sequence.saturating_add(1);
+        let sequence = current.sequence;
+        let mut windows = Vec::new();
+        for sparse in observation.windows {
+            let key = tau_proto::ProviderQuotaWindowKey {
+                limit_id: sparse.limit_id.clone(),
+                window_id: sparse.window_id.clone(),
+            };
+            let previous = current.windows.get(&key).map(|record| &record.window);
+            let Some(window) = merge_sparse_quota_window(previous, sparse, observed_at_unix_ms)
+            else {
+                continue;
+            };
+            current.windows.insert(
+                key,
+                QuotaWindowRecord {
+                    window: window.clone(),
+                    updated_sequence: sequence,
+                },
+            );
+            windows.push(window);
+        }
+        let mut route_bindings = Vec::new();
+        if let (Some(limit_id), Some(provenance)) =
+            (observation.active_limit_id, observation.binding_provenance)
+        {
+            let binding = tau_proto::ProviderQuotaRouteBinding {
+                model: model.clone(),
+                limit_ids: vec![limit_id],
+                observed_at_unix_ms,
+                provenance,
+            };
+            current.bindings.insert(model, binding.clone());
+            route_bindings.push(binding);
+        }
+        if windows.is_empty() && route_bindings.is_empty() {
+            return None;
+        }
+        Some(Event::ProviderQuotaPatch(tau_proto::ProviderQuotaPatch {
+            provider,
+            profile_epoch: current.epoch.clone(),
+            sequence,
+            windows,
+            removed_window_keys: Vec::new(),
+            route_bindings,
+        }))
+    }
+}
+
+fn quota_profile_identity(config: &responses::ResponsesConfig) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    config.base_url.hash(&mut hasher);
+    config.account_id.hash(&mut hasher);
+    config.api_key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn full_quota_window(
+    observation: tau_provider_chatgpt::quota::QuotaWindowObservation,
+    observed_at_unix_ms: u64,
+) -> Option<tau_proto::ProviderQuotaWindow> {
+    let window_seconds = observation.window_seconds?;
+    let server_offset_ms = match (
+        observation.reset_at_unix_seconds,
+        observation.remaining_seconds,
+    ) {
+        (Some(reset), Some(remaining)) => i128::from(reset)
+            .checked_sub(i128::from(remaining))?
+            .checked_mul(1_000)?
+            .checked_sub(i128::from(observed_at_unix_ms))?
+            .try_into()
+            .ok(),
+        _ => None,
+    };
+    Some(tau_proto::ProviderQuotaWindow {
+        key: tau_proto::ProviderQuotaWindowKey {
+            limit_id: observation.limit_id,
+            window_id: observation.window_id,
+        },
+        used_basis_points: observation.used_basis_points,
+        usage_observed_at_unix_ms: observed_at_unix_ms,
+        window_seconds,
+        reset_at_unix_seconds: observation.reset_at_unix_seconds,
+        remaining_seconds_at_timing_anchor: observation.remaining_seconds,
+        timing_anchor_observed_at_unix_ms: observation
+            .remaining_seconds
+            .map(|_| observed_at_unix_ms),
+        server_offset_ms,
+        server_offset_observed_at_unix_ms: server_offset_ms.map(|_| observed_at_unix_ms),
+    })
+}
+
+fn merge_sparse_quota_window(
+    previous: Option<&tau_proto::ProviderQuotaWindow>,
+    sparse: tau_provider_chatgpt::quota::QuotaWindowObservation,
+    observed_at_unix_ms: u64,
+) -> Option<tau_proto::ProviderQuotaWindow> {
+    let duration_changed = previous.is_some_and(|previous| {
+        sparse
+            .window_seconds
+            .is_some_and(|seconds| seconds != previous.window_seconds)
+    });
+    let window_seconds = sparse
+        .window_seconds
+        .or_else(|| previous.map(|window| window.window_seconds))?;
+    let reset_at_unix_seconds = sparse
+        .reset_at_unix_seconds
+        .or_else(|| previous.and_then(|window| window.reset_at_unix_seconds));
+    let unsafe_usage_decrease = previous.is_some_and(|previous| {
+        sparse.used_basis_points.saturating_add(100) < previous.used_basis_points
+    });
+    let reset_transition_trusted = previous.is_none_or(|previous| {
+        let (Some(old), Some(new)) = (previous.reset_at_unix_seconds, sparse.reset_at_unix_seconds)
+        else {
+            return true;
+        };
+        if old.abs_diff(new) <= 60 {
+            return true;
+        }
+        if new < old {
+            return false;
+        }
+        let old_remaining = previous
+            .remaining_seconds_at_timing_anchor
+            .zip(previous.timing_anchor_observed_at_unix_ms)
+            .map(|(remaining, anchor)| {
+                let age_seconds =
+                    i64::try_from(observed_at_unix_ms.saturating_sub(anchor).div_ceil(1_000))
+                        .unwrap_or(i64::MAX);
+                remaining.saturating_sub(age_seconds)
+            });
+        old_remaining.is_some_and(|remaining| remaining <= 5 * 60)
+    });
+    let timing_trusted = !duration_changed && !unsafe_usage_decrease && reset_transition_trusted;
+    let retain_relative = timing_trusted && sparse.reset_at_unix_seconds.is_none();
+    Some(tau_proto::ProviderQuotaWindow {
+        key: tau_proto::ProviderQuotaWindowKey {
+            limit_id: sparse.limit_id,
+            window_id: sparse.window_id,
+        },
+        used_basis_points: sparse.used_basis_points,
+        usage_observed_at_unix_ms: observed_at_unix_ms,
+        window_seconds,
+        reset_at_unix_seconds,
+        remaining_seconds_at_timing_anchor: retain_relative
+            .then(|| previous.and_then(|window| window.remaining_seconds_at_timing_anchor))
+            .flatten(),
+        timing_anchor_observed_at_unix_ms: retain_relative
+            .then(|| previous.and_then(|window| window.timing_anchor_observed_at_unix_ms))
+            .flatten(),
+        server_offset_ms: timing_trusted
+            .then(|| previous.and_then(|window| window.server_offset_ms))
+            .flatten(),
+        server_offset_observed_at_unix_ms: timing_trusted
+            .then(|| previous.and_then(|window| window.server_offset_observed_at_unix_ms))
+            .flatten(),
+    })
+}
 
 /// Default number of provider prompts allowed to execute concurrently.
 const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
@@ -513,11 +957,14 @@ where
         active_prompts: 0,
         input_closed: false,
         cancel_generation: 0,
+        quota: QuotaCoordinator::default(),
     };
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
         .start_manual_loop(reader, writer, runtime)?;
     let worker_waker = runtime.waker();
     runtime.state_mut().set_worker_waker(worker_waker);
+    let handle = runtime.handle();
+    runtime.state_mut().initialize_quota(&handle)?;
     run_provider_loop(runtime)
 }
 
@@ -691,6 +1138,8 @@ struct ProviderRuntime<F> {
     input_closed: bool,
     /// Generation used to reject retry outcomes created before global cancel.
     cancel_generation: u64,
+    /// Single-loop owner for ephemeral provider quota state.
+    quota: QuotaCoordinator,
 }
 
 impl<F> ProviderRuntime<F>
@@ -700,6 +1149,120 @@ where
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
         self.retry_scheduler = Some(RetryScheduler::start(self.worker_tx.clone(), waker.clone()));
         self.worker_waker = Some(waker);
+    }
+
+    #[cfg(not(test))]
+    fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        let mut profiles = (self.load_prompt_profiles)();
+        for model in models_for_profiles(&profiles) {
+            if let Some(config) = resolve_responses_backend(&model.id, &mut profiles) {
+                self.ensure_quota_profile(&model.id.provider, &config, handle)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn initialize_quota(&mut self, _handle: &ClientHandle) -> ClientResult<()> {
+        // Existing runtime tests use stateful profile loaders to model exact
+        // prompt-time reload counts. Quota acquisition and reconciliation are
+        // covered through the injected parser/coordinator seams instead of
+        // introducing an unrelated startup load into those tests.
+        Ok(())
+    }
+
+    fn ensure_quota_profile(
+        &mut self,
+        provider: &ProviderName,
+        config: &responses::ResponsesConfig,
+        handle: &ClientHandle,
+    ) -> ClientResult<bool> {
+        let identity = quota_profile_identity(config);
+        if let Some(event) = self.quota.ensure_profile(provider.clone(), identity) {
+            handle.send(HarnessInputMessage::emit(event))?;
+        }
+        Ok(self.start_quota_fetch_if_due(provider, config))
+    }
+
+    fn start_quota_fetch_if_due(
+        &mut self,
+        provider: &ProviderName,
+        config: &responses::ResponsesConfig,
+    ) -> bool {
+        let Some((profile_epoch, fetch_start_sequence)) = self.quota.begin_fetch(provider) else {
+            return false;
+        };
+        let Some(waker) = self.worker_waker.clone() else {
+            self.quota.fail_fetch(provider, &profile_epoch);
+            return false;
+        };
+        let tx = self.worker_tx.clone();
+        let provider = provider.clone();
+        let base_url = config.base_url.clone();
+        let access_token = config.api_key.clone();
+        let account_id = config.account_id.clone();
+        thread::spawn(move || {
+            let result = tau_provider_chatgpt::quota::fetch_usage(
+                &base_url,
+                &access_token,
+                account_id.as_deref(),
+            );
+            let _ = send_worker_message(
+                &tx,
+                &waker,
+                WorkerMessage::QuotaFetchFinished {
+                    provider,
+                    profile_epoch,
+                    fetch_start_sequence,
+                    observed_at_unix_ms: now_ms(),
+                    result,
+                },
+            );
+        });
+        true
+    }
+
+    fn resolve_backend_with_quota(
+        &mut self,
+        model: &ModelId,
+        profiles: &mut BuiltinProviderProfiles,
+        handle: &ClientHandle,
+    ) -> ClientResult<PromptBackend> {
+        let backend = resolve_prompt_backend(model, profiles).unwrap_or(PromptBackend::Unavailable);
+        if let PromptBackend::Responses(config) = &backend {
+            let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
+        } else if let Some(event) = self.quota.clear_profile(&model.provider) {
+            handle.send(HarnessInputMessage::emit(event))?;
+        }
+        Ok(backend)
+    }
+
+    fn schedule_quota_refresh(
+        &mut self,
+        provider: ProviderName,
+        profile_epoch: tau_proto::ProviderQuotaEpoch,
+        delay: Duration,
+    ) {
+        let Some(refresh_generation) = self.quota.schedule_refresh(&provider, &profile_epoch)
+        else {
+            return;
+        };
+        let Some(waker) = self.worker_waker.clone() else {
+            return;
+        };
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            thread::sleep(delay);
+            let _ = send_worker_message(
+                &tx,
+                &waker,
+                WorkerMessage::QuotaRefreshDue {
+                    provider,
+                    profile_epoch,
+                    refresh_generation,
+                },
+            );
+        });
     }
 
     fn drain_workers_and_start_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
@@ -797,8 +1360,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let mut profiles = (self.load_prompt_profiles)();
-        let backend = resolve_prompt_backend(&prompt.model, &mut profiles)
-            .unwrap_or(PromptBackend::Unavailable);
+        let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
         let mut frame_writer = handle_frame_writer(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
@@ -982,8 +1544,8 @@ where
                         continue;
                     }
                     let mut profiles = (self.load_prompt_profiles)();
-                    job.backend = resolve_prompt_backend(&job.prompt.model, &mut profiles)
-                        .unwrap_or(PromptBackend::Unavailable);
+                    job.backend =
+                        self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
                     self.prompt_queue.push_back(job);
                 }
                 Ok(WorkerMessage::ManualRetry {
@@ -1009,9 +1571,11 @@ where
                             tau_proto::RetryPromptStatus::NotParked
                         } else {
                             let mut profiles = (self.load_prompt_profiles)();
-                            owned_job.backend =
-                                resolve_prompt_backend(&owned_job.prompt.model, &mut profiles)
-                                    .unwrap_or(PromptBackend::Unavailable);
+                            owned_job.backend = self.resolve_backend_with_quota(
+                                &owned_job.prompt.model,
+                                &mut profiles,
+                                handle,
+                            )?;
                             owned_job.manual_cooldown_bypass = true;
                             self.prompt_queue.push_back(owned_job);
                             tau_proto::RetryPromptStatus::Accepted
@@ -1037,6 +1601,87 @@ where
                     }
                     self.cancellation.take_canceled(&job.agent_prompt_id);
                     self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                }
+                Ok(WorkerMessage::QuotaRolling {
+                    model,
+                    profile_identity,
+                    observation,
+                    observed_at_unix_ms,
+                }) => {
+                    if let Some(event) = self.quota.merge_rolling(
+                        model,
+                        profile_identity,
+                        observation,
+                        observed_at_unix_ms,
+                    ) {
+                        handle.send(HarnessInputMessage::emit(event))?;
+                    }
+                }
+                Ok(WorkerMessage::QuotaFetchFinished {
+                    provider,
+                    profile_epoch,
+                    fetch_start_sequence,
+                    observed_at_unix_ms,
+                    result,
+                }) => match result {
+                    Ok(snapshot) => {
+                        let refresh_provider = provider.clone();
+                        let refresh_epoch = profile_epoch.clone();
+                        if let Some(event) = self.quota.finish_fetch(
+                            provider,
+                            profile_epoch,
+                            fetch_start_sequence,
+                            snapshot,
+                            observed_at_unix_ms,
+                        ) {
+                            handle.send(HarnessInputMessage::emit(event))?;
+                            let delay = self.quota.refresh_delay(&refresh_provider);
+                            self.schedule_quota_refresh(refresh_provider, refresh_epoch, delay);
+                        } else if self.quota.epoch_matches(&refresh_provider, &refresh_epoch) {
+                            let delay = self.quota.failure_delay(&refresh_provider);
+                            self.schedule_quota_refresh(refresh_provider, refresh_epoch, delay);
+                        }
+                    }
+                    Err(error) => {
+                        self.quota.fail_fetch(&provider, &profile_epoch);
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            provider = %provider,
+                            "quota reconciliation unavailable: {error}"
+                        );
+                        if self.quota.epoch_matches(&provider, &profile_epoch) {
+                            let delay = self.quota.failure_delay(&provider);
+                            self.schedule_quota_refresh(provider, profile_epoch, delay);
+                        }
+                    }
+                },
+                Ok(WorkerMessage::QuotaRefreshDue {
+                    provider,
+                    profile_epoch,
+                    refresh_generation,
+                }) => {
+                    if self
+                        .quota
+                        .refresh_is_current(&provider, &profile_epoch, refresh_generation)
+                    {
+                        let mut profiles = (self.load_prompt_profiles)();
+                        let config = models_for_profiles(&profiles)
+                            .into_iter()
+                            .find(|model| model.id.provider == provider)
+                            .and_then(|model| resolve_responses_backend(&model.id, &mut profiles));
+                        if let Some(config) = config {
+                            let started = self.ensure_quota_profile(&provider, &config, handle)?;
+                            if !started && let Some(epoch) = self.quota.profile_epoch(&provider) {
+                                self.schedule_quota_refresh(
+                                    provider,
+                                    epoch,
+                                    QUOTA_FETCH_MIN_INTERVAL,
+                                );
+                            }
+                        } else if let Some(event) = self.quota.clear_profile(&provider) {
+                            handle.send(HarnessInputMessage::emit(event))?;
+                        }
+                    }
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
             }
@@ -1621,6 +2266,42 @@ enum WorkerMessage {
         /// reconciliation.
         delayed_count: usize,
     },
+    /// Sparse quota observation from a supported prompt transport.
+    QuotaRolling {
+        /// Exact model whose in-band route established applicability.
+        model: ModelId,
+        /// Secret-free hash of the profile used by this prompt.
+        profile_identity: u64,
+        /// Provider-normalized sparse rolling observation.
+        observation: tau_provider_chatgpt::quota::RollingQuotaObservation,
+        /// Original wall-clock observation time.
+        observed_at_unix_ms: u64,
+    },
+    /// Result of one coalesced full account-usage fetch.
+    QuotaFetchFinished {
+        /// Provider profile fetched.
+        provider: ProviderName,
+        /// Epoch captured before starting I/O.
+        profile_epoch: tau_proto::ProviderQuotaEpoch,
+        /// State sequence captured before starting I/O.
+        fetch_start_sequence: u64,
+        /// Wall-clock completion time sampled by the acquisition worker.
+        observed_at_unix_ms: u64,
+        /// Sanitized full-fetch result.
+        result: Result<
+            tau_provider_chatgpt::quota::FullQuotaSnapshot,
+            tau_provider_chatgpt::quota::UsageFetchError,
+        >,
+    },
+    /// Coarse full-refresh wake for a still-current profile epoch.
+    QuotaRefreshDue {
+        /// Provider profile to refresh.
+        provider: ProviderName,
+        /// Epoch that scheduled this wake.
+        profile_epoch: tau_proto::ProviderQuotaEpoch,
+        /// Coalescing generation; only the latest deadline may act.
+        refresh_generation: u64,
+    },
 }
 
 /// Destination for decoded provider output frames.
@@ -1893,6 +2574,33 @@ fn debug_provider_requests_for(
 fn production_prompt_executor() -> PromptExecutor {
     Arc::new(|execution| {
         let agent_prompt_id = execution.job.agent_prompt_id.clone();
+        let model = execution.job.prompt.model.clone();
+        let profile_identity = match &execution.job.backend {
+            PromptBackend::Responses(config) => Some(quota_profile_identity(config)),
+            _ => None,
+        };
+        let quota_tx = execution.output_tx.clone();
+        let quota_waker = execution.output_waker.clone();
+        let mut last_quota = None;
+        let mut on_quota = |observation: &tau_provider_chatgpt::quota::RollingQuotaObservation| {
+            if last_quota.as_ref() == Some(observation) {
+                return;
+            }
+            last_quota = Some(observation.clone());
+            let Some(profile_identity) = profile_identity else {
+                return;
+            };
+            let _ = send_worker_message(
+                &quota_tx,
+                &quota_waker,
+                WorkerMessage::QuotaRolling {
+                    model: model.clone(),
+                    profile_identity,
+                    observation: observation.clone(),
+                    observed_at_unix_ms: now_ms(),
+                },
+            );
+        };
         let result = {
             let mut writer = execution.frame_writer();
             let mut retry_ctx = SharedRetryContext {
@@ -1900,14 +2608,18 @@ fn production_prompt_executor() -> PromptExecutor {
                 current_apid: agent_prompt_id.clone(),
                 cancel_generation: execution.job.cancel_generation,
             };
+            let prompt_context = ChatGptPromptExecutionContext {
+                debug_provider_requests: execution.job.debug_provider_requests,
+                runtime: &execution.chatgpt_runtime,
+            };
             handle_prompt_backend(
                 &agent_prompt_id,
                 &execution.job.backend,
                 &execution.job.prompt,
-                execution.job.debug_provider_requests,
                 &mut writer,
                 &mut retry_ctx,
-                &execution.chatgpt_runtime,
+                prompt_context,
+                &mut on_quota,
             )
         };
         match result {
@@ -2427,10 +3139,10 @@ fn handle_prompt_backend<R, W: Write>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     backend: &PromptBackend,
     prompt: &tau_proto::AgentPromptCreated,
-    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
-    chatgpt_runtime: &ChatGptRuntime,
+    context: ChatGptPromptExecutionContext<'_>,
+    on_quota: &mut impl FnMut(&tau_provider_chatgpt::quota::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -2441,10 +3153,10 @@ where
             agent_prompt_id.as_str(),
             config,
             prompt,
-            debug_provider_requests,
             writer,
             retry_ctx,
-            chatgpt_runtime,
+            context,
+            on_quota,
         ),
         PromptBackend::ChatCompletions { provider, model } => {
             let outcome = run_prompt_attempt_for_provider(
@@ -2452,7 +3164,7 @@ where
                 prompt,
                 provider,
                 model,
-                debug_provider_requests,
+                context.debug_provider_requests,
                 writer,
                 &mut || TurnAbort::is_aborted(retry_ctx),
             );
@@ -2478,14 +3190,23 @@ where
     }
 }
 
+/// Shared immutable inputs for one ChatGPT provider prompt attempt.
+#[derive(Clone, Copy)]
+struct ChatGptPromptExecutionContext<'a> {
+    /// Whether durable-session policy permits provider debug captures.
+    debug_provider_requests: bool,
+    /// Shared ChatGPT transport runtime and WebSocket pool.
+    runtime: &'a ChatGptRuntime,
+}
+
 fn handle_prompt<R, W: Write>(
     agent_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::AgentPromptCreated,
-    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
-    chatgpt_runtime: &ChatGptRuntime,
+    execution: ChatGptPromptExecutionContext<'_>,
+    on_quota: &mut impl FnMut(&tau_provider_chatgpt::quota::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -2501,13 +3222,16 @@ where
         share_user_cache_key: prompt.share_user_cache_key,
         session_id: &prompt.session_id,
         agent_id: &prompt.agent_id,
-        debug_provider_requests,
+        debug_provider_requests: execution.debug_provider_requests,
     };
 
     if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
         // This deliberately has no inline fallback; see
         // `DESIGN-tau-ext-provider-builtin-standalone-compaction`.
-        match chatgpt_runtime.compact(agent_prompt_id, config, &request, retry_ctx) {
+        match execution
+            .runtime
+            .compact(agent_prompt_id, config, &request, retry_ctx)
+        {
             Ok(output_items) => {
                 writer.write_message(&HarnessInputMessage::emit(
                     Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -2546,7 +3270,7 @@ where
                     &backend,
                     error,
                     None,
-                    debug_provider_requests,
+                    execution.debug_provider_requests,
                     writer,
                 )?;
                 return Ok(None);
@@ -2564,6 +3288,9 @@ where
     let mut ws_pool_delta = None;
     let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
     let mut on_update = |state: &common::StreamState| {
+        if let Some(observation) = state.quota_observation.as_ref() {
+            on_quota(observation);
+        }
         response_update_emitter.emit_if_due(
             agent_prompt_id,
             &prompt.agent_id,
@@ -2572,7 +3299,7 @@ where
             writer,
         );
     };
-    let result = chatgpt_runtime.stream(
+    let result = execution.runtime.stream(
         agent_prompt_id,
         config,
         &request,
@@ -2607,7 +3334,7 @@ where
                 &backend,
                 dispatch.state,
                 ws_pool_delta,
-                debug_provider_requests,
+                execution.debug_provider_requests,
                 writer,
             )?
         }
@@ -2632,7 +3359,7 @@ where
                 &backend,
                 error,
                 ws_pool_delta,
-                debug_provider_requests,
+                execution.debug_provider_requests,
                 writer,
             )?
         }
@@ -2647,7 +3374,7 @@ where
                 &backend,
                 error,
                 ws_pool_delta,
-                debug_provider_requests,
+                execution.debug_provider_requests,
                 writer,
             )?
         }

@@ -343,6 +343,8 @@ pub struct StreamState {
     chat_message_item_index: Option<usize>,
     /// Bounded exact repetition guard for this provider generation.
     repetition_guard: StreamRepetitionGuard,
+    /// Latest supported HTTP/WS account-quota observation for this turn.
+    pub quota_observation: Option<crate::quota::RollingQuotaObservation>,
 }
 
 /// Tracks text already emitted to transient response update streams.
@@ -511,6 +513,7 @@ impl StreamState {
             stale_chain_fallback: false,
             chat_message_item_index: None,
             repetition_guard: StreamRepetitionGuard::new(),
+            quota_observation: None,
         }
     }
 

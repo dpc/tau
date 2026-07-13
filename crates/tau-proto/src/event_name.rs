@@ -273,6 +273,12 @@ impl EventName {
     pub const AGENT_STATS_UPDATED: Self = Self::from_static(EventCategory::Agent, "stats_updated");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
+    pub const PROVIDER_QUOTA_REPLACE: Self =
+        Self::from_static(EventCategory::Provider, "quota_replace");
+    pub const PROVIDER_QUOTA_PATCH: Self =
+        Self::from_static(EventCategory::Provider, "quota_patch");
+    pub const PROVIDER_QUOTA_CLEAR: Self =
+        Self::from_static(EventCategory::Provider, "quota_clear");
     pub const PROVIDER_TOOL_RESULT: Self =
         Self::from_static(EventCategory::Provider, "tool_result");
     pub const PROVIDER_TOOL_ERROR: Self = Self::from_static(EventCategory::Provider, "tool_error");
@@ -299,6 +305,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "role_selected");
     pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "context_usage_changed");
+    pub const HARNESS_PROVIDER_QUOTA_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "provider_quota_changed");
     pub const HARNESS_AGENT_CONTEXT_USAGE_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "agent_context_usage_changed");
     pub const HARNESS_EFFORTS_AVAILABLE: Self =

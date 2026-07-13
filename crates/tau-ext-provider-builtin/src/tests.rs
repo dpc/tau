@@ -205,10 +205,13 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
         "ap-ws-terminal",
         &config,
         &prompt,
-        false,
         &mut writer,
         &mut retry,
-        &runtime,
+        ChatGptPromptExecutionContext {
+            debug_provider_requests: false,
+            runtime: &runtime,
+        },
+        &mut |_| {},
     )
     .expect("prompt handler should classify provider error");
     assert!(
@@ -1061,4 +1064,227 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     );
     assert!(finished.output_items.is_empty());
     assert!(finished.error.as_deref().unwrap_or_default().len() <= 520);
+}
+/// Full reconciliation preserves a rolling window accepted after fetch start,
+/// while still deleting older pools absent from the full account response.
+#[test]
+fn quota_reconciliation_does_not_revert_newer_rolling_state() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::from("chatgpt/gpt-5.6-sol");
+    let mut quota = QuotaCoordinator::default();
+    let established = quota
+        .ensure_profile(provider.clone(), 7)
+        .expect("valid quota test value");
+    assert!(matches!(established, Event::ProviderQuotaReplace(_)));
+    let (epoch, fetch_sequence) = quota
+        .begin_fetch(&provider)
+        .expect("valid quota test value");
+    let rolling = tau_provider_chatgpt::quota::RollingQuotaObservation {
+        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
+                .expect("valid quota test value"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
+                .expect("valid quota test value"),
+            used_basis_points: 6_000,
+            window_seconds: Some(604_800),
+            reset_at_unix_seconds: Some(2_100_000_000),
+            remaining_seconds: None,
+        }],
+        active_limit_id: Some(
+            tau_proto::ProviderQuotaLimitId::parse("codex").expect("valid quota test value"),
+        ),
+        binding_provenance: Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent),
+    };
+    assert!(matches!(
+        quota.merge_rolling(model, 7, rolling, 2_000_000_000_000),
+        Some(Event::ProviderQuotaPatch(_))
+    ));
+    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
+        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
+                .expect("valid quota test value"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
+                .expect("valid quota test value"),
+            used_basis_points: 5_000,
+            window_seconds: Some(604_800),
+            reset_at_unix_seconds: Some(2_100_000_000),
+            remaining_seconds: Some(500_000),
+        }],
+    };
+    let Event::ProviderQuotaReplace(replaced) = quota
+        .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_001_000)
+        .expect("valid quota test value")
+    else {
+        panic!("expected replacement");
+    };
+    assert_eq!(replaced.windows[0].used_basis_points, 6_000);
+    assert_eq!(replaced.route_bindings.len(), 1);
+}
+
+/// An old account fetch can never repopulate quota state after a profile epoch
+/// rotates, even when its network response arrives later.
+#[test]
+fn quota_profile_rotation_rejects_old_fetch_completion() {
+    let provider = ProviderName::new("chatgpt");
+    let mut quota = QuotaCoordinator::default();
+    quota.ensure_profile(provider.clone(), 1);
+    let (old_epoch, sequence) = quota
+        .begin_fetch(&provider)
+        .expect("valid quota test value");
+    quota.ensure_profile(provider.clone(), 2);
+    assert!(
+        quota
+            .finish_fetch(
+                provider,
+                old_epoch,
+                sequence,
+                tau_provider_chatgpt::quota::FullQuotaSnapshot::default(),
+                1,
+            )
+            .is_none()
+    );
+}
+
+/// Sparse rolling observations cannot grow the coordinator beyond the protocol
+/// state bound; the rejected update is atomic and consumes no sequence.
+#[test]
+fn quota_sparse_state_is_bounded_before_mutation() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::from("chatgpt/gpt-5.6-sol");
+    let mut quota = QuotaCoordinator::default();
+    quota.ensure_profile(provider.clone(), 7);
+    for index in 0..tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
+        let observation = tau_provider_chatgpt::quota::RollingQuotaObservation {
+            windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+                limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("pool_{index}"))
+                    .expect("pool id"),
+                window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+                used_basis_points: 100,
+                window_seconds: Some(604_800),
+                reset_at_unix_seconds: Some(2_100_000_000),
+                remaining_seconds: None,
+            }],
+            active_limit_id: None,
+            binding_provenance: None,
+        };
+        assert!(
+            quota
+                .merge_rolling(model.clone(), 7, observation, 2_000_000_000_000)
+                .is_some()
+        );
+    }
+    let sequence = quota.profiles[&provider].sequence;
+    let overflow = tau_provider_chatgpt::quota::RollingQuotaObservation {
+        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse("overflow").expect("pool id"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+            used_basis_points: 100,
+            window_seconds: Some(604_800),
+            reset_at_unix_seconds: Some(2_100_000_000),
+            remaining_seconds: None,
+        }],
+        active_limit_id: None,
+        binding_provenance: None,
+    };
+    assert!(
+        quota
+            .merge_rolling(model, 7, overflow, 2_000_000_000_001)
+            .is_none()
+    );
+    assert_eq!(quota.profiles[&provider].sequence, sequence);
+    assert_eq!(
+        quota.profiles[&provider].windows.len(),
+        tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+    );
+}
+
+/// Full reconciliation validates the post-race merged candidate atomically;
+/// fetched keys cannot overflow the bound alongside post-start rolling keys.
+#[test]
+fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::from("chatgpt/gpt-5.6-sol");
+    let mut quota = QuotaCoordinator::default();
+    quota.ensure_profile(provider.clone(), 7);
+    let rolling =
+        |prefix: &str, index: usize| tau_provider_chatgpt::quota::RollingQuotaObservation {
+            windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+                limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("{prefix}_{index}"))
+                    .expect("pool id"),
+                window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+                used_basis_points: 100,
+                window_seconds: Some(604_800),
+                reset_at_unix_seconds: Some(2_100_000_000),
+                remaining_seconds: None,
+            }],
+            active_limit_id: None,
+            binding_provenance: None,
+        };
+    for index in 0..16 {
+        quota.merge_rolling(model.clone(), 7, rolling("old", index), 2_000_000_000_000);
+    }
+    let (epoch, fetch_sequence) = quota.begin_fetch(&provider).expect("fetch");
+    for index in 0..16 {
+        quota.merge_rolling(model.clone(), 7, rolling("new", index), 2_000_000_000_001);
+    }
+    let sequence = quota.profiles[&provider].sequence;
+    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
+        windows: (0..32)
+            .map(
+                |index| tau_provider_chatgpt::quota::QuotaWindowObservation {
+                    limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("full_{index}"))
+                        .expect("pool id"),
+                    window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
+                        .expect("window id"),
+                    used_basis_points: 200,
+                    window_seconds: Some(604_800),
+                    reset_at_unix_seconds: Some(2_100_000_000),
+                    remaining_seconds: Some(300_000),
+                },
+            )
+            .collect(),
+    };
+    assert!(
+        quota
+            .finish_fetch(
+                provider.clone(),
+                epoch,
+                fetch_sequence,
+                full,
+                2_000_000_000_002,
+            )
+            .is_none()
+    );
+    assert_eq!(quota.profiles[&provider].sequence, sequence);
+    assert_eq!(
+        quota.profiles[&provider].windows.len(),
+        tau_proto::MAX_PROVIDER_QUOTA_WINDOWS
+    );
+}
+
+/// Refresh deadlines are generation-coalesced per epoch and failures advance a
+/// bounded backoff instead of creating parallel permanent polling chains.
+#[test]
+fn quota_refresh_deadlines_coalesce_and_back_off() {
+    let provider = ProviderName::new("chatgpt");
+    let mut quota = QuotaCoordinator::default();
+    quota.ensure_profile(provider.clone(), 7);
+    let epoch = quota.profile_epoch(&provider).expect("epoch");
+    let first = quota
+        .schedule_refresh(&provider, &epoch)
+        .expect("generation");
+    let second = quota
+        .schedule_refresh(&provider, &epoch)
+        .expect("generation");
+    assert!(!quota.refresh_is_current(&provider, &epoch, first));
+    assert!(quota.refresh_is_current(&provider, &epoch, second));
+    let _ = quota.begin_fetch(&provider).expect("fetch");
+    quota.fail_fetch(&provider, &epoch);
+    assert!(quota.failure_delay(&provider) > QUOTA_FETCH_MIN_INTERVAL);
+    for _ in 0..10 {
+        quota.fail_fetch(&provider, &epoch);
+    }
+    assert_eq!(quota.failure_delay(&provider), QUOTA_REFRESH_INTERVAL);
+    quota.ensure_profile(provider.clone(), 8);
+    assert!(!quota.refresh_is_current(&provider, &epoch, second));
 }

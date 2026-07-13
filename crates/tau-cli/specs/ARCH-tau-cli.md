@@ -1,5 +1,12 @@
 # ARCH-tau-cli: tau-cli architecture
 
+The CLI consumes harness-validated provider-neutral quota snapshots and applies
+the fixed weekly pacing classifier from
+[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+It selects only an exact current/viewed `ModelId` binding, preserves provider
+timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
+accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.
+
 The terminal UI executes trusted local configuration and environment-derived
 commands, including key-binding shell snippets, completion commands, `$EDITOR`,
 and `$VISUAL`. Treat `cli.yaml`, inherited environment variables, and PATH as

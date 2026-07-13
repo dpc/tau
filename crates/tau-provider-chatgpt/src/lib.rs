@@ -33,6 +33,7 @@ const CHATGPT_MODELS: &[&str] = &[
 ];
 
 pub mod common;
+pub mod quota;
 pub mod responses;
 
 /// Prompt-turn cancellation source used by the WebSocket transport.

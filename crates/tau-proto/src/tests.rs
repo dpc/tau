@@ -980,6 +980,27 @@ fn representative_events() -> Vec<Event> {
                 standalone_compaction_threshold: None,
             }],
         }),
+        Event::ProviderQuotaReplace(ProviderQuotaReplace {
+            provider: ProviderName::new("chatgpt"),
+            profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
+            sequence: 1,
+            establishes_new_epoch: true,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
+        }),
+        Event::ProviderQuotaPatch(ProviderQuotaPatch {
+            provider: ProviderName::new("chatgpt"),
+            profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
+            sequence: 2,
+            windows: Vec::new(),
+            removed_window_keys: Vec::new(),
+            route_bindings: Vec::new(),
+        }),
+        Event::ProviderQuotaClear(ProviderQuotaClear {
+            provider: ProviderName::new("chatgpt"),
+            profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
+            sequence: 3,
+        }),
         Event::ProviderToolResult(ToolResult {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -1045,6 +1066,13 @@ fn representative_events() -> Vec<Event> {
             input_tokens: Some(100),
             cached_tokens: Some(20),
             percent_used: Some(1),
+        }),
+        Event::HarnessProviderQuotaChanged(HarnessProviderQuotaChanged {
+            provider: ProviderName::new("chatgpt"),
+            profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
+            sequence: 1,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
         }),
         Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
             agent_id: agent_id("agent-1"),
@@ -1408,6 +1436,10 @@ fn expected_default_transient(event: &Event) -> bool {
         Event::ToolCancelled(_)
             | Event::ProviderResponseUpdated(_)
             | Event::ProviderPromptSubmitted(_)
+            | Event::ProviderQuotaReplace(_)
+            | Event::ProviderQuotaPatch(_)
+            | Event::ProviderQuotaClear(_)
+            | Event::HarnessProviderQuotaChanged(_)
             | Event::AgentWatchesUpdated(_)
             | Event::AgentStatsUpdated(_)
             | Event::AgentReplayComplete(_)
@@ -1490,6 +1522,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "harness.efforts_available",
         "harness.models_available",
         "harness.notice",
+        "harness.provider_quota_changed",
         "harness.role_selected",
         "harness.roles_available",
         "harness.session_dir",
@@ -1499,6 +1532,9 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "provider.cache_miss_diagnostic",
         "provider.models_updated",
         "provider.prompt_submitted",
+        "provider.quota_clear",
+        "provider.quota_patch",
+        "provider.quota_replace",
         "provider.response_finished",
         "provider.response_updated",
         "provider.tool_error",

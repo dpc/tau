@@ -41,6 +41,13 @@ Supported profile kinds:
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
+ChatGPT account quota is acquired best-effort from `/wham/usage` and reconciled
+with supported response-header/WebSocket observations without delaying model
+work. Tau shows `Q-`, `Q=`, `Q+`, `Q!`, or neutral `Q?` only when the exact
+selected model has a fresh explicit in-band pool binding. It does not infer
+applicability from a default/sole pool, does not treat credits as weekly usage,
+and does not fabricate a reset when a cached boundary passes.
+
 
 ## Runtime behavior
 

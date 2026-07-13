@@ -1,5 +1,18 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Provider account quota is an ephemeral current-state cache. The harness accepts
+it only when every effective model route in the provider namespace has one
+unambiguous extension owner, and every binding names a route won by that owner.
+Split namespace ownership fails closed rather than letting one account snapshot
+erase another source's state. Ownership or model-route loss clears associated
+state; a sequence tombstone permits a later full replacement from the restored
+owner—including an unretired epoch rotated while authority was absent—to
+recover without accepting sparse state out of context. Explicit clears consume
+matching tombstones and retire their epoch. The harness validates bounds plus epoch/sequence
+transitions and projects full snapshots to live and late UI subscribers without
+rebasing observation clocks. It never enters semantic session or agent history. See
+[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+
 This component implements the harness-owned parts of [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md), and [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 
 ## Canonical transport message boundary

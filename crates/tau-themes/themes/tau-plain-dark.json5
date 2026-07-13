@@ -45,6 +45,11 @@
 
     // -- Status bar --
     "status.context":       { fg: "cyan" },
+    "status.quota.under":   { fg: "green", bold: true },
+    "status.quota.aligned": { fg: "green" },
+    "status.quota.over":    { fg: "yellow" },
+    "status.quota.danger":  { fg: "red" },
+    "status.quota.unknown": { },
     "status.effort":        { fg: "yellow" },
     "status.service_tier":  { fg: "green" },
     "status.tools":         { fg: "yellow" },

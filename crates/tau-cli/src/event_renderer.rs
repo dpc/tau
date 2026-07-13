@@ -131,6 +131,8 @@ pub(crate) struct EventRenderer {
     agent_watchers: HashMap<String, Vec<String>>,
     /// Latest generic operational stats keyed by agent id.
     agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    /// Last exact dispatched model per browsable agent.
+    agent_models: HashMap<String, tau_proto::ModelId>,
     /// Latest harness-authored agent-turn state keyed by `(watcher, watched)`.
     ///
     /// Once present, this outer lifecycle is authoritative over provider-prompt
@@ -235,6 +237,10 @@ pub(crate) struct EventRenderer {
     /// `HarnessRoleSelected`, or while the selected role has no available
     /// provider-published model.
     current_model: Option<tau_proto::ModelId>,
+    /// Provider-neutral quota state and per-cycle pacing hysteresis.
+    quota_pacing: crate::provider_quota::QuotaPacingState,
+    /// Last quota-only timer repaint, used to keep its cadence coarse.
+    last_quota_tick: Option<Instant>,
     /// Currently selected agent role, as last announced by
     /// `HarnessRoleSelected`. `None` only before the first selection event.
     /// The status bar shows this instead of the derived model id.
@@ -484,6 +490,8 @@ pub(crate) struct ToolTimerNotifier {
 
 pub(crate) struct ToolTimerState {
     pub(crate) active_tool_ids: HashSet<String>,
+    /// Whether quota pacing currently needs minute-boundary repainting.
+    pub(crate) quota_active: bool,
     pub(crate) done: bool,
 }
 
@@ -493,6 +501,7 @@ impl ToolTimerNotifier {
             inner: Arc::new((
                 std::sync::Mutex::new(ToolTimerState {
                     active_tool_ids: HashSet::new(),
+                    quota_active: false,
                     done: false,
                 }),
                 std::sync::Condvar::new(),
@@ -524,6 +533,14 @@ impl ToolTimerNotifier {
         let (mutex, cv) = &*self.inner;
         if let Ok(mut state) = mutex.lock() {
             state.active_tool_ids.clear();
+            cv.notify_all();
+        }
+    }
+
+    fn set_quota_active(&self, active: bool) {
+        let (mutex, cv) = &*self.inner;
+        if let Ok(mut state) = mutex.lock() {
+            state.quota_active = active;
             cv.notify_all();
         }
     }
@@ -979,6 +996,14 @@ fn push_status_chip(
     *needs_space = true;
 }
 
+pub(crate) fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn push_ui_io_status_chip(
     themed: &mut tau_themes::ThemedText,
     needs_space: &mut bool,
@@ -1287,6 +1312,7 @@ impl EventRenderer {
             watched_agents: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
+            agent_models: HashMap::new(),
             watched_agent_turn_states: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
@@ -1325,6 +1351,8 @@ impl EventRenderer {
             message_history: Vec::new(),
             state_dirs,
             current_model: None,
+            quota_pacing: crate::provider_quota::QuotaPacingState::default(),
+            last_quota_tick: None,
             current_role: None,
             model_params: tau_proto::ModelParams::default(),
             role_defaults: HashMap::new(),
@@ -2760,6 +2788,11 @@ impl EventRenderer {
         let tools_style = right_themed.add_style(names::STATUS_TOOLS);
         let agents_style = right_themed.add_style(names::STATUS_AGENTS);
         let context_style = right_themed.add_style(names::STATUS_CONTEXT);
+        let quota_under_style = right_themed.add_style(names::STATUS_QUOTA_UNDER);
+        let quota_aligned_style = right_themed.add_style(names::STATUS_QUOTA_ALIGNED);
+        let quota_over_style = right_themed.add_style(names::STATUS_QUOTA_OVER);
+        let quota_danger_style = right_themed.add_style(names::STATUS_QUOTA_DANGER);
+        let quota_unknown_style = right_themed.add_style(names::STATUS_QUOTA_UNKNOWN);
         let ui_io_low_style = right_themed.add_style(names::STATUS_UI_IO_LOW);
         let ui_io_medium_style = right_themed.add_style(names::STATUS_UI_IO_MEDIUM);
         let ui_io_high_style = right_themed.add_style(names::STATUS_UI_IO_HIGH);
@@ -2879,6 +2912,30 @@ impl EventRenderer {
                 &mut right_needs_space,
                 format!("@{active_agents}"),
             );
+        }
+        let quota_model = self.current_agent_id.as_ref().map_or_else(
+            || self.current_model.clone(),
+            |agent_id| self.agent_models.get(agent_id).cloned(),
+        );
+        let quota =
+            quota_model.and_then(|model| self.quota_pacing.classify(&model, unix_time_millis()));
+        if let Some(quota) = quota {
+            let style = match quota {
+                crate::provider_quota::QuotaPacing::FarUnder => quota_under_style,
+                crate::provider_quota::QuotaPacing::Aligned => quota_aligned_style,
+                crate::provider_quota::QuotaPacing::Over => quota_over_style,
+                crate::provider_quota::QuotaPacing::Danger => quota_danger_style,
+                crate::provider_quota::QuotaPacing::Unknown => quota_unknown_style,
+            };
+            push_status_chip(
+                &mut right_themed,
+                style,
+                &mut right_needs_space,
+                quota.chip().to_owned(),
+            );
+        }
+        if let Some(timer) = &self.tool_timer {
+            timer.set_quota_active(quota.is_some());
         }
         if let Some(context) = self.context_status_chip() {
             push_status_chip(
@@ -3642,6 +3699,7 @@ impl EventRenderer {
                     navigation.unload(unloaded.agent_id.as_str());
                 }
                 self.remove_agent_watch_endpoint(unloaded.agent_id.as_str());
+                self.agent_models.remove(unloaded.agent_id.as_str());
                 true
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
@@ -3691,6 +3749,8 @@ impl EventRenderer {
             }
             Event::AgentPromptCreated(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
+                self.agent_models
+                    .insert(agent_id.clone(), prompt.model.clone());
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
                     .insert(prompt.agent_prompt_id.to_string(), agent_id);
@@ -5435,6 +5495,13 @@ impl EventRenderer {
         if changed {
             self.handle.redraw();
         }
+        let quota_tick_due = self
+            .last_quota_tick
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
+        if quota_tick_due {
+            self.last_quota_tick = Some(Instant::now());
+            self.render_model_status_if_present();
+        }
     }
 
     fn freeze_multiline_live_payloads(&self) -> bool {
@@ -6154,6 +6221,11 @@ impl EventRenderer {
             }
             Event::HarnessModelsAvailable(models) => {
                 self.handle_harness_models_available(models);
+                true
+            }
+            Event::HarnessProviderQuotaChanged(changed) => {
+                self.quota_pacing.update(changed);
+                self.render_model_status_if_present();
                 true
             }
             _ => false,

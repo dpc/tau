@@ -17,10 +17,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, MessageEnvelope, MessageId, MessagePhase, MessageTransportAcceptance, ModelId,
-    ModelTag, PromptContext, PromptFragment, PromptSubmissionSource, ProviderTokenUsage,
-    ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
-    ToolTag,
+    ExtensionName, HarnessProviderQuotaChanged, MessageEnvelope, MessageId, MessagePhase,
+    MessageTransportAcceptance, ModelId, ModelTag, PromptContext, PromptFragment,
+    PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace,
+    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
+    ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -4479,6 +4480,12 @@ pub enum Event {
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
     ProviderModelsUpdated(ProviderModelsUpdated),
+    #[serde(rename = "provider.quota_replace")]
+    ProviderQuotaReplace(ProviderQuotaReplace),
+    #[serde(rename = "provider.quota_patch")]
+    ProviderQuotaPatch(ProviderQuotaPatch),
+    #[serde(rename = "provider.quota_clear")]
+    ProviderQuotaClear(ProviderQuotaClear),
     #[serde(rename = "provider.tool_result")]
     ProviderToolResult(ToolResult),
     #[serde(rename = "provider.tool_error")]
@@ -4499,6 +4506,8 @@ pub enum Event {
     HarnessRoleSelected(HarnessRoleSelected),
     #[serde(rename = "harness.context_usage_changed")]
     HarnessContextUsageChanged(HarnessContextUsageChanged),
+    #[serde(rename = "harness.provider_quota_changed")]
+    HarnessProviderQuotaChanged(HarnessProviderQuotaChanged),
     #[serde(rename = "harness.agent_context_usage_changed")]
     HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged),
     #[serde(rename = "agent.state")]
@@ -4742,6 +4751,9 @@ impl Event {
     fn provider_capability_event_name(&self) -> Option<EventName> {
         match self {
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
+            Self::ProviderQuotaReplace(_) => EventName::PROVIDER_QUOTA_REPLACE,
+            Self::ProviderQuotaPatch(_) => EventName::PROVIDER_QUOTA_PATCH,
+            Self::ProviderQuotaClear(_) => EventName::PROVIDER_QUOTA_CLEAR,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,
             _ => return None,
@@ -4758,6 +4770,7 @@ impl Event {
             Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
             Self::HarnessRoleSelected(_) => EventName::HARNESS_ROLE_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
+            Self::HarnessProviderQuotaChanged(_) => EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
             Self::HarnessAgentContextUsageChanged(_) => {
                 EventName::HARNESS_AGENT_CONTEXT_USAGE_CHANGED
             }
@@ -4878,6 +4891,10 @@ impl Event {
             self,
             Self::ToolCancelled(_)
                 | Self::ProviderResponseUpdated(_)
+                | Self::ProviderQuotaReplace(_)
+                | Self::ProviderQuotaPatch(_)
+                | Self::ProviderQuotaClear(_)
+                | Self::HarnessProviderQuotaChanged(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)

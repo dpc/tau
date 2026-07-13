@@ -18,6 +18,7 @@ mod print_prompt;
 mod print_tools;
 mod prompt_history;
 mod prompt_stdin;
+mod provider_quota;
 mod render_request;
 mod send;
 mod settings_registry;

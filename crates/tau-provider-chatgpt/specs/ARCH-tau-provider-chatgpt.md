@@ -3,6 +3,15 @@
 Provider output is constrained by
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 
+## Account quota telemetry
+
+This adapter owns the isolated ChatGPT `/wham/usage`, HTTP quota-header, and
+WebSocket `codex.rate_limits` contracts. It normalizes only bounded pool/window
+facts and preserves independent usage and timing observations; credentials,
+account ids, credits, and provider prose never leave the in-process provider
+boundary. Applicability and UI pacing are owned above this crate as specified
+by [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+
 ## Typed image tool output
 
 GPT-5.6 Sol, Terra, and Luna on the ChatGPT Responses surface explicitly

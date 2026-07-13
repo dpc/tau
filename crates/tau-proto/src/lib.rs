@@ -23,6 +23,7 @@ mod message_envelope;
 mod messages;
 pub mod notice_kind;
 mod prompt_fragment;
+mod provider_quota;
 mod suggestion;
 mod token_usage;
 
@@ -38,6 +39,7 @@ pub use interception::*;
 pub use message_envelope::*;
 pub use messages::*;
 pub use prompt_fragment::*;
+pub use provider_quota::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 pub use suggestion::*;
@@ -61,7 +63,9 @@ pub use token_usage::*;
 /// JSON replay sidecar.
 /// Version 8 adds typed message-envelope facts plus dedicated ingress and
 /// successful-send completion RPCs.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// Version 9 adds transient bounded provider quota current-state events.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

@@ -145,7 +145,12 @@ fn unaudited_responses_route_omits_typed_image() {
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let output = &body["input"][0]["output"];
-    assert!(output.as_str().unwrap().contains("does not support"));
+    assert!(
+        output
+            .as_str()
+            .expect("omission marker is text")
+            .contains("does not support")
+    );
     assert!(!body.to_string().contains("data:image"));
 }
 
@@ -1621,6 +1626,14 @@ fn spawn_eof_sse_server(body: &'static str) -> String {
 }
 
 fn spawn_http_error_server(status: u16, body: &'static str) -> String {
+    spawn_http_error_server_with_headers(status, body, "")
+}
+
+fn spawn_http_error_server_with_headers(
+    status: u16,
+    body: &'static str,
+    extra_headers: &'static str,
+) -> String {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind HTTP error server");
     let addr = listener.local_addr().expect("HTTP error address");
     std::thread::spawn(move || {
@@ -1628,12 +1641,50 @@ fn spawn_http_error_server(status: u16, body: &'static str) -> String {
         let mut request = [0_u8; 4096];
         let _ = std::io::Read::read(&mut stream, &mut request);
         let response = format!(
-            "HTTP/1.1 {status} Error\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} Error\r\ncontent-type: text/plain\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
         std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write HTTP error");
     });
     format!("http://{addr}")
+}
+
+/// HTTP error quota headers are delivered before the typed provider failure, so
+/// an explicit 429 active-pool observation is not lost with the response body.
+#[test]
+fn http_error_delivers_active_quota_limit_before_failure() {
+    let config = ResponsesConfig {
+        base_url: spawn_http_error_server_with_headers(
+            429,
+            "usage_limit_reached",
+            "x-codex-active-limit: codex-fast\r\n",
+        ),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_request(&config, &request, None);
+    let mut abort = crate::NeverAbort;
+    let mut quota = None;
+    let result = responses_stream_live_with_idle_timeout(
+        "ap-quota-429",
+        &config,
+        &request,
+        SseLiveOptions {
+            body: &body,
+            recording_stream: None,
+            idle_timeout: std::time::Duration::from_secs(1),
+        },
+        &mut abort,
+        &mut |state| quota = state.quota_observation.clone(),
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        quota
+            .and_then(|observation| observation.active_limit_id)
+            .expect("active limit observation")
+            .as_str(),
+        "codex_fast"
+    );
 }
 
 #[derive(Clone, Copy)]

@@ -1282,20 +1282,23 @@ fn tool_timer_loop(
     let (mutex, cv) = &*state;
     let mut guard = locked(mutex);
     loop {
-        while guard.active_tool_ids.is_empty() && !guard.done {
+        while guard.active_tool_ids.is_empty() && !guard.quota_active && !guard.done {
             guard = cv.wait(guard).expect(MUTEX_POISONED);
         }
         if guard.done {
             return;
         }
-        let (next_guard, timeout) = cv
-            .wait_timeout(guard, Duration::from_secs(1))
-            .expect(MUTEX_POISONED);
+        let interval = if guard.active_tool_ids.is_empty() {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(1)
+        };
+        let (next_guard, timeout) = cv.wait_timeout(guard, interval).expect(MUTEX_POISONED);
         guard = next_guard;
         if guard.done {
             return;
         }
-        if !guard.active_tool_ids.is_empty()
+        if (!guard.active_tool_ids.is_empty() || guard.quota_active)
             && timeout.timed_out()
             && renderer_tx.send(RendererCmd::ToolTimerTick).is_err()
         {

@@ -1650,6 +1650,7 @@ mod interception;
 mod lifecycle;
 mod mode;
 mod model;
+mod quota;
 mod replay;
 mod reply_projection;
 mod retry;

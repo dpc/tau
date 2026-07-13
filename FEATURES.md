@@ -347,8 +347,11 @@ that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rat
 than silently dropping the field.
 
 The status bar renders the current session id and selected agent role,
-falling back to the model id when no role is selected. Model knobs and
-context usage stay out of the bar to keep it compact.
+falling back to the model id when no role is selected. For an exact fresh
+ChatGPT model-to-weekly-pool binding it also renders an accessible quota pacing
+chip: `Q-` far under schedule, `Q=` aligned, `Q+` over, `Q!` danger, or neutral
+`Q?` when applicability exists but freshness/timing is untrusted. The text is
+meaningful without color and no pool is inferred from account snapshots alone.
 
 ### Prompt input caching
 

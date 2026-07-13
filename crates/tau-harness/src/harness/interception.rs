@@ -149,6 +149,9 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // `prompt_agents` bookkeeping and the conversation
     // would never advance.
     EventName::PROVIDER_RESPONSE_FINISHED,
+    // Validated ephemeral provider current state must agree between live and
+    // late-subscriber projections.
+    EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
     // Tool round-trip closure: a missing terminal completion,
     // cancellation, provider result, or background result for a tool
     // that was actually invoked leaves the agent waiting forever.
@@ -183,7 +186,7 @@ fn sanitize_harness_notice_replacement(original: &Event, replacement: &mut Event
     }
 }
 
-fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
+pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
     matches!(
         original,
         Event::AgentStarted(_)
@@ -203,6 +206,7 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
             | Event::ProviderResponseFinished(_)
+            | Event::HarnessProviderQuotaChanged(_)
             | Event::ToolResult(_)
             | Event::ToolError(_)
             | Event::ProviderToolResult(_)
@@ -211,6 +215,10 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
     ) && original != replacement
+}
+
+pub(super) fn event_must_pass_by_default(name: &EventName) -> bool {
+    MUST_PASS_BY_DEFAULT.contains(name)
 }
 
 fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &Event) -> bool {
@@ -864,7 +872,7 @@ impl Harness {
                     );
                     None
                 } else {
-                    let must_pass_default = MUST_PASS_BY_DEFAULT.contains(&event_name)
+                    let must_pass_default = event_must_pass_by_default(&event_name)
                         || mandatory_harness_notice(&original_event);
                     if must_pass || must_pass_default {
                         tracing::warn!(

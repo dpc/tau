@@ -4074,6 +4074,72 @@ fn model_status_uses_symbol_prefixed_chips() {
     assert!(!vt.screen_contains(80, "ctx:"));
 }
 
+/// The compact quota status uses redundant ASCII text for every pacing state,
+/// so no-color and narrow terminal users do not have to infer meaning from hue.
+#[test]
+fn quota_status_renders_all_accessible_compact_chips() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some(model.clone()),
+        context_window: None,
+        role: "engineer".into(),
+        baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
+    }));
+    let now = super::event_renderer::unix_time_millis();
+    let cases = [
+        (1, 1_000, 5_000, 0, "Q-"),
+        (2, 5_000, 5_000, 0, "Q="),
+        (3, 6_000, 5_000, 0, "Q+"),
+        (4, 9_000, 5_000, 0, "Q!"),
+        (5, 5_000, 5_000, 16 * 60 * 1_000, "Q?"),
+    ];
+    for (epoch, used, elapsed, age, expected) in cases {
+        let remaining = 604_800_u64 * (10_000 - elapsed) / 10_000;
+        renderer.handle(&Event::HarnessProviderQuotaChanged(
+            tau_proto::HarnessProviderQuotaChanged {
+                provider: model.provider.clone(),
+                profile_epoch: tau_proto::ProviderQuotaEpoch::parse(format!("epoch-{epoch}"))
+                    .expect("valid quota test value"),
+                sequence: 1,
+                windows: vec![tau_proto::ProviderQuotaWindow {
+                    key: tau_proto::ProviderQuotaWindowKey {
+                        limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
+                            .expect("valid quota test value"),
+                        window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
+                            .expect("valid quota test value"),
+                    },
+                    used_basis_points: used,
+                    usage_observed_at_unix_ms: now - age,
+                    window_seconds: 604_800,
+                    reset_at_unix_seconds: Some(now / 1_000 + remaining),
+                    remaining_seconds_at_timing_anchor: Some(remaining as i64),
+                    timing_anchor_observed_at_unix_ms: Some(now - age),
+                    server_offset_ms: Some(0),
+                    server_offset_observed_at_unix_ms: Some(now - age),
+                }],
+                route_bindings: vec![tau_proto::ProviderQuotaRouteBinding {
+                    model: model.clone(),
+                    limit_ids: vec![
+                        tau_proto::ProviderQuotaLimitId::parse("codex")
+                            .expect("valid quota test value"),
+                    ],
+                    observed_at_unix_ms: now - age,
+                    provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
+                }],
+            },
+        ));
+        sync(&handle);
+        assert!(vt.screen_contains(80, expected), "missing {expected}");
+    }
+}
+
 #[test]
 fn status_identity_matches_no_agent_placeholder_semantics() {
     let (_term, handle, vt) = setup(100, 24);

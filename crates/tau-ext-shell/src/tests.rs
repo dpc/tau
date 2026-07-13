@@ -73,8 +73,11 @@ fn read_image_returns_typed_provider_content() {
         .expect("encode PNG");
     std::fs::write(&path, bytes.into_inner()).expect("write PNG");
 
-    let output =
-        read_image(&cbor_text_map(vec![("path", path.to_str().unwrap())])).expect("read image");
+    let output = read_image(&cbor_text_map(vec![(
+        "path",
+        path.to_str().expect("temporary path is UTF-8"),
+    )]))
+    .expect("read image");
     assert_eq!(output.provider_content.len(), 1);
     let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
     assert_eq!(image.media_type, tau_proto::ImageMediaType::Png);

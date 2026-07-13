@@ -326,3 +326,27 @@ fn builtin_theme_missing_style_is_default() {
     let style = theme.resolve_style(&StyleName::new("nonexistent.style"));
     assert_eq!(style, ThemeStyle::default());
 }
+
+/// Every built-in theme assigns distinct semantic quota warning colors, with a
+/// bold bright-green far-under fallback and a neutral unknown state.
+#[test]
+fn builtin_themes_define_accessible_quota_styles() {
+    for theme in [
+        Theme::builtin(),
+        Theme::builtin_light(),
+        Theme::builtin_dpc(),
+    ] {
+        let under = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_UNDER));
+        let aligned = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_ALIGNED));
+        let over = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_OVER));
+        let danger = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_DANGER));
+        let unknown = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_UNKNOWN));
+        assert!(under.bold);
+        assert!(under.fg.is_some());
+        assert!(aligned.fg.is_some());
+        assert!(over.fg.is_some());
+        assert!(danger.fg.is_some());
+        assert_ne!(over.fg, danger.fg);
+        assert_ne!(unknown.fg, danger.fg);
+    }
+}

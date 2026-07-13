@@ -67,6 +67,9 @@ for control of the emit/intercept pipeline.
   after each agent response that reports usage.
 - **`harness.agent_context_usage_changed`** — Updated context-usage snapshot for
   a specific agent, used by UIs that render per-agent context pressure.
+- **`harness.provider_quota_changed`** — Harness-validated, transient full
+  current-state snapshot of bounded account quota windows and exact model-to-pool
+  bindings. Observation timestamps are preserved during late-subscriber catch-up.
 - **`harness.efforts_available`** — Which effort levels are valid for the
   selected role's resolved model. Empty when the selected role has no
   resolved model or the provider doesn't support reasoning.
@@ -216,6 +219,12 @@ Emitted by the provider backend that owns the selected model.
   accepted prompt-input and native tool-result modalities. Omitted modality
   metadata means text-only. The harness folds provider snapshots into
   `harness.models_available` and related role/model availability events.
+- **`provider.quota_replace`**, **`provider.quota_patch`**, and
+  **`provider.quota_clear`** — Transient provider-owned account-quota current
+  state. Replacements establish or reconcile an opaque profile epoch; patches
+  upsert complete stable-key records; clears remove only the matching epoch. The
+  harness verifies provider ownership, bounds, epoch, and sequence before
+  projecting `harness.provider_quota_changed`.
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Transient provider-owned live response update.

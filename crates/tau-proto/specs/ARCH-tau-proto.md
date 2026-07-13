@@ -1,5 +1,12 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Bounded provider quota records are transient current state. Provider
+replace/patch/clear events carry opaque profile epochs, strict sequences,
+complete stable-key window records with independent usage/timing clocks, and
+exact `ModelId` route bindings. Harness projections are full current snapshots;
+none of these events are semantic transcript history. The trust and pacing
+contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
 Provider-visible images are transport-neutral binary values attached to tool
