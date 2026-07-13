@@ -1327,6 +1327,7 @@ mod tests {
                 name: tool_name.clone(),
                 internal_name: tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
             },
         );
         harness.pending_tool_providers.insert(
@@ -1389,6 +1390,7 @@ mod tests {
                 tool_name,
                 tool_type: tau_proto::ToolType::Function,
                 result: tau_proto::CborValue::Text("ok".to_owned()),
+                provider_content: Vec::new(),
                 kind: tau_proto::ToolResultKind::Final,
                 display: None,
                 originator: tau_proto::PromptOriginator::User,

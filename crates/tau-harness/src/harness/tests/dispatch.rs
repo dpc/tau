@@ -849,6 +849,7 @@ fn seed_background_placeholder_for_agent(
                     "{}: true\n\nTool call `{call_id}` is running in the background.",
                     tau_proto::TAU_INTERNAL_HEADER_NAME
                 )),
+                provider_content: Vec::new(),
                 kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
                 originator: tau_proto::PromptOriginator::User,
 
@@ -2289,6 +2290,7 @@ fn loop_guard_resets_on_successful_terminal_tool_result() {
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("ok".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2317,6 +2319,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
             name: ToolName::new("read"),
             internal_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
 
@@ -2327,6 +2330,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("ok".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2799,6 +2803,7 @@ fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(text.to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2869,6 +2874,8 @@ fn provider_model_info(
         display_name: None,
         tags: Vec::new(),
         supported_tool_types: vec![],
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         default_affinity: 0,
         context_window,
         efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
@@ -4015,6 +4022,7 @@ fn cancel_request_api_rejects_non_owner_conversation() {
             name: ToolName::new("slow_tool"),
             internal_name: ToolName::new("slow_tool"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
 
@@ -4059,6 +4067,7 @@ fn completed_tool_call_lookup_is_owner_scoped() {
             name: ToolName::new("slow_tool"),
             internal_name: ToolName::new("slow_tool"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.clear_tool_call_tracking(target.as_str());
@@ -4178,6 +4187,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
             name: ToolName::new("live_cancel_bg_tool"),
             internal_name: ToolName::new("live_cancel_bg_tool"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.tool_agents.insert(call_id.clone(), cid.clone());
@@ -4290,6 +4300,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
             name: ToolName::new("live_cancel_bg_tool"),
             internal_name: ToolName::new("live_cancel_bg_tool"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
@@ -4731,6 +4742,7 @@ fn cancel_clears_active_wait_state() {
             name: ToolName::new("slow"),
             internal_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.record_wait_tool_request(&target_call_id);
@@ -4926,6 +4938,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     display_name: None,
                     tags: Vec::new(),
                     supported_tool_types: vec![],
+                    input_modalities: Vec::new(),
+                    tool_result_modalities: Vec::new(),
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -4946,6 +4960,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             display_name: None,
             tags: Vec::new(),
             supported_tool_types: vec![],
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -5034,6 +5050,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     display_name: None,
                     tags: Vec::new(),
                     supported_tool_types: vec![],
+                    input_modalities: Vec::new(),
+                    tool_result_modalities: Vec::new(),
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -5054,6 +5072,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             display_name: None,
             tags: Vec::new(),
             supported_tool_types: vec![],
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -10312,6 +10332,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             tool_name: ToolName::new("success_tool"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("success output".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -10535,6 +10556,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             tool_name: ToolName::new("reactive_tool"),
             tool_type: tau_proto::ToolType::Custom,
             result: CborValue::Text("reactive output".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -10670,6 +10692,8 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             display_name: None,
             tags: Vec::new(),
             supported_tool_types: vec![],
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             default_affinity: 0,
             context_window: 1_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -10752,6 +10776,7 @@ fn seed_historical_open_prefix_failure(
             tool_name: ToolName::new("historical_tool"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("historical output".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -11079,6 +11104,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
                 name: ToolName::new(name),
                 internal_name: ToolName::new(name),
                 tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
             },
         );
         h.tool_turn
@@ -11114,6 +11140,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
         tool_name: ToolName::new("sibling"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text("done".to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: None,
         originator: tau_proto::PromptOriginator::User,
@@ -11211,6 +11238,7 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
                 name: ToolName::new(name),
                 internal_name: ToolName::new(name),
                 tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
             },
         );
         h.tool_turn
@@ -11283,6 +11311,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             name: ToolName::new("compact"),
             internal_name: ToolName::new("compact"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.tool_turn
@@ -11479,6 +11508,7 @@ fn setup_manual_cross_compaction_test() -> (
             name: ToolName::new("agent_compact"),
             internal_name: ToolName::new("agent_compact"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.tool_turn
@@ -12649,6 +12679,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
                 name: ToolName::new("slow"),
                 internal_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
             },
         );
         h.record_wait_tool_request(call_id);
@@ -12657,6 +12688,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("running".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14361,6 +14393,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("real output".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -14607,6 +14640,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("real output".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -15124,6 +15158,7 @@ fn wait_resolves_on_synthetic_tool_error() {
             name: ToolName::new("missing"),
             internal_name: ToolName::new("missing"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.record_wait_tool_request(&target_call_id);
@@ -17542,6 +17577,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("nested answer".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -17922,6 +17958,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("outer answer".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 

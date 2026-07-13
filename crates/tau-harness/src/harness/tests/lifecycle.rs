@@ -133,6 +133,8 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         display_name: Some("Staged".to_owned()),
         tags: Vec::new(),
         supported_tool_types: vec![],
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         default_affinity: 100,
         context_window: 4_096,
         efforts: vec![tau_proto::Effort::Medium],
@@ -567,6 +569,7 @@ fn test_tool_result(call_id: &str, tool_name: &str) -> Event {
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
 
@@ -2953,6 +2956,7 @@ fn disconnected_tool_completes_pending_call() {
             name: tool_name.clone(),
             internal_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.pending_tool_providers
@@ -4159,6 +4163,7 @@ fn duplicate_tool_result_is_discarded() {
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             result: tau_proto::CborValue::Text("stale data".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -4321,6 +4326,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             name: ToolName::new("read"),
             internal_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.pending_tool_providers
@@ -4376,6 +4382,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("ok".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::default(),
             display: None,
             originator: tau_proto::PromptOriginator::User,

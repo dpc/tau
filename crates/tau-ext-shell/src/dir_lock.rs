@@ -1672,6 +1672,7 @@ fn tool_result(invoke: &ToolStarted, result: CborValue, display: ToolUseState) -
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
         result,
+        provider_content: Vec::new(),
         kind: ToolResultKind::Final,
         display: Some(display),
         originator: invoke.originator.clone(),

@@ -2,6 +2,11 @@
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
+Provider-visible images are transport-neutral binary values attached to tool
+results, separate from message authorship. CBOR is the durable/IPC byte
+transport; provider-specific data URLs are never protocol truth. Debug
+representations summarize byte length rather than formatting image bytes.
+
 ## Directional messages and CBOR
 
 Harness input and output messages are directionally typed. Keep request/response envelopes in the correct enum, and preserve existing serde names unless a migration plan updates all producers, consumers, docs, and recorded fixtures.

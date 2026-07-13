@@ -190,6 +190,7 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
                     CborValue::Text("no files found matching pattern".to_owned()),
                 ),
             ]),
+            provider_content: Vec::new(),
             display,
         };
     }
@@ -233,6 +234,7 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
     }
     ToolOutput {
         result: CborValue::Map(result_entries),
+        provider_content: Vec::new(),
         display,
     }
 }

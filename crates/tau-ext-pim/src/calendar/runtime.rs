@@ -2735,6 +2735,7 @@ fn finish_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         result,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(display),
         originator: tau_proto::PromptOriginator::User,

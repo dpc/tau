@@ -1,6 +1,7 @@
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
-    ResponsesToolCallEnvelope, ToolCallItem, ToolResultItem, ToolResultStatus,
+    ContentPart, ContextItem, ContextRole, ImageContent, ImageDetail, ImageMediaType, MessageItem,
+    OpaqueProviderItem, ResponsesToolCallEnvelope, ToolCallItem, ToolResultContentPart,
+    ToolResultItem, ToolResultStatus,
 };
 
 use super::*;
@@ -15,6 +16,180 @@ fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
         "tau-provider-chatgpt-state-{label}-{}-{nanos}",
         std::process::id()
     ))
+}
+
+/// Ensures GPT-5.6 Responses Lite receives native image content inside the
+/// function-call output, preserving call provenance and never turning base64
+/// into ordinary text.
+#[test]
+fn gpt_5_6_lowers_typed_image_inside_function_output() {
+    let mut config = chain_test_config();
+    config.model_id = "gpt-5.6-sol".to_owned();
+    let items = [ContextItem::ToolResult(ToolResultItem {
+        call_id: "call-image".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+            "image/png image, 1x1, 12 bytes, high detail".to_owned(),
+        )),
+        provider_content: vec![ToolResultContentPart::Image(ImageContent {
+            media_type: ImageMediaType::Png,
+            data: b"\x89PNG\r\n\x1a\nDATA".to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: ImageDetail::High,
+        })],
+    })];
+    let request = PromptPayload {
+        system_prompt: "",
+        context: context(&items),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let output = &body["input"][1];
+    assert_eq!(output["type"], "function_call_output");
+    assert_eq!(output["call_id"], "call-image");
+    assert_eq!(output["output"][0]["type"], "input_text");
+    assert_eq!(output["output"][1]["type"], "input_image");
+    assert_eq!(
+        output["output"][1]["image_url"],
+        "data:image/png;base64,iVBORw0KGgpEQVRB"
+    );
+    assert!(
+        output["output"][1].get("detail").is_none(),
+        "Responses Lite strips detail only after local high-detail preparation"
+    );
+}
+
+/// Ensures aggregate raw-image and expanded data-URL budgets both omit an image
+/// before base64 allocation once the request-wide limit would be crossed.
+#[test]
+fn typed_image_lowering_enforces_both_request_budgets() {
+    let result = ToolResultItem {
+        call_id: "call-image".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+            "image metadata".to_owned(),
+        )),
+        provider_content: vec![ToolResultContentPart::Image(ImageContent {
+            media_type: ImageMediaType::Png,
+            data: b"\x89PNG\r\n\x1a\nDATA".to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: ImageDetail::High,
+        })],
+    };
+    for mut budget in [
+        ImageRequestBudget {
+            supported: true,
+            responses_lite: true,
+            image_bytes: MAX_REQUEST_IMAGE_BYTES,
+            data_url_bytes: 0,
+        },
+        ImageRequestBudget {
+            supported: true,
+            responses_lite: true,
+            image_bytes: 0,
+            data_url_bytes: MAX_REQUEST_IMAGE_DATA_URL_BYTES,
+        },
+    ] {
+        let output = convert_tool_result_output(&result, &mut budget);
+        assert!(output.to_string().contains("request limit exceeded"));
+        assert!(!output.to_string().contains("data:image"));
+    }
+}
+
+/// Ensures unaudited Responses routes fail closed by projecting a bounded text
+/// placeholder instead of sending image bytes or synthesizing a user message.
+#[test]
+fn unaudited_responses_route_omits_typed_image() {
+    let config = chain_test_config();
+    let items = [ContextItem::ToolResult(ToolResultItem {
+        call_id: "call-image".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+            "image metadata".to_owned(),
+        )),
+        provider_content: vec![ToolResultContentPart::Image(ImageContent {
+            media_type: ImageMediaType::Png,
+            data: b"\x89PNG\r\n\x1a\nDATA".to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: ImageDetail::High,
+        })],
+    })];
+    let request = PromptPayload {
+        system_prompt: "",
+        context: context(&items),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let output = &body["input"][0]["output"];
+    assert!(output.as_str().unwrap().contains("does not support"));
+    assert!(!body.to_string().contains("data:image"));
+}
+
+/// Ensures provider diagnostics replace data URLs before JSON is persisted.
+#[test]
+fn provider_debug_redaction_removes_image_data_urls() {
+    let mut value = serde_json::json!({
+        "image_url": "data:image/png;base64,iVBORw0KGgo="
+    });
+    redact_image_data_urls(&mut value);
+    assert_eq!(
+        value["image_url"],
+        "<image/png; base64 omitted; 34 encoded bytes; \
+         sha256=e1e10747c2374f621aa59fefede6ef99dc6acdb41b267ab4af408d5529f89ea8>"
+    );
+
+    let mut same_length_distinct = serde_json::json!({
+        "image_url": "data:image/png;base64,iVBORw0KGgp="
+    });
+    redact_image_data_urls(&mut same_length_distinct);
+    assert_ne!(same_length_distinct["image_url"], value["image_url"]);
+}
+
+/// Ensures the exact WebSocket request object retained by VCR recording is
+/// redacted, not merely the separate replay lookup projection.
+#[test]
+fn websocket_vcr_recording_redacts_image_data_urls() {
+    let envelope = serde_json::json!({
+        "type": "response.create",
+        "input": [{
+            "type": "input_image",
+            "image_url": "data:image/png;base64,iVBORw0KGgo="
+        }]
+    });
+
+    let recorded = ws::recorded_request_body(&envelope, true)
+        .expect("serialize recorded request")
+        .expect("recording body");
+    assert!(!recorded.to_string().contains("data:image"));
+    assert_eq!(
+        recorded["input"][0]["image_url"],
+        "<image/png; base64 omitted; 34 encoded bytes; \
+         sha256=e1e10747c2374f621aa59fefede6ef99dc6acdb41b267ab4af408d5529f89ea8>"
+    );
 }
 
 fn context(items: &[ContextItem]) -> &'static tau_proto::PromptContext {
@@ -968,6 +1143,7 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
             output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
                 "function output".to_owned(),
             )),
+            provider_content: Vec::new(),
         }),
         ContextItem::ToolResult(ToolResultItem {
             call_id: "call-custom".into(),
@@ -978,6 +1154,7 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
             output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
                 "custom output".to_owned(),
             )),
+            provider_content: Vec::new(),
         }),
     ];
     let request = PromptPayload {
@@ -1947,6 +2124,7 @@ fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
             ),
         },
         output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(body.to_owned())),
+        provider_content: Vec::new(),
     })
 }
 
@@ -2515,6 +2693,7 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
             tool_type: tau_proto::ToolType::Custom,
             status: ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text("ok".into())),
+            provider_content: Vec::new(),
         }),
     ];
     let request = PromptPayload {
@@ -2610,6 +2789,7 @@ fn build_request_replays_cancelled_tool_result_with_header() {
             reason: "user interrupted".to_owned(),
         },
         output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+        provider_content: Vec::new(),
     })];
     let request = PromptPayload {
         system_prompt: "sys",
@@ -2689,6 +2869,7 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         tool_type: tau_proto::ToolType::Custom,
         status: ToolResultStatus::Success,
         output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text("ok".into())),
+        provider_content: Vec::new(),
     };
     let request = PromptPayload {
         system_prompt: "sys",

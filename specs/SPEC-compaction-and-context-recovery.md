@@ -1,5 +1,14 @@
 # SPEC-compaction-and-context-recovery: Compaction and context recovery
 
+Typed image tool results are indivisible members of their existing closed
+call/result round. Durable canonical bytes replay through normal inference and
+standalone compaction using the same provider converter. Approximate context
+accounting includes encoded bytes and conservative 32-by-32 image patches;
+provider adapters separately enforce aggregate canonical-image and generated
+data-URL request bounds. A compacted replacement may summarize an old image
+away like any other input fact. This behavior is confirmed by
+[DESIGN-typed-image-tool-results](DESIGN-typed-image-tool-results.md).
+
 ## Recovery authority
 
 The CLI `/compact` command is human/UI authority. The model-callable `compact`
@@ -170,3 +179,11 @@ compaction and explicit agent model changes also clear the usage, head, model,
 cached-token, and percentage baseline. Consequently the first post-resume
 activation runs the same projected standalone-compaction decision as a live
 agent.
+
+Typed image tool results remain canonical replay content until a compaction
+replacement window omits them. Logical canonical image bytes are counted across
+the agent's complete append-only history, including branches and replacement
+windows; appends above the 128 MiB per-agent bound fail before persistence.
+Agent-record writes must also satisfy the loader's 64 MiB encoded-record bound.
+Provider request lowering independently enforces its raw-image and data-URL
+aggregate limits.

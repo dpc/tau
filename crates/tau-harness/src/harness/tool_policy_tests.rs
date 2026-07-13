@@ -46,6 +46,8 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         display_name: None,
         tags: tags.iter().map(|tag| ModelTag::new(*tag)).collect(),
         supported_tool_types: vec![],
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         default_affinity: 0,
         context_window: 128_000,
         efforts: vec![Effort::Off],
@@ -90,6 +92,11 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         tagged_tool("shell", true, &["shell:exec:generic"]),
         tagged_tool("gpt_shell", false, &["shell:exec:shell_command"]),
         tagged_tool("read", true, &["shell:read"]),
+        tagged_tool(
+            "read_image",
+            true,
+            &["shell:read", "provider-content:image"],
+        ),
         tagged_tool("cd", true, &["shell:cd"]),
         tagged_tool("dir_lock", true, &["shell:lock"]),
     ] {
@@ -134,6 +141,41 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         harness,
         _temp_dir: temp_dir,
     }
+}
+
+/// Ensures a role cannot force-enable image-producing tools on a provider route
+/// that did not explicitly publish both image-input and image-tool-result
+/// support.
+#[test]
+fn image_tool_requires_exact_route_modalities() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    let model = policy
+        .harness
+        .selected_model
+        .clone()
+        .expect("selected model");
+    let without_image = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(&model));
+    assert!(!without_image.iter().any(|tool| tool.name == "read_image"));
+
+    let model_info = policy
+        .harness
+        .provider_model_info
+        .get_mut(&model)
+        .expect("model metadata");
+    model_info.input_modalities = vec![
+        tau_proto::InputModality::Text,
+        tau_proto::InputModality::Image,
+    ];
+    model_info.tool_result_modalities = vec![
+        tau_proto::InputModality::Text,
+        tau_proto::InputModality::Image,
+    ];
+    let with_image = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(&model));
+    assert!(with_image.iter().any(|tool| tool.name == "read_image"));
 }
 
 fn effective_tool_names(harness: &Harness) -> Vec<String> {

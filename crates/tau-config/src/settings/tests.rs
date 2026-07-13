@@ -255,7 +255,7 @@ fn builtin_tool_policy_rule_is_keyed_and_enabled_by_default() {
 
     assert!(rule.enable);
     assert_eq!(rule.disable_tool_tags.len(), 1);
-    assert_eq!(rule.enable_tool_tags.len(), 4);
+    assert_eq!(rule.enable_tool_tags.len(), 5);
 }
 
 /// Ensures the `toolPolicy` and nested `enabled` aliases are normalized before
@@ -331,7 +331,7 @@ tool_policy:
 
     assert!(!rule.enable);
     assert_eq!(rule.disable_tool_tags.len(), 1);
-    assert_eq!(rule.enable_tool_tags.len(), 4);
+    assert_eq!(rule.enable_tool_tags.len(), 5);
 }
 
 /// Ensures user CLI scalar settings override the built-in defaults.

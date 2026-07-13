@@ -40,7 +40,11 @@ pub(crate) fn apply_patch(
 
     let mut display = crate::display::ok_display("apply_patch");
     display.payload = payload;
-    Ok(ToolOutput { result, display })
+    Ok(ToolOutput {
+        result,
+        provider_content: Vec::new(),
+        display,
+    })
 }
 
 pub(crate) fn lock_directories_in_dir(

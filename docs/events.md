@@ -212,9 +212,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 Emitted by the provider backend that owns the selected model.
 
 - **`provider.models_updated`** — Provider extension replacement snapshot of
-  currently servable models and their capabilities. The harness folds provider
-  snapshots into `harness.models_available` and related role/model availability
-  events.
+  currently servable models and their capabilities, including the exact route's
+  accepted prompt-input and native tool-result modalities. Omitted modality
+  metadata means text-only. The harness folds provider snapshots into
+  `harness.models_available` and related role/model availability events.
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Transient provider-owned live response update.
@@ -253,7 +254,12 @@ Emitted by the provider backend that owns the selected model.
 - **`provider.tool_result`** / **`provider.tool_error`** — Provider-facing
   terminal tool-call completions. These satisfy provider protocol state and
   fold into prompt history, but are not logical UI tool completions. The
-  synthetic background placeholder uses `provider.tool_result` only.
+  synthetic background placeholder uses `provider.tool_result` only. A validated
+  image result may retain its typed bytes in the durable agent transcript and in
+  the point-to-point `agent.prompt_created` sent to the selected provider.
+  Generic live subscribers receive no image bytes, and historical replay may
+  omit provider content entirely; neither generic broadcast nor replay is
+  provider-content authority.
 - **`provider.cache_miss_diagnostic`** — Provider-owned diagnostic for a prompt
   with unexpectedly low cache reuse. The harness accepts it only from the
   provider that owns the prompt, and providers emit it before the matching
@@ -291,8 +297,13 @@ the agent requests calls, and the harness orchestrates dispatch.
   call rejection.
 - **`tool.result`** *(extension/harness)* — Successful logical runtime tool
   completion, by call id, with tool-owned `result` plus optional UI
-  `display` metadata and echoed originator. This event is renderer-facing.
-  Provider-only terminal completions use `provider.tool_result` instead.
+  `display` metadata, optional typed provider content, and echoed originator.
+  This event is renderer-facing. Only an explicitly image-capable tool on an
+  image-capable selected provider route may submit typed image content. The
+  harness validates such content before deduplication or success publication,
+  persists the provider-facing terminal fact, and clears image bytes from
+  generic live delivery, wait results, and all replay. Provider-only terminal
+  completions use `provider.tool_result` instead.
 - **`tool.error`** *(extension)* — Logical tool failure with a message and
   optional structured details. Operational only; transient. Provider-only
   terminal failures use `provider.tool_error` instead.

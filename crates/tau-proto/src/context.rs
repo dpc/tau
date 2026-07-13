@@ -3,7 +3,8 @@
 //! Semantic fields and provider replay sidecars follow
 //! `SPEC-tau-proto-provider-data`.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
+use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -235,6 +236,96 @@ pub enum ToolResultStatus {
     },
 }
 
+/// Closed media type for image bytes carried in provider-visible tool output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageMediaType {
+    /// Portable Network Graphics.
+    Png,
+    /// Joint Photographic Experts Group image.
+    Jpeg,
+    /// WebP image.
+    Webp,
+}
+
+impl ImageMediaType {
+    /// Return the canonical MIME type for this image format.
+    #[must_use]
+    pub const fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
+/// Provider image-detail mode selected when preparing an image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    /// Bounded high-detail image input.
+    High,
+}
+
+/// Validated image bytes carried as typed provider-visible tool content.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImageContent {
+    /// Closed media type derived from the decoded image.
+    pub media_type: ImageMediaType,
+    /// Canonical encoded image bytes.
+    #[serde(with = "arc_bytes")]
+    pub data: Arc<[u8]>,
+    /// Decoded image width in pixels.
+    pub width: u32,
+    /// Decoded image height in pixels.
+    pub height: u32,
+    /// Provider detail mode used when the bytes were prepared.
+    pub detail: ImageDetail,
+}
+
+mod arc_bytes {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S>(data: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::Bytes::new(data).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde_bytes::ByteBuf::deserialize(deserializer).map(|bytes| Arc::from(bytes.into_vec()))
+    }
+}
+
+impl fmt::Debug for ImageContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageContent")
+            .field("media_type", &self.media_type)
+            .field("data", &format_args!("<{} bytes>", self.data.len()))
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("detail", &self.detail)
+            .finish()
+    }
+}
+
+/// One typed provider-visible content part attached to a successful tool
+/// result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ToolResultContentPart {
+    /// A validated local raster image.
+    Image(ImageContent),
+}
+
 /// One rendered header in the text sent to a provider for a tool response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolResponseHeader {
@@ -418,6 +509,9 @@ pub struct ToolResultItem {
     pub status: ToolResultStatus,
     /// Provider-facing rendered tool response plus raw payload.
     pub output: ToolResponse,
+    /// Ordered typed content appended after the normalized text output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_content: Vec<ToolResultContentPart>,
 }
 
 /// Whether displayable reasoning text is a provider-summarized view or the
@@ -567,6 +661,48 @@ impl PromptContext {
     #[must_use]
     pub fn flatten(&self) -> Vec<ContextItem> {
         self.flatten_iter().collect()
+    }
+
+    /// Replaces typed provider image bytes with empty shared buffers while
+    /// retaining safe metadata and transcript structure.
+    ///
+    /// This is for incidental diagnostics and generic projections only. Durable
+    /// transcript and provider-directed paths must retain the canonical bytes.
+    pub fn clear_provider_image_bytes(&mut self) {
+        for block in &mut self.blocks {
+            match block {
+                ContextBlock::UserInput(block) => {
+                    clear_context_items_provider_image_bytes(&mut block.items);
+                }
+                ContextBlock::AssistantResponse(block) => {
+                    clear_context_items_provider_image_bytes(&mut block.output_items);
+                }
+                ContextBlock::ToolResults(block) => {
+                    for result in &mut block.items {
+                        clear_tool_result_provider_image_bytes(result);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replaces typed provider image bytes in a context-item slice with empty
+/// shared buffers while retaining safe metadata.
+pub fn clear_context_items_provider_image_bytes(items: &mut [ContextItem]) {
+    for item in items {
+        if let ContextItem::ToolResult(result) = item {
+            clear_tool_result_provider_image_bytes(result);
+        }
+    }
+}
+
+/// Replaces typed provider image bytes in one tool result with empty shared
+/// buffers while retaining safe metadata.
+pub fn clear_tool_result_provider_image_bytes(result: &mut ToolResultItem) {
+    for part in &mut result.provider_content {
+        let ToolResultContentPart::Image(image) = part;
+        image.data = Arc::from([]);
     }
 }
 

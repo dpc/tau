@@ -13,8 +13,9 @@ Use when asked to verify Tau tool behavior or Tau tool-verification skills.
 Tau exposes different tool sets depending on configuration, provider/model
 capabilities, and extension setup. Common sets include:
 
-* ext-shell's `read`, `edit`, and `shell` tools, plus related tools such as
-  `dir_lock`;
+* ext-shell's `read`, `read_image`, `edit`, and `shell` tools, plus related
+  tools such as `dir_lock`; `read_image` appears only on explicitly
+  image-capable provider routes;
 * provider/native tools such as `apply_patch` and `shell_command`.
 
 If not explicitly stated, start from the tools that are actually exposed in the

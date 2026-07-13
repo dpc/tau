@@ -6,13 +6,19 @@
 //! The dispatcher in [`crate::tools`] unpacks these into `ToolResult`
 //! / `ToolError` events with the descriptor attached.
 
-use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus};
+use tau_proto::{
+    CborValue, ToolResultContentPart, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus,
+};
 
 /// Success bundle: the CBOR result the agent consumes and the display
 /// descriptor the UI consumes.
 #[derive(Debug)]
 pub(crate) struct ToolOutput {
+    /// Ordinary structured result rendered to normalized provider text.
     pub result: CborValue,
+    /// Typed provider content kept out of ordinary text rendering.
+    pub provider_content: Vec<ToolResultContentPart>,
+    /// Generic metadata-only UI presentation.
     pub display: ToolUseState,
 }
 

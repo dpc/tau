@@ -2,6 +2,14 @@
 
 Status: inferred
 
+Image-tool tests generate deterministic PNG/JPEG/WebP fixtures, exercise
+sniffing, animation rejection, decoder-reported output allocation, the stricter
+WebP workspace budget, and high-detail bounds. They assert foreground-only
+registration and typed provider content separately from metadata-only display.
+Cross-crate provider tests own Responses wire shape, Lite detail omission, route
+fail-closed behavior, request-wide raw/data-URL budgets, and digest-preserving
+diagnostic data-URL redaction.
+
 ## Protocol and schema coverage
 
 Tool registration tests should assert model-visible schemas for every argument

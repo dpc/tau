@@ -1426,6 +1426,7 @@ fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: Cbo
             tool_name: call.tool_name.clone(),
             tool_type: call.tool_type,
             result,
+            provider_content: Vec::new(),
             kind: ToolResultKind::Final,
             display: None,
             originator: call.originator.clone(),

@@ -3,6 +3,21 @@
 Provider output is constrained by
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 
+## Typed image tool output
+
+GPT-5.6 Sol, Terra, and Luna on the ChatGPT Responses surface explicitly
+publish image input and image tool-result support. Successful typed function
+results lower to one `function_call_output` whose `output` array contains the
+normalized `input_text` followed by `input_image` data URLs. Canonical binary
+bytes remain in Tau; base64 exists only in the outgoing request. Responses Lite
+omits `detail` after local high-detail preparation. Other model/routes project a
+bounded omission marker and never receive bytes.
+
+Normal inference, WebSocket, replay, and standalone compaction share this item
+converter. Each request admits at most 24 MiB of canonical image bytes and 32
+MiB of image-attributable data URLs. Debug request files and VCR matching
+fixtures replace data URLs with metadata before persistence.
+
 ## Transport selection
 
 `ResponsesConfig::supports_websocket` is the source of truth for ChatGPT/Codex Responses

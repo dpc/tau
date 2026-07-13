@@ -270,6 +270,7 @@ impl ShellRuntime {
                     tool_name: pending_cd.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     result: output.result,
+                    provider_content: Vec::new(),
                     kind: ToolResultKind::Final,
                     display: Some(output.display),
                     originator: pending_cd.invoke.originator,

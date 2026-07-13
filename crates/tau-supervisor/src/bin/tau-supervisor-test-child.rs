@@ -140,6 +140,7 @@ fn write_echo_result(
             CborValue::Null => CborValue::Text("null".to_owned()),
             value => value,
         },
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: None,
         originator: tau_proto::PromptOriginator::User,

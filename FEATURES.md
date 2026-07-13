@@ -321,8 +321,10 @@ role allow-list base when set.
 
 The harness owns model-aware tool-surface policy from provider/tool tags. The
 built-in `builtin.chatgpt-shell` rule matches `shell:chatgpt` models, disables
-`shell:*`, then re-enables `shell:edit:apply_patch`,
-`shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Users can disable or replace that
+`shell:*`, then re-enables `shell:edit:apply_patch`, `shell:read:image`,
+`shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Image-producing tools
+remain independently gated by the exact provider route's input/tool-result
+modalities. Users can disable or replace that
 keyed rule in `tool_policy.rules`; policy rules sort by `priority` (default `0`,
 lower first) and then rule name. Tools and models only publish tags.
 
@@ -413,8 +415,14 @@ config overrides after it has already been spawned.
 ### `core-shell` — shell and filesystem tools
 
 Registers the everyday tools the agent uses to inspect and edit a project:
-`shell`, `gpt_shell`, `read`, `edit`, `apply_patch`, `grep`, `find`, `ls`, plus an `echo`
+`shell`, `gpt_shell`, `read`, `read_image`, `edit`, `apply_patch`, `grep`,
+`find`, `ls`, plus an `echo`
 tool for testing. The shell command and any wrapper prefix are configurable:
+
+`read_image(path)` reads one PNG, JPEG, or WebP under normal shell filesystem
+authority and returns bounded high-detail typed image content. It is exposed
+only when the exact provider route supports native image tool results (initially
+GPT-5.6 ChatGPT Responses); generic UI and debug surfaces show metadata only.
 
 ```json5
 "core-shell": {

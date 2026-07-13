@@ -69,6 +69,7 @@ pub(crate) fn run_ls(
                     CborValue::Text(String::new()),
                 ),
             ]),
+            provider_content: Vec::new(),
             display,
         });
     }
@@ -126,6 +127,7 @@ pub(crate) fn run_ls(
     }
     Ok(ToolOutput {
         result: CborValue::Map(result_entries),
+        provider_content: Vec::new(),
         display,
     })
 }

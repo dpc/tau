@@ -1668,6 +1668,7 @@ impl Harness {
                 name: visible_tool_name.clone(),
                 internal_name: call.name.clone(),
                 tool_type: call.tool_type,
+                allows_provider_image: false,
             },
         );
         self.bump_tools_started_for(cid);
@@ -1706,6 +1707,7 @@ impl Harness {
             tool_name,
             tool_type,
             result,
+            provider_content: Vec::new(),
             kind: ToolResultKind::Final,
             display,
             originator: tau_proto::PromptOriginator::User,
@@ -1804,6 +1806,7 @@ impl Harness {
                             tool_name: reply.wait_tool_name,
                             tool_type: ToolType::Function,
                             result,
+                            provider_content: Vec::new(),
                             kind: ToolResultKind::Final,
                             display,
                             originator: tau_proto::PromptOriginator::User,

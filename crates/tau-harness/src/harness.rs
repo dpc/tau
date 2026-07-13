@@ -320,9 +320,22 @@ fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
                     message.len() as u64
                 }
             };
+            let image_bytes = result
+                .provider_content
+                .iter()
+                .map(|part| match part {
+                    tau_proto::ToolResultContentPart::Image(image) => {
+                        let patches = u64::from(image.width)
+                            .div_ceil(32)
+                            .saturating_mul(u64::from(image.height).div_ceil(32));
+                        image.data.len() as u64 + patches.saturating_mul(4)
+                    }
+                })
+                .sum::<u64>();
             result.call_id.as_str().len() as u64
                 + status_bytes
                 + result.output.render().len() as u64
+                + image_bytes
                 + 16
         }
         ContextItem::ReasoningText(reasoning) => reasoning.text.len() as u64 + 16,
@@ -626,6 +639,7 @@ pub(crate) struct PendingTool {
     pub(crate) name: ToolName,
     pub(crate) internal_name: ToolName,
     pub(crate) tool_type: ToolType,
+    pub(crate) allows_provider_image: bool,
 }
 
 #[derive(Default)]
@@ -2079,6 +2093,8 @@ where
                 display_name: Some("Echo".to_owned()),
                 tags: Vec::new(),
                 supported_tool_types: vec![],
+                input_modalities: Vec::new(),
+                tool_result_modalities: Vec::new(),
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off],
@@ -3660,18 +3676,20 @@ impl Harness {
         source: Option<&str>,
         result: ToolResult,
     ) {
+        let mut ui_result = result.clone();
+        ui_result.provider_content.clear();
         match cid {
             Some(cid) => {
                 self.reset_loop_guard_for_progress(cid);
-                self.publish_for_agent_from(cid, source, Event::ToolResult(result.clone()));
+                self.publish_for_agent_from(cid, source, Event::ToolResult(ui_result.clone()));
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result.clone()));
             }
             None => {
-                self.publish_event(source, Event::ToolResult(result.clone()));
+                self.publish_event(source, Event::ToolResult(ui_result.clone()));
                 self.publish_event(source, Event::ProviderToolResult(result.clone()));
             }
         }
-        self.record_wait_tool_result(result);
+        self.record_wait_tool_result(ui_result);
     }
 
     fn publish_terminal_tool_error(
@@ -4058,7 +4076,10 @@ impl Harness {
         }
         // Wrap in a harness-owned delivery so subscribers get the shared
         // runtime timestamp and replay/live envelope metadata.
-        let log_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
+        let observer_frame = HarnessOutputMessage::deliver_live(
+            recorded_at,
+            event_without_provider_image_bytes(&event),
+        );
         if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
             // Provider-owned prompt execution is point-to-point: observers still
             // see the durable prompt fact, but execution clients do not all race
@@ -4066,12 +4087,13 @@ impl Harness {
             // payload via a directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
-            let _ =
-                self.bus
-                    .publish_from_excluding_kinds(source, log_frame.clone(), &execution_kinds);
+            let _ = self
+                .bus
+                .publish_from_excluding_kinds(source, observer_frame, &execution_kinds);
+            let provider_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
             match self
                 .bus
-                .send_to(provider_connection_id.as_str(), source, log_frame)
+                .send_to(provider_connection_id.as_str(), source, provider_frame)
             {
                 Ok(report) if !report.delivered_to.is_empty() => {
                     self.track_provider_prompt_request(&event, provider_connection_id);
@@ -4114,15 +4136,22 @@ impl Harness {
             let execution_kinds = [ClientKind::Provider];
             let _ = self
                 .bus
-                .publish_from_excluding_kinds(source, log_frame, &execution_kinds);
+                .publish_from_excluding_kinds(source, observer_frame, &execution_kinds);
             let unavailable_route = tau_proto::ConnectionId::from("unavailable-model-route");
             self.recover_failed_provider_prompt_route(
                 &event,
                 &unavailable_route,
                 "captured provider-qualified model has no route",
             );
+        } else if matches!(event, Event::ProviderToolResult(_)) {
+            // Typed provider content is transcript/provider data, not a generic
+            // UI payload. UIs receive the separately published, byte-free
+            // `tool.result` projection instead.
+            let _ =
+                self.bus
+                    .publish_from_excluding_kinds(source, observer_frame, &[ClientKind::Ui]);
         } else {
-            let _ = self.bus.publish_from(source, log_frame);
+            let _ = self.bus.publish_from(source, observer_frame);
         }
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
@@ -4585,6 +4614,7 @@ impl Harness {
                         tau_proto::CborValue::Text(transaction_id.to_string()),
                     ),
                 ]),
+                provider_content: Vec::new(),
                 kind: ToolResultKind::Final,
                 display: None,
                 originator: PromptOriginator::User,
@@ -6951,6 +6981,7 @@ impl Harness {
                     name: request.tool_name.clone(),
                     internal_name: request.tool_name.clone(),
                     tool_type: request.tool_type,
+                    allows_provider_image: false,
                 },
             );
             self.bump_tools_started_for(cid);
@@ -7074,9 +7105,66 @@ impl Harness {
             self.handle_background_tool_result(source_id, result);
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
             let call_id = result.call_id.to_string();
+            let mut allows_provider_image = false;
             if let Some(tool) = self.pending_tools.get(&result.call_id) {
                 result.tool_name = tool.name.clone();
                 result.tool_type = tool.tool_type;
+                allows_provider_image = tool.allows_provider_image;
+            }
+            let has_provider_image = !result.provider_content.is_empty();
+            let validation = if has_provider_image && !allows_provider_image {
+                Err("the originating tool is not authorized for image output".to_owned())
+            } else {
+                self.agents
+                    .get(&cid)
+                    .and_then(|agent| {
+                        let agent_id = agent.agent_id.clone()?;
+                        let parent = agent.head.map_or(
+                            tau_core::AgentEventParent::Root,
+                            tau_core::AgentEventParent::Under,
+                        );
+                        Some((agent_id, parent))
+                    })
+                    .ok_or_else(|| "the owning agent is unavailable".to_owned())
+                    .and_then(|(agent_id, parent)| {
+                        self.agent_store
+                            .validate_agent_event_at(
+                                &agent_id,
+                                Some(source_id.into()),
+                                parent,
+                                &Event::ProviderToolResult(result.clone()),
+                                tau_proto::UnixMicros::now(),
+                            )
+                            .map_err(|error| error.to_string())
+                    })
+            };
+            if let Err(error) = validation {
+                tracing::warn!(
+                    target: "tau_harness",
+                    call_id = %result.call_id,
+                    %error,
+                    "rejecting tool result before dedup and generic publication"
+                );
+                self.publish_terminal_tool_error(
+                    Some(&cid),
+                    None,
+                    ToolError {
+                        call_id: result.call_id,
+                        tool_name: result.tool_name,
+                        tool_type: result.tool_type,
+                        message: if has_provider_image {
+                            "image result rejected by media safety validation".to_owned()
+                        } else {
+                            "tool result rejected by transcript safety validation".to_owned()
+                        },
+                        details: None,
+                        display: None,
+                        originator: result.originator,
+                    },
+                );
+                self.on_tool_call_complete(&call_id);
+                self.clear_tool_call_tracking(&call_id);
+                return;
             }
             // Collapse byte-identical large results into a pointer back to the
             // first call_id that produced this content on this agent's branch.
@@ -9794,6 +9882,7 @@ impl Harness {
                 name: request.tool_name.clone(),
                 internal_name: request.tool_name.clone(),
                 tool_type: request.tool_type,
+                allows_provider_image: false,
             },
         );
     }
@@ -14293,6 +14382,7 @@ impl Harness {
                                     tau_proto::CborValue::Text(started.transaction_id.to_string()),
                                 ),
                             ]),
+                            provider_content: Vec::new(),
                             kind: ToolResultKind::Final,
                             display: None,
                             originator: PromptOriginator::User,
@@ -14345,6 +14435,7 @@ impl Harness {
                 name: request.visible_tool_name.clone(),
                 internal_name: manual_compaction_tool_name(request.initiating_tool_name),
                 tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
             },
         );
         self.tool_turn
@@ -15531,11 +15622,8 @@ impl Harness {
         role_name: &str,
         model: Option<&ModelId>,
     ) -> Vec<tau_proto::ToolSpec> {
-        let supported_tool_types = model.and_then(|model| {
-            self.provider_model_info
-                .get(model)
-                .map(|info| info.supported_tool_types.as_slice())
-        });
+        let model_info = model.and_then(|model| self.provider_model_info.get(model));
+        let supported_tool_types = model_info.map(|info| info.supported_tool_types.as_slice());
         self.registry
             .all_tool_providers()
             .into_iter()
@@ -15547,7 +15635,21 @@ impl Harness {
                         supported.contains(&provider.tool.tool_type)
                     }
                 });
+                let requires_image_content = provider
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == "provider-content:image");
+                let provider_supports_image_content = !requires_image_content
+                    || model_info.is_some_and(|info| {
+                        info.input_modalities
+                            .contains(&tau_proto::InputModality::Image)
+                            && info
+                                .tool_result_modalities
+                                .contains(&tau_proto::InputModality::Image)
+                    });
                 provider_supports_type
+                    && provider_supports_image_content
                     && self.is_tool_enabled_for_role_model(
                         &provider.tool,
                         provider.tool_group.as_ref(),
@@ -17166,6 +17268,7 @@ impl Harness {
                     name: entry.call.name.clone(),
                     internal_name: entry.call.name.clone(),
                     tool_type: entry.call.tool_type,
+                    allows_provider_image: false,
                 },
             );
         }
@@ -17370,6 +17473,7 @@ impl Harness {
             tool_name: tool.name,
             tool_type: tool.tool_type,
             result,
+            provider_content: Vec::new(),
             kind: ToolResultKind::BackgroundPlaceholder,
             originator: PromptOriginator::User,
 
@@ -17404,6 +17508,7 @@ impl Harness {
             tool_name: tool.name,
             tool_type: tool.tool_type,
             result: CborValue::Text(content),
+            provider_content: Vec::new(),
             kind: ToolResultKind::BackgroundPlaceholder,
             originator: PromptOriginator::User,
 
@@ -18247,6 +18352,7 @@ impl Harness {
                     name: tool_name.clone(),
                     internal_name: tool_name.clone(),
                     tool_type: call.tool_type,
+                    allows_provider_image: false,
                 },
             );
             self.bump_tools_started_for(cid);
@@ -18280,6 +18386,10 @@ impl Harness {
         };
         let internal_tool_name = tool_spec.name.clone();
         let visible_tool_name = self.tool_model_visible_name(tool_spec).clone();
+        let allows_provider_image = tool_spec
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "provider-content:image");
         let mut arguments = call.arguments.clone();
         if self
             .registry
@@ -18335,6 +18445,7 @@ impl Harness {
                 name: visible_tool_name.clone(),
                 internal_name: internal_tool_name.clone(),
                 tool_type: call.tool_type,
+                allows_provider_image,
             },
         );
         self.bump_tools_started_for(cid);
@@ -18563,8 +18674,9 @@ impl Harness {
         out.push('\n');
 
         out.push_str("================ PROMPT CONTEXT ================\n");
+        let display_context = prompt_context_without_image_bytes(&prompt.context);
         out.push_str(
-            &serde_json::to_string_pretty(&prompt.context)
+            &serde_json::to_string_pretty(&display_context)
                 .map_err(|e| HarnessError::Participant(e.to_string()))?,
         );
         out.push_str("\n\n");
@@ -18650,6 +18762,35 @@ impl Harness {
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
     }
+}
+
+fn prompt_context_without_image_bytes(
+    context: &tau_proto::PromptContext,
+) -> tau_proto::PromptContext {
+    let mut context = context.clone();
+    context.clear_provider_image_bytes();
+    context
+}
+
+fn event_without_provider_image_bytes(event: &Event) -> Event {
+    let mut event = event.clone();
+    match &mut event {
+        Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+            for part in &mut result.provider_content {
+                let tau_proto::ToolResultContentPart::Image(image) = part;
+                image.data = std::sync::Arc::from([]);
+            }
+        }
+        Event::AgentPromptCreated(prompt) => prompt.context.clear_provider_image_bytes(),
+        Event::AgentCompacted(compacted) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
+        }
+        Event::ProviderResponseFinished(finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+        }
+        _ => {}
+    }
+    event
 }
 
 fn provider_disconnected_error() -> HarnessError {

@@ -72,6 +72,7 @@ pub(crate) fn edit_file(
             result_lines.max_valid_start_line(),
             result.len(),
         ),
+        provider_content: Vec::new(),
         display,
     })
 }

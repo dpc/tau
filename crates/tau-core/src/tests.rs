@@ -182,6 +182,7 @@ fn background_placeholder(call_id: &str) -> Event {
         tool_name: ToolName::new("example_tool"),
         tool_type: ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: ToolResultKind::BackgroundPlaceholder,
         display: None,
         originator: PromptOriginator::User,

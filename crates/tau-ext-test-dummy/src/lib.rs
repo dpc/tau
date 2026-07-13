@@ -258,6 +258,7 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> Event {
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
+        provider_content: Vec::new(),
         kind: ToolResultKind::Final,
         display: None,
         originator: invoke.originator,

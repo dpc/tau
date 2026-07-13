@@ -775,7 +775,7 @@ where
         if self.cancellation.take_canceled(&agent_prompt_id) {
             return self.finish_canceled_prompt(&agent_prompt_id, &prompt, handle);
         }
-        trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
+        trace_provider_prompt(&prompt, &agent_prompt_id);
         self.start_or_reject_prompt(agent_prompt_id, prompt, handle)
     }
 
@@ -2067,6 +2067,15 @@ fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::Agen
     let mut materialized = prompt.clone();
     materialized.tools_ref = None;
     materialized
+}
+
+fn trace_provider_prompt(prompt: &tau_proto::AgentPromptCreated, agent_prompt_id: &str) {
+    if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
+        return;
+    }
+    let mut redacted = prompt.clone();
+    redacted.context.clear_provider_image_bytes();
+    trace_prompt_like("provider prompt", &redacted, agent_prompt_id);
 }
 
 fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, agent_prompt_id: &str) {

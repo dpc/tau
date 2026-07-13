@@ -2,6 +2,19 @@
 
 `tau-ext-shell` owns Tau's local filesystem and subprocess tools. It must avoid process-global cwd changes after startup: concurrent tool workers resolve paths against per-agent state instead.
 
+`read_image` uses the same remembered-cwd and bounded regular-file authority as
+`read`. It reads one opened file once and accepts sniffed PNG, JPEG, or WebP
+only. Source and normalized bytes are each capped at 8 MiB; pre-decode sides are
+at most 8192 pixels and decoded area at most 16,777,216 pixels. Decoder-reported
+output is capped at 64 MiB before allocation and one extension-wide permit
+bounds concurrent decoded memory. WebP uses a stricter 4,194,304-pixel and
+32-MiB decoded-output cap because its decoder has additional workspace
+allocations. Animated inputs are rejected. EXIF orientation
+is applied, metadata is stripped through same-format re-encoding, and
+high-detail output is resized to a 2048-pixel side and 2,500 32-by-32 patches.
+The typed image is provider/transcript data; generic display metadata contains
+path, format, dimensions, byte count, and detail without bytes.
+
 ## Per-agent cwd metadata
 
 The extension instance name from `configure.instance_name` defines the cwd

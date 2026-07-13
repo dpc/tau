@@ -470,6 +470,8 @@ pub fn models_for_provider(
             display_name: model.display_name.clone(),
             tags: merged_model_tags(&provider.tags, &model.tags),
             supported_tool_types: vec![tau_proto::ToolType::Function],
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             default_affinity: 0,
             context_window: model.context_window,
             efforts: model_efforts(model.compat.unwrap_or(provider.compat)),
@@ -1642,10 +1644,16 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
         }
         tau_proto::ContextBlock::ToolResults(block) => {
             for result in &block.items {
+                let mut content = tool_result_text(result.status.clone(), &result.output);
+                if !result.provider_content.is_empty() {
+                    content.push_str(
+                        "\n[image omitted: Chat Completions does not support native image tool output]",
+                    );
+                }
                 messages.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": result.call_id,
-                    "content": tool_result_text(result.status.clone(), &result.output),
+                    "content": content,
                 }));
             }
         }

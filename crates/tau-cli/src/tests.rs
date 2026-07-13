@@ -3868,6 +3868,7 @@ fn new_session_clears_session_ui_state() {
                 CborValue::Text("fn main() {}\n".into()),
             ),
         ]),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "src/lib.rs".into(),
@@ -4440,6 +4441,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text("side result".into()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -4453,6 +4455,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text("main result".into()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
 
@@ -4495,6 +4498,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text("main result".into()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
 
@@ -6698,6 +6702,7 @@ fn immediate_agent_start_completion_shows_agent_stats_and_standard_status() {
         tool_name: tau_proto::ToolName::new("agent_start"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Map(Vec::new()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "[audit]".into(),
@@ -6929,6 +6934,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
                     CborValue::Text("fn main() {}\n".into()),
                 ),
             ]),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: Some(tau_proto::ToolUseState {
                 args: "src/main.rs".into(),
@@ -7089,6 +7095,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
             result: CborValue::Text(
                 "tau_internal: true\n\nTool call `call-1` is running in the background.".into(),
             ),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
             originator: tau_proto::PromptOriginator::User,
 
@@ -7214,6 +7221,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Null,
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: Some(tau_proto::ToolUseState {
                 args: "rw printf hello".into(),
@@ -7271,6 +7279,7 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
@@ -7485,6 +7494,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
@@ -7548,6 +7558,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
@@ -7611,6 +7622,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
@@ -7652,6 +7664,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: "foo".into(),
@@ -7716,6 +7729,7 @@ fn show_tools_compact_hides_payload_body() {
             tool_name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Null,
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: Some(tau_proto::ToolUseState {
                 args: "src/main.rs".into(),
@@ -7769,6 +7783,7 @@ fn show_tools_off_hides_tool_blocks() {
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
 
@@ -7795,6 +7810,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
         result: CborValue::Text(
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
             args: String::new(),

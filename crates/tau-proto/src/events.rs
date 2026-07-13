@@ -1390,6 +1390,13 @@ pub struct ToolResult {
     pub tool_type: ToolType,
     /// Tool-owned successful result payload.
     pub result: CborValue,
+    /// Typed provider-visible content that must not pass through text
+    /// rendering.
+    ///
+    /// The harness strips this field from the generic UI completion event and
+    /// preserves it only on the provider/transcript completion path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_content: Vec<crate::ToolResultContentPart>,
     /// Whether this is the real final result or a synthetic background
     /// placeholder.
     #[serde(default)]
@@ -2463,6 +2470,16 @@ pub struct AgentStatsUpdated {
     /// Latest context usage known to the harness.
     pub context: AgentContextStats,
 }
+/// A modality that a provider route can accept as prompt input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputModality {
+    /// UTF-8 text input.
+    Text,
+    /// Validated raster image input.
+    Image,
+}
+
 /// Metadata for one model currently served by a provider extension.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelInfo {
@@ -2482,6 +2499,17 @@ pub struct ProviderModelInfo {
     /// function tools only; custom tools require explicit publication.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_tool_types: Vec<ToolType>,
+    /// Input modalities accepted by the exact provider/model route.
+    ///
+    /// Omitted legacy metadata means text-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<InputModality>,
+    /// Modalities accepted specifically inside native tool-result output.
+    ///
+    /// Image-reading tools require image support in both this field and
+    /// [`Self::input_modalities`]. Omitted legacy metadata means text-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_result_modalities: Vec<InputModality>,
     /// Provider-published preference for becoming the implicit default model
     /// when the selected role does not name one. Higher values win; ties are
     /// broken by model id for deterministic behavior. Zero means neutral.

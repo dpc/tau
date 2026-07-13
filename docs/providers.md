@@ -58,6 +58,11 @@ This snapshot carries model metadata, not just IDs:
 struct ProviderModelInfo {
     id: ModelId,
     display_name: Option<String>,
+    tags: Vec<ModelTag>,
+    supported_tool_types: Vec<ToolType>,
+    input_modalities: Vec<InputModality>,
+    tool_result_modalities: Vec<InputModality>,
+    default_affinity: i32,
     context_window: u64,
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
@@ -66,6 +71,10 @@ struct ProviderModelInfo {
 ```
 
 `context_window` is required for every published model.
+`input_modalities` declares what the exact provider/model route accepts as
+prompt input, while `tool_result_modalities` declares what it accepts inside
+native tool-result output. A tool that returns images is exposed only when both
+lists contain `image`; omitted lists preserve legacy text-only behavior.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
 The harness records which extension sent the snapshot and uses that as routing state.

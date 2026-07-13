@@ -1,5 +1,139 @@
 use super::*;
 
+/// Ensures extension-supplied typed image metadata cannot bypass the durable
+/// provider-content byte/type validation boundary.
+#[test]
+fn provider_image_content_rejects_mismatched_media_bytes() {
+    let result = tau_proto::ToolResult {
+        call_id: "call-image".into(),
+        tool_name: tau_proto::ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("image metadata".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: b"not a PNG".to_vec().into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    assert!(validate_tool_result_provider_content(&result).is_err());
+}
+
+/// Ensures durable validation independently decodes typed bytes and rejects
+/// extension-supplied dimensions that do not describe the canonical image.
+#[test]
+fn provider_image_content_rejects_false_decoded_dimensions() {
+    let source = image::DynamicImage::new_rgba8(1, 1);
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    source
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode fixture");
+    let content = vec![tau_proto::ToolResultContentPart::Image(
+        tau_proto::ImageContent {
+            media_type: tau_proto::ImageMediaType::Png,
+            data: encoded.into_inner().into(),
+            width: 2,
+            height: 1,
+            detail: tau_proto::ImageDetail::High,
+        },
+    )];
+
+    let error = validate_provider_content_parts(tau_proto::ToolType::Function, &content)
+        .expect_err("false dimensions must fail");
+    assert!(error.to_string().contains("do not match"));
+}
+
+/// Ensures magic bytes alone cannot make a truncated image durable.
+#[test]
+fn provider_image_content_rejects_truncated_encoded_bytes() {
+    let content = vec![tau_proto::ToolResultContentPart::Image(
+        tau_proto::ImageContent {
+            media_type: tau_proto::ImageMediaType::Png,
+            data: b"\x89PNG\r\n\x1a\ntruncated".to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: tau_proto::ImageDetail::High,
+        },
+    )];
+
+    assert!(validate_provider_content_parts(tau_proto::ToolType::Function, &content).is_err());
+}
+
+/// Ensures canonical media retained across an agent's complete append-only
+/// history cannot grow past the aggregate logical-byte quota.
+#[test]
+fn provider_image_content_rejects_per_agent_aggregate_overflow() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.retained_provider_image_bytes = MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT;
+    let result = tau_proto::ToolResult {
+        call_id: "call-image".into(),
+        tool_name: tau_proto::ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("image metadata".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: b"\x89PNG\r\n\x1a\nfixture".to_vec().into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    let error = tree
+        .validate_event(&Event::ProviderToolResult(result))
+        .expect_err("aggregate image quota must reject the event");
+    assert!(error.to_string().contains("per-agent limit"));
+}
+
+/// Ensures provider output cannot inject input-side tool results and thereby
+/// bypass the dedicated result validation, accounting, and call-pairing path.
+#[test]
+fn provider_response_rejects_input_side_tool_result_items() {
+    let tree = AgentTree::from_events(agent_id(), &[]);
+    let response = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: "ap-invalid-result".into(),
+        agent_id: agent_id(),
+        output_items: vec![ContextItem::ToolResult(tau_proto::ToolResultItem {
+            call_id: "call-image".into(),
+            tool_type: tau_proto::ToolType::Function,
+            status: tau_proto::ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                "invalid provider result".to_owned(),
+            )),
+            provider_content: Vec::new(),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+
+    let error = tree
+        .validate_event(&Event::ProviderResponseFinished(response))
+        .expect_err("input-side tool result must fail");
+    assert!(error.to_string().contains("input-side tool result"));
+}
+
 fn agent_id() -> AgentId {
     AgentId::parse("agent-metadata-test").expect("valid test agent id")
 }
@@ -146,6 +280,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
                 tool_name: ToolName::new(format!("tool_{index}")),
                 tool_type: *tool_type,
                 result: tau_proto::CborValue::Text(format!("result {index}")),
+                provider_content: Vec::new(),
                 kind: ToolResultKind::Final,
                 display: None,
                 originator: PromptOriginator::User,
@@ -1191,6 +1326,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 tool_name: ToolName::new("second_tool"),
                 tool_type: ToolType::Function,
                 result: tau_proto::CborValue::Text("second done".to_owned()),
+                provider_content: Vec::new(),
                 kind: ToolResultKind::Final,
                 display: None,
                 originator: PromptOriginator::User,

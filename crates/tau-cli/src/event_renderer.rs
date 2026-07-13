@@ -5624,6 +5624,7 @@ impl EventRenderer {
             tool_name: result.tool_name.clone(),
             tool_type: result.tool_type,
             result: result.result.clone(),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: result.display.clone(),
             originator: result.originator.clone(),

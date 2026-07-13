@@ -166,6 +166,101 @@ fn compact_debug_string_keeps_short_strings() {
     assert_eq!(compact_debug_string(&"x".repeat(100)), "x".repeat(100));
 }
 
+/// Ensures image bytes nested in later prompt contexts are removed before JSON
+/// conversion, rather than expanding into decimal byte arrays in debug logs.
+#[test]
+fn nested_provider_image_bytes_are_redacted_before_debug_json() {
+    let sentinel = b"\x89PNG\r\n\x1a\nunique-image-sentinel".to_vec();
+    let tool_result = tau_proto::ToolResultItem {
+        call_id: "call-image".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: tau_proto::ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image metadata".to_owned())),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: sentinel.clone().into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+    };
+    let event = Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-main-1".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        session_id: SessionId::from("s1"),
+        system_prompt: "system".to_owned(),
+        context: tau_proto::PromptContext {
+            blocks: vec![tau_proto::ContextBlock::ToolResults(
+                tau_proto::ToolResultsBlock {
+                    items: vec![tool_result],
+                },
+            )],
+        },
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "chatgpt/gpt-5.6-sol".parse().expect("model"),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        originator: PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    });
+
+    let json = debug_event_json(&event);
+    let rendered = serde_json::to_string(&json).expect("render debug JSON");
+    assert!(!rendered.contains("unique-image-sentinel"));
+    assert_eq!(
+        json["payload"]["context"]["blocks"][0]["payload"]["items"][0]["provider_content"][0]["content"]
+            ["data"],
+        serde_json::json!([])
+    );
+}
+
+/// Ensures interceptor replies cannot bypass incoming-frame image redaction by
+/// nesting a replacement event outside `HarnessInputMessage::Emit`.
+#[test]
+fn intercept_reply_nested_event_redacts_provider_image_bytes() {
+    let mut message = HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
+        action: tau_proto::InterceptAction::Pass(Some(Box::new(Event::ProviderToolResult(
+            tau_proto::ToolResult {
+                call_id: "call-image".into(),
+                tool_name: tau_proto::ToolName::new("read_image"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("metadata".to_owned()),
+                provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                    tau_proto::ImageContent {
+                        media_type: tau_proto::ImageMediaType::Png,
+                        data: b"\x89PNG\r\n\x1a\nsentinel".to_vec().into(),
+                        width: 1,
+                        height: 1,
+                        detail: tau_proto::ImageDetail::High,
+                    },
+                )],
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: PromptOriginator::User,
+            },
+        )))),
+    });
+
+    redact_harness_input_message_binary_content(&mut message);
+    let HarnessInputMessage::InterceptReply(reply) = message else {
+        panic!("intercept reply");
+    };
+    let tau_proto::InterceptAction::Pass(Some(event)) = reply.action else {
+        panic!("replacement event");
+    };
+    let Event::ProviderToolResult(result) = *event else {
+        panic!("provider tool result");
+    };
+    let tau_proto::ToolResultContentPart::Image(image) = &result.provider_content[0];
+    assert!(image.data.is_empty());
+}
+
 #[test]
 fn transient_from_connection_events_are_not_logged_twice() {
     let td = tempfile::tempdir().expect("tempdir");

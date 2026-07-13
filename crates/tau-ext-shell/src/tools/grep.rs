@@ -505,6 +505,7 @@ fn render_grep_output(
         display.stats.matches = Some(0);
         return ToolOutput {
             result: grep_result_map(status, 0, "no matches found".to_owned()),
+            provider_content: Vec::new(),
             display,
         };
     }
@@ -538,6 +539,7 @@ fn render_grep_output(
     display.stats.matches = Some(match_count as u64);
     ToolOutput {
         result: grep_result_map(status, match_count, output_text),
+        provider_content: Vec::new(),
         display,
     }
 }

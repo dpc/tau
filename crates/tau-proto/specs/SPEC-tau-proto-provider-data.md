@@ -4,6 +4,14 @@
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.
 
+A successful function-tool result may additionally carry typed
+`ToolResultContentPart::Image` values. Image bytes never pass through
+`ToolResponse::render()`; the normalized text remains first and providers append
+typed images in declared order inside the same causal tool-result envelope.
+Closed media/detail enums and decoded dimensions accompany canonical binary
+bytes. Old events and transcript items omit the additive content field and
+remain text-only.
+
 `ToolResponse::render()` must keep headers as safe single lines, preserve ASCII LF body separators for line-oriented records, escape other model-visible control and separator characters, and keep binary/fallback rendering bounded. This is not terminal/UI escaping; terminal renderers still need their own sanitization for display state and layout.
 
 Bounded model-visible diagnostic text helpers that are shared by harness, core,
@@ -97,6 +105,17 @@ metadata. Omitted or empty metadata is legacy-compatible Function-only support;
 Custom tools require explicit publication. The harness may narrow this set with
 policy but must not widen it. Changes require coordinated provider, harness,
 wire-compatibility, and serialization tests.
+
+`ProviderModelInfo.input_modalities` and `tool_result_modalities` describe the
+exact composite model/route capability. Omitted legacy fields mean text-only.
+Image-producing tools require explicit image support in both fields; model
+names and generic compatibility tags do not widen this capability.
+
+Typed image data is CBOR byte-string content with shared immutable in-process
+ownership; cloning a prompt or event must not copy the image allocation.
+Diagnostic projections replace that shared buffer before generic JSON
+serialization. This ownership optimization does not change the durable or wire
+representation.
 
 `ProviderResponseFinished.failure_kind` carries a closed, display-prose-independent category for
 terminal provider request rejection. `context_window_exceeded` allows lifecycle consumers to

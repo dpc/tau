@@ -67,6 +67,7 @@ fn background_placeholder(call_id: &str) -> ToolResult {
         tool_name: slow_tool_name(),
         tool_type: ToolType::Function,
         result: CborValue::Text("still running".to_owned()),
+        provider_content: Vec::new(),
         kind: ToolResultKind::BackgroundPlaceholder,
         display: None,
         originator: tau_proto::PromptOriginator::User,

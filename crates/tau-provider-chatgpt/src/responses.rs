@@ -15,6 +15,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tau_proto::{
@@ -43,6 +44,8 @@ const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SSE_READ_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_HTTP_THREADS: usize = 4;
 
 #[derive(Default)]
@@ -312,7 +315,8 @@ fn debug_write_provider_request(
     let path = dir.join(format!(
         "{ts}-{agent_prompt_id}-{transport_label}-request.json"
     ));
-    let body = serde_json::to_value(body)?;
+    let mut body = serde_json::to_value(body)?;
+    redact_image_data_urls(&mut body);
     let metadata = serde_json::json!({
         "session_id": request.session_id,
         "agent_prompt_id": agent_prompt_id,
@@ -346,7 +350,8 @@ pub fn responses_stream(
     let body = build_request(config, request, None);
     let vcr_config = load_vcr_config()?;
     if let Some(vcr_config) = vcr_config.as_ref() {
-        let request_body = serde_json::to_value(&body).map_err(LlmError::Json)?;
+        let mut request_body = serde_json::to_value(&body).map_err(LlmError::Json)?;
+        redact_image_data_urls(&mut request_body);
         if let Some(cassette) = load_provider_stream_cassette(
             vcr_config,
             request,
@@ -1958,11 +1963,18 @@ fn build_input_items(
         input_items
     };
     let mut input = Vec::new();
+    let mut image_budget = ImageRequestBudget {
+        supported: config.surface == ResponsesSurface::ChatGpt
+            && crate::is_gpt_5_6(&config.model_id),
+        responses_lite,
+        image_bytes: 0,
+        data_url_bytes: 0,
+    };
     for item in input_items {
         if responses_lite && matches!(item, ContextItem::CompactionTrigger) {
             continue;
         }
-        convert_context_item(item, config.supports_phase, &mut input);
+        convert_context_item(item, config.supports_phase, &mut image_budget, &mut input);
     }
     input
 }
@@ -2127,6 +2139,7 @@ fn encode_tool_name(name: &str) -> String {
 fn convert_context_item(
     item: &ContextItem,
     supports_phase: bool,
+    image_budget: &mut ImageRequestBudget,
     out: &mut Vec<ResponsesInputItem>,
 ) {
     match item {
@@ -2145,7 +2158,7 @@ fn convert_context_item(
             }
         }
         ContextItem::ToolCall(call) => convert_tool_call_item(call, out),
-        ContextItem::ToolResult(result) => convert_tool_result_item(result, out),
+        ContextItem::ToolResult(result) => convert_tool_result_item(result, image_budget, out),
         ContextItem::ReasoningText(_) => {}
         ContextItem::Reasoning(item) => {
             convert_opaque_provider_item(item, out);
@@ -2486,7 +2499,24 @@ fn prefixed_provider_item_id(id: &str, prefix: &str) -> String {
     }
 }
 
-fn convert_tool_result_item(result: &ToolResultItem, out: &mut Vec<ResponsesInputItem>) {
+struct ImageRequestBudget {
+    /// Whether this exact model and Responses surface is audited for image
+    /// output.
+    supported: bool,
+    /// Whether the final request uses Responses Lite and must omit detail
+    /// labels.
+    responses_lite: bool,
+    /// Aggregate canonical image bytes admitted to this request.
+    image_bytes: usize,
+    /// Aggregate base64 data-URL bytes admitted to this request.
+    data_url_bytes: usize,
+}
+
+fn convert_tool_result_item(
+    result: &ToolResultItem,
+    image_budget: &mut ImageRequestBudget,
+    out: &mut Vec<ResponsesInputItem>,
+) {
     let output_type = match result.tool_type {
         tau_proto::ToolType::Function => "function_call_output",
         tau_proto::ToolType::Custom => "custom_tool_call_output",
@@ -2494,15 +2524,92 @@ fn convert_tool_result_item(result: &ToolResultItem, out: &mut Vec<ResponsesInpu
     out.push(ResponsesInputItem::json(serde_json::json!({
         "type": output_type,
         "call_id": result.call_id,
-        "output": convert_tool_result_output(result),
+        "output": convert_tool_result_output(result, image_budget),
     })));
 }
 
-fn convert_tool_result_output(result: &ToolResultItem) -> String {
-    match &result.status {
+fn convert_tool_result_output(
+    result: &ToolResultItem,
+    image_budget: &mut ImageRequestBudget,
+) -> serde_json::Value {
+    let text = match &result.status {
         ToolResultStatus::Success => result.output.render(),
         ToolResultStatus::Error { message } => render_error_tool_result(&result.output, message),
         ToolResultStatus::Cancelled { reason } => render_cancelled_tool_result(reason),
+    };
+    if !matches!(result.status, ToolResultStatus::Success) || result.provider_content.is_empty() {
+        return serde_json::Value::String(text);
+    }
+    if !image_budget.supported || result.tool_type != tau_proto::ToolType::Function {
+        return serde_json::Value::String(format!(
+            "{text}\n[image omitted: this provider route does not support native image tool output]"
+        ));
+    }
+
+    let mut content = vec![serde_json::json!({
+        "type": "input_text",
+        "text": text,
+    })];
+    for part in &result.provider_content {
+        let tau_proto::ToolResultContentPart::Image(image) = part;
+        let encoded_len = image.data.len().div_ceil(3).saturating_mul(4);
+        let prefix_len = "data:;base64,".len() + image.media_type.mime_type().len();
+        let data_url_len = prefix_len.saturating_add(encoded_len);
+        let next_image_bytes = image_budget.image_bytes.saturating_add(image.data.len());
+        let next_data_url_bytes = image_budget.data_url_bytes.saturating_add(data_url_len);
+        if MAX_REQUEST_IMAGE_BYTES < next_image_bytes
+            || MAX_REQUEST_IMAGE_DATA_URL_BYTES < next_data_url_bytes
+        {
+            content.push(serde_json::json!({
+                "type": "input_text",
+                "text": "[image omitted: aggregate provider image request limit exceeded]",
+            }));
+            continue;
+        }
+        image_budget.image_bytes = next_image_bytes;
+        image_budget.data_url_bytes = next_data_url_bytes;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&image.data);
+        let mut input_image = serde_json::json!({
+            "type": "input_image",
+            "image_url": format!(
+                "data:{};base64,{encoded}",
+                image.media_type.mime_type()
+            ),
+        });
+        if !image_budget.responses_lite {
+            input_image["detail"] = serde_json::json!("high");
+        }
+        content.push(input_image);
+    }
+    serde_json::Value::Array(content)
+}
+
+pub(super) fn redact_image_data_urls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) if text.starts_with("data:image/") => {
+            use sha2::Digest as _;
+
+            let media_type = text
+                .strip_prefix("data:")
+                .and_then(|text| text.split(';').next())
+                .unwrap_or("image");
+            let digest = sha2::Sha256::digest(text.as_bytes());
+            *text = format!(
+                "<{media_type}; base64 omitted; {} encoded bytes; sha256={digest:x}>",
+                text.len(),
+            );
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_image_data_urls(value);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                redact_image_data_urls(value);
+            }
+        }
+        _ => {}
     }
 }
 

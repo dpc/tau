@@ -312,6 +312,7 @@ fn tool_background_placeholder(
         tool_name: tau_proto::ToolName::new("shell"),
         tool_type: tau_proto::ToolType::Function,
         result: tau_proto::CborValue::Text("running in background".into()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
         display: None,
         originator,

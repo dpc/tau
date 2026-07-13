@@ -257,6 +257,7 @@ pub(crate) fn run_command_live(
     );
     Ok(CommandOutcome::Finished(Box::new(ToolOutput {
         result,
+        provider_content: Vec::new(),
         display,
     })))
 }
@@ -286,6 +287,7 @@ fn replay_shell_outcome(
             }
             Ok(CommandOutcome::Finished(Box::new(ToolOutput {
                 result,
+                provider_content: Vec::new(),
                 display: *display,
             })))
         }

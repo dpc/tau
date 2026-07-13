@@ -135,6 +135,10 @@ impl Harness {
         selectors: &[EventSelector],
     ) -> ReplayOutcome {
         let mut outcome = ReplayOutcome::default();
+        let is_ui =
+            self.bus.connections().iter().any(|meta| {
+                meta.id.as_str() == client_id && meta.kind == tau_proto::ClientKind::Ui
+            });
         let loaded_agents: Vec<tau_proto::AgentId> = {
             match self.store.load_session(self.current_session_id.as_str()) {
                 Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
@@ -218,11 +222,12 @@ impl Harness {
                 }
             };
             for entry in events {
-                if selector_matches_event(selectors, &entry.event)
-                    && should_replay_agent_event_to_late_subscriber(&entry.event)
-                {
-                    let frame =
-                        HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
+                if should_replay_agent_event_to_late_subscriber(&entry.event) {
+                    let event = project_agent_replay_event(entry.event, is_ui);
+                    if !selector_matches_event(selectors, &event) {
+                        continue;
+                    }
+                    let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
                     let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
                 }
             }
@@ -313,7 +318,7 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) {
-        let subscribers: Vec<(String, Vec<EventSelector>)> = self
+        let subscribers: Vec<(String, tau_proto::ClientKind, Vec<EventSelector>)> = self
             .bus
             .connections()
             .into_iter()
@@ -322,10 +327,10 @@ impl Harness {
                 if selectors.is_empty() {
                     return None;
                 }
-                Some((meta.id.to_string(), selectors.to_vec()))
+                Some((meta.id.to_string(), meta.kind, selectors.to_vec()))
             })
             .collect();
-        for (client_id, selectors) in subscribers {
+        for (client_id, kind, selectors) in subscribers {
             let mut errors = Vec::new();
             match self.agent_store.load_agent(agent_id.as_str()) {
                 Ok(Some(tree)) => {
@@ -357,13 +362,16 @@ impl Harness {
             match self.agent_store.agent_events(agent_id.as_str()) {
                 Ok(events) => {
                     for entry in events {
-                        if selector_matches_event(&selectors, &entry.event)
-                            && should_replay_agent_event_to_late_subscriber(&entry.event)
-                        {
-                            let frame = HarnessOutputMessage::deliver_replay(
-                                entry.recorded_at,
+                        if should_replay_agent_event_to_late_subscriber(&entry.event) {
+                            let event = project_agent_replay_event(
                                 entry.event,
+                                kind == tau_proto::ClientKind::Ui,
                             );
+                            if !selector_matches_event(&selectors, &event) {
+                                continue;
+                            }
+                            let frame =
+                                HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
                             let _ = self.bus.send_to(&client_id, entry.source.as_deref(), frame);
                         }
                     }
@@ -701,4 +709,30 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::ToolCancelled(_)
             | Event::ProviderResponseFinished(_)
     )
+}
+
+pub(super) fn project_agent_replay_event(event: Event, is_ui: bool) -> Event {
+    match event {
+        Event::ProviderToolResult(mut result) => {
+            result.provider_content.clear();
+            if is_ui {
+                Event::ToolResult(result)
+            } else {
+                Event::ProviderToolResult(result)
+            }
+        }
+        Event::AgentPromptCreated(mut prompt) => {
+            prompt.context.clear_provider_image_bytes();
+            Event::AgentPromptCreated(prompt)
+        }
+        Event::AgentCompacted(mut compacted) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
+            Event::AgentCompacted(compacted)
+        }
+        Event::ProviderResponseFinished(mut finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+            Event::ProviderResponseFinished(finished)
+        }
+        other => other,
+    }
 }

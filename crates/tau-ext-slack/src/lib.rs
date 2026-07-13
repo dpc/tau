@@ -3051,6 +3051,7 @@ fn successful_tool_result(invoke: &ToolStarted, text: &str) -> ToolResult {
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(text.to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(ToolUseState {
             status: ToolUseStatus::Success,

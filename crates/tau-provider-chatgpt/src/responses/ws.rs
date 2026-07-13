@@ -152,6 +152,18 @@ pub(super) struct WsTurnResult {
     pub request_body: Option<serde_json::Value>,
 }
 
+pub(super) fn recorded_request_body(
+    envelope: &impl serde::Serialize,
+    recording: bool,
+) -> Result<Option<serde_json::Value>, LlmError> {
+    if !recording {
+        return Ok(None);
+    }
+    let mut request_body = serde_json::to_value(envelope).map_err(LlmError::Json)?;
+    super::redact_image_data_urls(&mut request_body);
+    Ok(Some(request_body))
+}
+
 impl WsConn {
     /// Open a fresh connection and perform the WS upgrade. Spawns
     /// the reader and writer tasks on the shared runtime so the
@@ -228,11 +240,7 @@ impl WsConn {
     ) -> Result<WsTurnResult, LlmError> {
         let cached_response_id = self.cached_response_id.as_deref();
         let envelope = build_ws_envelope(config, request, cached_response_id, None);
-        let request_body = if recording_stream.is_some() {
-            Some(serde_json::to_value(&envelope).map_err(LlmError::Json)?)
-        } else {
-            None
-        };
+        let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
         super::maybe_debug_write_provider_request(
             agent_prompt_id,
             config,
@@ -408,7 +416,8 @@ impl WsReplayConn {
     ) -> Result<Option<StreamState>, LlmError> {
         let cached_response_id = self.cached_response_id.as_deref();
         let envelope = build_ws_envelope(config, request, cached_response_id, None);
-        let request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+        let mut request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+        super::redact_image_data_urls(&mut request_body);
         let Some(cassette) = load_provider_stream_cassette(
             vcr_config,
             request,

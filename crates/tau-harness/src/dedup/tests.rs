@@ -13,6 +13,7 @@ fn result_entry(call_id: &str, content: &str) -> AgentEntry {
             tool_type: ToolType::Function,
             status: ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&cbor_text(content)),
+            provider_content: Vec::new(),
         }],
     }
 }

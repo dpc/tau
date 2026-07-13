@@ -1784,6 +1784,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             name: tool_name.clone(),
             internal_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.publish_for_agent(
@@ -1836,6 +1837,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             tool_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("ok".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -2302,6 +2304,7 @@ fn tool_result_event(call_id: &str, text: &str) -> Event {
         tool_name: ToolName::new("test_tool"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(text.to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
         display: None,

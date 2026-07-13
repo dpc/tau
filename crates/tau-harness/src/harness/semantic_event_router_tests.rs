@@ -33,6 +33,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
         result: CborValue::Null,
+        provider_content: Vec::new(),
         kind: ToolResultKind::Final,
         display: None,
         originator: PromptOriginator::User,

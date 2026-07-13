@@ -142,6 +142,11 @@ futures-util = { version = "0.3", default-features = false, features = [
 globset = { version = "0.4", default-features = false }
 handlebars = { version = "6", default-features = false }
 ignore = { version = "0.4", default-features = false }
+image = { version = "0.25", default-features = false, features = [
+  "jpeg",
+  "png",
+  "webp",
+] }
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 json5 = { version = "0.4", default-features = false }
 lettre = { version = "0.11", default-features = false, features = [
@@ -184,6 +189,7 @@ serde = { version = "1", default-features = false, features = [
   "derive",
   "std",
 ] }
+serde_bytes = "0.11"
 serde_json = { version = "1", default-features = false, features = [
   "raw_value",
   "std",

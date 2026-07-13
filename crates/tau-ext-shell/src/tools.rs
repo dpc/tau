@@ -16,12 +16,14 @@ pub(crate) mod find;
 pub(crate) mod grep;
 pub(crate) mod ls;
 pub(crate) mod read;
+pub(crate) mod read_image;
 pub(crate) mod shell;
 pub(crate) mod world;
 
 #[cfg(any(test, feature = "echo-agent"))]
 pub const ECHO_TOOL_NAME: &str = "echo";
 pub const READ_TOOL_NAME: &str = "read";
+pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 pub const SHELL_TOOL_NAME: &str = "shell";
@@ -45,6 +47,7 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
             result: invoke.arguments,
+            provider_content: Vec::new(),
             kind: ToolResultKind::Final,
             display: None,
             originator: invoke.originator.clone(),
@@ -62,6 +65,9 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
 
     if invoke.tool_name == READ_TOOL_NAME {
         return wrap_pure(invoke, world, read::read_file);
+    }
+    if invoke.tool_name == READ_IMAGE_TOOL_NAME {
+        return wrap_pure(invoke, world, read_image::read_image);
     }
     if invoke.tool_name == EDIT_TOOL_NAME {
         return wrap_pure(invoke, world, edit::edit_file);
@@ -156,12 +162,17 @@ fn wrap_pure(
 }
 
 fn push_output(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, output: ToolOutput) {
-    let ToolOutput { result, display } = output;
+    let ToolOutput {
+        result,
+        provider_content,
+        display,
+    } = output;
     events.push(Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         result,
+        provider_content,
         kind: ToolResultKind::Final,
         display: Some(display),
         originator: invoke.originator.clone(),
@@ -202,6 +213,7 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
                 .unwrap_or_else(|| format_requested_read_line_range(&invoke.arguments));
             format!("{path} {ranges}")
         }
+        READ_IMAGE_TOOL_NAME => cbor_text_field(&invoke.arguments, "path").unwrap_or_default(),
         EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "edits")

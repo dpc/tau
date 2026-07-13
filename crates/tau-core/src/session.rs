@@ -19,6 +19,8 @@ use tau_proto::{
     ToolResultStatus, ToolType, UnixMicros,
 };
 
+const MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT: u64 = 128 * 1024 * 1024;
+
 fn message_envelope_item(
     direction: tau_proto::MessageDirection,
     envelope: &tau_proto::MessageEnvelope,
@@ -356,6 +358,9 @@ pub struct AgentTree {
     materialized_prompt_count: u64,
     /// Number of ordinary inference prompts, excluding compaction operations.
     ordinary_inference_generation: u64,
+    /// Canonical provider image bytes retained across all durable transcript
+    /// events, including branches and compaction replacement windows.
+    retained_provider_image_bytes: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
     /// Message facts committed while provider tool adjacency is open. They are
@@ -1049,6 +1054,7 @@ impl AgentTree {
             next_event_seq: PersistedAgentEventSeq::new(0),
             materialized_prompt_count: 0,
             ordinary_inference_generation: 0,
+            retained_provider_image_bytes: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
             pending_message_envelopes: Vec::new(),
@@ -1121,6 +1127,9 @@ impl AgentTree {
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
+        self.retained_provider_image_bytes = self
+            .retained_provider_image_bytes
+            .saturating_add(durable_event_provider_image_bytes(event));
         self.count_materialized_prompt(event);
         self.apply_compaction_control_event(event);
         if self.apply_side_state_event(event) {
@@ -1451,6 +1460,7 @@ impl AgentTree {
             tool_type: result.tool_type,
             status: ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&result.result),
+            provider_content: result.provider_content.clone(),
         })
     }
 
@@ -1467,6 +1477,7 @@ impl AgentTree {
                     .as_ref()
                     .unwrap_or(&tau_proto::CborValue::Null),
             ),
+            provider_content: Vec::new(),
         })
     }
 
@@ -1481,6 +1492,7 @@ impl AgentTree {
                 reason: "cancelled".to_owned(),
             },
             output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+            provider_content: Vec::new(),
         })
     }
 
@@ -1558,6 +1570,18 @@ impl AgentTree {
         head: Option<NodeId>,
         event: &Event,
     ) -> Result<(), AgentEventValidationError> {
+        let retained_provider_image_bytes = self
+            .retained_provider_image_bytes
+            .checked_add(durable_event_provider_image_bytes(event))
+            .ok_or_else(|| {
+                AgentEventValidationError::new("retained provider image byte count overflow")
+            })?;
+        if MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT < retained_provider_image_bytes {
+            return Err(AgentEventValidationError::new(format!(
+                "retained provider image bytes exceed per-agent limit of \
+                 {MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT}"
+            )));
+        }
         if let Some(result) = self.validate_agent_state_event(event) {
             return result;
         }
@@ -1673,6 +1697,9 @@ impl AgentTree {
                         AgentEventValidationError::new(format!(
                             "invalid compaction replacement window: {error}"
                         ))
+                    })
+                    .and_then(|()| {
+                        validate_context_items_provider_content(&compacted.replacement_window)
                     })
                     .and_then(|()| self.validate_compaction_boundary(head, compacted)),
             ),
@@ -2086,9 +2113,10 @@ impl AgentTree {
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
-            Event::ProviderToolResult(result) => {
-                Some(self.validate_terminal_tool_result(&result.call_id))
-            }
+            Event::ProviderToolResult(result) => Some(
+                self.validate_terminal_tool_result(&result.call_id)
+                    .and_then(|()| validate_tool_result_provider_content(result)),
+            ),
             Event::ProviderToolError(error) | Event::ToolError(error) => {
                 Some(self.validate_terminal_tool_result(&error.call_id))
             }
@@ -2159,6 +2187,11 @@ impl AgentTree {
         }
         let mut seen = HashSet::new();
         for item in &response.output_items {
+            if matches!(item, ContextItem::ToolResult(_)) {
+                return Err(AgentEventValidationError::new(
+                    "provider response cannot contain input-side tool result items",
+                ));
+            }
             let ContextItem::ToolCall(call) = item else {
                 continue;
             };
@@ -2285,6 +2318,230 @@ impl AgentTree {
             )));
         }
         Ok(())
+    }
+}
+
+fn durable_event_provider_image_bytes(event: &Event) -> u64 {
+    match event {
+        Event::ProviderToolResult(result) => tool_result_provider_image_bytes(result),
+        Event::AgentCompacted(compacted) => compacted
+            .replacement_window
+            .iter()
+            .map(context_item_provider_image_bytes)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn context_item_provider_image_bytes(item: &ContextItem) -> u64 {
+    match item {
+        ContextItem::ToolResult(result) => result
+            .provider_content
+            .iter()
+            .map(|part| {
+                let tau_proto::ToolResultContentPart::Image(image) = part;
+                image.data.len() as u64
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn tool_result_provider_image_bytes(result: &tau_proto::ToolResult) -> u64 {
+    result
+        .provider_content
+        .iter()
+        .map(|part| {
+            let tau_proto::ToolResultContentPart::Image(image) = part;
+            image.data.len() as u64
+        })
+        .sum()
+}
+
+fn validate_tool_result_provider_content(
+    result: &tau_proto::ToolResult,
+) -> Result<(), AgentEventValidationError> {
+    validate_provider_content_parts(result.tool_type, &result.provider_content)
+}
+
+fn validate_context_items_provider_content(
+    items: &[ContextItem],
+) -> Result<(), AgentEventValidationError> {
+    for item in items {
+        let ContextItem::ToolResult(result) = item else {
+            continue;
+        };
+        if !matches!(result.status, tau_proto::ToolResultStatus::Success)
+            && !result.provider_content.is_empty()
+        {
+            return Err(AgentEventValidationError::new(
+                "non-successful tool result contains provider image content",
+            ));
+        }
+        validate_provider_content_parts(result.tool_type, &result.provider_content)?;
+    }
+    Ok(())
+}
+
+fn validate_provider_content_parts(
+    tool_type: tau_proto::ToolType,
+    provider_content: &[tau_proto::ToolResultContentPart],
+) -> Result<(), AgentEventValidationError> {
+    const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_IMAGE_SIDE: u32 = 8192;
+    const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+    const MAX_WEBP_IMAGE_PIXELS: u64 = 4_194_304;
+    const MAX_IMAGE_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+    if 1 < provider_content.len() {
+        return Err(AgentEventValidationError::new(
+            "tool result contains more than one provider image",
+        ));
+    }
+    for part in provider_content {
+        let tau_proto::ToolResultContentPart::Image(image) = part;
+        if tool_type != tau_proto::ToolType::Function {
+            return Err(AgentEventValidationError::new(
+                "typed image output requires a function tool result",
+            ));
+        }
+        let pixels = u64::from(image.width)
+            .checked_mul(u64::from(image.height))
+            .ok_or_else(|| AgentEventValidationError::new("image dimensions overflow"))?;
+        if image.width == 0
+            || image.height == 0
+            || MAX_IMAGE_SIDE < image.width
+            || MAX_IMAGE_SIDE < image.height
+            || MAX_IMAGE_PIXELS < pixels
+        {
+            return Err(AgentEventValidationError::new(
+                "image dimensions exceed provider-content limits",
+            ));
+        }
+        if image.media_type == tau_proto::ImageMediaType::Webp && MAX_WEBP_IMAGE_PIXELS < pixels {
+            return Err(AgentEventValidationError::new(
+                "WebP image dimensions exceed provider-content limits",
+            ));
+        }
+        if image.data.is_empty() || MAX_IMAGE_BYTES < image.data.len() {
+            return Err(AgentEventValidationError::new(
+                "image bytes exceed provider-content limits",
+            ));
+        }
+        let magic_matches = match image.media_type {
+            tau_proto::ImageMediaType::Png => image.data.starts_with(b"\x89PNG\r\n\x1a\n"),
+            tau_proto::ImageMediaType::Jpeg => image.data.starts_with(b"\xff\xd8\xff"),
+            tau_proto::ImageMediaType::Webp => {
+                image.data.starts_with(b"RIFF")
+                    && image.data.get(8..12).is_some_and(|kind| kind == b"WEBP")
+            }
+        };
+        if !magic_matches {
+            return Err(AgentEventValidationError::new(
+                "image media type does not match encoded bytes",
+            ));
+        }
+        if provider_image_is_animated(&image.data, image.media_type) {
+            return Err(AgentEventValidationError::new(
+                "animated provider image content is not supported",
+            ));
+        }
+        let format = match image.media_type {
+            tau_proto::ImageMediaType::Png => image::ImageFormat::Png,
+            tau_proto::ImageMediaType::Jpeg => image::ImageFormat::Jpeg,
+            tau_proto::ImageMediaType::Webp => image::ImageFormat::WebP,
+        };
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&image.data), format);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_IMAGE_SIDE);
+        limits.max_image_height = Some(MAX_IMAGE_SIDE);
+        limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC_BYTES);
+        reader.limits(limits);
+        use image::ImageDecoder as _;
+        let decoder = reader.into_decoder().map_err(|error| {
+            AgentEventValidationError::new(format!("cannot decode provider image header: {error}"))
+        })?;
+        if decoder.dimensions() != (image.width, image.height) {
+            return Err(AgentEventValidationError::new(
+                "provider image dimensions do not match encoded bytes",
+            ));
+        }
+        let decoded_byte_limit = if image.media_type == tau_proto::ImageMediaType::Webp {
+            MAX_IMAGE_DECODE_ALLOC_BYTES / 2
+        } else {
+            MAX_IMAGE_DECODE_ALLOC_BYTES
+        };
+        if decoded_byte_limit < decoder.total_bytes() {
+            return Err(AgentEventValidationError::new(
+                "decoded provider image exceeds allocation limit",
+            ));
+        }
+        image::DynamicImage::from_decoder(decoder).map_err(|error| {
+            AgentEventValidationError::new(format!("cannot fully decode provider image: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn provider_image_is_animated(bytes: &[u8], media_type: tau_proto::ImageMediaType) -> bool {
+    match media_type {
+        tau_proto::ImageMediaType::Png => {
+            let mut offset = 8_usize;
+            while offset.checked_add(12).is_some_and(|end| end <= bytes.len()) {
+                let length = u32::from_be_bytes([
+                    bytes[offset],
+                    bytes[offset + 1],
+                    bytes[offset + 2],
+                    bytes[offset + 3],
+                ]) as usize;
+                let kind = &bytes[offset + 4..offset + 8];
+                if kind == b"acTL" {
+                    return true;
+                }
+                if kind == b"IDAT" || kind == b"IEND" {
+                    return false;
+                }
+                let Some(next) = offset
+                    .checked_add(12)
+                    .and_then(|offset| offset.checked_add(length))
+                else {
+                    return false;
+                };
+                if bytes.len() < next {
+                    return false;
+                }
+                offset = next;
+            }
+            false
+        }
+        tau_proto::ImageMediaType::Webp => {
+            let mut offset = 12_usize;
+            while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+                let kind = &bytes[offset..offset + 4];
+                if kind == b"ANIM" || kind == b"ANMF" {
+                    return true;
+                }
+                let length = u32::from_le_bytes([
+                    bytes[offset + 4],
+                    bytes[offset + 5],
+                    bytes[offset + 6],
+                    bytes[offset + 7],
+                ]) as usize;
+                let Some(next) = offset
+                    .checked_add(8)
+                    .and_then(|offset| offset.checked_add(length))
+                    .and_then(|offset| offset.checked_add(length % 2))
+                else {
+                    return false;
+                };
+                if bytes.len() < next {
+                    return false;
+                }
+                offset = next;
+            }
+            false
+        }
+        tau_proto::ImageMediaType::Jpeg => false,
     }
 }
 

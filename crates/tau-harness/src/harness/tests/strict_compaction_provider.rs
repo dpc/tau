@@ -149,6 +149,8 @@ fn write_startup(
                 display_name: Some("Strict compaction".to_owned()),
                 tags: Vec::new(),
                 supported_tool_types: vec![tau_proto::ToolType::Function],
+                input_modalities: Vec::new(),
+                tool_result_modalities: Vec::new(),
                 default_affinity: 0,
                 context_window: 10_000,
                 efforts: vec![tau_proto::Effort::Off],

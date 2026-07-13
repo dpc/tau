@@ -56,4 +56,5 @@ built.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true
+image.workspace = true
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }

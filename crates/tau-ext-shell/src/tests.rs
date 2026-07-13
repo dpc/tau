@@ -25,12 +25,13 @@ use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file as read_file_with_world, slice_lines};
+use crate::tools::read_image::read_image as read_image_with_world;
 use crate::tools::shell::{
     CommandDetails, CommandOutcome, command_details_value, run_command_live,
 };
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
-    READ_TOOL_NAME, SHELL_TOOL_NAME,
+    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME,
 };
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
@@ -50,6 +51,39 @@ fn edit_file(
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
     let mut world = crate::tools::world::ShellWorld::real();
     edit_file_with_world(arguments, &mut world)
+}
+
+fn read_image(
+    arguments: &CborValue,
+) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
+    let mut world = crate::tools::world::ShellWorld::real();
+    read_image_with_world(arguments, &mut world)
+}
+
+/// Ensures the public shell tool path reads a real local image and keeps pixels
+/// exclusively in typed provider content while returning safe text metadata.
+#[test]
+fn read_image_returns_typed_provider_content() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("fixture.png");
+    let source = image::DynamicImage::new_rgb8(4, 3);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    source
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode PNG");
+    std::fs::write(&path, bytes.into_inner()).expect("write PNG");
+
+    let output =
+        read_image(&cbor_text_map(vec![("path", path.to_str().unwrap())])).expect("read image");
+    assert_eq!(output.provider_content.len(), 1);
+    let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
+    assert_eq!(image.media_type, tau_proto::ImageMediaType::Png);
+    assert_eq!((image.width, image.height), (4, 3));
+    let decoded = image::load_from_memory_with_format(&image.data, image::ImageFormat::Png)
+        .expect("prepared image remains a decodable PNG");
+    assert_eq!((decoded.width(), decoded.height()), (4, 3));
+    assert!(matches!(output.result, CborValue::Map(_)));
+    assert!(!format!("{:?}", output.result).contains("137, 80, 78, 71"));
 }
 
 type TestExtensionReader = EventReader<BufReader<UnixStream>>;
@@ -326,6 +360,7 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
     for expected in [
         EventName::TOOL_REGISTER,                               // echo
         EventName::TOOL_REGISTER,                               // read
+        EventName::TOOL_REGISTER,                               // read_image
         EventName::TOOL_REGISTER,                               // edit
         EventName::TOOL_REGISTER,                               // apply_patch
         EventName::TOOL_REGISTER,                               // dir_lock
@@ -436,6 +471,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
     for expected_tool in [
         ECHO_TOOL_NAME,
         READ_TOOL_NAME,
+        READ_IMAGE_TOOL_NAME,
         EDIT_TOOL_NAME,
         APPLY_PATCH_TOOL_NAME,
         DIR_LOCK_TOOL_NAME,
@@ -536,9 +572,10 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
     let mut found_echo_disabled = false;
     let mut found_gpt_shell_visible_name = false;
     let mut found_read_schema = false;
+    let mut found_read_image_foreground_only = false;
     let mut found_edit_schema = false;
     let mut found_write = false;
-    for _ in 0..11 {
+    for _ in 0..12 {
         let event = reader
             .read_event()
             .expect("read")
@@ -587,6 +624,13 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
             );
             found_read_schema = true;
         }
+        if register.tool.name == READ_IMAGE_TOOL_NAME {
+            assert_eq!(
+                register.tool.background_support,
+                Some(tau_proto::BackgroundSupport::Never)
+            );
+            found_read_image_foreground_only = true;
+        }
         if register.tool.name == EDIT_TOOL_NAME {
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let edit_item = &parameters["properties"]["edits"]["items"];
@@ -625,6 +669,10 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
         "expected gpt_shell tool registration"
     );
     assert!(found_read_schema, "expected multi-range read schema");
+    assert!(
+        found_read_image_foreground_only,
+        "expected foreground-only read_image registration"
+    );
     assert!(found_edit_schema, "expected line-oriented edit schema");
     assert!(!found_write, "write tool should not be registered");
 
@@ -641,7 +689,7 @@ fn startup_registers_schema_valid_tool_examples() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut checked = Vec::new();
-    for _ in 0..11 {
+    for _ in 0..12 {
         let event = reader
             .read_event()
             .expect("read")
@@ -803,7 +851,7 @@ fn startup_registers_dir_lock_disabled_by_default() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_dir_lock = false;
-    for _ in 0..11 {
+    for _ in 0..12 {
         let event = reader
             .read_event()
             .expect("read")
@@ -833,7 +881,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_schema = false;
-    for _ in 0..15 {
+    for _ in 0..16 {
         let event = reader
             .read_event()
             .expect("read")
@@ -2240,7 +2288,7 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
 
     let mut found_shell = false;
     let mut found_gpt_shell = false;
-    for _ in 0..11 {
+    for _ in 0..12 {
         let event = reader
             .read_event()
             .expect("read")
@@ -2284,7 +2332,7 @@ fn startup_registers_shell_cwd_prompt_fragment() {
     let mut found_context_provider = false;
     let mut found_fragment = false;
     let mut saw_tool_fragment = false;
-    for _ in 0..14 {
+    for _ in 0..15 {
         let event = reader
             .read_event()
             .expect("read")
@@ -6466,6 +6514,7 @@ fn lock_wait_duration_header_wraps_non_map_results() {
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("changed".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: None,
             originator: tau_proto::PromptOriginator::User,

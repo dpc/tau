@@ -72,6 +72,7 @@ pub(crate) fn read_file(
     display.stats = text_stats(&truncated.content);
     Ok(ToolOutput {
         result: CborValue::Map(entries),
+        provider_content: Vec::new(),
         display,
     })
 }

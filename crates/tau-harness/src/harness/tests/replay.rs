@@ -1,5 +1,52 @@
 use super::*;
 
+/// Ensures every late subscriber receives a byte-free durable-result
+/// projection, with UI clients additionally receiving the generic `tool.result`
+/// event shape.
+#[test]
+fn ui_replay_projects_provider_image_result_without_bytes() {
+    let result = ToolResult {
+        call_id: "call-image".into(),
+        tool_name: ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("image metadata".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: b"\x89PNG\r\n\x1a\nfixture".to_vec().into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    let ui = crate::harness::replay::project_agent_replay_event(
+        Event::ProviderToolResult(result.clone()),
+        true,
+    );
+    assert!(matches!(
+        ui,
+        Event::ToolResult(ToolResult {
+            provider_content,
+            ..
+        }) if provider_content.is_empty()
+    ));
+    assert!(matches!(
+        crate::harness::replay::project_agent_replay_event(
+            Event::ProviderToolResult(result),
+            false,
+        ),
+        Event::ProviderToolResult(ToolResult {
+            provider_content,
+            ..
+        }) if provider_content.is_empty()
+    ));
+}
+
 fn assistant_output(text: &str) -> Vec<tau_proto::ContextItem> {
     vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
         role: tau_proto::ContextRole::Assistant,
@@ -61,6 +108,7 @@ fn successful_tool_result(call_id: &str) -> ToolResult {
         tool_name: ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(format!("result for {call_id}")),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1275,6 +1323,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             tool_name: ToolName::new("background_ok"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("running".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
             originator: Default::default(),
 
@@ -1307,6 +1356,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             tool_name: ToolName::new("background_err"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("running".to_owned()),
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
             originator: Default::default(),
 

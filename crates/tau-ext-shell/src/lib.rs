@@ -50,7 +50,8 @@ use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
-    GREP_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
+    GREP_TOOL_NAME, LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME,
+    execute_tool,
 };
 
 /// Cloneable shell output adapter.
@@ -231,6 +232,40 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             title: Some("Read a file".to_owned()),
             arguments: CborValue::Map(vec![example_field("path", example_text("src/main.rs"))]),
             note: Some("Use only the path field for a full-file read.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let read_image_tool = ToolSpec {
+        name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Read one local PNG, JPEG, or WebP image for visual inspection. The image is \
+             decoded under strict byte, dimension, pixel, and memory limits, normalized \
+             without source metadata, resized to bounded high detail, and returned as native \
+             typed image content rather than base64 text."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to one local PNG, JPEG, or WebP image"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:read", "shell:read:image", "provider-content:image"]),
+        enabled_by_default: true,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
+        examples: vec![ToolExample {
+            id: "read-image".to_owned(),
+            title: Some("Inspect a screenshot".to_owned()),
+            arguments: CborValue::Map(vec![example_field("path", example_text("screenshot.png"))]),
+            note: None,
             subcommand: None,
         }],
     };
@@ -610,6 +645,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     };
     let builtin_tools = [
         read_tool,
+        read_image_tool,
         edit_tool,
         apply_patch_tool,
         dir_lock_tool,
@@ -970,7 +1006,8 @@ fn rewrite_invoke_for_cwd(
     let base = cwd_state.get_or_default(&invoke.agent_id);
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => "cwd",
-        READ_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
+        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME
+        | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
         _ => return invoke,
     };
@@ -1695,6 +1732,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
                 result: output.result,
+                provider_content: Vec::new(),
                 kind: ToolResultKind::Final,
                 display: Some(output.display),
                 originator: invoke.originator.clone(),
@@ -1831,6 +1869,7 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(
         name,
         READ_TOOL_NAME
+            | READ_IMAGE_TOOL_NAME
             | EDIT_TOOL_NAME
             | APPLY_PATCH_TOOL_NAME
             | GREP_TOOL_NAME

@@ -1237,6 +1237,8 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
                         display_name: Some("Test".to_owned()),
                         tags: Vec::new(),
                         supported_tool_types: vec![],
+                        input_modalities: Vec::new(),
+                        tool_result_modalities: Vec::new(),
                         default_affinity: 0,
                         context_window: 1_000,
                         efforts: vec![tau_proto::Effort::Medium],

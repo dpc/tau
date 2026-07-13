@@ -113,7 +113,6 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::SESSION_STARTED),
         EventSelector::Exact(E::SESSION_SHUTDOWN),
         EventSelector::Exact(E::SESSION_AGENT_UNLOADED),
-        EventSelector::Exact(E::PROVIDER_TOOL_RESULT),
         EventSelector::Exact(E::PROVIDER_TOOL_ERROR),
         EventSelector::Exact(E::PROVIDER_PROMPT_SUBMITTED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_UPDATED),

@@ -11,6 +11,213 @@ use crate::INTERNAL_MARKER;
 use crate::dedup::DEFAULT_THRESHOLD_BYTES;
 use crate::harness::PendingTool;
 
+fn encoded_test_png() -> Vec<u8> {
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode test PNG");
+    encoded.into_inner()
+}
+
+fn image_result(call_id: &str, bytes: Vec<u8>) -> ToolResult {
+    ToolResult {
+        call_id: call_id.into(),
+        tool_name: ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("image/png image, 2x2".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: bytes.into(),
+                width: 2,
+                height: 2,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowed: bool) {
+    seed_assistant_tool_round(h, cid, &[(call_id, "read_image")]);
+    h.tool_agents.insert(call_id.into(), cid.clone());
+    h.pending_tools.insert(
+        call_id.into(),
+        PendingTool {
+            name: ToolName::new("read_image"),
+            internal_name: ToolName::new("read_image"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: allowed,
+        },
+    );
+}
+
+/// Exercises image authorization and media validation through the real
+/// extension-result intake boundary. Rejections must become exactly one error
+/// before any success/dedup state is published, while an authorized valid image
+/// remains intact in durable provider-facing transcript truth.
+#[test]
+fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_bytes() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let live = connect_test_tool(&mut h, "image-live");
+    h.complete_subscription(
+        "image-live",
+        Vec::new(),
+        vec![
+            EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+            EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_RESULT),
+        ],
+    )
+    .expect("subscribe to live tool results");
+
+    for (call_id, allowed, bytes) in [
+        ("image-untagged", false, encoded_test_png()),
+        (
+            "image-invalid",
+            true,
+            b"\x89PNG\r\n\x1a\ntruncated".to_vec(),
+        ),
+    ] {
+        track_image_call(&mut h, &cid, call_id, allowed);
+        let event = Event::ToolResult(image_result(call_id, bytes));
+        h.handle_extension_event("shell", TestProtocolItem::Event(event.clone()))
+            .expect("reject unsafe image result");
+        h.handle_extension_event("shell", TestProtocolItem::Event(event))
+            .expect("discard duplicate rejected result");
+
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ToolError(error) if error.call_id.as_str() == call_id
+                ))
+                .count(),
+            1,
+            "rejection must publish one logical terminal error"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ToolResult(result) | Event::ProviderToolResult(result)
+                        if result.call_id.as_str() == call_id
+                ))
+                .count(),
+            0,
+            "rejection must happen before generic/provider success publication"
+        );
+        assert!(!h.pending_tools.contains_key(call_id));
+        assert!(!h.tool_agents.contains_key(call_id));
+    }
+
+    let valid_bytes = encoded_test_png();
+    track_image_call(&mut h, &cid, "image-valid", true);
+    h.handle_extension_event(
+        "shell",
+        TestProtocolItem::Event(Event::ToolResult(image_result(
+            "image-valid",
+            valid_bytes.clone(),
+        ))),
+    )
+    .expect("accept authorized image");
+
+    let events = event_log_events(&h);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ToolResult(ToolResult { call_id, provider_content, .. })
+            if call_id.as_str() == "image-valid" && provider_content.is_empty()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ProviderToolResult(ToolResult { call_id, provider_content, .. })
+            if call_id.as_str() == "image-valid"
+                && matches!(
+                    provider_content.as_slice(),
+                    [tau_proto::ToolResultContentPart::Image(image)]
+                        if image.data.as_ref() == valid_bytes.as_slice()
+                )
+    )));
+
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .expect("durable agent id");
+    let tree = h.agent_store.agent(agent_id).expect("agent tree");
+    assert!(tree.nodes().iter().any(|node| matches!(
+        &node.entry,
+        AgentEntry::ToolResults { items }
+            if items.iter().any(|item| {
+                item.call_id.as_str() == "image-valid"
+                    && matches!(
+                        item.provider_content.as_slice(),
+                        [tau_proto::ToolResultContentPart::Image(image)]
+                            if image.data.as_ref() == valid_bytes.as_slice()
+                    )
+            })
+    )));
+
+    let live_events = live
+        .lock()
+        .expect("live events")
+        .iter()
+        .cloned()
+        .map(|frame| TestProtocolItem::from_output_message(frame.frame).into_event_frame())
+        .filter_map(|frame| match frame {
+            TestProtocolItem::Event(event) => Some(event),
+            TestProtocolItem::Message(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(live_events.iter().any(|event| matches!(
+        event,
+        Event::ToolResult(ToolResult { call_id, provider_content, .. })
+            if call_id.as_str() == "image-valid" && provider_content.is_empty()
+    )));
+    assert!(live_events.iter().any(|event| matches!(
+        event,
+        Event::ProviderToolResult(ToolResult { call_id, provider_content, .. })
+            if call_id.as_str() == "image-valid"
+                && matches!(
+                    provider_content.as_slice(),
+                    [tau_proto::ToolResultContentPart::Image(image)] if image.data.is_empty()
+                )
+    )));
+
+    let replay = connect_test_tool(&mut h, "image-replay");
+    h.complete_subscription(
+        "image-replay",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::PROVIDER_TOOL_RESULT,
+        )],
+        Vec::new(),
+    )
+    .expect("subscribe to historical provider results");
+    assert!(
+        replay
+            .lock()
+            .expect("replay events")
+            .iter()
+            .cloned()
+            .map(|frame| TestProtocolItem::from_output_message(frame.frame).into_event_frame())
+            .any(|frame| matches!(
+                frame,
+                TestProtocolItem::Event(Event::ProviderToolResult(ToolResult {
+                    call_id,
+                    provider_content,
+                    ..
+                })) if call_id.as_str() == "image-valid" && provider_content.is_empty()
+            )),
+        "historical subscribers receive metadata without image bytes"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Drive a single `ToolResult` through the harness's normal intake
 /// path (registers the call_id with `tool_agents`,
 /// `pending_tools`, and a `ToolsRunning` turn state, then sends
@@ -35,6 +242,7 @@ fn run_tool_result(
             name: name.clone(),
             internal_name: name.clone(),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.handle_extension_event(
@@ -44,6 +252,7 @@ fn run_tool_result(
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,
             result,
+            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             originator: tau_proto::PromptOriginator::User,
 
@@ -92,6 +301,7 @@ fn run_tool_error(
             name: name.clone(),
             internal_name: name.clone(),
             tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
         },
     );
     h.handle_extension_event(
@@ -478,6 +688,7 @@ fn dedup_refuses_to_self_point() {
         tool_name: ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         result: big.clone(),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::User,
 

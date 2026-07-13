@@ -35,6 +35,7 @@ pub(crate) fn output(path: &Path) -> ToolOutput {
     let text = format!("Working directory change requested: {}", path.display());
     ToolOutput {
         result: CborValue::Text(text.clone()),
+        provider_content: Vec::new(),
         display: ok_display(text),
     }
 }

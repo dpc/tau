@@ -60,6 +60,7 @@ fn tool_results_preview_includes_every_result_in_round() {
                 tool_type: ToolType::Function,
                 status: ToolResultStatus::Success,
                 output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("ok".into())),
+                provider_content: Vec::new(),
             },
             tau_proto::ToolResultItem {
                 call_id: "call-2".into(),
@@ -68,6 +69,7 @@ fn tool_results_preview_includes_every_result_in_round() {
                     message: "failed".into(),
                 },
                 output: tau_proto::ToolResponse::from_cbor(&CborValue::Null),
+                provider_content: Vec::new(),
             },
         ],
     };

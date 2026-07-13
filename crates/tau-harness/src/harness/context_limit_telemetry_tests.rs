@@ -116,6 +116,7 @@ fn transcript_delta_derivation_handles_raw_cbor_without_sentinel() {
             tool_type: ToolType::Function,
             status: ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&raw),
+            provider_content: Vec::new(),
         }],
     };
 

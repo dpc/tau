@@ -46,6 +46,13 @@ against mutable current role/model state after the user switches roles or models
 mid-turn. Staged tool registration can never expand a prompt snapshot after it
 was sent.
 
+Tools tagged `provider-content:image` survive effective-tool filtering only
+when the selected route publishes image in both `input_modalities` and
+`tool_result_modalities`. Role and global tool policy may narrow that result but
+cannot force the tool onto a text-only route. The provider-side projection
+independently fails closed so stale history or capability races never send image
+bytes to an unaudited route.
+
 Narrow schema-guided argument repair also uses the prompt-owned `ToolSpec`.
 Repair runs only after pre-dispatch validation failure, applies a small fixed set
 of mechanical conversions, revalidates before dispatch, and falls back to the
@@ -73,6 +80,21 @@ fact immediately before the full `agent.prompt_created` provider work request.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool
 schemas are not sent over UI/control channels unnecessarily.
+
+Typed image bytes in provider tool results are never generic UI traffic. Live
+`provider.tool_result` delivery excludes UI clients; they receive the separate
+byte-free `tool.result` event. Historical UI replay projects the durable
+provider event back to that byte-free generic event. Debug and TRACE prompt
+projections recursively remove image buffers before JSON serialization.
+
+All subscriber broadcasts and historical replay project typed image buffers out
+of provider tool results, prompt-created contexts, compaction windows, and
+structurally possible provider-response items. Only durable agent storage and
+the selected provider's point-to-point prompt receive canonical bytes. Pending
+tool-call state retains whether the exact registered tool carried
+`provider-content:image`; a function tool without that tag cannot return media.
+Semantic validation and prospective encoded-record validation run before result
+deduplication or generic success publication.
 
 ## Transient reply presentation
 

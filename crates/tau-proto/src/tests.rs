@@ -54,6 +54,70 @@ fn test_message_envelope() -> MessageEnvelope {
     }
 }
 
+/// Ensures typed image output survives the durable CBOR protocol with exact
+/// call provenance and bytes while its `Debug` representation stays
+/// metadata-only.
+#[test]
+fn typed_image_tool_result_cbor_roundtrip_and_safe_debug() {
+    let event = Event::ToolResult(ToolResult {
+        call_id: "call-image".into(),
+        tool_name: ToolName::new("read_image"),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("image/png image, 1x1".to_owned()),
+        provider_content: vec![ToolResultContentPart::Image(ImageContent {
+            media_type: ImageMediaType::Png,
+            data: b"\x89PNG\r\n\x1a\nDATA".to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: ImageDetail::High,
+        })],
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    });
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&event, &mut encoded).expect("encode image event");
+    let encoded_value: CborValue =
+        ciborium::from_reader(encoded.as_slice()).expect("decode image event as generic CBOR");
+    fn contains_bytes(value: &CborValue, expected: &[u8]) -> bool {
+        match value {
+            CborValue::Bytes(bytes) => bytes == expected,
+            CborValue::Array(values) => values.iter().any(|value| contains_bytes(value, expected)),
+            CborValue::Map(entries) => entries.iter().any(|(key, value)| {
+                contains_bytes(key, expected) || contains_bytes(value, expected)
+            }),
+            CborValue::Tag(_, value) => contains_bytes(value, expected),
+            _ => false,
+        }
+    }
+    assert!(
+        contains_bytes(&encoded_value, b"\x89PNG\r\n\x1a\nDATA"),
+        "image data must use a CBOR byte string rather than an integer array"
+    );
+    let decoded: Event = ciborium::from_reader(encoded.as_slice()).expect("decode image event");
+    assert_eq!(decoded, event);
+    let debug = format!("{event:?}");
+    assert!(debug.contains("<12 bytes>"));
+    assert!(!debug.contains("[137, 80, 78, 71"));
+}
+
+/// Ensures prompt/event projections share canonical immutable image bytes
+/// in-process instead of deep-copying a potentially multi-megabyte buffer.
+#[test]
+fn typed_image_clone_shares_immutable_bytes() {
+    let image = ImageContent {
+        media_type: ImageMediaType::Png,
+        data: b"\x89PNG\r\n\x1a\nDATA".to_vec().into(),
+        width: 1,
+        height: 1,
+        detail: ImageDetail::High,
+    };
+    let cloned = image.clone();
+
+    assert!(std::sync::Arc::ptr_eq(&image.data, &cloned.data));
+}
+
 /// Manual retry controls and their correlated provider result must retain exact
 /// prompt identity and typed scheduler status across the wire codec.
 #[test]
@@ -443,6 +507,7 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("echo"),
             tool_type: ToolType::Function,
             result: CborValue::Text("hello".to_owned()),
+            provider_content: Vec::new(),
             kind: ToolResultKind::Final,
             display: None,
             originator: PromptOriginator::User,
@@ -903,6 +968,8 @@ fn representative_events() -> Vec<Event> {
                 display_name: Some("GPT-4.1".to_owned()),
                 tags: Vec::new(),
                 supported_tool_types: vec![],
+                input_modalities: Vec::new(),
+                tool_result_modalities: Vec::new(),
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
@@ -918,6 +985,7 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("echo"),
             tool_type: ToolType::Function,
             result: CborValue::Text("provider-visible completion".to_owned()),
+            provider_content: Vec::new(),
             kind: ToolResultKind::BackgroundPlaceholder,
             display: None,
             originator: PromptOriginator::User,
@@ -3620,8 +3688,12 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     let legacy: ProviderModelInfo =
         serde_json::from_value(value.clone()).expect("legacy model metadata");
     assert!(legacy.supported_tool_types.is_empty());
+    assert!(legacy.input_modalities.is_empty());
+    assert!(legacy.tool_result_modalities.is_empty());
 
     value["supported_tool_types"] = serde_json::json!(["function", "custom"]);
+    value["input_modalities"] = serde_json::json!(["text", "image"]);
+    value["tool_result_modalities"] = serde_json::json!(["text", "image"]);
     let explicit: ProviderModelInfo =
         serde_json::from_value(value).expect("explicit model metadata");
     assert_eq!(
@@ -3632,6 +3704,14 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     assert_eq!(
         encoded["supported_tool_types"],
         serde_json::json!(["function", "custom"])
+    );
+    assert_eq!(
+        encoded["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(
+        encoded["tool_result_modalities"],
+        serde_json::json!(["text", "image"])
     );
 }
 /// Terminal provider failure categories have stable snake-case wire values,

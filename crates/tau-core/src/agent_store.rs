@@ -51,6 +51,12 @@ pub enum AgentStoreError {
         path: PathBuf,
         source: tau_proto::EncodeError,
     },
+    /// Encoded record exceeded the loader's matching allocation bound.
+    RecordTooLarge {
+        path: PathBuf,
+        record_length: u64,
+        maximum: u64,
+    },
     /// Another process holds the exclusive lock on this agent.
     Locked {
         path: PathBuf,
@@ -76,6 +82,28 @@ pub enum AgentStoreError {
         agent_id: AgentId,
         path: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod record_limit_tests {
+    use super::*;
+
+    /// Ensures the writer rejects a record length that the matching loader
+    /// would reject, before opening or mutating the journal.
+    #[test]
+    fn write_record_limit_matches_read_limit() {
+        let error =
+            validate_record_length(Path::new("/not/opened/events.cbor"), MAX_RECORD_BYTES + 1)
+                .expect_err("oversized record must be rejected");
+        assert!(matches!(
+            error,
+            AgentStoreError::RecordTooLarge {
+                record_length,
+                maximum: MAX_RECORD_BYTES,
+                ..
+            } if record_length == MAX_RECORD_BYTES + 1
+        ));
+    }
 }
 
 impl fmt::Display for AgentStoreError {
@@ -107,6 +135,15 @@ impl fmt::Display for AgentStoreError {
             Self::Encode { path, source } => write!(
                 f,
                 "failed to encode agent store record for {}: {source}",
+                path.display()
+            ),
+            Self::RecordTooLarge {
+                path,
+                record_length,
+                maximum,
+            } => write!(
+                f,
+                "agent store record for {} is {record_length} bytes; maximum is {maximum}",
                 path.display()
             ),
             Self::Locked { path, holder } => write!(
@@ -153,7 +190,8 @@ impl Error for AgentStoreError {
             Self::Encode { source, .. } => Some(source),
             Self::InvalidAgentId { source, .. } => Some(source),
             Self::InvalidEvent { source } => Some(source),
-            Self::Locked { .. }
+            Self::RecordTooLarge { .. }
+            | Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
             | Self::PersistenceConflict { .. } => None,
@@ -545,6 +583,48 @@ impl AgentStore {
         })
     }
 
+    /// Validates one prospective event against the currently retained agent
+    /// transcript without appending or folding it.
+    ///
+    /// The harness uses this to turn typed-media quota failures into an
+    /// ordinary terminal tool error before publishing a generic success
+    /// projection.
+    pub fn validate_agent_event_at(
+        &mut self,
+        agent_id: &str,
+        source: Option<ConnectionId>,
+        parent: AgentEventParent,
+        event: &Event,
+        recorded_at: UnixMicros,
+    ) -> Result<(), AgentStoreError> {
+        let sid = parse_agent_id_for_store(agent_id)?;
+        self.load_agent_if_needed(agent_id)?;
+        let tree = self
+            .agents
+            .entry(sid.clone())
+            .or_insert_with(|| AgentTree::from_events(sid, &[]));
+        tree.validate_event_at(parent, event)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        let prospective_record = PersistedAgentEvent {
+            seq: tree.next_event_seq(),
+            source,
+            event: event.clone(),
+            parent,
+            recorded_at,
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&prospective_record, &mut encoded).map_err(|source| {
+            AgentStoreError::Encode {
+                path: self.agent_dir(agent_id).join("events.cbor"),
+                source,
+            }
+        })?;
+        validate_record_length(
+            &self.agent_dir(agent_id).join("events.cbor"),
+            encoded.len() as u64,
+        )
+    }
+
     /// Loads per-agent protocol events from disk or the memory-only replay
     /// stream for ephemeral agents.
     pub fn agent_events(
@@ -840,6 +920,8 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Agent
         path: path.to_path_buf(),
         source,
     })?;
+    let record_length = encoded.len() as u64;
+    validate_record_length(path, record_length)?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -849,7 +931,7 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Agent
             path: path.to_path_buf(),
             source,
         })?;
-    file.write_all(&(encoded.len() as u64).to_le_bytes())
+    file.write_all(&record_length.to_le_bytes())
         .map_err(|source| AgentStoreError::Write {
             path: path.to_path_buf(),
             source,
@@ -868,6 +950,18 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Agent
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn validate_record_length(path: &Path, record_length: u64) -> Result<(), AgentStoreError> {
+    if MAX_RECORD_BYTES < record_length {
+        Err(AgentStoreError::RecordTooLarge {
+            path: path.to_path_buf(),
+            record_length,
+            maximum: MAX_RECORD_BYTES,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn load_agent_events(path: &Path) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {

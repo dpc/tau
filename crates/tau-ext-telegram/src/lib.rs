@@ -2192,6 +2192,7 @@ fn tool_result(invoke: ToolStarted, text: &str) -> Event {
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(text.to_owned()),
+        provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         display: Some(ToolUseState {
             status: ToolUseStatus::Success,

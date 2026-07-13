@@ -280,6 +280,32 @@ fn publishes_chatgpt_model_metadata() {
             .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
             .all(|model| !model.efforts.contains(&Effort::Max))
     );
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| {
+                model
+                    .input_modalities
+                    .contains(&tau_proto::InputModality::Image)
+                    && model
+                        .tool_result_modalities
+                        .contains(&tau_proto::InputModality::Image)
+            })
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| {
+                !model
+                    .input_modalities
+                    .contains(&tau_proto::InputModality::Image)
+                    && !model
+                        .tool_result_modalities
+                        .contains(&tau_proto::InputModality::Image)
+            })
+    );
 }
 
 #[test]
@@ -300,6 +326,25 @@ fn config_for_model_enables_codex_responses_capabilities() {
     assert!(config.supports_compaction);
     assert!(config.supports_phase);
     assert!(config.supports_encrypted_reasoning);
+}
+
+#[test]
+fn unaudited_gpt_5_6_suffix_does_not_gain_image_or_lite_capabilities() {
+    let model = "gpt-5.6-experimental";
+    let info = model_info(&ProviderName::new("chatgpt"), model);
+    let config = config_for_model(&ModelName::new(model), "token".to_owned(), None);
+
+    assert!(
+        !info
+            .input_modalities
+            .contains(&tau_proto::InputModality::Image)
+    );
+    assert!(
+        !info
+            .tool_result_modalities
+            .contains(&tau_proto::InputModality::Image)
+    );
+    assert!(config.supports_compaction);
 }
 
 /// Ensures request configuration retains each model's raw context window

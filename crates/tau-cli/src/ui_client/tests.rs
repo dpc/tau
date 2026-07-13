@@ -9,6 +9,8 @@ fn chat_subscription_uses_prompt_started_not_prompt_created() {
 
     assert!(selectors.contains(&EventSelector::Exact(EventName::AGENT_PROMPT_STARTED)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::AGENT_PROMPT_CREATED)));
+    assert!(!selectors.contains(&EventSelector::Exact(EventName::PROVIDER_TOOL_RESULT)));
+    assert!(selectors.contains(&EventSelector::Exact(EventName::TOOL_RESULT)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::AGENT_STATE)));
     assert!(!selectors.contains(&EventSelector::Prefix("agent.".to_owned())));
 }
@@ -48,7 +50,6 @@ fn chat_subscription_uses_no_prefix_selectors() {
         EventName::SESSION_STARTED,
         EventName::SESSION_SHUTDOWN,
         EventName::SESSION_AGENT_UNLOADED,
-        EventName::PROVIDER_TOOL_RESULT,
         EventName::PROVIDER_TOOL_ERROR,
         EventName::PROVIDER_PROMPT_SUBMITTED,
         EventName::PROVIDER_RESPONSE_UPDATED,

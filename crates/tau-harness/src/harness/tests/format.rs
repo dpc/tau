@@ -8,6 +8,7 @@ fn format_session_entry_tree_preview_shows_grouped_tool_results() {
             tool_type: tau_proto::ToolType::Function,
             status: tau_proto::ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("hello".to_owned())),
+            provider_content: Vec::new(),
         }],
     };
     assert_eq!(
@@ -21,6 +22,7 @@ fn format_session_entry_tree_preview_shows_grouped_tool_results() {
             tool_type: tau_proto::ToolType::Function,
             status: tau_proto::ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("é".repeat(81))),
+            provider_content: Vec::new(),
         }],
     };
     let formatted = format_session_entry(&multibyte_result);

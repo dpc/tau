@@ -52,7 +52,9 @@ impl DebugEventLog {
                     }
                     _ => "<message>".to_owned(),
                 };
-                let mut frame_json = serde_json::to_value(message).unwrap_or_default();
+                let mut redacted_message = message.as_ref().clone();
+                redact_harness_input_message_binary_content(&mut redacted_message);
+                let mut frame_json = serde_json::to_value(redacted_message).unwrap_or_default();
                 compact_debug_json_strings(&mut frame_json);
                 serde_json::json!({
                     "type": "from_connection",
@@ -93,7 +95,7 @@ impl DebugEventLog {
         event: &Event,
         recorded_at: UnixMicros,
     ) {
-        let mut event_json = serde_json::to_value(event).unwrap_or_default();
+        let mut event_json = debug_event_json(event);
         redact_debug_event(&mut event_json);
         compact_debug_json_strings(&mut event_json);
         let entry = serde_json::json!({
@@ -111,6 +113,51 @@ impl DebugEventLog {
         let _ = serde_json::to_writer(&mut self.file, entry);
         let _ = self.file.write_all(b"\n");
         let _ = self.file.flush();
+    }
+}
+
+fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessInputMessage) {
+    match message {
+        tau_proto::HarnessInputMessage::Emit(emit) => {
+            redact_event_binary_content(&mut emit.event);
+        }
+        tau_proto::HarnessInputMessage::InterceptReply(reply) => {
+            if let tau_proto::InterceptAction::Pass(Some(event)) = &mut reply.action {
+                redact_event_binary_content(event);
+            }
+        }
+        tau_proto::HarnessInputMessage::CompleteTransportSend(request) => {
+            for part in &mut request.tool_result.provider_content {
+                let tau_proto::ToolResultContentPart::Image(image) = part;
+                image.data = std::sync::Arc::from([]);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn debug_event_json(event: &Event) -> serde_json::Value {
+    let mut redacted = event.clone();
+    redact_event_binary_content(&mut redacted);
+    serde_json::to_value(redacted).unwrap_or_default()
+}
+
+fn redact_event_binary_content(event: &mut Event) {
+    match event {
+        Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+            for part in &mut result.provider_content {
+                let tau_proto::ToolResultContentPart::Image(image) = part;
+                image.data = std::sync::Arc::from([]);
+            }
+        }
+        Event::AgentPromptCreated(prompt) => prompt.context.clear_provider_image_bytes(),
+        Event::AgentCompacted(compacted) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
+        }
+        Event::ProviderResponseFinished(finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+        }
+        _ => {}
     }
 }
 

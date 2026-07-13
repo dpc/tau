@@ -327,6 +327,22 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ModelTag::new("tools:custom-text"),
         ],
         supported_tool_types: vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom],
+        input_modalities: if is_gpt_5_6(model) {
+            vec![
+                tau_proto::InputModality::Text,
+                tau_proto::InputModality::Image,
+            ]
+        } else {
+            vec![tau_proto::InputModality::Text]
+        },
+        tool_result_modalities: if is_gpt_5_6(model) {
+            vec![
+                tau_proto::InputModality::Text,
+                tau_proto::InputModality::Image,
+            ]
+        } else {
+            vec![tau_proto::InputModality::Text]
+        },
         default_affinity: default_affinity_for_model(model),
         context_window: effective_context_window_for_model(model),
         efforts: efforts_for_model(model),
@@ -374,7 +390,7 @@ fn uses_responses_lite(model: &str) -> bool {
 }
 
 fn is_gpt_5_6(model: &str) -> bool {
-    model.starts_with("gpt-5.6-")
+    matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
 }
 
 fn efforts_for_model(model: &str) -> Vec<Effort> {

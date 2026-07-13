@@ -94,6 +94,7 @@ fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
         result: CborValue::Text("done".to_owned()),
+        provider_content: Vec::new(),
         kind,
         display: None,
         originator: PromptOriginator::User,
