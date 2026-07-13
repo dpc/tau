@@ -1650,6 +1650,7 @@ mod mode;
 mod model;
 mod replay;
 mod reply_projection;
+mod retry;
 mod strict_compaction_provider;
 
 use strict_compaction_provider::{

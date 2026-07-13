@@ -1,5 +1,7 @@
 //! Shared constructors for UI protocol events.
 
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tau_proto::{Event, UiRoleUpdateAction};
@@ -12,6 +14,26 @@ pub(crate) fn cancel_prompt(
     // is in flight there, regardless of spid. The targeted variant is used by
     // the harness for surgical preempts.
     Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+        session_id: session_id.into(),
+        target_agent_id,
+        agent_prompt_id: None,
+    })
+}
+
+pub(crate) fn retry_prompt(session_id: &str, target_agent_id: Option<tau_proto::AgentId>) -> Event {
+    static NEXT_RETRY_ID: AtomicU64 = AtomicU64::new(0);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    // Fixed-width process/time/counter IDs avoid wall-clock collisions while
+    // remaining valid across independent UI processes.
+    let nonce = time
+        ^ u64::from(process::id()).rotate_left(32)
+        ^ NEXT_RETRY_ID.fetch_add(1, Ordering::Relaxed);
+    Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+        request_id: tau_proto::RetryPromptRequestId::parse(format!("{nonce:016x}"))
+            .expect("valid retry request id"),
         session_id: session_id.into(),
         target_agent_id,
         agent_prompt_id: None,

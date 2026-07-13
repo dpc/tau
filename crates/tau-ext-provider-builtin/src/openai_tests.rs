@@ -167,6 +167,29 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     bytes
 }
 
+/// Waits for a complete runtime output snapshot satisfying `predicate`.
+///
+/// Runtime tests use this only to observe a protocol boundary; worker and
+/// scheduler ordering itself is controlled by channels and input frame order.
+fn wait_for_runtime_frames(
+    output: &SharedWriter,
+    predicate: impl Fn(&[HarnessInputMessage]) -> bool,
+) -> Vec<HarnessInputMessage> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(frames) = try_decode_frames(&output.bytes())
+            && predicate(&frames)
+        {
+            return frames;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "runtime output boundary not reached"
+        );
+        thread::yield_now();
+    }
+}
+
 fn live_event(recorded_at: u64, event: Event) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::new(recorded_at), event)
 }
@@ -270,6 +293,7 @@ fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         backend: PromptBackend::Unavailable,
         retry_state: PromptRetryState::default(),
         cancel_generation: 0,
+        manual_cooldown_bypass: false,
     }
 }
 
@@ -294,9 +318,13 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
     let unaffected_due = epoch + Duration::from_secs(12);
     let mut queue = RetryScheduleQueue::default();
     for id in ["same-1", "same-2", "same-3", "same-4"] {
-        queue.schedule(initial_due, scheduled_job(id, "limited"));
+        queue
+            .schedule(initial_due, scheduled_job(id, "limited"))
+            .unwrap_or_else(|_| panic!("unique parked prompt"));
     }
-    queue.schedule(unaffected_due, scheduled_job("peer", "healthy"));
+    queue
+        .schedule(unaffected_due, scheduled_job("peer", "healthy"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
 
     queue.extend_cooldown(&ProviderName::new("limited"), extended_boundary);
 
@@ -349,8 +377,12 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
 fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
     let due = Instant::now() + Duration::from_secs(86_400);
     let mut queue = RetryScheduleQueue::default();
-    queue.schedule(due, scheduled_job("target", "limited"));
-    queue.schedule(due, scheduled_job("peer", "limited"));
+    queue
+        .schedule(due, scheduled_job("target", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+    queue
+        .schedule(due, scheduled_job("peer", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
 
     let canceled = queue.cancel(&"target".into());
     assert_eq!(canceled.len(), 1);
@@ -362,6 +394,77 @@ fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
         "global cancellation must synchronously drain the remaining queue"
     );
     assert_eq!(queue.len(), 0);
+}
+
+/// Proves the scheduler ownership linearization used by timer-versus-manual
+/// races: whichever removal runs first obtains the only logical job.
+#[test]
+fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
+    let now = Instant::now();
+    let mut timer_wins = RetryScheduleQueue::default();
+    timer_wins
+        .schedule(now, scheduled_job("timer-wins", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+    assert!(timer_wins.pop_due(now).is_some());
+    assert!(timer_wins.cancel(&"timer-wins".into()).is_empty());
+
+    let mut manual_wins = RetryScheduleQueue::default();
+    manual_wins
+        .schedule(now, scheduled_job("manual-wins", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+    assert_eq!(manual_wins.cancel(&"manual-wins".into()).len(), 1);
+    assert!(manual_wins.pop_due(now).is_none());
+}
+
+/// Proves repeated manual commands cannot clone scheduler-owned state and a
+/// peer parked under the same provider cooldown remains untouched.
+#[test]
+fn retry_schedule_queue_double_manual_release_moves_exactly_one_job() {
+    let due = Instant::now() + Duration::from_secs(60);
+    let mut queue = RetryScheduleQueue::default();
+    queue
+        .schedule(due, scheduled_job("target", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+    queue
+        .schedule(due, scheduled_job("peer", "limited"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+
+    let first = queue.cancel(&"target".into());
+    let second = queue.cancel(&"target".into());
+    assert_eq!(first.len(), 1);
+    assert!(second.is_empty());
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        queue.cancel(&"peer".into())[0].agent_prompt_id.as_str(),
+        "peer"
+    );
+}
+
+/// Proves an atomic manual transfer preserves retry accounting and all prompt
+/// identity/origin data; only the later main-loop admission sets its one-shot
+/// cooldown bypass.
+#[test]
+fn retry_schedule_queue_manual_transfer_preserves_logical_prompt_state() {
+    let due = Instant::now() + Duration::from_secs(60);
+    let mut job = scheduled_job("target", "limited");
+    job.retry_state.attempts = 7;
+    job.retry_state.previous = 13;
+    job.retry_state.current = 21;
+    job.debug_provider_requests = true;
+    let expected_prompt = job.prompt.clone();
+    let mut queue = RetryScheduleQueue::default();
+    assert!(queue.schedule(due, job).is_ok(), "unique parked prompt");
+
+    let mut transferred = queue.cancel(&"target".into()).pop().expect("parked job");
+    assert_eq!(transferred.retry_state.attempts, 7);
+    assert_eq!(transferred.retry_state.previous, 13);
+    assert_eq!(transferred.retry_state.current, 21);
+    assert!(transferred.debug_provider_requests);
+    assert_eq!(transferred.prompt, expected_prompt);
+    assert!(!transferred.manual_cooldown_bypass);
+
+    transferred.manual_cooldown_bypass = true;
+    assert!(transferred.manual_cooldown_bypass);
 }
 
 /// Exercises the exact worker-channel commit handoff: output is queued first,
@@ -699,6 +802,20 @@ fn prompt_workers_start_concurrently() {
     assert_eq!(finished_count, 2);
 }
 
+/// A second parked instance of one APID is rejected at insertion so timer and
+/// manual operations can never dispatch two copies of one logical prompt.
+#[test]
+fn retry_schedule_rejects_duplicate_prompt_identity() {
+    let mut queue = RetryScheduleQueue::default();
+    let due = Instant::now() + Duration::from_secs(30);
+    queue
+        .schedule(due, scheduled_job("same", "limited"))
+        .unwrap_or_else(|_| panic!("first owner"));
+    let duplicate = queue.schedule(due, scheduled_job("same", "limited"));
+    assert!(duplicate.is_err(), "duplicate APID must be returned");
+    assert_eq!(queue.len(), 1, "original remains the sole parked owner");
+}
+
 /// Ensures a retryable attempt is parked outside the worker pool and later
 /// succeeds without duplicating the logical prompt lifecycle.
 #[test]
@@ -753,43 +870,70 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         .expect("run provider");
     });
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let frames = decode_frames(&output.bytes());
-        if frames.iter().any(|frame| {
+    // Wait until the failed attempt has crossed the main loop and is owned by
+    // the scheduler, then exercise the real control path rather than waiting
+    // for its timer.
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("runtime-manual-1")
+                .expect("valid retry request id"),
+            session_id: "s1".into(),
+            target_agent_id: Some(
+                tau_proto::AgentId::parse("agent-1").expect("valid test agent id"),
+            ),
+            agent_prompt_id: Some("sp-1".into()),
+        }),
+    )]));
+
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
                 Some(Event::ProviderResponseFinished(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
-        }) {
-            let submitted = frames
-                .iter()
-                .filter(|frame| {
-                    matches!(
-                        input_event(frame),
-                        Some(Event::ProviderPromptSubmitted(submitted))
-                            if submitted.agent_prompt_id.as_str() == "sp-1"
-                    )
-                })
-                .count();
-            let finished = frames
-                .iter()
-                .filter(|frame| {
-                    matches!(
-                        input_event(frame),
-                        Some(Event::ProviderResponseFinished(finished))
-                            if finished.agent_prompt_id.as_str() == "sp-1"
-                    )
-                })
-                .count();
-            assert_eq!(submitted, 1);
-            assert_eq!(finished, 1);
-            break;
-        }
-        assert!(Instant::now() < deadline, "retry did not become due");
-        thread::sleep(Duration::from_millis(5));
-    }
+        })
+    });
+    let submitted = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmitted(submitted))
+                    if submitted.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+        .count();
+    let finished = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+        .count();
+    assert_eq!(submitted, 1);
+    assert_eq!(finished, 1);
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            input_event(frame),
+            Some(Event::ProviderRetryPromptResult(result))
+                if result.request_id.as_str() == "runtime-manual-1"
+                    && result.status == tau_proto::RetryPromptStatus::Accepted
+        )
+    }));
     input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
         tau_proto::Disconnect {
             reason: Some("done".to_owned()),
@@ -798,6 +942,321 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
     input.close();
     runtime.join().expect("runtime join");
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+/// Ensures manual scheduler ownership transfer decrements the delayed count in
+/// the main loop, so EOF can finish after the admitted attempt completes.
+#[test]
+fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let attempt = execution.job.retry_state.attempts;
+        attempt_tx.send(attempt).expect("report admitted attempt");
+        if attempt == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Transport),
+                },
+            )
+            .expect("park first attempt");
+        } else {
+            let mut writer = execution.frame_writer();
+            writer
+                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                    simple_finished(
+                        execution.job.agent_prompt_id,
+                        execution.job.prompt.agent_id,
+                        execution.job.prompt.originator,
+                        "done",
+                    ),
+                )))
+                .expect("finish manual attempt");
+            writer.flush().expect("flush finish");
+        }
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    assert_eq!(attempt_rx.recv().expect("first attempt"), 0);
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("count-transfer")
+                .expect("valid retry request id"),
+            session_id: "session-1".into(),
+            target_agent_id: None,
+            agent_prompt_id: Some("sp-1".into()),
+        }),
+    )]));
+    assert_eq!(attempt_rx.recv().expect("manually admitted attempt"), 1);
+    input.close();
+    runtime.join().expect("runtime exits with no delayed owner");
+    let frames = decode_frames(&output.bytes());
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderRetryPromptResult(result))
+            if result.request_id.as_str() == "count-transfer"
+                && result.status == tau_proto::RetryPromptStatus::Accepted
+    )));
+}
+
+/// Ensures ordered session shutdown wins against a following manual request:
+/// the parked job is canceled once, cannot be admitted, and is never
+/// resurrected.
+#[test]
+fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        executor_attempts.fetch_add(1, Ordering::SeqCst);
+        send_worker_message(
+            &execution.output_tx,
+            &execution.output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::Transport),
+            },
+        )
+        .expect("park attempt");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    input.push(encode_frames(&[
+        live_event(
+            12,
+            Event::SessionShutdown(tau_proto::SessionShutdown {
+                session_id: "session-1".into(),
+            }),
+        ),
+        live_event(
+            13,
+            Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+                request_id: tau_proto::RetryPromptRequestId::parse("after-shutdown")
+                    .expect("valid retry request id"),
+                session_id: "session-1".into(),
+                target_agent_id: None,
+                agent_prompt_id: Some("sp-1".into()),
+            }),
+        ),
+    ]));
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResult(result))
+                    if result.request_id.as_str() == "after-shutdown"
+            )
+        })
+    });
+    input.close();
+    runtime.join().expect("shutdown runtime");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmitted(submitted))
+                    if submitted.agent_prompt_id.as_str() == "sp-1"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            ))
+            .count(),
+        1
+    );
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderRetryPromptResult(result))
+            if result.request_id.as_str() == "after-shutdown"
+                && result.status == tau_proto::RetryPromptStatus::NotParked
+    )));
+}
+
+/// Ensures clicking retry does not alter attempt accounting: a retryable manual
+/// attempt re-parks at the next normal backoff step and later completes once.
+#[test]
+fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let attempt = execution.job.retry_state.attempts;
+        attempt_tx.send(attempt).expect("report attempt");
+        if attempt < 2 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Transport),
+                },
+            )
+            .expect("return retry");
+        } else {
+            let mut writer = execution.frame_writer();
+            writer
+                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                    simple_finished(
+                        execution.job.agent_prompt_id,
+                        execution.job.prompt.agent_id,
+                        execution.job.prompt.originator,
+                        "done",
+                    ),
+                )))
+                .expect("finish");
+            writer.flush().expect("flush finish");
+        }
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    assert_eq!(attempt_rx.recv().expect("initial attempt"), 0);
+    for (recorded_at, request_id, expected_attempt) in
+        [(12, "manual-first", 1_u64), (13, "manual-second", 2_u64)]
+    {
+        wait_for_runtime_frames(&output, |frames| {
+            frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderResponseUpdated(update))
+                            if update.status.as_ref().is_some_and(|status| status.retry.is_some())
+                    )
+                })
+                .count()
+                >= expected_attempt as usize
+        });
+        input.push(encode_frames(&[live_event(
+            recorded_at,
+            Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+                request_id: tau_proto::RetryPromptRequestId::parse(request_id)
+                    .expect("valid retry request id"),
+                session_id: "session-1".into(),
+                target_agent_id: None,
+                agent_prompt_id: Some("sp-1".into()),
+            }),
+        )]));
+        assert_eq!(attempt_rx.recv().expect("manual attempt"), expected_attempt);
+    }
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+    });
+    let retry_attempts = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseUpdated(update)) => update
+                .status
+                .as_ref()?
+                .retry
+                .as_ref()
+                .map(|retry| retry.attempt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retry_attempts, vec![1, 2]);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            ))
+            .count(),
+        1
+    );
+    input.close();
+    runtime.join().expect("runtime join");
 }
 
 /// A typed context-window rejection bypasses the effectively unlimited logical
@@ -2308,6 +2767,7 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
             tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
             tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
             tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+            tau_proto::EventSelector::Exact(EventName::SESSION_SHUTDOWN),
         ],
         "provider startup subscriptions must stay exact and must not include direct prompt routing",
     );

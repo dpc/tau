@@ -3072,6 +3072,107 @@ pub struct UiCancelPrompt {
     pub agent_prompt_id: Option<AgentPromptId>,
 }
 
+/// Maximum encoded length of a manual provider-retry correlation identifier.
+pub const MAX_RETRY_PROMPT_REQUEST_ID_LEN: usize = 64;
+
+/// Correlation identifier for one manual provider-retry request.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RetryPromptRequestId(String);
+
+impl RetryPromptRequestId {
+    /// Validates and constructs a bounded, path-safe correlation identifier.
+    pub fn parse(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("retry prompt request id must not be empty");
+        }
+        if value.len() > MAX_RETRY_PROMPT_REQUEST_ID_LEN {
+            return Err("retry prompt request id is too long");
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("retry prompt request id contains invalid characters");
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated wire representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RetryPromptRequestId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<RetryPromptRequestId> for String {
+    fn from(value: RetryPromptRequestId) -> Self {
+        value.0
+    }
+}
+
+/// Request that a selected prompt's provider-owned delayed retry run now.
+///
+/// UIs leave [`Self::agent_prompt_id`] empty. The harness resolves and fills it
+/// before directing the request to the provider that owns the prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRetryPrompt {
+    /// Correlates the provider result with the invoking UI.
+    pub request_id: RetryPromptRequestId,
+    /// Session captured when the UI submitted the command.
+    pub session_id: SessionId,
+    /// Agent captured when the UI submitted the command.
+    pub target_agent_id: Option<AgentId>,
+    /// Exact logical prompt, filled only by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_prompt_id: Option<AgentPromptId>,
+}
+
+/// Authoritative outcome of a provider scheduler's atomic ownership check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryPromptStatus {
+    /// The parked job was transferred to the normal runnable queue.
+    Accepted,
+    /// The scheduler did not own a parked job with this prompt id.
+    NotParked,
+}
+
+/// Provider response to a targeted [`UiRetryPrompt`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRetryPromptResult {
+    /// Correlation identifier copied from the request.
+    pub request_id: RetryPromptRequestId,
+    /// Exact logical prompt checked by the provider scheduler.
+    pub agent_prompt_id: AgentPromptId,
+    /// Result of the atomic ownership check.
+    pub status: RetryPromptStatus,
+}
+
+/// Requester-directed outcome of a manual retry command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRetryPromptResult {
+    /// Correlation identifier copied from the request.
+    pub request_id: RetryPromptRequestId,
+    /// Agent captured by the request, when one was resolvable.
+    pub target_agent_id: Option<AgentId>,
+    /// Stable display label captured before asynchronous provider work.
+    pub target_label: String,
+    /// Authoritative scheduler result, or `None` for harness rejection.
+    pub status: Option<RetryPromptStatus>,
+    /// User-facing result text.
+    pub message: String,
+}
+
 /// Request that the harness remove and return the most recently queued user
 /// prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -4416,6 +4517,10 @@ pub enum Event {
     UiCompactRequest(UiCompactRequest),
     #[serde(rename = "ui.cancel_prompt")]
     UiCancelPrompt(UiCancelPrompt),
+    #[serde(rename = "ui.retry_prompt")]
+    UiRetryPrompt(UiRetryPrompt),
+    #[serde(rename = "ui.retry_prompt_result")]
+    UiRetryPromptResult(UiRetryPromptResult),
     #[serde(rename = "ui.recall_queued_prompt")]
     UiRecallQueuedPrompt(UiRecallQueuedPrompt),
     #[serde(rename = "ui.set_agent_display_name")]
@@ -4498,6 +4603,8 @@ pub enum Event {
     ProviderResponseUpdated(ProviderResponseUpdated),
     #[serde(rename = "provider.response_finished")]
     ProviderResponseFinished(ProviderResponseFinished),
+    #[serde(rename = "provider.retry_prompt_result")]
+    ProviderRetryPromptResult(ProviderRetryPromptResult),
     #[serde(rename = "provider.cache_miss_diagnostic")]
     ProviderCacheMissDiagnostic(ProviderCacheMissDiagnostic),
 }
@@ -4656,6 +4763,8 @@ impl Event {
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
+            Self::UiRetryPrompt(_) => EventName::UI_RETRY_PROMPT,
+            Self::UiRetryPromptResult(_) => EventName::UI_RETRY_PROMPT_RESULT,
             Self::UiRecallQueuedPrompt(_) => EventName::UI_RECALL_QUEUED_PROMPT,
             Self::UiSetAgentDisplayName(_) => EventName::UI_SET_AGENT_DISPLAY_NAME,
             _ => return None,
@@ -4726,6 +4835,7 @@ impl Event {
             Self::ProviderPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
             Self::ProviderResponseUpdated(_) => EventName::PROVIDER_RESPONSE_UPDATED,
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
+            Self::ProviderRetryPromptResult(_) => EventName::PROVIDER_RETRY_PROMPT_RESULT,
             Self::ProviderCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
             _ => return None,
         }

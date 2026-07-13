@@ -10,6 +10,11 @@ Harness-owned prompt commands, currently `/skill <name> ...` and
 `/skill:<name> ...`, are completed and echoed by the CLI but must still be
 submitted as prompts so the harness can resolve skills and inject their content.
 
+`/retry` is a static CLI-owned command whose work is harness-routed. The CLI
+captures the current session and selected agent; it never resubmits prompt text.
+The harness resolves the exact in-flight prompt and directly addresses its
+provider owner, then directs the correlated typed result only to the invoking UI.
+
 Until action schemas can mark sensitive arguments, the CLI has one narrow
 action-specific redaction exception: `/email auth google finish ...` is redacted
 in command echo and persistent prompt history because its pasted loopback URL

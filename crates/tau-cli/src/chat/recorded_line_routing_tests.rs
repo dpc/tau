@@ -134,6 +134,49 @@ fn route_line(line: &str, dynamic_consumes: bool) -> Vec<String> {
     handlers.outputs
 }
 
+/// The core retry command must remain in static completion and only its exact
+/// argument-free spelling may be consumed locally; malformed variants must not
+/// become an accidental prompt resubmission.
+#[test]
+fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
+    assert!(BUILTIN_SLASH_COMMANDS.iter().any(|(name, description)| {
+        *name == "/retry" && description.contains("delayed provider retry")
+    }));
+    assert!(is_local_slash_command("/retry"));
+    assert!(
+        is_local_slash_command("/retry now"),
+        "argument errors stay local instead of becoming prompts"
+    );
+    assert!(
+        is_local_slash_command("/retry "),
+        "trailing whitespace stays local for exact-parser rejection"
+    );
+}
+
+/// A correlated retry result is rendered as requester-visible output rather
+/// than being silently consumed as provider-control plumbing.
+#[test]
+fn retry_prompt_result_renderer_displays_harness_message() {
+    let (_term, handle, vt) = mini_term(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::new(),
+    );
+    renderer.handle(&Event::UiRetryPromptResult(
+        tau_proto::UiRetryPromptResult {
+            request_id: tau_proto::RetryPromptRequestId::parse("retry-render")
+                .expect("valid retry request id"),
+            target_agent_id: Some(tau_proto::AgentId::parse("agent-a").expect("valid agent id")),
+            target_label: "worker".into(),
+            status: Some(tau_proto::RetryPromptStatus::Accepted),
+            message: "Retrying agent worker now.".into(),
+        },
+    ));
+    handle.redraw_sync();
+    assert!(vt.screen_contains(80, "Retrying agent worker now."));
+}
+
 /// Dynamic action preparation uses the same selected-agent mirror as the input
 /// loop and emits a renderer owner command whose invocation id matches the
 /// harness `action.invoke`. This protects completion routing from drifting away

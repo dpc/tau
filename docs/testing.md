@@ -69,6 +69,12 @@ profile reload before a later success, and exactly one submitted/terminal
 lifecycle. Backend fixtures should cover Responses HTTP/SSE/WebSocket, generic
 Chat Completions, and OpenRouter retry-then-success paths, including tentative
 output clearing and trusted hint lower bounds.
+Manual `/retry` coverage must drive the scheduler/runtime boundary
+deterministically: assert delayed-count transfer, timer/manual and
+shutdown/manual ownership races, one-shot cooldown bypass, and that a failed
+manually released attempt increments accounting once and parks again normally.
+CLI coverage must separately prove static completion, exact argument-free
+parsing without prompt resubmission, and requester-visible result rendering.
 
 ## Provider stream repetition guard
 

@@ -624,6 +624,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Exit the chat session"),
     ("/cancel", "Cancel the current in-flight prompt"),
     (
+        "/retry",
+        "Run the selected agent's delayed provider retry now",
+    ),
+    (
         "/detach",
         "Leave the UI but keep the harness running for later reattach",
     ),
@@ -2085,6 +2089,20 @@ impl<'a> TerminalInputSession<'a> {
             self.send_cancel_prompt();
             return Ok(CommandOutcome::Continue);
         }
+        if text == "/retry" {
+            let _ = send_event(
+                self.writer,
+                &crate::ui_events::retry_prompt(self.session_id, self.selected_side_agent_id()),
+            );
+            return Ok(CommandOutcome::Continue);
+        }
+        if text
+            .strip_prefix("/retry")
+            .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
+        {
+            self.output.system_info("usage: /retry");
+            return Ok(CommandOutcome::Continue);
+        }
         if text == "/detach" {
             // Tell the harness to stay alive after we leave,
             // then exit the UI. If the write fails we still
@@ -3309,6 +3327,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
         command,
         "/quit"
             | "/cancel"
+            | "/retry"
             | "/detach"
             | "/session"
             | "/tree"

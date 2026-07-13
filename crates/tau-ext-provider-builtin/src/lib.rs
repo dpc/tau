@@ -17,7 +17,7 @@ use std::error::Error;
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -575,6 +575,14 @@ where
                 tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
                 handle_provider_delivery::<F>,
             )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::SESSION_SHUTDOWN),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_routed_live(
+                tau_proto::EventSelector::Exact(EventName::UI_RETRY_PROMPT),
+                handle_provider_delivery::<F>,
+            )
             .on_raw_routed_live(
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
                 handle_provider_delivery::<F>,
@@ -733,6 +741,8 @@ where
             Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm),
             Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt, handle)?,
             Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel, handle)?,
+            Event::UiRetryPrompt(retry) => self.handle_retry_prompt(retry)?,
+            Event::SessionShutdown(_) => self.handle_session_shutdown(handle)?,
             _ => {}
         }
         Ok(())
@@ -802,6 +812,7 @@ where
             backend,
             retry_state: PromptRetryState::default(),
             cancel_generation: self.cancel_generation,
+            manual_cooldown_bypass: false,
         };
         if let Some(cooldown) = self
             .shared_cooldowns
@@ -854,6 +865,29 @@ where
             self.cancellation.take_canceled(&apid);
         }
         Ok(())
+    }
+
+    fn handle_retry_prompt(&mut self, retry: tau_proto::UiRetryPrompt) -> ClientResult<()> {
+        let Some(agent_prompt_id) = retry.agent_prompt_id else {
+            return Ok(());
+        };
+        if let Some(scheduler) = &self.retry_scheduler {
+            scheduler.retry_now(retry.request_id, agent_prompt_id);
+        }
+        Ok(())
+    }
+
+    /// Cancels every old-session job before the provider accepts work for a
+    /// replacement session.
+    fn handle_session_shutdown(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        self.handle_cancel_prompt(
+            tau_proto::UiCancelPrompt {
+                session_id: tau_proto::SessionId::default(),
+                target_agent_id: None,
+                agent_prompt_id: None,
+            },
+            handle,
+        )
     }
 
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
@@ -952,11 +986,54 @@ where
                         .unwrap_or(PromptBackend::Unavailable);
                     self.prompt_queue.push_back(job);
                 }
-                Ok(WorkerMessage::DelayedCanceled(job)) => {
+                Ok(WorkerMessage::ManualRetry {
+                    mut job,
+                    request_id,
+                    agent_prompt_id,
+                }) => {
+                    let status = if let Some(mut owned_job) = job.take() {
+                        if let Some(scheduler) = &self.retry_scheduler {
+                            scheduler
+                                .delayed_count
+                                .fetch_sub(1, AtomicOrdering::Relaxed);
+                        }
+                        if self.input_closed
+                            || owned_job.cancel_generation != self.cancel_generation
+                            || self.cancellation.take_canceled(&owned_job.agent_prompt_id)
+                        {
+                            self.finish_canceled_prompt(
+                                &owned_job.agent_prompt_id,
+                                &owned_job.prompt,
+                                handle,
+                            )?;
+                            tau_proto::RetryPromptStatus::NotParked
+                        } else {
+                            let mut profiles = (self.load_prompt_profiles)();
+                            owned_job.backend =
+                                resolve_prompt_backend(&owned_job.prompt.model, &mut profiles)
+                                    .unwrap_or(PromptBackend::Unavailable);
+                            owned_job.manual_cooldown_bypass = true;
+                            self.prompt_queue.push_back(owned_job);
+                            tau_proto::RetryPromptStatus::Accepted
+                        }
+                    } else {
+                        tau_proto::RetryPromptStatus::NotParked
+                    };
+                    let mut frame_writer = handle_frame_writer(handle);
+                    frame_writer.write_message(&HarnessInputMessage::emit(
+                        Event::ProviderRetryPromptResult(tau_proto::ProviderRetryPromptResult {
+                            request_id,
+                            agent_prompt_id,
+                            status,
+                        }),
+                    ))?;
+                    frame_writer.flush()?;
+                }
+                Ok(WorkerMessage::DelayedCanceled { job, delayed_count }) => {
                     if let Some(scheduler) = &self.retry_scheduler {
                         scheduler
                             .delayed_count
-                            .fetch_sub(1, AtomicOrdering::Relaxed);
+                            .fetch_sub(delayed_count, AtomicOrdering::Relaxed);
                     }
                     self.cancellation.take_canceled(&job.agent_prompt_id);
                     self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
@@ -969,6 +1046,10 @@ where
     fn park_cooled_queued_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         let mut index = 0;
         while index < self.prompt_queue.len() {
+            if self.prompt_queue[index].manual_cooldown_bypass {
+                index += 1;
+                continue;
+            }
             let Some(cooldown) = self
                 .prompt_queue
                 .get(index)
@@ -1051,6 +1132,8 @@ struct PromptJob {
     retry_state: PromptRetryState,
     /// Runtime global-cancel generation at logical prompt creation.
     cancel_generation: u64,
+    /// Lets one manually released job pass a still-active shared cooldown once.
+    manual_cooldown_bypass: bool,
 }
 
 /// Shared provider-profile lower bound and its visible normalized reason.
@@ -1147,13 +1230,21 @@ struct RetryScheduleQueue {
 
 impl RetryScheduleQueue {
     /// Adds one logical prompt at its current eligible deadline.
-    fn schedule(&mut self, due: Instant, job: PromptJob) {
+    fn schedule(&mut self, due: Instant, job: PromptJob) -> Result<(), Box<PromptJob>> {
+        if self
+            .prompts
+            .iter()
+            .any(|scheduled| scheduled.job.agent_prompt_id == job.agent_prompt_id)
+        {
+            return Err(Box::new(job));
+        }
         self.sequence = self.sequence.saturating_add(1);
         self.prompts.push(ScheduledPrompt {
             due,
             sequence: self.sequence,
             job,
         });
+        Ok(())
     }
 
     /// Removes and returns the next prompt when its deadline has arrived.
@@ -1268,6 +1359,10 @@ enum SchedulerCommand {
     },
     Cancel(tau_proto::AgentPromptId),
     CancelAll,
+    RetryNow {
+        request_id: tau_proto::RetryPromptRequestId,
+        agent_prompt_id: tau_proto::AgentPromptId,
+    },
     ExtendCooldown {
         provider: ProviderName,
         due: Instant,
@@ -1275,13 +1370,16 @@ enum SchedulerCommand {
 }
 
 struct RetryScheduler {
-    commands: Sender<SchedulerCommand>,
+    commands: SyncSender<SchedulerCommand>,
     delayed_count: Arc<AtomicUsize>,
 }
 
 impl RetryScheduler {
     fn start(worker_tx: Sender<WorkerMessage>, worker_waker: ManualRuntimeWaker) -> Self {
-        let (commands, receiver) = mpsc::channel();
+        // Bound scheduler admission independently of the parked-job heap. The
+        // harness already caps outstanding manual controls, and backpressure
+        // here also covers internal schedule/cancel/cooldown producers.
+        let (commands, receiver) = mpsc::sync_channel(1_024);
         let delayed_count = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
             run_retry_scheduler(receiver, worker_tx, worker_waker);
@@ -1312,6 +1410,17 @@ impl RetryScheduler {
 
     fn cancel_all(&self) {
         let _ = self.commands.send(SchedulerCommand::CancelAll);
+    }
+
+    fn retry_now(
+        &self,
+        request_id: tau_proto::RetryPromptRequestId,
+        agent_prompt_id: tau_proto::AgentPromptId,
+    ) {
+        let _ = self.commands.send(SchedulerCommand::RetryNow {
+            request_id,
+            agent_prompt_id,
+        });
     }
 
     fn extend_cooldown(&self, provider: ProviderName, due: Instant) {
@@ -1350,14 +1459,31 @@ fn run_retry_scheduler(
         };
         match command {
             Ok(SchedulerCommand::Schedule { due, job }) => {
-                queue.schedule(due, *job);
+                if let Err(duplicate) = queue.schedule(due, *job) {
+                    // A duplicated logical APID makes ownership ambiguous. Fail
+                    // the logical prompt closed once rather than retaining either
+                    // entry and risking two later dispatches.
+                    if let Some(original) = queue.cancel(&duplicate.agent_prompt_id).pop() {
+                        let _ = send_worker_message(
+                            &worker_tx,
+                            &worker_waker,
+                            WorkerMessage::DelayedCanceled {
+                                job: original,
+                                delayed_count: 2,
+                            },
+                        );
+                    }
+                }
             }
             Ok(SchedulerCommand::Cancel(prompt_id)) => {
                 for job in queue.cancel(&prompt_id) {
                     let _ = send_worker_message(
                         &worker_tx,
                         &worker_waker,
-                        WorkerMessage::DelayedCanceled(job),
+                        WorkerMessage::DelayedCanceled {
+                            job,
+                            delayed_count: 1,
+                        },
                     );
                 }
             }
@@ -1366,9 +1492,50 @@ fn run_retry_scheduler(
                     let _ = send_worker_message(
                         &worker_tx,
                         &worker_waker,
-                        WorkerMessage::DelayedCanceled(job),
+                        WorkerMessage::DelayedCanceled {
+                            job,
+                            delayed_count: 1,
+                        },
                     );
                 }
+            }
+            Ok(SchedulerCommand::RetryNow {
+                request_id,
+                agent_prompt_id,
+            }) => {
+                let mut matches = queue.cancel(&agent_prompt_id);
+                if matches.len() > 1 {
+                    if let Some(job) = matches.pop() {
+                        let _ = send_worker_message(
+                            &worker_tx,
+                            &worker_waker,
+                            WorkerMessage::DelayedCanceled {
+                                job,
+                                delayed_count: matches.len() + 1,
+                            },
+                        );
+                    }
+                    let _ = send_worker_message(
+                        &worker_tx,
+                        &worker_waker,
+                        WorkerMessage::ManualRetry {
+                            job: None,
+                            request_id,
+                            agent_prompt_id,
+                        },
+                    );
+                    continue;
+                }
+                let job = matches.pop();
+                let _ = send_worker_message(
+                    &worker_tx,
+                    &worker_waker,
+                    WorkerMessage::ManualRetry {
+                        job,
+                        request_id,
+                        agent_prompt_id,
+                    },
+                );
             }
             Ok(SchedulerCommand::ExtendCooldown { provider, due }) => {
                 queue.extend_cooldown(&provider, due);
@@ -1437,8 +1604,23 @@ enum WorkerMessage {
     },
     /// A delayed logical prompt whose retry deadline has arrived.
     RetryDue(PromptJob),
+    /// Result and optional owned job from an atomic manual scheduler release.
+    ManualRetry {
+        /// Parked job, or `None` when the timer/another command won.
+        job: Option<PromptJob>,
+        /// Request correlation identifier.
+        request_id: tau_proto::RetryPromptRequestId,
+        /// Exact prompt checked by the scheduler.
+        agent_prompt_id: tau_proto::AgentPromptId,
+    },
     /// A delayed prompt removed by targeted or global cancellation.
-    DelayedCanceled(PromptJob),
+    DelayedCanceled {
+        /// One representative owner used to emit exactly one terminal result.
+        job: PromptJob,
+        /// Number of scheduler entries removed for delayed-count
+        /// reconciliation.
+        delayed_count: usize,
+    },
 }
 
 /// Destination for decoded provider output frames.
@@ -1790,7 +1972,7 @@ fn start_queued_prompts(
     handle: &ClientHandle,
 ) -> ClientResult<()> {
     while *active_prompts < prompt_concurrency_limit {
-        let Some(job) = prompt_queue.pop_front() else {
+        let Some(mut job) = prompt_queue.pop_front() else {
             return Ok(());
         };
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
@@ -1799,6 +1981,7 @@ fn start_queued_prompts(
                 .map_err(|error| ClientError::handler(error.to_string()))?;
             continue;
         }
+        job.manual_cooldown_bypass = false;
         start_prompt_job(job, active_prompts, context);
     }
     Ok(())

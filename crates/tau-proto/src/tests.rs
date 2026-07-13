@@ -54,6 +54,96 @@ fn test_message_envelope() -> MessageEnvelope {
     }
 }
 
+/// Manual retry controls and their correlated provider result must retain exact
+/// prompt identity and typed scheduler status across the wire codec.
+#[test]
+fn retry_prompt_events_round_trip() {
+    let request = Event::UiRetryPrompt(UiRetryPrompt {
+        request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
+        session_id: "session-1".into(),
+        target_agent_id: Some(AgentId::parse("agent-1").expect("valid agent id")),
+        agent_prompt_id: Some("prompt-1".into()),
+    });
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&request, &mut encoded).expect("encode retry request");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(encoded.as_slice()).expect("decode retry request"),
+        request
+    );
+
+    let result = Event::ProviderRetryPromptResult(ProviderRetryPromptResult {
+        request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
+        agent_prompt_id: "prompt-1".into(),
+        status: RetryPromptStatus::Accepted,
+    });
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&result, &mut encoded).expect("encode retry result");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(encoded.as_slice()).expect("decode retry result"),
+        result
+    );
+
+    let ui_result = Event::UiRetryPromptResult(UiRetryPromptResult {
+        request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
+        target_agent_id: Some(AgentId::parse("agent-1").expect("valid agent id")),
+        target_label: "worker".into(),
+        status: Some(RetryPromptStatus::Accepted),
+        message: "Retrying agent worker now.".into(),
+    });
+    assert_eq!(ui_result.name(), EventName::UI_RETRY_PROMPT_RESULT);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&ui_result, &mut encoded).expect("encode UI retry result");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(encoded.as_slice()).expect("decode UI retry result"),
+        ui_result
+    );
+}
+
+/// Locks each retry-control stage into its intended directional wrapper so a
+/// future caller cannot accidentally send a provider result as a UI request or
+/// bypass the harness-owned requester delivery.
+#[test]
+fn retry_prompt_events_use_emit_and_deliver_directional_wrappers() {
+    let request = HarnessInputMessage::emit(Event::UiRetryPrompt(UiRetryPrompt {
+        request_id: RetryPromptRequestId::parse("retry-direction").expect("valid retry request id"),
+        session_id: "session-1".into(),
+        target_agent_id: Some(agent_id("agent-1")),
+        agent_prompt_id: None,
+    }));
+    let provider_result = HarnessInputMessage::emit(Event::ProviderRetryPromptResult(
+        ProviderRetryPromptResult {
+            request_id: RetryPromptRequestId::parse("retry-direction")
+                .expect("valid retry request id"),
+            agent_prompt_id: "prompt-1".into(),
+            status: RetryPromptStatus::NotParked,
+        },
+    ));
+    let ui_result =
+        HarnessOutputMessage::deliver(Event::UiRetryPromptResult(UiRetryPromptResult {
+            request_id: RetryPromptRequestId::parse("retry-direction")
+                .expect("valid retry request id"),
+            target_agent_id: Some(agent_id("agent-1")),
+            target_label: "worker".into(),
+            status: Some(RetryPromptStatus::NotParked),
+            message: "No delayed provider retry is waiting for agent worker.".into(),
+        }));
+
+    for input in [request, provider_result] {
+        let bytes = encode_harness_input_to_vec(&input).expect("encode retry input");
+        assert_eq!(
+            decode_harness_input_from_slice(&bytes).expect("decode retry input"),
+            input
+        );
+        assert!(decode_harness_output_from_slice(&bytes).is_err());
+    }
+    let bytes = encode_harness_output_to_vec(&ui_result).expect("encode retry delivery");
+    assert_eq!(
+        decode_harness_output_from_slice(&bytes).expect("decode retry delivery"),
+        ui_result
+    );
+    assert!(decode_harness_input_from_slice(&bytes).is_err());
+}
+
 /// Ensures manual-compaction request ids remain bounded and safe for notices,
 /// persistence keys, and provider-independent correlation.
 #[test]

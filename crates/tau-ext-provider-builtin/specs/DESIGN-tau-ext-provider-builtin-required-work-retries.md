@@ -1,6 +1,6 @@
 # DESIGN-tau-ext-provider-builtin-required-work-retries: Required provider work retries outside the worker pool
 
-Status: confirmed, 2026-07-11, tau-agent-jbkk
+Status: confirmed, 2026-07-12, user
 
 A logical prompt remains pending across retryable provider attempts until it
 succeeds, is canceled, the process/session shuts down, or the unchanged request
@@ -25,3 +25,9 @@ becomes due.
 Retry state is memory-only. Cold restart intentionally does not replay an
 ambiguously accepted request because doing so can duplicate output, cost, tools,
 or side effects.
+
+An explicit user `/retry` may atomically remove one exact `AgentPromptId` from
+the delayed scheduler before its deadline. This deliberately shortens even a
+trusted server delay for that job only. The same owned job and retry accounting
+are preserved, peers remain parked, and the released job bypasses the shared
+cooldown once before entering the normal bounded worker queue.

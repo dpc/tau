@@ -594,6 +594,11 @@ WebSocket-capable ChatGPT/Codex models stay on the WebSocket transport:
 retryable WebSocket failures return to Tau's in-memory logical-prompt scheduler, and
 terminal WebSocket errors are surfaced instead of silently falling back to
 HTTP/SSE.
+The built-in `/retry` command releases the selected agent's exact currently
+parked logical prompt immediately, without recreating or resubmitting it. The
+provider scheduler remains authoritative: running, capacity-queued, completed,
+terminal, and historical prompts are not eligible; shared cooldown peers remain
+parked; and a later retryable failure resumes ordinary accounting and backoff.
 
 Live ChatGPT/Codex streams have a default five-minute idle watchdog for both
 HTTP/SSE and WebSocket transports. The timer resets on each SSE `data:` event or

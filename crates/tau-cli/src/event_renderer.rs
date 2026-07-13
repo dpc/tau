@@ -5955,6 +5955,14 @@ impl EventRenderer {
                 self.handle_action_error(error);
                 true
             }
+            Event::UiRetryPromptResult(result) => {
+                use crate::tool_render::render_action_output_block;
+                self.handle.print_output(
+                    "retry-result",
+                    render_action_output_block(&self.theme, &result.message),
+                );
+                true
+            }
             Event::ActionInvoke(_) => true,
             _ => false,
         }

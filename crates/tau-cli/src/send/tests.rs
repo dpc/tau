@@ -44,6 +44,31 @@ fn cancel_requests_prompt_cancellation() {
     }
 }
 
+/// Headless send must provide the same exact logical-retry control as the
+/// interactive static slash command rather than submitting prompt text.
+#[test]
+fn retry_requests_exact_delayed_prompt_release() {
+    match event("/retry").expect("retry event") {
+        Event::UiRetryPrompt(retry) => {
+            assert_eq!(retry.session_id, SESSION_ID);
+            assert_eq!(retry.target_agent_id, None);
+            assert_eq!(retry.agent_prompt_id, None);
+        }
+        other => panic!("expected UiRetryPrompt, got {other:?}"),
+    }
+    assert!(
+        !matches!(event("/retry later"), Some(Event::UiRetryPrompt(_))),
+        "arguments must not invoke retry"
+    );
+    for malformed in ["/retry ", "/retry\tlater", "/retry\nlater"] {
+        assert_eq!(
+            event(malformed),
+            None,
+            "malformed retry syntax must neither retry nor become a prompt"
+        );
+    }
+}
+
 /// Tree commands are daemon-side operations, while malformed navigation
 /// stays a prompt.
 #[test]

@@ -1449,6 +1449,26 @@ struct PendingActionInvocation {
 }
 
 #[derive(Clone, Debug)]
+struct PendingRetryPrompt {
+    /// UI correlation retained only for the requester-directed result.
+    ui_request_id: tau_proto::RetryPromptRequestId,
+    provider_connection_id: tau_proto::ConnectionId,
+    requester_client_id: tau_proto::ConnectionId,
+    agent_prompt_id: AgentPromptId,
+    target_agent_id: AgentId,
+    target_label: String,
+}
+
+/// Mint a process-unique provider-stage token that cannot collide with a UI's
+/// replayable correlation namespace.
+fn next_provider_retry_token() -> tau_proto::RetryPromptRequestId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let value = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tau_proto::RetryPromptRequestId::parse(format!("harness-retry-{value}"))
+        .expect("harness retry token is valid")
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct PendingExternalAgentMessageAuth {
     /// Sender-minted bearer capability authorizing one outbound message.
     pub(crate) capability: String,
@@ -1733,6 +1753,12 @@ pub struct Harness {
     /// `invocation_id` → action provider/requester pair for UI-directed
     /// action result routing and source validation.
     pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
+    /// Correlated manual retry requests awaiting their exact provider owner.
+    pending_retry_prompts: HashMap<tau_proto::RetryPromptRequestId, PendingRetryPrompt>,
+    /// Process-lifetime replay guard for UI-chosen retry correlation ids.
+    seen_retry_prompt_requests: HashSet<(String, tau_proto::RetryPromptRequestId)>,
+    /// FIFO order for the bounded retry replay guard.
+    seen_retry_prompt_request_order: VecDeque<(String, tau_proto::RetryPromptRequestId)>,
     /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
     /// semantic state instead of retained event payloads.
     pub(crate) event_log: std::sync::Arc<EventLog>,
@@ -2459,6 +2485,9 @@ impl Harness {
             pending_transport_send_acks: HashMap::new(),
             completed_transport_send_order: VecDeque::new(),
             pending_action_invocations: HashMap::new(),
+            pending_retry_prompts: HashMap::new(),
+            seen_retry_prompt_requests: HashSet::new(),
+            seen_retry_prompt_request_order: VecDeque::new(),
             event_log: EventLog::new(),
             client_writers: HashMap::new(),
             external_message_peers: HashSet::new(),
@@ -7238,6 +7267,47 @@ impl Harness {
         event: Event,
     ) -> Result<Option<Event>, HarnessError> {
         match event {
+            Event::ProviderRetryPromptResult(result) => {
+                let Some(pending) = self.pending_retry_prompts.get(&result.request_id).cloned()
+                else {
+                    return Ok(None);
+                };
+                if pending.provider_connection_id.as_str() != source_id
+                    || pending.agent_prompt_id != result.agent_prompt_id
+                {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        source_id,
+                        agent_prompt_id = %result.agent_prompt_id,
+                        "discarding mismatched provider retry result"
+                    );
+                    return Ok(None);
+                }
+                self.pending_retry_prompts.remove(&result.request_id);
+                let message = match result.status {
+                    tau_proto::RetryPromptStatus::Accepted => {
+                        format!("Retrying agent {} now.", pending.target_label)
+                    }
+                    tau_proto::RetryPromptStatus::NotParked => format!(
+                        "No delayed provider retry is waiting for agent {}; it may already be running.",
+                        pending.target_label
+                    ),
+                };
+                let _ = self.bus.send_to(
+                    pending.requester_client_id.as_str(),
+                    Some(source_id),
+                    HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
+                        tau_proto::UiRetryPromptResult {
+                            request_id: pending.ui_request_id,
+                            target_agent_id: Some(pending.target_agent_id),
+                            target_label: pending.target_label,
+                            status: Some(result.status),
+                            message,
+                        },
+                    )),
+                );
+                Ok(None)
+            }
             Event::ProviderPromptSubmitted(submitted) => {
                 if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
                     && self.provider_prompt_owner_matches(
@@ -7569,6 +7639,10 @@ impl Harness {
                 .map(|keep_going| (keep_going, None)),
             Event::UiCancelPrompt(req) => {
                 self.handle_cancel_prompt(&req);
+                Ok((true, None))
+            }
+            Event::UiRetryPrompt(req) => {
+                self.handle_retry_prompt(client_id, req);
                 Ok((true, None))
             }
             Event::UiRecallQueuedPrompt(req) => {
@@ -8409,6 +8483,143 @@ impl Harness {
         self.apply_pending_cancel_for_agent(&cid);
     }
 
+    fn handle_retry_prompt(&mut self, client_id: &str, req: tau_proto::UiRetryPrompt) {
+        const RETRY_TOMBSTONE_LIMIT: usize = 1024;
+        const PENDING_RETRY_LIMIT: usize = 1024;
+        let reject = |this: &mut Self, target_agent_id, label: String, message: &str| {
+            let _ = this.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
+                    tau_proto::UiRetryPromptResult {
+                        request_id: req.request_id.clone(),
+                        target_agent_id,
+                        target_label: label,
+                        status: None,
+                        message: message.to_owned(),
+                    },
+                )),
+            );
+        };
+        let request_key = (client_id.to_owned(), req.request_id.clone());
+        if !self.seen_retry_prompt_requests.insert(request_key.clone()) {
+            reject(
+                self,
+                req.target_agent_id,
+                "selected agent".into(),
+                "Cannot retry: duplicate retry request.",
+            );
+            return;
+        }
+        self.seen_retry_prompt_request_order.push_back(request_key);
+        while self.seen_retry_prompt_request_order.len() > RETRY_TOMBSTONE_LIMIT {
+            if let Some(expired) = self.seen_retry_prompt_request_order.pop_front() {
+                self.seen_retry_prompt_requests.remove(&expired);
+            }
+        }
+        if req.session_id != self.current_session_id {
+            reject(
+                self,
+                req.target_agent_id,
+                "selected agent".into(),
+                "Cannot retry: the session is stale.",
+            );
+            return;
+        }
+        let Some(cid) = self.runtime_agent_id_for_target_agent(req.target_agent_id.as_deref())
+        else {
+            reject(
+                self,
+                req.target_agent_id,
+                "selected agent".into(),
+                "Cannot retry: no agent is selected.",
+            );
+            return;
+        };
+        let target_agent_id = self
+            .target_agent_id_for_agent(&cid)
+            .map(crate::parse_agent_id)
+            .expect("runtime agent has durable id");
+        let target_label = self
+            .agents
+            .get(&cid)
+            .and_then(|agent| normalize_display_name(agent.display_name.as_deref()))
+            .unwrap_or_else(|| target_agent_id.as_str().to_owned());
+        let Some(agent_prompt_id) = self
+            .agents
+            .get(&cid)
+            .and_then(|agent| agent.in_flight_prompt.clone())
+        else {
+            reject(
+                self,
+                Some(target_agent_id),
+                target_label,
+                "Cannot retry: the selected agent has no active prompt.",
+            );
+            return;
+        };
+        let Some(provider_connection_id) =
+            self.pending_provider_prompts.get(&agent_prompt_id).cloned()
+        else {
+            reject(
+                self,
+                Some(target_agent_id),
+                target_label,
+                "Cannot retry: the prompt's provider route is unavailable.",
+            );
+            return;
+        };
+        if self.pending_retry_prompts.len() >= PENDING_RETRY_LIMIT
+            || self.pending_retry_prompts.values().any(|pending| {
+                pending.requester_client_id.as_str() == client_id
+                    && pending.agent_prompt_id == agent_prompt_id
+            })
+        {
+            reject(
+                self,
+                Some(target_agent_id),
+                target_label,
+                "Cannot retry: a retry request for this prompt is already pending.",
+            );
+            return;
+        }
+        let provider_request_id = next_provider_retry_token();
+        let targeted = Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: provider_request_id.clone(),
+            session_id: req.session_id,
+            target_agent_id: Some(target_agent_id.clone()),
+            agent_prompt_id: Some(agent_prompt_id.clone()),
+        });
+        let delivered = self
+            .bus
+            .send_to(
+                provider_connection_id.as_str(),
+                Some(client_id),
+                HarnessOutputMessage::deliver(targeted),
+            )
+            .is_ok_and(|report| !report.delivered_to.is_empty());
+        if !delivered {
+            reject(
+                self,
+                Some(target_agent_id),
+                target_label,
+                "Cannot retry: the prompt's provider route is unavailable.",
+            );
+            return;
+        }
+        self.pending_retry_prompts.insert(
+            provider_request_id,
+            PendingRetryPrompt {
+                ui_request_id: req.request_id,
+                provider_connection_id,
+                requester_client_id: client_id.into(),
+                agent_prompt_id,
+                target_agent_id,
+                target_label,
+            },
+        );
+    }
+
     /// Marks an intercepted reactive claim for durable cancellation when its
     /// start eventually commits, without allowing remote dispatch.
     fn cancel_pending_context_claim(&mut self, cid: &AgentId) {
@@ -8939,6 +9150,30 @@ impl Harness {
         }
 
         self.fail_pending_action_invocations_for_connection(connection_id);
+        let failed_retries: Vec<_> = self
+            .pending_retry_prompts
+            .iter()
+            .filter(|(_, pending)| pending.provider_connection_id.as_str() == connection_id)
+            .map(|(id, pending)| (id.clone(), pending.clone()))
+            .collect();
+        for (request_id, pending) in failed_retries {
+            self.pending_retry_prompts.remove(&request_id);
+            let _ = self.bus.send_to(
+                pending.requester_client_id.as_str(),
+                None,
+                HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
+                    tau_proto::UiRetryPromptResult {
+                        request_id: pending.ui_request_id,
+                        target_agent_id: Some(pending.target_agent_id),
+                        target_label: pending.target_label,
+                        status: None,
+                        message: "Cannot retry: the prompt's provider route disconnected.".into(),
+                    },
+                )),
+            );
+        }
+        self.pending_retry_prompts
+            .retain(|_, pending| pending.requester_client_id.as_str() != connection_id);
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id.as_str() != connection_id);
@@ -12248,6 +12483,26 @@ impl Harness {
             None,
             Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
         );
+
+        // A rollover is terminal for controls correlated to the old session.
+        // Resolve requesters rather than silently dropping their pending request;
+        // the shutdown event above concurrently tells providers to cancel the
+        // scheduler-owned old-session jobs.
+        for (_, pending) in std::mem::take(&mut self.pending_retry_prompts) {
+            let _ = self.bus.send_to(
+                pending.requester_client_id.as_str(),
+                None,
+                HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
+                    tau_proto::UiRetryPromptResult {
+                        request_id: pending.ui_request_id,
+                        target_agent_id: Some(pending.target_agent_id),
+                        target_label: pending.target_label,
+                        status: None,
+                        message: "Cannot retry: the session was replaced.".into(),
+                    },
+                )),
+            );
+        }
 
         // Drop in-flight work bound to the old session. Pending prompts
         // for it are abandoned (the user explicitly switched away), and

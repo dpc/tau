@@ -37,6 +37,15 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     if text == "/cancel" {
         return Some(crate::ui_events::cancel_prompt(session_id, None));
     }
+    if text == "/retry" {
+        return Some(crate::ui_events::retry_prompt(session_id, None));
+    }
+    if text
+        .strip_prefix("/retry")
+        .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
+    {
+        return None;
+    }
     if text == "/tree" {
         return Some(crate::ui_events::tree_request(session_id, None));
     }

@@ -282,6 +282,9 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "response_updated");
     pub const PROVIDER_RESPONSE_FINISHED: Self =
         Self::from_static(EventCategory::Provider, "response_finished");
+    /// Result of an atomic manual delayed-retry ownership check.
+    pub const PROVIDER_RETRY_PROMPT_RESULT: Self =
+        Self::from_static(EventCategory::Provider, "retry_prompt_result");
     pub const PROVIDER_CACHE_MISS_DIAGNOSTIC: Self =
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
 
@@ -322,6 +325,11 @@ impl EventName {
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
     pub const UI_FOCUS_CHANGED: Self = Self::from_static(EventCategory::Ui, "focus_changed");
     pub const UI_CANCEL_PROMPT: Self = Self::from_static(EventCategory::Ui, "cancel_prompt");
+    /// Request to release one exact delayed provider retry.
+    pub const UI_RETRY_PROMPT: Self = Self::from_static(EventCategory::Ui, "retry_prompt");
+    /// Requester-directed result of a manual delayed-retry request.
+    pub const UI_RETRY_PROMPT_RESULT: Self =
+        Self::from_static(EventCategory::Ui, "retry_prompt_result");
     pub const UI_RECALL_QUEUED_PROMPT: Self =
         Self::from_static(EventCategory::Ui, "recall_queued_prompt");
     pub const UI_SET_AGENT_DISPLAY_NAME: Self =

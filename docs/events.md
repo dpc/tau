@@ -569,3 +569,10 @@ the UI is the only consumer. Components without a terminal silently no-op.
 - **`agent.standalone_compaction_started`** — standalone transaction start; a
   `manual_agent_tool` trigger carries the request id, caller id, and original
   tool call id used for background completion.
+- **`ui.retry_prompt`** — Correlated request for the harness to resolve the
+  selected agent's exact in-flight prompt and direct a manual delayed-retry
+  control to its owning provider.
+- **`provider.retry_prompt_result`** — Owning provider scheduler's correlated
+  `accepted` or `not_parked` result for that exact prompt.
+- **`ui.retry_prompt_result`** — Requester-directed retry outcome, including
+  harness-side validation failures and the captured target-agent label.

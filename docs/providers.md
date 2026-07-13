@@ -233,3 +233,11 @@ selected model and live route to advertise standalone compaction. They never
 fall back to legacy inline compaction. Acceptance is asynchronous; the
 original tool call receives a `tool.background_result` or
 `tool.background_error`, which may be consumed through `wait`.
+## Manual delayed retries
+
+Use `/retry` to run the selected agent's currently delayed provider retry now.
+The command applies only while that exact logical prompt is parked in the
+provider retry scheduler; it does not resend completed work or start a second
+prompt. It overrides the selected job's remaining delay once, including a
+server-requested delay, while retaining normal worker concurrency limits and
+leaving other delayed jobs untouched.

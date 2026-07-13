@@ -76,3 +76,6 @@ caps preview files to 64 KiB each / 1 MiB total before launching the picker.
 
 The shipped defaults use plain path completion. Configure `./: complete_path_fuzzy`
 to opt into fuzzy git path completion for `./<partial>`.
+`/retry` runs the selected agent's exact currently delayed provider retry now.
+It does not resubmit prompt text; if the provider no longer has that prompt
+parked, Tau reports that it may already be running.
