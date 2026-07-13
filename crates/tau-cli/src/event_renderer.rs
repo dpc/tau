@@ -1437,53 +1437,106 @@ impl EventRenderer {
     }
 
     #[cfg(test)]
+    /// Removes the status block so tests can exercise placeholder-only redraws.
+    pub(crate) fn clear_model_status_for_test(&mut self) {
+        self.model_status_block = None;
+    }
+
+    #[cfg(test)]
     pub(crate) fn agent_id_for_event_for_test(&self, event: &Event) -> Option<String> {
         self.agent_id_for_event(event)
     }
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
-        self.remember_agent(agent_id.clone());
-        let target_changed = self.current_agent_id.as_deref() != Some(agent_id.as_str());
-        let display_changed = self.displayed_agent_id.as_deref() != Some(agent_id.as_str());
+        self.switch_agent_after_display_update(agent_id, || {});
+    }
 
-        if display_changed {
-            // Let transcript switching see the previous awaiting flag so it can
-            // distinguish initial no-agent adoption from explicit `/agent new`.
-            self.show_agent_transcript(agent_id.clone());
-        }
-        self.awaiting_new_agent_selection = false;
+    #[cfg(test)]
+    /// Invokes `after_display_update` after restoring the destination
+    /// transcript but before updating the selected target, status, or
+    /// placeholder.
+    pub(crate) fn switch_agent_after_display_update_for_test(
+        &mut self,
+        agent_id: String,
+        after_display_update: impl FnOnce(),
+    ) {
+        self.switch_agent_after_display_update(agent_id, after_display_update);
+    }
 
-        if target_changed {
-            self.set_current_agent_id(Some(agent_id), false);
-            self.render_model_status();
-            self.refresh_prompt_placeholder();
-        }
+    fn switch_agent_after_display_update(
+        &mut self,
+        agent_id: String,
+        after_display_update: impl FnOnce(),
+    ) {
+        let handle = self.handle.clone();
+        // A selection transition publishes one coherent transcript, target,
+        // status, and placeholder frame. Input routing is mirrored earlier by
+        // the input thread and is intentionally outside this renderer batch.
+        handle.with_redraw_suppressed(|| {
+            self.remember_agent(agent_id.clone());
+            let target_changed = self.current_agent_id.as_deref() != Some(agent_id.as_str());
+            let display_changed = self.displayed_agent_id.as_deref() != Some(agent_id.as_str());
+
+            if display_changed {
+                // Let transcript switching see the previous awaiting flag so it can
+                // distinguish initial no-agent adoption from explicit `/agent new`.
+                self.show_agent_transcript(agent_id.clone());
+            }
+            after_display_update();
+            self.awaiting_new_agent_selection = false;
+
+            if target_changed {
+                self.set_current_agent_id(Some(agent_id), false);
+                self.render_model_status();
+                self.refresh_prompt_placeholder();
+                handle.redraw();
+            }
+        });
     }
 
     pub(crate) fn clear_selected_agent(&mut self) {
-        let target_changed = self.current_agent_id.is_some();
-        let display_changed = self.displayed_agent_id.is_some();
-        if target_changed || display_changed {
-            // Only a clear that actually leaves an agent creates the explicit
-            // no-agent boundary. A delayed clear command that arrives after
-            // `/session new` while the UI is already on the fresh initial
-            // screen must stay a no-op, otherwise the first new-session agent
-            // would incorrectly clear startup history instead of adopting it.
-            self.awaiting_new_agent_selection = true;
-        }
+        self.clear_selected_agent_after_display_update(|| {});
+    }
 
-        if display_changed {
-            self.store_visible_agent_state();
-            let state = std::mem::take(&mut self.no_agent_ui_state);
-            self.restore_visible_agent_state(state);
-            self.displayed_agent_id = None;
-        }
+    #[cfg(test)]
+    /// Invokes `after_display_update` after restoring the no-agent transcript
+    /// but before clearing the selected target, status, or placeholder.
+    pub(crate) fn clear_selected_agent_after_display_update_for_test(
+        &mut self,
+        after_display_update: impl FnOnce(),
+    ) {
+        self.clear_selected_agent_after_display_update(after_display_update);
+    }
 
-        if target_changed {
-            self.set_current_agent_id(None, false);
-            self.render_model_status();
-            self.refresh_prompt_placeholder();
-        }
+    fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
+        let handle = self.handle.clone();
+        handle.with_redraw_suppressed(|| {
+            let target_changed = self.current_agent_id.is_some();
+            let display_changed = self.displayed_agent_id.is_some();
+            if target_changed || display_changed {
+                // Only a clear that actually leaves an agent creates the explicit
+                // no-agent boundary. A delayed clear command that arrives after
+                // `/session new` while the UI is already on the fresh initial
+                // screen must stay a no-op, otherwise the first new-session agent
+                // would incorrectly clear startup history instead of adopting it.
+                self.awaiting_new_agent_selection = true;
+            }
+
+            if display_changed {
+                self.store_visible_agent_state();
+                let state = std::mem::take(&mut self.no_agent_ui_state);
+                self.restore_visible_agent_state(state);
+                self.displayed_agent_id = None;
+            }
+            after_display_update();
+
+            if target_changed {
+                self.set_current_agent_id(None, false);
+                self.render_model_status();
+                self.refresh_prompt_placeholder();
+                handle.redraw();
+            }
+        });
     }
 
     fn store_visible_agent_state(&mut self) {
@@ -2059,10 +2112,14 @@ impl EventRenderer {
     /// Refresh status and placeholder rendering after the input thread changes
     /// the shared navigation snapshot.
     pub(crate) fn refresh_agent_navigation(&mut self, agent_id: &str) {
-        self.render_model_status_if_present();
-        if self.current_agent_id.as_deref() == Some(agent_id) {
-            self.refresh_prompt_placeholder();
-        }
+        let handle = self.handle.clone();
+        handle.with_redraw_suppressed(|| {
+            self.render_model_status_if_present();
+            if self.current_agent_id.as_deref() == Some(agent_id) {
+                self.refresh_prompt_placeholder();
+                handle.redraw();
+            }
+        });
     }
 
     #[cfg(test)]

@@ -732,18 +732,21 @@ fn runtime_version_label_matches_cli_version_shape() {
     assert!(label.ends_with(')'));
 }
 
-/// Writer that feeds bytes into a vt100::Parser. Bytes are
-/// buffered per-write and flushed atomically to the parser on
-/// flush(), so the test thread never sees a partial render.
+/// Writer that feeds bytes directly into a VT parser and records a screen
+/// snapshot at each redraw-thread flush boundary.
 #[derive(Clone)]
 struct VtWriter {
+    /// Parser containing the latest virtual-terminal screen.
     parser: Arc<Mutex<vt100::Parser>>,
+    /// Completed flush-delimited frames and their wait notification.
+    frames: Arc<(Mutex<Vec<Vec<String>>>, std::sync::Condvar)>,
 }
 
 impl VtWriter {
     fn new(parser: vt100::Parser) -> Self {
         Self {
             parser: Arc::new(Mutex::new(parser)),
+            frames: Arc::new((Mutex::new(Vec::new()), std::sync::Condvar::new())),
         }
     }
 
@@ -759,6 +762,57 @@ impl VtWriter {
     fn screen_contains(&self, w: u16, needle: &str) -> bool {
         self.screen_text(w).iter().any(|r| r.contains(needle))
     }
+
+    fn frame_generation(&self) -> usize {
+        self.frames.0.lock().expect("frames").len()
+    }
+
+    fn wait_for_frame_after(&self, generation: usize) -> Vec<String> {
+        self.wait_for_frame_after_until(
+            generation,
+            Instant::now() + Duration::from_secs(2),
+            "next frame",
+        )
+    }
+
+    fn wait_for_frame_after_until(
+        &self,
+        generation: usize,
+        deadline: Instant,
+        context: &str,
+    ) -> Vec<String> {
+        let (frames, ready) = self.frames.as_ref();
+        let mut frames = frames.lock().expect("frames");
+        while frames.len() <= generation {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let (next, timeout) = ready.wait_timeout(frames, remaining).expect("frames");
+            frames = next;
+            assert!(
+                !timeout.timed_out() || frames.len() > generation,
+                "timed out waiting for {context} after frame generation {generation}; captured frames: {frames:?}"
+            );
+        }
+        frames[generation].clone()
+    }
+
+    fn wait_for_frame_containing_after(&self, mut generation: usize, needle: &str) -> usize {
+        let starting_generation = generation;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let context =
+            format!("frame containing {needle:?} (starting generation {starting_generation})");
+        loop {
+            let frame = self.wait_for_frame_after_until(generation, deadline, &context);
+            generation += 1;
+            if frame.iter().any(|row| row.contains(needle)) {
+                return generation;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {context} after generation {}; last frame: {frame:?}",
+                generation - 1
+            );
+        }
+    }
 }
 
 impl std::io::Write for VtWriter {
@@ -769,6 +823,13 @@ impl std::io::Write for VtWriter {
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
+        let parser = self.parser.lock().expect("vt");
+        let width = parser.screen().size().1;
+        let frame = parser.screen().rows(0, width).collect();
+        drop(parser);
+        let (frames, ready) = self.frames.as_ref();
+        frames.lock().expect("frames").push(frame);
+        ready.notify_all();
         Ok(())
     }
 }
@@ -1820,6 +1881,105 @@ fn switching_between_displayed_agents_restores_transcripts() {
     assert!(handle.full_render_count() > full_render_count);
 }
 
+/// Ensures the redraw caused by an agent switch cannot combine the destination
+/// transcript with the previously selected agent's input placeholder.
+#[test]
+fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let generation = vt.frame_generation();
+    handle.with_redraw_suppressed(|| {
+        renderer.switch_agent("worker-1".to_owned());
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "worker one transcript".into(),
+            agent_id: agent_id("worker-1"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+        renderer.switch_agent("worker-2".to_owned());
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "worker two transcript".into(),
+            agent_id: agent_id("worker-2"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+    });
+    let generation = vt.wait_for_frame_containing_after(generation, "worker two transcript");
+    renderer.switch_agent_after_display_update_for_test("worker-1".to_owned(), || {
+        handle.redraw_sync();
+    });
+    let frame = vt.wait_for_frame_after(generation);
+
+    assert!(
+        frame
+            .iter()
+            .any(|row| row.contains("worker one transcript")),
+        "{frame:?}"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|row| row.contains("Write a message to worker-1"))
+    );
+    assert!(
+        !frame
+            .iter()
+            .any(|row| row.contains("Write a message to worker-2"))
+    );
+}
+
+/// Ensures clearing an agent selection paints the no-agent transcript boundary
+/// and new-agent placeholder together in the clear operation's first frame.
+#[test]
+fn clear_selection_first_frame_has_new_agent_placeholder() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let generation = vt.frame_generation();
+    handle.with_redraw_suppressed(|| {
+        renderer.switch_agent("worker-1".to_owned());
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "selected agent transcript".into(),
+            agent_id: agent_id("worker-1"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+    });
+    let generation = vt.wait_for_frame_containing_after(generation, "selected agent transcript");
+    renderer.clear_selected_agent_after_display_update_for_test(|| handle.redraw_sync());
+    let frame = vt.wait_for_frame_after(generation);
+
+    assert!(
+        !frame
+            .iter()
+            .any(|row| row.contains("selected agent transcript")),
+        "{frame:?}"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|row| row.contains("Write a message to start a new agent"))
+    );
+    assert!(
+        !frame
+            .iter()
+            .any(|row| row.contains("Write a message to worker-1"))
+    );
+}
+
 /// Ensures the external prompt editor trailer is seeded from the visible
 /// agent's response history, not from the most recent hidden agent response
 /// processed by the renderer. It also preserves prompt-local editor fields that
@@ -2502,12 +2662,25 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(100, "active-auto agent is idle"));
+    // Exercise the placeholder-only navigation path: the operation must request
+    // its own redraw even when no model-status block is present to do so.
+    renderer.clear_model_status_for_test();
+    let generation = vt.frame_generation();
     renderer.suspend_agent("worker-1");
-    sync(&handle);
-    assert!(vt.screen_contains(100, "This agent is suspended"));
+    let frame = vt.wait_for_frame_after(generation);
+    assert!(
+        frame
+            .iter()
+            .any(|row| row.contains("This agent is suspended"))
+    );
+    let generation = vt.frame_generation();
     renderer.resume_agent("worker-1".to_owned());
-    sync(&handle);
-    assert!(vt.screen_contains(100, "Write a message to worker-1"));
+    let frame = vt.wait_for_frame_after(generation);
+    assert!(
+        frame
+            .iter()
+            .any(|row| row.contains("Write a message to worker-1"))
+    );
 }
 
 /// Ensures start-result delivery cannot replace canonical outer-turn runtime

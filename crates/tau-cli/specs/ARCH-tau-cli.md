@@ -57,6 +57,12 @@ input coordination assumes a single foreground reader thread; background
 renderer threads must not write while the terminal is released to an external
 program.
 
+Agent-selection input routing is mirrored immediately on the input thread so a
+prompt submitted during renderer handoff reaches the new target. The renderer
+must separately publish transcript, selected target, status, and placeholder
+changes as one redraw-suppressed transaction, preventing a visible frame from
+mixing state derived from different selections.
+
 External-editor prompt trailers are prompt-surface text. They may quote
 assistant responses and prior prompt text to help compose the next prompt, but
 the terminal UI must scope response context to the currently visible/no-agent

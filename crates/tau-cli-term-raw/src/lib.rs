@@ -969,8 +969,11 @@ impl TermHandle {
     }
 
     /// Run `f` while redraw notifications from this handle are suppressed.
-    /// Used to update off-screen output snapshots without repainting the
-    /// currently visible transcript.
+    ///
+    /// Mutations remain visible in shared state, but redraw requests are marked
+    /// dirty and coalesced into one notification after the outermost nested
+    /// suppression scope exits. Use this to publish related visible-state
+    /// changes as one coherent rendered frame.
     pub fn with_redraw_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
         let _guard = RedrawSuppressionGuard::new(self);
         f()
@@ -3487,7 +3490,16 @@ fn prepare_redraw_pass(
     sync_condvar: &std::sync::Condvar,
 ) -> Option<RedrawPass> {
     let mut st = state.lock().expect("term state mutex poisoned");
-    if st.redraw_suppression != 0 || st.external_paused {
+    if st.redraw_suppression != 0 {
+        // The notification that woke this pass has been consumed. Preserve it
+        // for the outermost suppression guard so a no-op transaction cannot
+        // swallow another producer's already-pending redraw.
+        st.redraw_dirty_while_suppressed = true;
+        st.sync_completed = st.sync_requested;
+        sync_condvar.notify_all();
+        return None;
+    }
+    if st.external_paused {
         st.sync_completed = st.sync_requested;
         sync_condvar.notify_all();
         return None;

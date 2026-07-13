@@ -691,6 +691,54 @@ fn redraw_suppression_is_scoped() {
     drop(term);
 }
 
+/// A redraw notification consumed by the worker during suppression must remain
+/// dirty so the outer guard republishes it even when the transaction is a
+/// no-op.
+#[test]
+fn consumed_redraw_remains_pending_during_suppression() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    handle.redraw_sync();
+
+    handle.with_redraw_suppressed(|| {
+        // Force the real redraw worker to consume a sync notification while
+        // this scope prevents rendering.
+        handle.redraw_sync();
+        let st = handle.lock();
+        assert_eq!(st.redraw_suppression, 1);
+        assert!(st.redraw_dirty_while_suppressed);
+    });
+
+    assert_eq!(handle.lock().redraw_suppression, 0);
+    drop(term);
+}
+
+/// Dropping a dirty outer suppression guard must notify its redraw channel
+/// independently of redraw-worker scheduling.
+#[test]
+fn dirty_suppression_guard_notifies_redraw_channel() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    handle.redraw_sync();
+    let (redraw, redraw_rx) = tau_blocking_notify_channel::channel();
+    let isolated_handle = TermHandle {
+        redraw,
+        ..handle.clone()
+    };
+
+    isolated_handle.with_redraw_suppressed(|| {
+        isolated_handle.lock().redraw_dirty_while_suppressed = true;
+    });
+
+    assert_eq!(
+        redraw_rx.try_recv(),
+        Ok(tau_blocking_notify_channel::TryRecvStatus::Notified)
+    );
+    drop(term);
+}
+
 /// Output transactions must make multi-step snapshot swaps atomic with respect
 /// to cloned handles that print local terminal output from other threads. This
 /// prevents local messages from attaching to a temporary hidden transcript

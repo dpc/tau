@@ -29,3 +29,9 @@ oversized tails before append, and redaction/routing at the chat-command layer.
 Keep these as focused unit tests around `prompt_history` plus routing tests for
 command-line redaction; do not require interactive terminal E2E checks for
 storage-format regressions.
+
+Renderer transition tests should observe flush-delimited virtual-terminal frames
+driven by the operation under test. Frame waits must be bounded and must not
+request a post-operation `redraw_sync`, because that extra redraw can hide an
+incoherent first frame. Race regressions may use a deterministic test-only
+midpoint hook to request the premature redraw whose suppression is under test.
