@@ -356,6 +356,17 @@ impl Harness {
         self.subagents.wait_tracker.discard_input_wait_for(owner);
     }
 
+    /// Return the earliest monotonic deadline among registered input waiters.
+    pub(crate) fn next_input_wait_deadline(&self) -> Option<Instant> {
+        self.subagents.wait_tracker.next_input_wait_deadline()
+    }
+
+    /// Complete every input waiter due at or before `now`.
+    pub(crate) fn process_input_wait_deadlines(&mut self, now: Instant) {
+        let replies = self.subagents.wait_tracker.expire_input_waits(now);
+        self.publish_wait_replies(replies);
+    }
+
     #[cfg(test)]
     pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
         self.subagents
@@ -1563,7 +1574,7 @@ impl Harness {
                 .subagents
                 .wait_tracker
                 .oldest_completed_for_owner(agent_id),
-            Ok(WaitTarget::AnyInput) | Err(_) => None,
+            Ok(WaitTarget::AnyInput(_)) | Err(_) => None,
         };
         if self.has_pending_wait_preempting_prompt(agent_id, consumable_completion.as_ref()) {
             let reply = match parsed {
@@ -1597,7 +1608,9 @@ impl Harness {
                 Ok(WaitTarget::AnyBackground) => {
                     wait_interrupted_any_reply(call_id, visible_tool_name)
                 }
-                Ok(WaitTarget::AnyInput) => wait_input_available_reply(call_id, visible_tool_name),
+                Ok(WaitTarget::AnyInput(_)) => {
+                    wait_input_available_reply(call_id, visible_tool_name)
+                }
                 Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
             };
             self.publish_wait_replies(vec![reply]);
@@ -2184,13 +2197,14 @@ fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
 }
 
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
-const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"any_input\":true})` to wait for new activating input";
+const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
+const MAX_INPUT_WAIT_MINUTES: i128 = 60;
 
 #[derive(Clone, Debug, PartialEq)]
 enum WaitTarget {
     Exact(ToolCallId),
     AnyBackground,
-    AnyInput,
+    AnyInput(Duration),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2208,6 +2222,12 @@ struct WaitRequest {
     call_id: ToolCallId,
     tool_name: ToolName,
     owner: AgentId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct InputWaitRequest {
+    request: WaitRequest,
+    deadline: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2250,7 +2270,7 @@ struct WaitTracker {
     calls: HashMap<ToolCallId, WaitCallState>,
     waiters: HashMap<ToolCallId, WaitRequest>,
     any_waiters: HashMap<AgentId, WaitRequest>,
-    input_waiters: HashMap<AgentId, WaitRequest>,
+    input_waiters: HashMap<AgentId, InputWaitRequest>,
     call_owners: HashMap<ToolCallId, AgentId>,
     call_tool_names: HashMap<ToolCallId, ToolName>,
     completion_order: VecDeque<ToolCallId>,
@@ -2273,6 +2293,17 @@ impl WaitTracker {
         tool_name: ToolName,
         arguments: &CborValue,
     ) -> WaitStart {
+        self.handle_wait_invoke_at(owner, call_id, tool_name, arguments, Instant::now())
+    }
+
+    fn handle_wait_invoke_at(
+        &mut self,
+        owner: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        arguments: &CborValue,
+        now: Instant,
+    ) -> WaitStart {
         let target = match parse_wait_args(arguments) {
             Ok(target) => target,
             Err(message) => {
@@ -2292,7 +2323,9 @@ impl WaitTracker {
         match target {
             WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
             WaitTarget::AnyBackground => self.start_any_wait(owner.clone(), wait),
-            WaitTarget::AnyInput => self.start_input_wait(owner.clone(), wait),
+            WaitTarget::AnyInput(timeout) => {
+                self.start_input_wait(owner.clone(), wait, now + timeout)
+            }
         }
     }
 
@@ -2418,7 +2451,12 @@ impl WaitTracker {
         ))
     }
 
-    fn start_input_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
+    fn start_input_wait(
+        &mut self,
+        owner: AgentId,
+        wait: WaitRequest,
+        deadline: Instant,
+    ) -> WaitStart {
         if self.input_waiters.contains_key(&owner) {
             return WaitStart::reply(wait_error_reply(
                 wait.call_id,
@@ -2427,8 +2465,31 @@ impl WaitTracker {
                 None,
             ));
         }
-        self.input_waiters.insert(owner, wait);
+        self.input_waiters.insert(
+            owner,
+            InputWaitRequest {
+                request: wait,
+                deadline,
+            },
+        );
         WaitStart::default()
+    }
+
+    fn next_input_wait_deadline(&self) -> Option<Instant> {
+        self.input_waiters.values().map(|wait| wait.deadline).min()
+    }
+
+    fn expire_input_waits(&mut self, now: Instant) -> Vec<WaitReply> {
+        let due: Vec<AgentId> = self
+            .input_waiters
+            .iter()
+            .filter(|(_, wait)| wait.deadline <= now)
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        due.into_iter()
+            .filter_map(|owner| self.input_waiters.remove(&owner))
+            .map(|wait| wait_timed_out_reply(wait.request.call_id, wait.request.tool_name))
+            .collect()
     }
 
     fn consume_completed_for_any(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
@@ -2649,7 +2710,7 @@ impl WaitTracker {
             .collect();
         let mut exact_consumed_cancelled = HashSet::new();
         self.input_waiters
-            .retain(|_, wait| !call_ids.contains(&wait.call_id));
+            .retain(|_, wait| !call_ids.contains(&wait.request.call_id));
         let mut cancelled = WaitCancel::default();
         let waiters = std::mem::take(&mut self.waiters);
         for (target, wait) in waiters {
@@ -2777,7 +2838,10 @@ impl WaitTracker {
     fn activate_waits_for(&mut self, owner: &AgentId) -> Vec<WaitReply> {
         let mut replies = self.interrupt_active_waits_for(owner);
         if let Some(wait) = self.input_waiters.remove(owner) {
-            replies.push(wait_input_available_reply(wait.call_id, wait.tool_name));
+            replies.push(wait_input_available_reply(
+                wait.request.call_id,
+                wait.request.tool_name,
+            ));
         }
         replies
     }
@@ -3103,9 +3167,10 @@ fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
         return Err("arguments must be an object".to_owned());
     };
     let mut tool_call_id_value = None;
-    let mut any_input_value = None;
+    let mut timeout_minutes_value = None;
+    let mut legacy_any_input = false;
     let mut tool_call_id_count = 0_u8;
-    let mut any_input_count = 0_u8;
+    let mut timeout_minutes_count = 0_u8;
     for (k, v) in entries {
         let CborValue::Text(name) = k else { continue };
         match name.as_str() {
@@ -3113,21 +3178,28 @@ fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
                 tool_call_id_count = tool_call_id_count.saturating_add(1);
                 tool_call_id_value.get_or_insert(v);
             }
-            "any_input" => {
-                any_input_count = any_input_count.saturating_add(1);
-                any_input_value.get_or_insert(v);
+            "timeout_minutes" => {
+                timeout_minutes_count = timeout_minutes_count.saturating_add(1);
+                timeout_minutes_value.get_or_insert(v);
             }
+            "any_input" => legacy_any_input = true,
             _ => {}
         }
     }
-    if tool_call_id_value.is_some() && any_input_value.is_some() {
-        return Err("`tool_call_id` and `any_input` are mutually exclusive".to_owned());
+    if legacy_any_input {
+        return Err(
+            "`any_input` is no longer supported; use `timeout_minutes` with a positive integer"
+                .to_owned(),
+        );
+    }
+    if tool_call_id_value.is_some() && timeout_minutes_value.is_some() {
+        return Err("`tool_call_id` and `timeout_minutes` are mutually exclusive".to_owned());
     }
     if tool_call_id_count > 1 {
         return Err("`tool_call_id` must not be repeated".to_owned());
     }
-    if any_input_count > 1 {
-        return Err("`any_input` must not be repeated".to_owned());
+    if timeout_minutes_count > 1 {
+        return Err("`timeout_minutes` must not be repeated".to_owned());
     }
     if let Some(value) = tool_call_id_value {
         return match value {
@@ -3138,10 +3210,18 @@ fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
             _ => Err("`tool_call_id` must be a string".to_owned()),
         };
     }
-    match any_input_value {
-        Some(CborValue::Bool(true)) => Ok(WaitTarget::AnyInput),
-        Some(CborValue::Bool(false)) => Err("`any_input` must be true when provided".to_owned()),
-        Some(_) => Err("`any_input` must be a boolean".to_owned()),
+    match timeout_minutes_value {
+        Some(CborValue::Integer(value)) => {
+            let minutes: i128 = (*value).into();
+            if minutes < 1 {
+                return Err("`timeout_minutes` must be at least 1".to_owned());
+            }
+            let effective_minutes = minutes.min(MAX_INPUT_WAIT_MINUTES) as u64;
+            Ok(WaitTarget::AnyInput(Duration::from_secs(
+                effective_minutes * 60,
+            )))
+        }
+        Some(_) => Err("`timeout_minutes` must be an integer".to_owned()),
         None => Ok(WaitTarget::AnyBackground),
     }
 }
@@ -3157,6 +3237,27 @@ fn wait_input_available_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitR
         )]),
         None,
     )
+}
+
+fn wait_timed_out_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitReply {
+    WaitReply {
+        wait_call_id: call_id,
+        wait_tool_name: tool_name,
+        kind: WaitReplyKind::Result {
+            result: CborValue::Map(vec![(
+                CborValue::Text("timed_out".to_owned()),
+                CborValue::Bool(true),
+            )]),
+            display: Some(wait_display_from_source(
+                None,
+                None,
+                ToolUseStatus::Warning,
+                "timeout".to_owned(),
+            )),
+        },
+        suppress_call_id: None,
+        unsuppress_call_id: None,
+    }
 }
 
 #[cfg(test)]

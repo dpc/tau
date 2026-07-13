@@ -46,10 +46,10 @@ fn wait_args_exact(call_id: &str) -> CborValue {
     )])
 }
 
-fn wait_args_input(value: bool) -> CborValue {
+fn wait_args_input(minutes: i64) -> CborValue {
     CborValue::Map(vec![(
-        CborValue::Text("any_input".to_owned()),
-        CborValue::Bool(value),
+        CborValue::Text("timeout_minutes".to_owned()),
+        CborValue::Integer(minutes.into()),
     )])
 }
 
@@ -119,12 +119,7 @@ fn start_wait_exact(
 }
 
 fn start_wait_input(tracker: &mut WaitTracker, owner: &AgentId, call_id: &str) -> WaitStart {
-    tracker.handle_wait_invoke(
-        owner,
-        call_id.into(),
-        wait_tool_name(),
-        &wait_args_input(true),
-    )
+    tracker.handle_wait_invoke(owner, call_id.into(), wait_tool_name(), &wait_args_input(1))
 }
 
 fn start_reply(start: WaitStart) -> WaitReply {
@@ -346,60 +341,99 @@ fn wait_args_reject_non_string_and_empty_tool_call_id() {
     );
 }
 
-/// The input-wait flag is explicit so false cannot silently acquire the
-/// long-standing no-argument background-wait meaning, and combining modes is
-/// rejected independent of map order.
+/// Input waits accept positive whole minutes, clamp before conversion, reject
+/// ambiguous or malformed forms, and explicitly diagnose the removed boolean.
 #[test]
 fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
+    for (minutes, effective) in [(1, 1), (60, 60), (61, 60), (i64::MAX, 60)] {
+        assert_eq!(
+            parse_wait_args(&wait_args_input(minutes)),
+            Ok(WaitTarget::AnyInput(Duration::from_secs(effective * 60)))
+        );
+    }
     assert_eq!(
-        parse_wait_args(&wait_args_input(true)),
-        Ok(WaitTarget::AnyInput)
+        parse_wait_args(&CborValue::Map(vec![(
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(u64::MAX.into()),
+        )])),
+        Ok(WaitTarget::AnyInput(Duration::from_secs(60 * 60)))
     );
-    assert_eq!(
-        parse_wait_args(&wait_args_input(false)),
-        Err("`any_input` must be true when provided".to_owned())
-    );
-    assert_eq!(
-        parse_wait_args(&CborValue::Map(vec![
+    for minutes in [0, -1] {
+        assert_eq!(
+            parse_wait_args(&wait_args_input(minutes)),
+            Err("`timeout_minutes` must be at least 1".to_owned())
+        );
+    }
+    for value in [
+        CborValue::Float(1.0),
+        CborValue::Float(1.5),
+        CborValue::Text("1".to_owned()),
+        CborValue::Bool(true),
+        CborValue::Null,
+    ] {
+        assert_eq!(
+            parse_wait_args(&CborValue::Map(vec![(
+                CborValue::Text("timeout_minutes".to_owned()),
+                value,
+            )])),
+            Err("`timeout_minutes` must be an integer".to_owned())
+        );
+    }
+    for entries in [
+        vec![
             (
-                CborValue::Text("any_input".to_owned()),
-                CborValue::Bool(true),
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(1.into()),
             ),
             (
                 CborValue::Text("tool_call_id".to_owned()),
                 CborValue::Text("call".to_owned()),
             ),
+        ],
+        vec![
+            (
+                CborValue::Text("tool_call_id".to_owned()),
+                CborValue::Text("call".to_owned()),
+            ),
+            (
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+        ],
+    ] {
+        assert_eq!(
+            parse_wait_args(&CborValue::Map(entries)),
+            Err("`tool_call_id` and `timeout_minutes` are mutually exclusive".to_owned())
+        );
+    }
+    assert_eq!(
+        parse_wait_args(&CborValue::Map(vec![
+            (
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+            (
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(2.into()),
+            ),
         ])),
-        Err("`tool_call_id` and `any_input` are mutually exclusive".to_owned())
+        Err("`timeout_minutes` must not be repeated".to_owned())
     );
     assert_eq!(
         parse_wait_args(&CborValue::Map(vec![(
             CborValue::Text("any_input".to_owned()),
-            CborValue::Text("true".to_owned()),
+            CborValue::Bool(true),
         )])),
-        Err("`any_input` must be a boolean".to_owned())
+        Err(
+            "`any_input` is no longer supported; use `timeout_minutes` with a positive integer"
+                .to_owned()
+        )
     );
-    for values in [[true, false], [false, true]] {
-        assert_eq!(
-            parse_wait_args(&CborValue::Map(
-                values
-                    .into_iter()
-                    .map(|value| {
-                        (
-                            CborValue::Text("any_input".to_owned()),
-                            CborValue::Bool(value),
-                        )
-                    })
-                    .collect(),
-            )),
-            Err("`any_input` must not be repeated".to_owned())
-        );
-    }
 }
 
-/// Activating input completes only the addressed agent's input and background
-/// waits, leaves another agent's waiter untouched, and never copies input
-/// content into the bounded input-wait result.
+/// Activating input completes only the addressed agent's input waiter, leaves
+/// another agent's waiter untouched, and never copies input content into the
+/// bounded input-wait result.
 ///
 /// See `DESIGN-tau-harness-activating-input-wait`.
 #[test]
@@ -470,6 +504,11 @@ fn cancelled_input_wait_cannot_be_woken_later() {
         tracker.record_tool_cancelled(&HashSet::from([ToolCallId::from("input-cancel")]));
     assert!(cancelled.replies.is_empty());
     assert!(tracker.activate_waits_for(&owner).is_empty());
+    assert!(
+        tracker
+            .expire_input_waits(Instant::now() + Duration::from_secs(120))
+            .is_empty()
+    );
 }
 
 /// Unloading an endpoint drops its runtime-only waiter so a later endpoint
@@ -486,6 +525,11 @@ fn discarded_input_wait_is_not_inherited_by_reused_agent_id() {
     tracker.discard_input_wait_for(&owner);
     assert!(tracker.activate_waits_for(&owner).is_empty());
     assert!(
+        tracker
+            .expire_input_waits(Instant::now() + Duration::from_secs(120))
+            .is_empty()
+    );
+    assert!(
         start_wait_input(&mut tracker, &owner, "input-new")
             .reply
             .is_none()
@@ -493,6 +537,158 @@ fn discarded_input_wait_is_not_inherited_by_reused_agent_id() {
     let replies = tracker.activate_waits_for(&owner);
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].wait_call_id.as_str(), "input-new");
+}
+
+/// Monotonic input deadlines expose the earliest waiter, expire all due
+/// waiters exactly once, isolate later targets, and use warning UI metadata.
+#[test]
+fn input_wait_deadlines_are_ordered_and_expire_exactly_once() {
+    let now = Instant::now();
+    let first = conv("first");
+    let first_peer = conv("first-peer");
+    let second = conv("second");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &first,
+                "wait-first".into(),
+                wait_tool_name(),
+                &wait_args_input(1),
+                now,
+            )
+            .reply
+            .is_none()
+    );
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &first_peer,
+                "wait-first-peer".into(),
+                wait_tool_name(),
+                &wait_args_input(1),
+                now,
+            )
+            .reply
+            .is_none()
+    );
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &second,
+                "wait-second".into(),
+                wait_tool_name(),
+                &wait_args_input(2),
+                now,
+            )
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + Duration::from_secs(60))
+    );
+    assert!(
+        tracker
+            .expire_input_waits(now + Duration::from_secs(59))
+            .is_empty()
+    );
+
+    let replies = tracker.expire_input_waits(now + Duration::from_secs(60));
+    assert_eq!(replies.len(), 2);
+    let reply = replies
+        .into_iter()
+        .find(|reply| reply.wait_call_id.as_str() == "wait-first")
+        .expect("first due timeout");
+    let (result, display) = reply_result_with_display(reply);
+    assert_eq!(
+        result,
+        CborValue::Map(vec![(
+            CborValue::Text("timed_out".to_owned()),
+            CborValue::Bool(true),
+        )])
+    );
+    let display = display.expect("timeout display");
+    assert_eq!(display.status, ToolUseStatus::Warning);
+    assert_eq!(display.status_text, "timeout");
+    assert!(
+        tracker
+            .expire_input_waits(now + Duration::from_secs(60))
+            .is_empty()
+    );
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + Duration::from_secs(120))
+    );
+    assert_eq!(tracker.activate_waits_for(&second).len(), 1);
+    assert_eq!(tracker.next_input_wait_deadline(), None);
+}
+
+/// Event-loop serialization makes timeout-before-input terminal exactly once.
+#[test]
+fn expired_input_wait_cannot_be_activated_later() {
+    let now = Instant::now();
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &owner,
+                "wait".into(),
+                wait_tool_name(),
+                &wait_args_input(1),
+                now,
+            )
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker
+            .expire_input_waits(now + Duration::from_secs(60))
+            .len(),
+        1
+    );
+    assert!(tracker.activate_waits_for(&owner).is_empty());
+}
+
+/// When timeout wins before a background completion, that later completion
+/// remains available to the ordinary bare background collector.
+#[test]
+fn input_timeout_does_not_consume_later_background_completion() {
+    let now = Instant::now();
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &owner,
+                "input-wait".into(),
+                wait_tool_name(),
+                &wait_args_input(1),
+                now,
+            )
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker
+            .expire_input_waits(now + Duration::from_secs(60))
+            .len(),
+        1
+    );
+    assert!(
+        tracker
+            .record_background_result(background_result("later-bg", "done"), owner.clone())
+            .is_empty()
+    );
+    let collected = start_wait_any(&mut tracker, &owner, "collect-later");
+    assert_eq!(
+        cbor_map_text(
+            &reply_result(start_reply(collected)),
+            ORIGINAL_TOOL_CALL_ID_HEADER,
+        ),
+        Some("later-bg")
+    );
 }
 
 /// Completed any-waits must use deterministic finish order, not HashMap

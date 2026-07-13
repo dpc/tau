@@ -33,6 +33,13 @@ This prompt is model-visible only if it reaches the agent before the completion 
 
 The agent can call `wait({"tool_call_id": "..."})` to collect that specific real result, or `wait({})` to wait for the first background completion in the current conversation. The no-arg form is conversation-scoped: it must not consume completions from parent, child, or sibling conversations. The tool description shown to agents often says not to call `wait` until they know the tool call has completed. This is an optimization to avoid wasting tokens: for foreground calls, the normal tool call result will arrive without an extra `wait`, and for background calls Tau will wake the agent when the completion prompt is delivered. It is not a technical requirement. The `wait` tool must work well when called for tool calls that are still running, and it must have reasonable semantics in all cases. If `wait` is used for a backgrounded call before completion, Tau suppresses that internal completion prompt while still emitting the real background result/error event. If `wait` consumes an already-completed result before its queued completion prompt is delivered to the model, Tau also suppresses/removes that prompt. If `wait({})` consumes a completion, it suppresses the normal `[tau-internal] Tool call ... is complete.` prompt for that completion and returns an `original_tool_call_id: <tool_call_id>` provider-visible header so the agent knows which background call was collected.
 
+`wait({"timeout_minutes": N})` is the separate activating-input form. `N` must
+be a positive integer and values above 60 are silently capped at 60. It returns
+`input_available: true` when accepted input wins or `timed_out: true` when the
+monotonic deadline wins, without consuming input or background results. Exact-id
+and bare background waits remain unbounded. Registration and expiry stay inside
+the running outer turn and must not emit an idle/watch lifecycle edge.
+
 Current background timing: most backgroundable tools background after about 5
 seconds, and `wait` itself never backgrounds. `agent_start` currently finishes
 instantly after creating the sub-agent and returns `self_agent_id` and
@@ -245,4 +252,3 @@ Report concise but complete findings:
 * Include whether current `agent_start` results make `self_agent_id` and `sub_agent_id` clear enough without redundant aliases; when legacy/background `agent_start` ids are available, also include whether the placeholder made the cancellable target ID clear enough.
 * When legacy/background `agent_start` ids are available, include whether slow canceled delegates reported `duration_seconds`.
 * Include whether the UI hid completion prompts that should be hidden, or whether that could not be directly verified.
-

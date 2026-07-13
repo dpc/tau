@@ -2820,8 +2820,8 @@ fn wait_input_call(call_id: &str) -> AgentToolCall {
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![(
-            CborValue::Text("any_input".to_owned()),
-            CborValue::Bool(true),
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(1.into()),
         )]),
     }
 }
@@ -12424,6 +12424,115 @@ fn input_wait_wakes_once_when_activating_prompt_is_queued() {
 
     h.activate_waits_for(&cid);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Runtime deadline processing completes a registered input wait normally,
+/// clears its foreground tracking, and does not suspend the outer turn.
+#[test]
+fn input_wait_timeout_completes_once_inside_running_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call = wait_input_call("wait-input-timeout");
+    seed_tools_running(
+        &mut h,
+        &cid,
+        vec![call.id.clone(), ToolCallId::from("still-running-sibling")],
+    );
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("register input wait");
+    let deadline = h.next_input_wait_deadline().expect("input deadline");
+    assert_eq!(h.next_runtime_deadline(), Some(deadline));
+
+    h.process_runtime_deadlines_at(deadline);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    assert!(!h.input_wait_pending_for(&cid));
+    assert!(!h.tool_agents.contains_key(&call.id));
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == call.id
+                && result.result == CborValue::Map(vec![(
+                    CborValue::Text("timed_out".to_owned()),
+                    CborValue::Bool(true),
+                )])
+                && result.display.as_ref().is_some_and(|display|
+                    display.status == tau_proto::ToolUseStatus::Warning
+                        && display.status_text == "timeout")
+    )));
+    h.process_runtime_deadlines_at(deadline);
+    h.activate_waits_for(&cid);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// The combined runtime scheduler chooses the earlier background or input
+/// deadline in both directions, then advances to the remaining deadline.
+#[test]
+fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let input = wait_input_call("wait-input-combined-deadline");
+    seed_tools_running(
+        &mut h,
+        &cid,
+        vec![
+            input.id.clone(),
+            ToolCallId::from("combined-deadline-sibling"),
+        ],
+    );
+    h.handle_wait_tool_call(&cid, &input, ToolName::new("wait"))
+        .expect("register input wait");
+    let input_deadline = h.next_input_wait_deadline().expect("input deadline");
+
+    let background_call = AgentToolCall {
+        id: "background-deadline-first".into(),
+        name: ToolName::new("slow"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.tool_turn.push(
+        cid.clone(),
+        background_call.clone(),
+        tau_proto::BackgroundSupport::MinForegroundSeconds(30),
+    );
+    let background_start = input_deadline - Duration::from_secs(60);
+    h.tool_turn
+        .pop_dispatchable(background_start)
+        .expect("dispatch backgroundable call");
+    let background_deadline = background_start + Duration::from_secs(30);
+    assert_eq!(h.next_runtime_deadline(), Some(background_deadline));
+
+    h.process_runtime_deadlines_at(background_deadline);
+    assert!(h.tool_turn.is_backgrounded(&background_call.id));
+
+    let later_background_call = AgentToolCall {
+        id: "background-deadline-after-input".into(),
+        name: ToolName::new("slow"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.tool_turn.push(
+        cid.clone(),
+        later_background_call.clone(),
+        tau_proto::BackgroundSupport::MinForegroundSeconds(60),
+    );
+    h.tool_turn
+        .pop_dispatchable(input_deadline - Duration::from_secs(30))
+        .expect("dispatch later backgroundable call");
+    let later_background_deadline = input_deadline + Duration::from_secs(30);
+    assert_eq!(h.next_runtime_deadline(), Some(input_deadline));
+    h.process_runtime_deadlines_at(input_deadline);
+    assert_eq!(tool_result_count(&h, input.id.as_str()), 1);
+    assert_eq!(h.next_runtime_deadline(), Some(later_background_deadline));
+    h.process_runtime_deadlines_at(later_background_deadline);
+    assert!(h.tool_turn.is_backgrounded(&later_background_call.id));
     h.shutdown().expect("shutdown");
 }
 

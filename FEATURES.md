@@ -626,9 +626,11 @@ that subscribes the calling agent to async notifications when another agent
 responds, plus a `wait` tool for collecting background tool results or suspending
 until activating input is available. `wait({"tool_call_id":"…"})` waits for one owned
 background call, `wait({})` consumes the next owned background completion, and
-`wait({"any_input":true})` waits without requiring background work. The input
-form does not consume or copy the input; normal prompt machinery supplies it in
-the next model round, and already-queued activation returns immediately. It
+`wait({"timeout_minutes":N})` waits up to a positive integer number of minutes
+without requiring background work; values above 60 are silently treated as 60.
+The input form does not consume or copy the input; normal prompt machinery
+supplies it in the next model round, already-queued activation returns
+immediately, and expiry returns `timed_out: true`. It
 keeps the current outer agent turn running, including
 across live UI detach/reconnect, but its registration is not restored after a
 cold daemon restart. Long-running background-capable tool

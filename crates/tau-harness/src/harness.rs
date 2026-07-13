@@ -5668,11 +5668,41 @@ impl Harness {
     }
 
     fn process_runtime_deadlines(&mut self) {
-        self.process_background_deadlines();
+        self.process_runtime_deadlines_at(Instant::now());
+    }
+
+    fn process_runtime_deadlines_at(&mut self, now: Instant) {
+        loop {
+            // Drain one earliest deadline cohort at a time. Supplying that
+            // cohort's deadline, rather than `now`, preserves deterministic
+            // ordering when the event loop wakes after several classes are due.
+            let background = self.tool_turn.next_background_deadline();
+            let input = self.next_input_wait_deadline();
+            let next = match (input, background) {
+                (Some(input), Some(background)) => Some(input.min(background)),
+                (Some(input), None) => Some(input),
+                (None, Some(background)) => Some(background),
+                (None, None) => None,
+            };
+            let Some(deadline) = next.filter(|deadline| *deadline <= now) else {
+                break;
+            };
+            if input == Some(deadline) {
+                self.process_input_wait_deadlines(deadline);
+            } else {
+                self.process_background_deadlines_at(deadline);
+            }
+        }
     }
 
     fn next_runtime_deadline(&self) -> Option<Instant> {
-        self.tool_turn.next_background_deadline()
+        [
+            self.tool_turn.next_background_deadline(),
+            self.next_input_wait_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn handle_runtime_event(
@@ -17383,8 +17413,8 @@ impl Harness {
         self.record_wait_tool_result(result);
     }
 
-    fn process_background_deadlines(&mut self) {
-        for call_id in self.tool_turn.background_due(Instant::now()) {
+    fn process_background_deadlines_at(&mut self, now: Instant) {
+        for call_id in self.tool_turn.background_due(now) {
             self.publish_synthetic_background_result(&call_id);
             self.on_tool_call_foreground_complete(call_id.as_str());
         }
@@ -18410,13 +18440,12 @@ impl Harness {
         let started_at = Instant::now();
         let mut progress_messages = Vec::new();
         loop {
-            self.process_background_deadlines();
+            self.process_runtime_deadlines();
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
             let wait = self
-                .tool_turn
-                .next_background_deadline()
+                .next_runtime_deadline()
                 .map(|deadline| {
                     deadline
                         .saturating_duration_since(Instant::now())
@@ -18427,9 +18456,9 @@ impl Harness {
                 Ok(event) => event,
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if started_at.elapsed() < RESPONSE_TIMEOUT
-                        && self.tool_turn.next_background_deadline().is_some() =>
+                        && self.next_runtime_deadline().is_some() =>
                 {
-                    self.process_background_deadlines();
+                    self.process_runtime_deadlines();
                     continue;
                 }
                 Err(_) => return Err(HarnessError::ResponseTimeout),
