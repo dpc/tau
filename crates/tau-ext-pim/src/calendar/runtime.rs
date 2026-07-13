@@ -2912,7 +2912,6 @@ fn calendar_log_error_message(result: &CborValue) -> Option<&str> {
 fn success_display_for_tool(tool_name: &str, result: &CborValue) -> ToolUseState {
     let command = cbor_text_field(result, "command").unwrap_or("calendar");
     if command_for_tool_name(tool_name).is_some() {
-        let status_text = cbor_text_field(result, "status").unwrap_or("ok");
         let data = cbor_field(result, "data");
         return ToolUseState {
             args: split_calendar_display_args(command, data).unwrap_or_default(),
@@ -2920,7 +2919,7 @@ fn success_display_for_tool(tool_name: &str, result: &CborValue) -> ToolUseState
             stats: calendar_display_stats(command, data),
             info_chips: calendar_display_info(command, data),
             status: ToolUseStatus::Success,
-            status_text: status_text.to_owned(),
+            status_text: success_status_text(result).to_owned(),
             ..Default::default()
         };
     }
@@ -2929,7 +2928,6 @@ fn success_display_for_tool(tool_name: &str, result: &CborValue) -> ToolUseState
 
 fn success_display(result: &CborValue) -> ToolUseState {
     let command = cbor_text_field(result, "command").unwrap_or("calendar");
-    let status_text = cbor_text_field(result, "status").unwrap_or("ok");
     let data = cbor_field(result, "data");
     ToolUseState {
         args: calendar_display_args(command, data).unwrap_or_default(),
@@ -2937,8 +2935,18 @@ fn success_display(result: &CborValue) -> ToolUseState {
         stats: calendar_display_stats(command, data),
         info_chips: calendar_display_info(command, data),
         status: ToolUseStatus::Success,
-        status_text: status_text.to_owned(),
+        status_text: success_status_text(result).to_owned(),
         ..Default::default()
+    }
+}
+
+fn success_status_text(result: &CborValue) -> &'static str {
+    // DESIGN-tool-result-ok-status permits a documented non-success lifecycle
+    // state; PIM preserves only the policy-gated pending state.
+    if cbor_text_field(result, "status") == Some("approval_required") {
+        "approval_required"
+    } else {
+        "ok"
     }
 }
 

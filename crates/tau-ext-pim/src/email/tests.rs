@@ -1578,6 +1578,22 @@ fn successful_email_tool_results_show_command_scope_and_counts() {
     assert_eq!(display.info_chips, vec!["2 messages".to_owned()]);
 }
 
+/// Ensures operation-specific payload detail remains model-visible without
+/// replacing the canonical successful tool-result display status.
+#[test]
+fn successful_email_display_status_is_canonical() {
+    let output = ok_envelope("send", "sent", cbor_map(Vec::new()));
+    let event = finish_tool_result(split_tool_started("email_send", Vec::new()), output);
+
+    let Event::ToolResult(result) = event else {
+        panic!("successful split email command should be a tool result")
+    };
+    assert_eq!(cbor_text_field(&result.result, "status"), Some("sent"));
+    let display = result.display.expect("display");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+}
+
 #[test]
 fn split_email_tool_displays_do_not_repeat_internal_command() {
     let temp = tempfile::TempDir::new().expect("tempdir");

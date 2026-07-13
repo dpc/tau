@@ -374,6 +374,36 @@ fn split_calendar_tool_displays_do_not_repeat_internal_command() {
     assert_eq!(initial.args, "proton/main event_id=evt1");
 }
 
+/// Ensures operation-specific payload detail does not replace the canonical
+/// successful tool-result display status.
+#[test]
+fn successful_calendar_display_status_is_canonical() {
+    let output = ok_envelope(
+        "create_event",
+        "created",
+        cbor_map(vec![("event_id", CborValue::Text("evt1".to_owned()))]),
+    );
+    let event = finish_tool_result(
+        invoke_with_command(tool_started("calendar_create", Vec::new())),
+        output,
+    );
+
+    let Event::ToolResult(result) = event else {
+        panic!("successful split calendar command should be a tool result")
+    };
+    assert_eq!(cbor_text_field(&result.result, "status"), Some("created"));
+    let display = result.display.expect("display");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+
+    let pending = ok_envelope("create_event", "approval_required", cbor_map(Vec::new()));
+    assert_eq!(
+        success_display(&pending).status_text,
+        "approval_required",
+        "pending side effects retain their documented lifecycle status"
+    );
+}
+
 #[test]
 fn split_calendar_tool_error_display_uses_external_tool_name() {
     let event = finish_tool_result(
