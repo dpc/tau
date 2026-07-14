@@ -239,6 +239,8 @@ pub(crate) fn daemon_output_for_session(
 pub(crate) struct DaemonCliOverrides<'a> {
     pub(crate) role: &'a [tau_config::settings::RoleCliOverride],
     pub(crate) extension: &'a [tau_config::settings::ExtensionCliOverride],
+    /// Parsed public extension environment to forward deterministically.
+    pub(crate) extension_environment: Option<&'a [String]>,
     pub(crate) harness_config: &'a [tau_config::settings::HarnessConfigCliOverride],
 }
 
@@ -387,6 +389,12 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         );
     } else {
         cmd.env_remove(tau_harness::EXTENSION_CLI_OVERRIDES_ENV);
+    }
+    if let Some(names) = spec.cli_overrides.extension_environment {
+        cmd.env(
+            tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV,
+            names.join(","),
+        );
     }
     if !spec.cli_overrides.harness_config.is_empty() {
         cmd.env(

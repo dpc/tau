@@ -30,6 +30,13 @@ Keep these as focused unit tests around `prompt_history` plus routing tests for
 command-line redaction; do not require interactive terminal E2E checks for
 storage-format regressions.
 
+Developer prompt and tool preview startup regressions must execute the bundled
+`tau` binary against an isolated home and working directory. They should assert
+observable rendered contributions from disabled-by-default extensions for both
+public-environment-only and environment-plus-ordered-CLI cases; tests of parsed
+override vectors or child `Command` environment fields alone do not cover the
+spawned harness boundary.
+
 Renderer transition tests should observe flush-delimited virtual-terminal frames
 driven by the operation under test. Frame waits must be bounded and must not
 request a post-operation `redraw_sync`, because that extra redraw can hide an

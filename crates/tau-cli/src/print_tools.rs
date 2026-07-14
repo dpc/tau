@@ -10,6 +10,7 @@ pub(crate) fn run_print_tools(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
+    extension_environment: &[String],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let session_id = mint_short_id("print-tools");
@@ -23,6 +24,7 @@ pub(crate) fn run_print_tools(
         DaemonCliOverrides {
             role: role_cli_overrides,
             extension: extension_cli_overrides,
+            extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
         },
         false,

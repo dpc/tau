@@ -17,6 +17,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: std::slice::from_ref(&override_),
         },
         ephemeral: false,
@@ -36,6 +37,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: false,
@@ -60,6 +62,7 @@ fn daemon_command_clears_empty_extension_transport() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: false,
@@ -75,6 +78,47 @@ fn daemon_command_clears_empty_extension_transport() {
     );
 }
 
+/// Ensures preview daemons receive the already parsed public environment
+/// through its supported variable while argv operations remain in the private
+/// ordered CLI transport.
+#[test]
+fn daemon_command_forwards_public_extension_environment_separately() {
+    let names = vec!["test-dummy".to_owned(), "std-rhai".to_owned()];
+    let cli = [tau_config::settings::ExtensionCliOverride::Disable(
+        "test-dummy".to_owned(),
+    )];
+    let command = build_daemon_command(DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "print-tools-1",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: Some("engineer"),
+        cli_overrides: DaemonCliOverrides {
+            role: &[],
+            extension: &cli,
+            extension_environment: Some(&names),
+            harness_config: &[],
+        },
+        ephemeral: false,
+    });
+
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV
+            && value == Some(std::ffi::OsStr::new("test-dummy,std-rhai"))
+    }));
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_harness::EXTENSION_CLI_OVERRIDES_ENV
+            && value
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|value| {
+                    serde_json::from_str::<Vec<tau_config::settings::ExtensionCliOverride>>(value)
+                        .is_ok_and(|decoded| decoded == cli)
+                })
+    }));
+}
+
 #[test]
 fn daemon_command_clears_socket_activation_env() {
     let command = build_daemon_command(DaemonCommandSpec {
@@ -88,6 +132,7 @@ fn daemon_command_clears_socket_activation_env() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: false,
@@ -124,6 +169,7 @@ fn daemon_command_sets_ephemeral_env_only_when_requested() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: true,
@@ -144,6 +190,7 @@ fn daemon_command_sets_ephemeral_env_only_when_requested() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: false,
@@ -169,6 +216,7 @@ fn daemon_command_uses_initial_ui_stdio() {
         cli_overrides: DaemonCliOverrides {
             role: &[],
             extension: &[],
+            extension_environment: None,
             harness_config: &[],
         },
         ephemeral: false,

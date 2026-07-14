@@ -12,6 +12,7 @@ pub(crate) fn run_print_prompt(
     enable_agents_md: bool,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
+    extension_environment: &[String],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let mut daemon = launch_render_daemon(
@@ -19,6 +20,7 @@ pub(crate) fn run_print_prompt(
         role,
         role_cli_overrides,
         extension_cli_overrides,
+        extension_environment,
         harness_config_overrides,
     )?;
 
@@ -30,6 +32,7 @@ pub(crate) fn run_print_system_prompt(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
+    extension_environment: &[String],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let mut daemon = launch_render_daemon(
@@ -37,6 +40,7 @@ pub(crate) fn run_print_system_prompt(
         role,
         role_cli_overrides,
         extension_cli_overrides,
+        extension_environment,
         harness_config_overrides,
     )?;
 
@@ -49,6 +53,7 @@ fn launch_render_daemon(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
+    extension_environment: &[String],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<DaemonHandle, CliError> {
     let session_id = mint_short_id(session_prefix);
@@ -62,6 +67,7 @@ fn launch_render_daemon(
         DaemonCliOverrides {
             role: role_cli_overrides,
             extension: extension_cli_overrides,
+            extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
         },
         false,

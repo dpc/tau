@@ -570,12 +570,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         } else {
             Vec::new()
         };
-        let mut effective_extension_overrides = environment_extension_names
-            .iter()
-            .cloned()
-            .map(tau_config::settings::ExtensionCliOverride::Enable)
-            .collect::<Vec<_>>();
-        effective_extension_overrides.extend(extension_cli_overrides.iter().cloned());
         match &command {
             cli::Command::Run(run) if run.attach => {
                 reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
@@ -614,7 +608,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 reject_dev_tmux_startup_overrides(
                     harness.role.as_deref(),
                     &role_cli_overrides,
-                    &effective_extension_overrides,
+                    &extension_cli_overrides,
                     &harness_config_overrides,
                 )?;
             }
@@ -703,6 +697,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         crate::daemon::DaemonCliOverrides {
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
+                            extension_environment: None,
                             harness_config: &harness_config_overrides,
                         },
                         ephemeral,
@@ -716,6 +711,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         crate::daemon::DaemonCliOverrides {
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
+                            extension_environment: None,
                             harness_config: &harness_config_overrides,
                         },
                         ephemeral,
@@ -782,6 +778,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         enable_agents_md,
                         &role_cli_overrides,
                         &extension_cli_overrides,
+                        &environment_extension_names,
                         &harness_config_overrides,
                     )
                 }
@@ -792,6 +789,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         role,
                         &role_cli_overrides,
                         &extension_cli_overrides,
+                        &environment_extension_names,
                         &harness_config_overrides,
                     )
                 }
@@ -801,6 +799,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         role,
                         &role_cli_overrides,
                         &extension_cli_overrides,
+                        &environment_extension_names,
                         &harness_config_overrides,
                     )
                 }
