@@ -1,10 +1,13 @@
 # DESIGN-tau-ext-slack-immutable-thread-destinations: Thread destinations are immutable authenticated routes
 
-Status: unconfirmed
+Status: confirmed, 2026-07-14, dpc
 
-Reply thread roots are validated event metadata and travel inside the same
-pending, accepted, and active conversation state as the configured channel or
-linked DM. `slack_send` exposes no thread argument. Top-level origins store no
-thread root, while threaded origins supply their root to `chat.postMessage`;
-successful completion must repeat the exact typed route metadata or fail closed.
-Configured proactive aliases may instead bind one fixed validated thread root.
+A thread is an optional immutable root timestamp under one Slack conversation,
+not an independent conversation. An incoming reply uses `thread_ts`; a configured
+receive-enabled fixed-thread route also matches its root create when `ts` equals that root and
+normalizes it to the root. Parent receive routes retain each actual optional
+incoming root. Reply and proactive routes carry this value through pending,
+accepted, and active state; completion must repeat it exactly.
+
+`slack_send` exposes no thread argument, never substitutes a child timestamp,
+and never broadcasts a reply. Fixed-thread aliases may bind the root directly.

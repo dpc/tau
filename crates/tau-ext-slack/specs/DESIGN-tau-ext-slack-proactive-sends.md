@@ -1,7 +1,18 @@
 # DESIGN-tau-ext-slack-proactive-sends: Configured proactive transport sends
 
-Status: unconfirmed
+Status: confirmed, 2026-07-14, dpc
 
-Slack initiation is separately authorized by the empty-by-default `send_destinations` list. Each record has `alias`, `conversation_id`, `kind` (`channel`, `mpim`, or `dm`), and optional `description` and fixed `thread_ts`. Inbound `channel_ids` and a runtime-linked DM never imply this outbound right. The `slack_send` tool requires `message` plus exactly one of opaque `reply_to` or configured `destination`; the model sees sorted aliases and trusted descriptions, never native Slack IDs or a raw thread selector. Every enabled agent may use every advertised alias without `slack_register`; normal effective role/tool policy is the agent authorization layer.
+A `conversations` record grants proactive initiation only with
+`proactive_send: true`. This is independent from its optional receive permission
+and from dynamic DM links. `slack_send` accepts `message` plus exactly one opaque
+`reply_to` or configured `destination`; the schema exposes sorted aliases and
+verbatim trusted descriptions, never native ids or thread selectors. Agents do
+not need `slack_register` for proactive sends; effective role/tool policy remains
+the agent authorization layer.
 
-The extension and harness both fail closed: they revalidate the authenticated connection, current session generation, live call and actual agent/tool, transport, alias, endpoint, native conversation kind/id, and fixed thread. Successful outgoing facts retain the authorization relation and tool call audit. Same-process retries are bounded; transcript replay never posts remotely, and Tau does not claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt injection can still influence a role already granted `slack_send`; isolate ingress roles or keep their destination set minimal. Slack app membership remains required and `chat:write.public` is not needed.
+The extension and harness revalidate connection, session, agent/tool,
+capability, alias, endpoint, kind/id, and fixed thread. Same-process accepted
+retry does not repost. Transcript replay never posts remotely, and Tau does not
+claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt
+injection can influence a role granted this tool, so destination sets and roles
+should remain minimal. App membership is required; `chat:write.public` is not.

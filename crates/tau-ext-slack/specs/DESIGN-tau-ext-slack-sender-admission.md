@@ -1,5 +1,15 @@
 # DESIGN-tau-ext-slack-sender-admission: Sender admission is independent from trigger scope and content trust
 
-Status: unconfirmed
+Status: confirmed, 2026-07-14, dpc
 
-Strict mode is the default and admits only allowlisted verified humans. Lax mode accepts the increased prompt-injection exposure of other Slack-verified non-bot humans only in configured channels or an already-linked DM. This changes sender admission, not content trust: payloads remain untrusted, and identity plus `Allowlisted`/`LaxPermitted` policy are typed separately. Lax senders cannot link DMs or use agent-selection and bridge-control commands. Accepted ingress activates only an opaque source-bound reply route for the authenticated actor, conversation, and thread; it grants no arbitrary destination selection. Mentions-only/all-messages trigger scope is orthogonal and must preserve these sender, conversation, control, and route invariants.
+Strict mode admits only allowlisted Slack-verified humans. Lax mode admits other
+verified humans only on static receive routes. It changes sender admission, not
+content trust: payloads remain untrusted, with identity and policy typed
+separately. Lax never grants dynamic DM linking, agent selection, bridge
+commands, or destination authority; dynamic links remain exact allowlisted-user
+bindings even in lax mode.
+
+Each route independently chooses mentions-only or all-message triggers. Outside
+DMs, commands require an exact leading authenticated bot mention regardless of
+Slack event wrapper. Accepted ingress activates only its opaque source-bound
+reply route and grants no proactive authority.

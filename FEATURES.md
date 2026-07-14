@@ -713,34 +713,40 @@ destination.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 
-Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
-
-Disabled by default, `std-slack` lets allowlisted Slack users send text to
+Disabled by default, `std-slack` lets policy-permitted verified Slack humans send text to
 explicitly registered Tau agents and lets tool-authorized agents reply or send to
 explicitly configured proactive aliases with `slack_send`.
 Incoming creates and owned-post reactions use typed message envelopes with
 durable native ids and gray semi-system provenance; no duplicate legacy prompt
 is created. Replies require the envelope's opaque `reply_to` id; proactive sends require a
 configured alias. Both produce a durable outgoing fact before terminal completion.
-It uses Slack Socket Mode with an app-token secret (`xapp-...`), a bot-token
-secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Inbound `channel_ids` and a linked DM authorize replies only. Proactive sends use
-the separate empty-by-default `send_destinations` alias list. Each channel has independent agent
-selection, and replies return to the source-bound configured or linked
-conversation selected by `reply_to`, preserving its originating thread
-automatically; the model chooses only an advertised alias, never a native ID or thread.
+It uses Slack Socket Mode with app/bot token secrets and a nonempty U/W
+`allowed_user_ids` allowlist. One validated `conversations` list binds exact
+channel/private/MPIM/DM/fixed-thread routes to stable aliases and independently
+enables per-route `receive: mentions_only|all_messages` and `proactive_send`.
+Optional bounded dynamic DMs are exact-user-bound, multi-link, runtime-only, and
+receive-and-source-reply only. Only proactive aliases are model-selectable; native ids and thread
+selectors remain private. Parent threads share selection, receive-enabled
+fixed-thread routes isolate it, and opaque replies preserve the exact source root automatically.
+The removed `channel_ids`, `listening_scope`, and `send_destinations` keys are
+hard migration errors.
 `security_mode` is `strict` by default. Optional `lax` also forwards verified
 human creates, edits, and reactions from authorized conversations, without
 granting bridge commands or destination-selection authority. It materially increases
 prompt-injection exposure; all payloads remain untrusted and typed policy,
 identity, and content-trust fields cannot be forged with payload tags.
-Runtime registrations, selected agents, opaque reply routes,
-learned DM link, duplicate event cache, and websocket state are in-memory only.
+Runtime registrations, selected agents, opaque reply routes, dynamic DM links,
+local-effect dedup, post ownership, and websocket state are in-memory only.
 Policy-permitted verified human reactions added to or removed from a recent `slack_send` post
 route to the post's owning agent with stable channel/thread/message metadata;
 reactions to arbitrary posts or unconfigured conversations are ignored.
 Slack edits are separate immutable typed occurrences that visibly reference the
 original canonical/native message. They never rewrite history or fall through
 as indistinguishable new messages.
+Slack's overlapping `message`/`app_mention` delivery is normalized by native
+message identity; only an exact leading authenticated mention invokes commands
+outside DMs. Configuration freezes after successful Socket Mode preflight or
+immediately before any authorized reply/proactive post attempt.
 
 ### Web search extensions
 

@@ -10,3 +10,5 @@ unless the surrounding code already treats the text as user-visible prompt text.
 
 After user-visible capability, configuration, Slack scope/event, or operational
 changes, update the built-in `tau-self-knowledge-ext-slack` skill.
+
+- `SECURITY.md` — required reading for Slack-specific trust boundaries, secrets, replay/failure behavior, and review triggers.

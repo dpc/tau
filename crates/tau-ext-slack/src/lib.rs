@@ -8,7 +8,7 @@
 //! Reply routing follows
 //! `DESIGN-tau-ext-slack-canonical-reply-selectors`.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,7 +87,9 @@ const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
 const PENDING_SEND_LIMIT: usize = 1024;
 const ACCEPTED_SEND_ATTEMPT_LIMIT: usize = 256;
-const SEND_DESTINATION_LIMIT: usize = 64;
+const CONVERSATION_LIMIT: usize = 64;
+const DYNAMIC_DM_LIMIT: usize = 64;
+const DYNAMIC_DM_LABEL: &str = "direct-message";
 const TRANSPORT_NAME: &str = "slack";
 const CAPABILITY_REQUEST_PREFIX: &str = "slack-capability-";
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
@@ -155,12 +157,16 @@ struct RuntimeConfig {
     allowed_user_ids: HashSet<String>,
     /// Policy controlling which verified human senders may enter Tau.
     security_mode: SecurityMode,
-    /// Which eligible Slack message events trigger ingress.
-    listening_scope: ListeningScope,
-    /// Explicitly allowed Slack channels for inbound routing.
-    configured_channel_ids: HashSet<String>,
-    /// Explicit proactive aliases, independent of ingress authorization.
-    send_destinations: BTreeMap<String, SendDestination>,
+    /// Exact validated static conversation policies, keyed by stable alias.
+    conversations: BTreeMap<String, ConversationPolicy>,
+    /// Receive-enabled parent routes keyed by native conversation id.
+    parent_receives: HashMap<String, String>,
+    /// Receive-enabled fixed routes keyed by native conversation and root.
+    thread_receives: HashMap<(String, String), String>,
+    /// Proactive aliases, independently derived from static policies.
+    proactive_aliases: BTreeSet<String>,
+    /// Optional bounded dynamic-DM discovery policy.
+    dynamic_direct_messages: Option<DynamicDirectMessages>,
     /// Slack Web API base URL.
     api_base: String,
     /// Maximum accepted inbound or outbound text size in bytes.
@@ -180,39 +186,59 @@ struct ExtConfig {
     allowed_user_ids: Vec<String>,
     /// Ingress sender policy. Omission deliberately preserves strict behavior.
     security_mode: SecurityMode,
-    /// Message trigger scope, independent of sender security policy.
-    listening_scope: ListeningScope,
-    /// Slack channel ids allowed to route messages to Tau.
-    channel_ids: Vec<String>,
-    /// Explicit outbound initiation routes; empty preserves reply-only
-    /// behavior.
-    send_destinations: Vec<RawSendDestination>,
+    /// Exact static receive/proactive conversation policy.
+    conversations: Vec<RawConversationPolicy>,
+    /// Optional bounded dynamic one-to-one DM discovery policy.
+    dynamic_direct_messages: Option<DynamicDirectMessages>,
+    /// Removed key retained only to produce actionable migration errors.
+    #[serde(deserialize_with = "removed_config_key")]
+    channel_ids: bool,
+    /// Removed key retained only to produce actionable migration errors.
+    #[serde(deserialize_with = "removed_config_key")]
+    listening_scope: bool,
+    /// Removed key retained only to produce actionable migration errors.
+    #[serde(deserialize_with = "removed_config_key")]
+    send_destinations: bool,
     /// Optional Slack Web API base URL, mostly for tests.
     api_base: Option<String>,
     /// Optional maximum accepted text size in bytes.
     max_message_bytes: Option<usize>,
 }
 
-/// Raw operator-configured proactive Slack destination.
+/// Mark any encountered removed key as present, including an explicit null.
+fn removed_config_key<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(true)
+}
+
+/// Raw operator-configured static Slack conversation policy.
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawSendDestination {
+struct RawConversationPolicy {
     /// Stable lower-case model-facing name.
     alias: String,
     /// Existing Slack conversation id, never a user id.
     conversation_id: String,
     /// Expected Slack conversation family.
-    kind: SendDestinationKind,
-    /// Optional safe model-facing operator hint.
+    kind: ConversationPolicyKind,
+    /// Optional inbound trigger permission.
+    receive: Option<ReceiveMode>,
+    /// Whether proactive initiation to this alias is authorized.
+    #[serde(default)]
+    proactive_send: bool,
+    /// Optional trusted model-facing operator hint.
     description: Option<String>,
     /// Optional immutable root thread timestamp.
     thread_ts: Option<String>,
 }
 
-/// Supported proactive Slack conversation families.
+/// Supported static Slack conversation families.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum SendDestinationKind {
+enum ConversationPolicyKind {
     /// Public or private Slack channel.
     Channel,
     /// Existing multi-person direct conversation.
@@ -221,14 +247,39 @@ enum SendDestinationKind {
     Dm,
 }
 
-/// Fully validated proactive route.
+/// Fully validated static receive/proactive route.
 #[derive(Clone)]
-struct SendDestination {
+struct ConversationPolicy {
+    /// Stable model-facing route label.
     alias: String,
+    /// Exact existing native Slack conversation.
     conversation_id: String,
-    kind: SendDestinationKind,
+    /// Explicit native conversation family.
+    kind: ConversationPolicyKind,
+    /// Optional inbound trigger permission.
+    receive: Option<ReceiveMode>,
+    /// Optional trusted model-facing operator hint.
     description: Option<String>,
+    /// Optional immutable fixed-thread root.
     thread_ts: Option<String>,
+}
+
+/// Inbound trigger mode for one exact static route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiveMode {
+    /// Accept Slack `app_mention` events for the route.
+    MentionsOnly,
+    /// Accept all eligible messages in the exact route.
+    AllMessages,
+}
+
+/// Optional dynamic one-to-one DM discovery settings.
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicDirectMessages {
+    /// DMs always receive ordinary `message.im` events.
+    receive: ReceiveMode,
 }
 
 /// Stable disposition of a Slack-accepted send, retained to prevent reposting.
@@ -268,53 +319,76 @@ impl ExtConfig {
         if self.allowed_user_ids.is_empty() {
             return Err("slack config requires non-empty `allowed_user_ids`".to_owned());
         }
+        if self.channel_ids || self.listening_scope || self.send_destinations {
+            return Err(
+                "Slack `channel_ids`, `listening_scope`, and `send_destinations` were removed; migrate each exact route to `conversations[]` with optional `receive` and `proactive_send`"
+                    .to_owned(),
+            );
+        }
         let mut allowed_user_ids = HashSet::new();
         for user_id in self.allowed_user_ids {
-            let user_id = validate_slack_id("allowed_user_ids", &user_id)?;
+            let user_id = validate_user_id("allowed_user_ids", &user_id)?;
             if !allowed_user_ids.insert(user_id.clone()) {
                 return Err(format!(
                     "slack `allowed_user_ids` contains duplicate id `{user_id}`"
                 ));
             }
         }
-        let mut configured_channel_ids = HashSet::new();
-        for channel_id in self.channel_ids {
-            let channel_id = validate_slack_id("channel_ids", &channel_id)?;
-            if !configured_channel_ids.insert(channel_id.clone()) {
-                return Err(format!(
-                    "slack `channel_ids` contains duplicate id `{channel_id}`"
-                ));
-            }
-        }
-        if self.send_destinations.len() > SEND_DESTINATION_LIMIT {
+        if self.conversations.len() > CONVERSATION_LIMIT {
             return Err(format!(
-                "slack `send_destinations` supports at most {SEND_DESTINATION_LIMIT} entries"
+                "slack `conversations` supports at most {CONVERSATION_LIMIT} entries"
             ));
         }
-        let mut send_destinations = BTreeMap::new();
+        let mut conversations = BTreeMap::new();
+        let mut proactive_aliases = BTreeSet::new();
         let mut routes = HashSet::new();
-        for raw in self.send_destinations {
+        let mut kinds = HashMap::new();
+        let mut parent_receives = HashMap::new();
+        let mut thread_receives = HashMap::new();
+        for raw in self.conversations {
             if !valid_destination_alias(&raw.alias) {
                 return Err(
-                    "slack send destination alias must match ^[a-z][a-z0-9_-]{0,63}$".to_owned(),
+                    "slack conversation alias must match ^[a-z][a-z0-9_-]{0,63}$".to_owned(),
                 );
             }
+            if raw.alias == DYNAMIC_DM_LABEL {
+                return Err(format!(
+                    "slack conversation alias `{DYNAMIC_DM_LABEL}` is reserved for dynamic DMs"
+                ));
+            }
             let conversation_id =
-                validate_slack_id("send_destinations.conversation_id", &raw.conversation_id)?;
+                validate_conversation_id("conversations[].conversation_id", &raw.conversation_id)?;
             let valid_prefix = match raw.kind {
-                SendDestinationKind::Channel => {
+                ConversationPolicyKind::Channel => {
                     matches!(conversation_id.as_bytes().first(), Some(b'C' | b'G'))
                 }
-                SendDestinationKind::Mpim => conversation_id.starts_with('G'),
-                SendDestinationKind::Dm => conversation_id.starts_with('D'),
+                ConversationPolicyKind::Mpim => conversation_id.starts_with('G'),
+                ConversationPolicyKind::Dm => conversation_id.starts_with('D'),
             };
             if !valid_prefix {
-                return Err("slack send destination kind does not match conversation id".to_owned());
+                return Err("slack conversation kind does not match conversation id".to_owned());
+            }
+            if let Some(previous) = kinds.insert(conversation_id.clone(), raw.kind)
+                && previous != raw.kind
+            {
+                return Err(
+                    "slack conversation id cannot have conflicting `kind` values".to_owned(),
+                );
             }
             if let Some(thread_ts) = &raw.thread_ts
                 && validate_slack_ts(thread_ts).is_err()
             {
-                return Err("slack send destination has invalid `thread_ts`".to_owned());
+                return Err("slack conversation has invalid `thread_ts`".to_owned());
+            }
+            if raw.receive == Some(ReceiveMode::MentionsOnly)
+                && raw.kind == ConversationPolicyKind::Dm
+            {
+                return Err("slack DM receive must be `all_messages`".to_owned());
+            }
+            if raw.receive.is_none() && !raw.proactive_send {
+                return Err(
+                    "slack conversation must enable `receive` and/or `proactive_send`".to_owned(),
+                );
             }
             let description = raw
                 .description
@@ -323,7 +397,12 @@ impl ExtConfig {
                         || value.chars().count() > 120
                         || value.chars().any(char::is_control)
                     {
-                        Err("slack send destination has invalid `description`".to_owned())
+                        Err("slack conversation has invalid `description`".to_owned())
+                    } else if !raw.proactive_send {
+                        Err(
+                            "slack conversation `description` requires `proactive_send: true`"
+                                .to_owned(),
+                        )
                     } else {
                         Ok(value)
                     }
@@ -331,19 +410,48 @@ impl ExtConfig {
                 .transpose()?;
             if !routes.insert((conversation_id.clone(), raw.thread_ts.clone())) {
                 return Err(
-                    "slack `send_destinations` contains a duplicate native route".to_owned(),
+                    "slack `conversations` contains a duplicate exact native route".to_owned(),
                 );
             }
-            let destination = SendDestination {
+            let policy = ConversationPolicy {
                 alias: raw.alias.clone(),
                 conversation_id,
                 kind: raw.kind,
+                receive: raw.receive,
                 description,
                 thread_ts: raw.thread_ts,
             };
-            if send_destinations.insert(raw.alias, destination).is_some() {
-                return Err("slack `send_destinations` contains a duplicate alias".to_owned());
+            if raw.proactive_send {
+                proactive_aliases.insert(raw.alias.clone());
             }
+            if policy.receive.is_some() {
+                if let Some(thread_ts) = &policy.thread_ts {
+                    thread_receives.insert(
+                        (policy.conversation_id.clone(), thread_ts.clone()),
+                        policy.alias.clone(),
+                    );
+                } else {
+                    parent_receives.insert(policy.conversation_id.clone(), policy.alias.clone());
+                }
+            }
+            if conversations.insert(raw.alias, policy).is_some() {
+                return Err("slack `conversations` contains a duplicate alias".to_owned());
+            }
+        }
+        if parent_receives.keys().any(|parent| {
+            thread_receives
+                .keys()
+                .any(|(conversation, _)| conversation == parent)
+        }) {
+            return Err(
+                "slack receive-enabled parent overlaps a receive-enabled fixed thread; remove one `receive`"
+                    .to_owned(),
+            );
+        }
+        if let Some(dynamic) = self.dynamic_direct_messages
+            && dynamic.receive != ReceiveMode::AllMessages
+        {
+            return Err("slack dynamic DM receive must be `all_messages`".to_owned());
         }
         let api_base = self
             .api_base
@@ -357,14 +465,22 @@ impl ExtConfig {
                 "slack `max_message_bytes` must be between 1 and {MAX_MESSAGE_BYTES}"
             ));
         }
+        if conversations.is_empty() && self.dynamic_direct_messages.is_none() {
+            return Err(
+                "slack conversation policy is inactive; configure `conversations` and/or `dynamic_direct_messages`"
+                    .to_owned(),
+            );
+        }
         Ok(RuntimeConfig {
             app_token: app_token.to_owned(),
             bot_token: bot_token.to_owned(),
             allowed_user_ids,
             security_mode: self.security_mode,
-            listening_scope: self.listening_scope,
-            configured_channel_ids,
-            send_destinations,
+            conversations,
+            parent_receives,
+            thread_receives,
+            proactive_aliases,
+            dynamic_direct_messages: self.dynamic_direct_messages,
             api_base,
             max_message_bytes,
         })
@@ -387,18 +503,6 @@ enum SecurityMode {
     Strict,
     /// Also admit verified humans in an already authorized conversation.
     Lax,
-}
-
-/// Eligible Slack message events that wake Tau.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ListeningScope {
-    /// Configured channels require `app_mention`; linked DMs remain direct.
-    #[default]
-    MentionsOnly,
-    /// Configured channels also accept ordinary `message` events; DMs are
-    /// unchanged.
-    AllMessages,
 }
 
 impl RuntimeConfig {
@@ -464,20 +568,43 @@ struct SlackMessage {
     thread_ts: Option<String>,
 }
 
-/// Slack destination derived exclusively from authenticated inbound context.
+/// Slack conversation route derived exclusively from authenticated inbound
+/// context.
 ///
-/// The channel is configured or linked when captured, and `thread_ts` is absent
-/// or passed `validate_slack_ts`; neither value comes from model input. Channel
-/// authorization is checked again immediately before every send. See
+/// The conversation is configured or linked when captured, and `thread_ts` is
+/// absent or passed `validate_slack_ts`; neither value comes from model input.
+/// Route authorization is checked again immediately before every send. See
 /// `DESIGN-tau-ext-slack-immutable-thread-destinations`.
 #[derive(Clone, Eq, PartialEq)]
 struct SlackConversation {
-    /// Configured channel or linked DM id.
+    /// Exact configured or linked native conversation id.
     channel_id: String,
     /// Root thread timestamp, absent for a top-level conversation.
     thread_ts: Option<String>,
-    /// Whether this is the linked one-to-one Slack IM.
-    direct: bool,
+    /// Authenticated Slack conversation family.
+    kind: ConversationPolicyKind,
+    /// Stable configured alias, or the reserved dynamic-DM label.
+    alias: String,
+}
+
+impl SlackConversation {
+    /// Stable key isolating each static route and each dynamic DM's selection.
+    fn route_key(&self) -> SelectionRouteKey {
+        if self.alias == DYNAMIC_DM_LABEL {
+            SelectionRouteKey::DynamicDm(self.channel_id.clone())
+        } else {
+            SelectionRouteKey::StaticAlias(self.alias.clone())
+        }
+    }
+}
+
+/// Exact policy scope owning one selected-agent choice.
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum SelectionRouteKey {
+    /// One configured static route, including its parent/thread scope.
+    StaticAlias(String),
+    /// One dynamically linked direct conversation.
+    DynamicDm(String),
 }
 
 /// Slack reaction event awaiting validation and authorization.
@@ -546,11 +673,9 @@ enum DecodedSlackEvent {
     Edit(SlackEdit),
 }
 
-/// Private DM learned through `start` when no channels are configured.
+/// Private dynamic DM learned through allowlisted `start`.
 #[derive(Clone)]
 struct LinkedConversation {
-    /// Slack DM channel id used as the reply destination.
-    channel_id: String,
     /// Allowlisted Slack user id that established this DM link.
     user_id: String,
 }
@@ -635,7 +760,8 @@ struct State {
     config: Option<RuntimeConfig>,
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
-    selected_agent_by_channel: HashMap<String, AgentId>,
+    /// Selected agent independently owned by each static route or dynamic DM.
+    selected_agent_by_route: HashMap<SelectionRouteKey, AgentId>,
     /// Ingress requests waiting for a commit-gated result.
     pending_ingress: HashMap<String, PendingIngress>,
     /// Canonical opaque ids mapped to private Slack routes.
@@ -662,7 +788,12 @@ struct State {
     pending_capability_request: Option<String>,
     /// Monotonic capability request correlation source.
     next_capability_request: u64,
-    learned_dm: Option<LinkedConversation>,
+    /// Bounded exact D-conversation to U/W-user dynamic links.
+    linked_dms: HashMap<String, LinkedConversation>,
+    /// Monotonic latch preventing configuration changes after remote effects.
+    config_frozen: bool,
+    /// Version used to reject a stale successful worker preflight race.
+    config_generation: u64,
     worker_started: bool,
     worker_online: bool,
     worker_startup_failure_reported: bool,
@@ -846,39 +977,27 @@ impl Extension {
         }
     }
 
-    /// Apply validated configuration before the Socket Mode worker starts.
+    /// Apply validated configuration before any successful preflight or post
+    /// freezes it.
     fn apply_config(&self, cfg: RuntimeConfig) -> Result<(), String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.worker_started {
+        if state.config_frozen {
             return Err(immutable_config_error());
         }
-        let old_channels = state
-            .config
-            .as_ref()
-            .map(|cfg| cfg.configured_channel_ids.clone());
-        let learned_dm_is_stale = !cfg.configured_channel_ids.is_empty()
-            || state
-                .learned_dm
-                .as_ref()
-                .is_some_and(|link| !cfg.allowed_user_ids.contains(&link.user_id));
-        if learned_dm_is_stale {
-            state.learned_dm = None;
-        }
+        state.linked_dms.clear();
         state.config = Some(cfg);
+        state.config_generation = state.config_generation.wrapping_add(1);
         state.clear_accepted_send_attempts();
-        let new_channels = state
-            .config
-            .as_ref()
-            .map(|cfg| cfg.configured_channel_ids.clone());
-        if old_channels != new_channels {
-            state.registered_agents.clear();
-            state.selected_agent_by_channel.clear();
-            state.pending_ingress.clear();
-            state.clear_reply_routes();
-            state.clear_incoming_messages();
-            state.pending_posts.clear();
-            state.posted_messages.clear();
-        }
+        state.registered_agents.clear();
+        state.selected_agent_by_route.clear();
+        state.pending_ingress.clear();
+        state.clear_reply_routes();
+        state.clear_incoming_messages();
+        state.pending_posts.clear();
+        state.posted_messages.clear();
+        state.capability_active = false;
+        state.pending_capability_request = None;
+        state.duplicate_events = DuplicateCache::default();
         Ok(())
     }
 
@@ -886,12 +1005,13 @@ impl Extension {
     /// error.
     fn clear_config_after_error(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.worker_started {
+        if state.config_frozen {
             return;
         }
+        state.config_generation = state.config_generation.wrapping_add(1);
         state.config = None;
         state.registered_agents.clear();
-        state.selected_agent_by_channel.clear();
+        state.selected_agent_by_route.clear();
         state.pending_ingress.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
@@ -900,22 +1020,23 @@ impl Extension {
         state.capability_active = false;
         state.pending_capability_request = None;
         state.posted_messages.clear();
-        state.learned_dm = None;
+        state.linked_dms.clear();
         state.bot_user_id = None;
         state.duplicate_events = DuplicateCache::default();
     }
 
-    /// Report whether the Socket Mode worker has already started.
-    fn worker_started(&self) -> bool {
+    /// Report whether remote activation or an authorized post froze
+    /// configuration.
+    fn config_frozen(&self) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .worker_started
+            .config_frozen
     }
 
     /// Register the typed Slack capability for the current harness session.
     fn request_transport_capability(&self) {
-        let (request_id, send_destinations) = {
+        let (request_id, proactive_destinations) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.capability_active = false;
             state.next_capability_request = state.next_capability_request.wrapping_add(1);
@@ -925,8 +1046,9 @@ impl Extension {
             );
             state.pending_capability_request = Some(request_id.clone());
             let destinations = state.config.as_ref().map_or_else(Vec::new, |cfg| {
-                cfg.send_destinations
-                    .values()
+                cfg.proactive_aliases
+                    .iter()
+                    .filter_map(|alias| cfg.conversations.get(alias))
                     .map(send_destination_capability)
                     .collect()
             });
@@ -938,7 +1060,7 @@ impl Extension {
                     request_id,
                     transport_name: TRANSPORT_NAME.to_owned(),
                     send_tool: Some(self.output.wire_tool_name(SEND_TOOL_NAME)),
-                    send_destinations,
+                    send_destinations: proactive_destinations,
                 },
             ));
     }
@@ -995,27 +1117,37 @@ impl Extension {
                     let Some(cfg) = state.config.clone() else {
                         return tool_error(invoke, "slack extension is not configured".to_owned());
                     };
+                    let generation = state.config_generation;
                     drop(state);
                     match self.prepare_worker_start(&cfg) {
-                        Ok(startup) => Some((cfg, startup)),
+                        Ok(startup) => Some((cfg, startup, generation)),
                         Err(message) => return tool_error(invoke, message),
                     }
                 }
             };
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, _, generation)) = &startup
+                && state.config_generation != *generation
+            {
+                return tool_error(
+                    invoke,
+                    "Slack configuration changed during Socket Mode preflight; retry registration"
+                        .to_owned(),
+                );
+            }
             state.registered_agents.insert(invoke.agent_id.clone());
             state
                 .agent_labels
                 .entry(invoke.agent_id.clone())
                 .or_insert_with(|| invoke.agent_id.to_string());
-            if let Some((cfg, startup)) = startup {
+            if let Some((cfg, startup, _)) = startup {
                 self.start_worker_locked(&mut state, cfg, Some(startup));
             }
         } else {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.registered_agents.remove(&invoke.agent_id);
             state
-                .selected_agent_by_channel
+                .selected_agent_by_route
                 .retain(|_, agent| agent != &invoke.agent_id);
             state.remove_agent_reply_routes(&invoke.agent_id);
             state.remove_agent_incoming_messages(&invoke.agent_id);
@@ -1057,6 +1189,7 @@ impl Extension {
         if state.worker_started {
             return;
         }
+        state.config_frozen = true;
         if let Some(startup) = &startup {
             state.bot_user_id = Some(startup.bot_user_id.clone());
         }
@@ -1181,7 +1314,7 @@ impl Extension {
             return Some(tool_error(invoke, "`message` must not be empty".to_owned()));
         }
         let (cfg, route, authorization, endpoint, conversation, policy_status) = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
                 return Some(tool_error(
                     invoke,
@@ -1226,7 +1359,7 @@ impl Extension {
                         format!("{send_tool} reply_to belongs to another agent"),
                     ));
                 }
-                if !is_authorized_conversation(&state, &cfg, &route.conversation.channel_id) {
+                if !is_route_authorized(&state, &cfg, &route.conversation, &route.user_id) {
                     return Some(tool_error(
                         invoke,
                         format!("{send_tool} originating conversation is no longer authorized"),
@@ -1235,6 +1368,7 @@ impl Extension {
                 let endpoint = external_endpoint_for_route(&route);
                 let conversation = message_conversation(&route.conversation);
                 let policy = route.policy_status;
+                state.config_frozen = true;
                 (
                     cfg,
                     route.conversation.clone(),
@@ -1247,7 +1381,12 @@ impl Extension {
                 )
             } else {
                 let alias = destination_alias.as_ref().expect("exclusive selector");
-                let Some(destination) = cfg.send_destinations.get(alias) else {
+                let Some(destination) = cfg
+                    .proactive_aliases
+                    .contains(alias)
+                    .then(|| cfg.conversations.get(alias))
+                    .flatten()
+                else {
                     return Some(tool_error(
                         invoke,
                         format!("{send_tool} destination is unknown or unauthorized"),
@@ -1256,8 +1395,10 @@ impl Extension {
                 let route = SlackConversation {
                     channel_id: destination.conversation_id.clone(),
                     thread_ts: destination.thread_ts.clone(),
-                    direct: destination.kind == SendDestinationKind::Dm,
+                    kind: destination.kind,
+                    alias: destination.alias.clone(),
                 };
+                state.config_frozen = true;
                 (
                     cfg.clone(),
                     route,
@@ -1386,7 +1527,9 @@ impl Extension {
     }
 
     fn process_slack_reaction(&self, reaction: SlackReaction) {
-        if validate_reaction_name(&reaction.reaction).is_err()
+        if validate_conversation_id("reaction.channel", &reaction.channel_id).is_err()
+            || validate_user_id("reaction.user", &reaction.user_id).is_err()
+            || validate_reaction_name(&reaction.reaction).is_err()
             || validate_slack_ts(&reaction.message_ts).is_err()
             || reaction
                 .thread_ts
@@ -1403,7 +1546,7 @@ impl Extension {
             };
             if cfg.sender_policy(&reaction.user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
-                || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
+                || !conversation_has_receive_source(&state, &cfg, &reaction.channel_id)
             {
                 log_ingress_rejection("reaction_policy");
                 return;
@@ -1413,14 +1556,14 @@ impl Extension {
         if !self.verified_human(&cfg, &reaction.user_id) {
             return;
         }
-        let (cfg, agent_id, thread_ts, direct) = {
+        let (cfg, agent_id, route) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
                 return;
             };
             if cfg.sender_policy(&reaction.user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
-                || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
+                || !conversation_has_receive_source(&state, &cfg, &reaction.channel_id)
             {
                 log_ingress_rejection("reaction_route");
                 return;
@@ -1437,12 +1580,19 @@ impl Extension {
             if !state.registered_agents.contains(&owner.agent_id) {
                 return;
             }
-            let direct = cfg.configured_channel_ids.is_empty()
-                && state
-                    .learned_dm
-                    .as_ref()
-                    .is_some_and(|link| link.channel_id == reaction.channel_id);
-            (cfg, owner.agent_id.clone(), owner.thread_ts.clone(), direct)
+            let route = resolve_receive_route(
+                &cfg,
+                &state,
+                &reaction.channel_id,
+                owner.thread_ts.as_deref(),
+                None,
+                &reaction.user_id,
+            );
+            let Some(route) = route else {
+                log_ingress_rejection("reaction_route");
+                return;
+            };
+            (cfg, owner.agent_id.clone(), route)
         };
         let dedup_key = reaction.event_id.clone().unwrap_or_else(|| {
             format!(
@@ -1456,11 +1606,7 @@ impl Extension {
         });
         self.submit_ingress(
             &cfg,
-            SlackConversation {
-                channel_id: reaction.channel_id,
-                thread_ts,
-                direct,
-            },
+            route,
             agent_id,
             IngressSender {
                 policy_status: cfg
@@ -1496,7 +1642,9 @@ impl Extension {
     /// This commit-confirmed ownership lookup and its fail-closed rejection
     /// path implement `DESIGN-tau-ext-slack-edit-ownership`.
     fn process_slack_edit(&self, edit: SlackEdit) {
-        if validate_slack_ts(&edit.message_ts).is_err()
+        if validate_conversation_id("edit.channel", &edit.channel_id).is_err()
+            || validate_user_id("edit.user", &edit.editor_user_id).is_err()
+            || validate_slack_ts(&edit.message_ts).is_err()
             || validate_slack_ts(&edit.revision_ts).is_err()
             || edit
                 .thread_ts
@@ -1513,7 +1661,7 @@ impl Extension {
             };
             if cfg.sender_policy(&edit.editor_user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(edit.editor_user_id.as_str())
-                || !is_authorized_conversation(&state, &cfg, &edit.channel_id)
+                || !conversation_has_receive_source(&state, &cfg, &edit.channel_id)
             {
                 log_ingress_rejection("edit_policy");
                 return;
@@ -1523,8 +1671,11 @@ impl Extension {
                 log_ingress_rejection("edit_unknown_target");
                 return;
             };
+            let thread_matches = owner.conversation.thread_ts == edit.thread_ts
+                || (edit.thread_ts.is_none()
+                    && owner.conversation.thread_ts.as_deref() == Some(edit.message_ts.as_str()));
             if owner.user_id != edit.editor_user_id
-                || owner.conversation.thread_ts != edit.thread_ts
+                || !thread_matches
                 || !state.registered_agents.contains(&owner.agent_id)
             {
                 log_ingress_rejection("edit_owner_or_thread");
@@ -1575,13 +1726,28 @@ impl Extension {
         );
     }
 
-    fn process_slack_message(&self, message: SlackMessage) {
+    fn process_slack_message(&self, mut message: SlackMessage) {
         if message.bot_id.is_some() || message.subtype.is_some() {
             log_ingress_rejection(if message.bot_id.is_some() {
                 "bot_message"
             } else {
                 "unsupported_subtype"
             });
+            return;
+        }
+        if validate_conversation_id("event.channel", &message.channel_id).is_err()
+            || validate_user_id("event.user", &message.user_id).is_err()
+            || message
+                .ts
+                .as_deref()
+                .is_none_or(|ts| validate_slack_ts(ts).is_err())
+            || message
+                .thread_ts
+                .as_deref()
+                .is_some_and(|ts| validate_slack_ts(ts).is_err())
+            || (message.event_type == "message" && message.channel_type.is_none())
+        {
+            log_ingress_rejection("malformed_event");
             return;
         }
         let Some(cfg) = self.config_for_allowed_message(&message) else {
@@ -1600,14 +1766,35 @@ impl Extension {
             log_ingress_rejection("conversation_or_trigger");
             return;
         }
+        if let Some(route) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            static_receive_route_for_message(&cfg, &message).or_else(|| {
+                resolve_receive_route(
+                    &cfg,
+                    &state,
+                    &message.channel_id,
+                    message.thread_ts.as_deref(),
+                    message.channel_type.as_deref(),
+                    &message.user_id,
+                )
+            })
+        } {
+            message.thread_ts = route.thread_ts;
+        }
         if !self.verified_human(&cfg, &message.user_id) {
             return;
         }
+        let leading_mention = self.has_leading_bot_mention(&message.text);
         let Some(mut text) = self.trimmed_message_text(&cfg, &message) else {
             return;
         };
-        text = self.strip_bot_mention(&text);
+        if leading_mention {
+            text = self.strip_bot_mention(&text);
+        }
         if text.is_empty() {
+            if !self.insert_command_duplicate(&message) {
+                return;
+            }
             self.reply(
                 &cfg,
                 &message.channel_id,
@@ -1616,7 +1803,7 @@ impl Extension {
             );
             return;
         }
-        let (command, rest) = if is_dm || message.event_type == "app_mention" {
+        let (command, rest) = if is_dm || leading_mention {
             parse_command(&text)
         } else {
             (None, "")
@@ -1654,12 +1841,11 @@ impl Extension {
     /// Routed occurrences deliberately bypass this cache because durable
     /// harness deduplication must observe reconnect/retry submissions.
     fn insert_command_duplicate(&self, message: &SlackMessage) -> bool {
-        let key = message.event_id.clone().or_else(|| {
-            message
-                .ts
-                .as_ref()
-                .map(|ts| format!("command:{}:{ts}", message.channel_id))
-        });
+        let key = message
+            .ts
+            .as_ref()
+            .map(|ts| format!("local:{}:{ts}", message.channel_id))
+            .or_else(|| message.event_id.clone());
         key.is_none_or(|key| {
             self.state
                 .lock()
@@ -1695,25 +1881,45 @@ impl Extension {
         message: &SlackMessage,
         is_dm: bool,
     ) -> bool {
-        if is_dm {
-            if message.event_type != "message" || !cfg.configured_channel_ids.is_empty() {
-                return false;
-            }
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            return state.learned_dm.as_ref().map_or_else(
-                || cfg.allowed_user_ids.contains(&message.user_id),
-                |link| link.channel_id == message.channel_id,
-            );
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let route = static_receive_route_for_message(cfg, message).or_else(|| {
+            resolve_receive_route(
+                cfg,
+                &state,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                message.channel_type.as_deref(),
+                &message.user_id,
+            )
+        });
+        let Some(route) = route else {
+            // An unlinked allowlisted DM is admitted only far enough to run
+            // the explicit dynamic `start` command.
+            return is_dm
+                && message.event_type == "message"
+                && cfg.dynamic_direct_messages.is_some()
+                && cfg.allowed_user_ids.contains(&message.user_id)
+                && !state.linked_dms.contains_key(&message.channel_id)
+                && message.channel_id.starts_with('D');
+        };
+        if route.kind == ConversationPolicyKind::Dm {
+            return message.event_type == "message";
         }
-        cfg.configured_channel_ids.contains(&message.channel_id)
-            && (message.event_type == "app_mention"
-                || (message.event_type == "message"
-                    && cfg.listening_scope == ListeningScope::AllMessages))
+        let receive = cfg
+            .conversations
+            .get(&route.alias)
+            .and_then(|policy| policy.receive)
+            .expect("static receive route");
+        message.event_type == "app_mention"
+            || (message.event_type == "message" && receive == ReceiveMode::AllMessages)
     }
 
     fn trimmed_message_text(&self, cfg: &RuntimeConfig, message: &SlackMessage) -> Option<String> {
         let text = message.text.trim();
         if text.is_empty() {
+            if !self.insert_command_duplicate(message) {
+                return None;
+            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -1722,6 +1928,9 @@ impl Extension {
             );
             None
         } else if text.len() > cfg.max_message_bytes {
+            if !self.insert_command_duplicate(message) {
+                return None;
+            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -1752,6 +1961,16 @@ impl Extension {
             .to_owned()
     }
 
+    fn has_leading_bot_mention(&self, text: &str) -> bool {
+        let bot_user_id = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .bot_user_id
+            .clone();
+        bot_user_id.is_some_and(|id| text.trim().starts_with(&format!("<@{id}>")))
+    }
+
     fn rejects_unlinked_command(
         &self,
         cfg: &RuntimeConfig,
@@ -1762,11 +1981,10 @@ impl Extension {
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .learned_dm
-            .is_some();
-        if !cfg.configured_channel_ids.is_empty()
-            || has_linked_dm
-            || matches!(command, Some("start") | Some("/start"))
+            .linked_dms
+            .contains_key(&message.channel_id);
+        let has_static_receive = static_receive_route_for_message(cfg, message).is_some();
+        if has_static_receive || has_linked_dm || matches!(command, Some("start") | Some("/start"))
         {
             return false;
         }
@@ -1818,22 +2036,74 @@ impl Extension {
     }
 
     fn handle_start_command(&self, cfg: &RuntimeConfig, message: &SlackMessage, is_dm: bool) {
-        if cfg.configured_channel_ids.is_empty() {
-            if !is_dm {
-                self.reply(
-                    cfg,
-                    &message.channel_id,
-                    message.thread_ts.as_deref(),
-                    "Slack channel messages require an explicitly configured channel_ids entry.",
-                );
-                return;
-            }
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.learned_dm = Some(LinkedConversation {
-                channel_id: message.channel_id.clone(),
-                user_id: message.user_id.clone(),
-            });
+        if !is_dm {
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "Dynamic Slack linking is available only in one-to-one DMs.",
+            );
+            return;
         }
+        if static_parent_receive_covers_dm(cfg, &message.channel_id) {
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                help_text(),
+            );
+            return;
+        }
+        if static_receive_covers_dm(cfg, &message.channel_id) {
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "This DM already has a fixed-thread receive policy; dynamic linking cannot broaden it.",
+            );
+            return;
+        }
+        if cfg.dynamic_direct_messages.is_none() {
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "Dynamic Slack DMs are disabled; configure `dynamic_direct_messages` or a static DM route.",
+            );
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = state.linked_dms.get(&message.channel_id)
+            && existing.user_id != message.user_id
+        {
+            drop(state);
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "This DM is already linked to another exact Slack user.",
+            );
+            return;
+        }
+        if !state.linked_dms.contains_key(&message.channel_id)
+            && state.linked_dms.len() >= DYNAMIC_DM_LIMIT
+        {
+            drop(state);
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "Dynamic Slack DM link capacity reached; restart Tau or configure a static DM route.",
+            );
+            return;
+        }
+        state.linked_dms.insert(
+            message.channel_id.clone(),
+            LinkedConversation {
+                user_id: message.user_id.clone(),
+            },
+        );
+        drop(state);
         self.reply(
             cfg,
             &message.channel_id,
@@ -1869,10 +2139,14 @@ impl Extension {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             match resolve_agent(&state, rest.trim()) {
                 Ok(agent_id) => {
-                    state
-                        .selected_agent_by_channel
-                        .insert(message.channel_id.clone(), agent_id.clone());
-                    format!("Selected {}", agent_designator(&state, &agent_id))
+                    if let Some(route_key) = current_route_key(&state, cfg, message) {
+                        state
+                            .selected_agent_by_route
+                            .insert(route_key, agent_id.clone());
+                        format!("Selected {}", agent_designator(&state, &agent_id))
+                    } else {
+                        "Slack route is no longer authorized.".to_owned()
+                    }
                 }
                 Err(reply) => reply,
             }
@@ -1888,6 +2162,9 @@ impl Extension {
     fn handle_to_command(&self, cfg: &RuntimeConfig, message: &SlackMessage, rest: &str) {
         let (target, body) = split_first(rest);
         if target.is_empty() || body.trim().is_empty() {
+            if !self.insert_command_duplicate(message) {
+                return;
+            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -1898,30 +2175,46 @@ impl Extension {
         }
         match self.resolve_registered_agent(target) {
             Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
-            Err(reply) => self.reply(
-                cfg,
-                &message.channel_id,
-                message.thread_ts.as_deref(),
-                &reply,
-            ),
+            Err(reply) => {
+                if self.insert_command_duplicate(message) {
+                    self.reply(
+                        cfg,
+                        &message.channel_id,
+                        message.thread_ts.as_deref(),
+                        &reply,
+                    );
+                }
+            }
         }
     }
 
     fn route_plain_text(&self, cfg: &RuntimeConfig, message: &SlackMessage, text: &str) {
-        match self.plain_text_target(&message.channel_id) {
+        let route_key = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            current_route_key(&state, cfg, message)
+        };
+        let Some(route_key) = route_key else {
+            log_ingress_rejection("route_changed");
+            return;
+        };
+        match self.plain_text_target(&route_key) {
             Ok(agent_id) => self.route_text(message, agent_id, text),
-            Err(reply) => self.reply(
-                cfg,
-                &message.channel_id,
-                message.thread_ts.as_deref(),
-                &reply,
-            ),
+            Err(reply) => {
+                if self.insert_command_duplicate(message) {
+                    self.reply(
+                        cfg,
+                        &message.channel_id,
+                        message.thread_ts.as_deref(),
+                        &reply,
+                    );
+                }
+            }
         }
     }
 
-    fn plain_text_target(&self, channel_id: &str) -> Result<AgentId, String> {
+    fn plain_text_target(&self, route_key: &SelectionRouteKey) -> Result<AgentId, String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(agent_id) = state.selected_agent_by_channel.get(channel_id)
+        if let Some(agent_id) = state.selected_agent_by_route.get(route_key)
             && state.registered_agents.contains(agent_id)
         {
             Ok(agent_id.clone())
@@ -1974,13 +2267,25 @@ impl Extension {
         let Some(dedup_key) = dedup_key else {
             return;
         };
+        let route = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            static_receive_route_for_message(&cfg, message).or_else(|| {
+                resolve_receive_route(
+                    &cfg,
+                    &state,
+                    &message.channel_id,
+                    message.thread_ts.as_deref(),
+                    message.channel_type.as_deref(),
+                    &message.user_id,
+                )
+            })
+        };
+        let Some(route) = route else {
+            return;
+        };
         self.submit_ingress(
             &cfg,
-            SlackConversation {
-                channel_id: message.channel_id.clone(),
-                thread_ts: message.thread_ts.clone(),
-                direct: message.channel_type.as_deref() == Some("im"),
-            },
+            route,
             agent_id,
             IngressSender {
                 policy_status: cfg
@@ -2032,7 +2337,7 @@ impl Extension {
         let request_id = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.registered_agents.contains(&agent_id)
-                || !is_authorized_conversation(&state, cfg, &conversation.channel_id)
+                || !is_route_authorized(&state, cfg, &conversation, &user_id)
                 || !state.capability_active
             {
                 return;
@@ -2083,26 +2388,207 @@ impl Extension {
     }
 }
 
-fn is_authorized_conversation(state: &State, cfg: &RuntimeConfig, channel_id: &str) -> bool {
-    cfg.configured_channel_ids.contains(channel_id)
-        || (cfg.configured_channel_ids.is_empty()
+/// Match an exact static message route, including fixed-thread root creates.
+fn static_receive_route_for_message(
+    cfg: &RuntimeConfig,
+    message: &SlackMessage,
+) -> Option<SlackConversation> {
+    let fixed = message
+        .thread_ts
+        .as_ref()
+        .or(message.ts.as_ref())
+        .and_then(|root| {
+            cfg.thread_receives
+                .get(&(message.channel_id.clone(), root.clone()))
+                .and_then(|alias| cfg.conversations.get(alias))
+        });
+    fixed
+        .or_else(|| {
+            cfg.parent_receives
+                .get(&message.channel_id)
+                .and_then(|alias| cfg.conversations.get(alias))
+        })
+        .and_then(|policy| {
+            let kind_matches = if message.event_type == "app_mention" {
+                policy.kind != ConversationPolicyKind::Dm
+                    && message
+                        .channel_type
+                        .as_deref()
+                        .is_none_or(|kind| channel_type_matches(policy.kind, Some(kind)))
+            } else {
+                channel_type_matches(policy.kind, message.channel_type.as_deref())
+            };
+            if !kind_matches {
+                return None;
+            }
+            let thread_ts = match &policy.thread_ts {
+                Some(root)
+                    if message.thread_ts.as_ref() == Some(root)
+                        || (message.thread_ts.is_none() && message.ts.as_ref() == Some(root)) =>
+                {
+                    Some(root.clone())
+                }
+                Some(_) => return None,
+                None => message.thread_ts.clone(),
+            };
+            Some(SlackConversation {
+                channel_id: message.channel_id.clone(),
+                thread_ts,
+                kind: policy.kind,
+                alias: policy.alias.clone(),
+            })
+        })
+}
+
+/// Match a receive route for an already-normalized native parent/thread.
+fn resolve_receive_route(
+    cfg: &RuntimeConfig,
+    state: &State,
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    channel_type: Option<&str>,
+    user_id: &str,
+) -> Option<SlackConversation> {
+    let fixed = thread_ts.and_then(|root| {
+        cfg.thread_receives
+            .get(&(channel_id.to_owned(), root.to_owned()))
+            .and_then(|alias| cfg.conversations.get(alias))
+    });
+    if let Some(policy) = fixed.or_else(|| {
+        cfg.parent_receives
+            .get(channel_id)
+            .and_then(|alias| cfg.conversations.get(alias))
+    }) && channel_type.is_none_or(|kind| channel_type_matches(policy.kind, Some(kind)))
+    {
+        return Some(SlackConversation {
+            channel_id: channel_id.to_owned(),
+            thread_ts: policy
+                .thread_ts
+                .clone()
+                .or_else(|| thread_ts.map(str::to_owned)),
+            kind: policy.kind,
+            alias: policy.alias.clone(),
+        });
+    }
+    state.linked_dms.get(channel_id).and_then(|link| {
+        (cfg.dynamic_direct_messages.is_some()
+            && link.user_id == user_id
+            && channel_id.starts_with('D')
+            && channel_type.is_none_or(|kind| kind == "im"))
+        .then(|| SlackConversation {
+            channel_id: channel_id.to_owned(),
+            thread_ts: thread_ts.map(str::to_owned),
+            kind: ConversationPolicyKind::Dm,
+            alias: DYNAMIC_DM_LABEL.to_owned(),
+        })
+    })
+}
+
+/// Slack's authenticated event family must agree with the configured family.
+fn channel_type_matches(kind: ConversationPolicyKind, channel_type: Option<&str>) -> bool {
+    match kind {
+        ConversationPolicyKind::Channel => matches!(channel_type, Some("channel" | "group")),
+        ConversationPolicyKind::Mpim => channel_type == Some("mpim"),
+        ConversationPolicyKind::Dm => channel_type == Some("im"),
+    }
+}
+
+fn current_route_key(
+    state: &State,
+    cfg: &RuntimeConfig,
+    message: &SlackMessage,
+) -> Option<SelectionRouteKey> {
+    static_receive_route_for_message(cfg, message)
+        .or_else(|| {
+            resolve_receive_route(
+                cfg,
+                state,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                message.channel_type.as_deref(),
+                &message.user_id,
+            )
+        })
+        .map(|route| route.route_key())
+}
+
+fn static_receive_covers_dm(cfg: &RuntimeConfig, channel_id: &str) -> bool {
+    cfg.parent_receives
+        .get(channel_id)
+        .and_then(|alias| cfg.conversations.get(alias))
+        .is_some_and(|policy| policy.kind == ConversationPolicyKind::Dm)
+        || cfg
+            .thread_receives
+            .iter()
+            .any(|((conversation, _), alias)| {
+                conversation == channel_id
+                    && cfg
+                        .conversations
+                        .get(alias)
+                        .is_some_and(|policy| policy.kind == ConversationPolicyKind::Dm)
+            })
+}
+
+fn static_parent_receive_covers_dm(cfg: &RuntimeConfig, channel_id: &str) -> bool {
+    cfg.parent_receives
+        .get(channel_id)
+        .and_then(|alias| cfg.conversations.get(alias))
+        .is_some_and(|policy| policy.kind == ConversationPolicyKind::Dm)
+}
+
+/// Coarse conversation-id prefilter; callers must still resolve or revalidate
+/// the exact alias, kind, thread, sender, and owner.
+fn conversation_has_receive_source(state: &State, cfg: &RuntimeConfig, channel_id: &str) -> bool {
+    cfg.parent_receives.contains_key(channel_id)
+        || cfg
+            .thread_receives
+            .keys()
+            .any(|(conversation, _)| conversation == channel_id)
+        || state.linked_dms.contains_key(channel_id)
+}
+
+/// Return whether an already-captured source route still has its exact
+/// authority.
+fn is_route_authorized(
+    state: &State,
+    cfg: &RuntimeConfig,
+    route: &SlackConversation,
+    user_id: &str,
+) -> bool {
+    if route.alias == DYNAMIC_DM_LABEL {
+        return cfg.dynamic_direct_messages.is_some()
             && state
-                .learned_dm
-                .as_ref()
-                .is_some_and(|link| link.channel_id == channel_id))
+                .linked_dms
+                .get(&route.channel_id)
+                .is_some_and(|link| link.user_id == user_id);
+    }
+    let policy = route
+        .thread_ts
+        .as_ref()
+        .and_then(|root| {
+            cfg.thread_receives
+                .get(&(route.channel_id.clone(), root.clone()))
+                .and_then(|alias| cfg.conversations.get(alias))
+        })
+        .or_else(|| {
+            cfg.parent_receives
+                .get(&route.channel_id)
+                .and_then(|alias| cfg.conversations.get(alias))
+        });
+    policy.is_some_and(|policy| policy.alias == route.alias && policy.kind == route.kind)
 }
 
 /// Build the canonical conversation metadata used identically for ingress and
 /// successful-send completion.
 fn message_conversation(conversation: &SlackConversation) -> MessageConversation {
     MessageConversation {
-        kind: if conversation.direct {
-            ConversationKind::Direct
-        } else {
-            ConversationKind::Channel
+        kind: match conversation.kind {
+            ConversationPolicyKind::Channel => ConversationKind::Channel,
+            ConversationPolicyKind::Mpim => ConversationKind::Group,
+            ConversationPolicyKind::Dm => ConversationKind::Direct,
         },
         stable_id: Some(conversation.channel_id.clone()),
-        display_name: None,
+        display_name: Some(conversation.alias.clone()),
         thread: conversation
             .thread_ts
             .as_ref()
@@ -2117,12 +2603,12 @@ fn message_conversation(conversation: &SlackConversation) -> MessageConversation
     }
 }
 
-fn send_destination_conversation(destination: &SendDestination) -> MessageConversation {
+fn send_destination_conversation(destination: &ConversationPolicy) -> MessageConversation {
     MessageConversation {
         kind: match destination.kind {
-            SendDestinationKind::Channel => ConversationKind::Channel,
-            SendDestinationKind::Mpim => ConversationKind::Group,
-            SendDestinationKind::Dm => ConversationKind::Direct,
+            ConversationPolicyKind::Channel => ConversationKind::Channel,
+            ConversationPolicyKind::Mpim => ConversationKind::Group,
+            ConversationPolicyKind::Dm => ConversationKind::Direct,
         },
         stable_id: Some(destination.conversation_id.clone()),
         display_name: Some(destination.alias.clone()),
@@ -2140,7 +2626,7 @@ fn send_destination_conversation(destination: &SendDestination) -> MessageConver
     }
 }
 
-fn send_destination_endpoint(destination: &SendDestination) -> MessageEndpoint {
+fn send_destination_endpoint(destination: &ConversationPolicy) -> MessageEndpoint {
     MessageEndpoint::External {
         stable_id: None,
         display_name: Some(destination.alias.clone()),
@@ -2149,7 +2635,7 @@ fn send_destination_endpoint(destination: &SendDestination) -> MessageEndpoint {
 }
 
 fn send_destination_capability(
-    destination: &SendDestination,
+    destination: &ConversationPolicy,
 ) -> TransportSendDestinationCapability {
     TransportSendDestinationCapability {
         alias: destination.alias.clone(),
@@ -2632,7 +3118,7 @@ impl TauExtension for SlackExtension {
                     let mut tool = register_tool_spec();
                     let send = scope.wire_tool(SEND_TOOL_NAME)?;
                     tool.description = Some(format!(
-                        "Register or unregister this agent for Slack messages. Use enabled=true to allow an allowlisted Slack user to send prompts to this agent; use enabled=false to stop listening. When replying to Slack-originated prompts, use {send}."
+                        "Register or unregister this agent for Slack receive routes. Policy-permitted verified humans may then send prompts; dynamic DMs remain exact-allowlisted-user-bound. Registration grants no proactive authority. When replying, use {send}."
                     ));
                     Ok(tau_proto::ToolRegister {
                         tool,
@@ -2678,14 +3164,14 @@ struct SlackRuntime {
 }
 
 fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> ClientResult<()> {
-    if cx.state.ext.worker_started() {
+    if cx.state.ext.config_frozen() {
         return Err(ClientError::handler(immutable_config_error()));
     }
     let cfg = match cx.parse_config::<ExtConfig>() {
         Ok(cfg) => cfg,
         Err(error) => {
             cx.state.ext.clear_config_after_error();
-            refresh_send_tool(&cx.handle, &BTreeMap::new())?;
+            refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
             return Err(error);
         }
     };
@@ -2693,16 +3179,19 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         Ok(cfg) => cfg,
         Err(message) => {
             cx.state.ext.clear_config_after_error();
-            refresh_send_tool(&cx.handle, &BTreeMap::new())?;
+            refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
             return Err(ClientError::handler(message));
         }
     };
     if let Err(message) = cx.state.ext.apply_config(cfg.clone()) {
+        if cx.state.ext.config_frozen() {
+            return Err(ClientError::handler(message));
+        }
         cx.state.ext.clear_config_after_error();
-        refresh_send_tool(&cx.handle, &BTreeMap::new())?;
+        refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
         return Err(ClientError::handler(message));
     }
-    refresh_send_tool(&cx.handle, &cfg.send_destinations)?;
+    refresh_send_tool(&cx.handle, &cfg.conversations, &cfg.proactive_aliases)?;
     cx.state.ext.request_transport_capability();
     Ok(())
 }
@@ -2711,10 +3200,11 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
 /// destination aliases after invalid configuration.
 fn refresh_send_tool(
     handle: &ClientHandle,
-    destinations: &BTreeMap<String, SendDestination>,
+    conversations: &BTreeMap<String, ConversationPolicy>,
+    aliases: &BTreeSet<String>,
 ) -> ClientResult<()> {
     handle.register_local_tool(tau_proto::ToolRegister {
-        tool: send_tool_spec_for_destinations(destinations),
+        tool: send_tool_spec_for_destinations(conversations, aliases),
         tool_group: Some(slack_tool_group()),
         prompt_fragment: None,
     })
@@ -2845,7 +3335,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.registered_agents.remove(&unloaded.agent_id);
             state.agent_labels.remove(&unloaded.agent_id);
             state
-                .selected_agent_by_channel
+                .selected_agent_by_route
                 .retain(|_, agent_id| agent_id != &unloaded.agent_id);
             state.remove_agent_reply_routes(&unloaded.agent_id);
             state.remove_agent_incoming_messages(&unloaded.agent_id);
@@ -2861,7 +3351,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
             state.registered_agents.clear();
             state.agent_labels.clear();
-            state.selected_agent_by_channel.clear();
+            state.selected_agent_by_route.clear();
             state.pending_ingress.clear();
             state.clear_reply_routes();
             state.clear_incoming_messages();
@@ -2877,7 +3367,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
 }
 
 fn immutable_config_error() -> String {
-    "slack configuration cannot be changed after Socket Mode has started; restart Tau to apply new Slack settings"
+    "slack configuration is frozen after successful Socket Mode preflight or an authorized Slack post attempt; restart Tau to apply new Slack settings"
         .to_owned()
 }
 
@@ -2901,7 +3391,7 @@ fn register_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(REGISTER_TOOL_NAME)),
         description: Some(
-            "Register or unregister this agent for Slack messages. Use enabled=true to allow an allowlisted Slack user to send prompts to this agent; use enabled=false to stop listening. When replying to Slack-originated prompts, use slack_send."
+            "Register or unregister this agent for Slack receive routes. Policy-permitted verified humans may then send prompts; dynamic DMs remain exact-allowlisted-user-bound. Registration grants no proactive authority. When replying, use slack_send."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -2926,10 +3416,13 @@ fn register_tool_spec() -> ToolSpec {
 }
 
 fn send_tool_spec() -> ToolSpec {
-    send_tool_spec_for_destinations(&BTreeMap::new())
+    send_tool_spec_for_destinations(&BTreeMap::new(), &BTreeSet::new())
 }
 
-fn send_tool_spec_for_destinations(destinations: &BTreeMap<String, SendDestination>) -> ToolSpec {
+fn send_tool_spec_for_destinations(
+    conversations: &BTreeMap<String, ConversationPolicy>,
+    aliases: &BTreeSet<String>,
+) -> ToolSpec {
     let mut properties = serde_json::json!({
         "message": { "type": "string" },
         "reply_to": {
@@ -2949,10 +3442,11 @@ fn send_tool_spec_for_destinations(destinations: &BTreeMap<String, SendDestinati
         ),
         subcommand: None,
     }];
-    if !destinations.is_empty() {
-        let aliases = destinations.keys().cloned().collect::<Vec<_>>();
-        let hints = destinations
-            .values()
+    if !aliases.is_empty() {
+        let destination_aliases = aliases.iter().cloned().collect::<Vec<_>>();
+        let hints = aliases
+            .iter()
+            .filter_map(|alias| conversations.get(alias))
             .filter_map(|destination| {
                 destination
                     .description
@@ -2963,10 +3457,10 @@ fn send_tool_spec_for_destinations(destinations: &BTreeMap<String, SendDestinati
             .join("; ");
         properties["destination"] = serde_json::json!({
             "type": "string",
-            "enum": aliases,
+            "enum": destination_aliases,
             "description": format!("Configured Slack destination alias; mutually exclusive with reply_to. {hints}")
         });
-        let first = destinations.keys().next().expect("nonempty destinations");
+        let first = aliases.iter().next().expect("nonempty destinations");
         examples.push(ToolExample {
             id: "send-proactive".to_owned(),
             title: Some("Initiate a configured Slack message".to_owned()),
@@ -2991,7 +3485,7 @@ fn send_tool_spec_for_destinations(destinations: &BTreeMap<String, SendDestinati
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": properties,
-            "required": if destinations.is_empty() { serde_json::json!(["message", "reply_to"]) } else { serde_json::json!(["message"]) },
+            "required": if aliases.is_empty() { serde_json::json!(["message", "reply_to"]) } else { serde_json::json!(["message"]) },
             "additionalProperties": false
         })),
         format: None,
@@ -3177,8 +3671,7 @@ fn help_text() -> &'static str {
 }
 
 fn validate_slack_id(field: &str, value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.trim() != value {
         return Err(format!("slack `{field}` must not contain empty ids"));
     }
     if value.len() > 64
@@ -3189,6 +3682,26 @@ fn validate_slack_id(field: &str, value: &str) -> Result<String, String> {
         return Err(format!("slack `{field}` contains an invalid Slack id"));
     }
     Ok(value.to_owned())
+}
+
+fn validate_user_id(field: &str, value: &str) -> Result<String, String> {
+    let value = validate_slack_id(field, value)?;
+    if !matches!(value.as_bytes().first(), Some(b'U' | b'W')) || value.len() < 2 {
+        return Err(format!(
+            "slack `{field}` must contain exact U… or W… user ids"
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_conversation_id(field: &str, value: &str) -> Result<String, String> {
+    let value = validate_slack_id(field, value)?;
+    if !matches!(value.as_bytes().first(), Some(b'C' | b'G' | b'D')) || value.len() < 2 {
+        return Err(format!(
+            "slack `{field}` must contain exact C…, G…, or D… conversation ids, never U/W user ids"
+        ));
+    }
+    Ok(value)
 }
 
 fn validate_reaction_name(value: &str) -> Result<(), ()> {

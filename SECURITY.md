@@ -38,6 +38,17 @@ content; proxying them through an extension does not make the local extension
 transport itself adversarial. The boundary summary is recorded in
 [`ARCH-external-message-boundary`](specs/ARCH-external-message-boundary.md).
 
+The Slack bridge requires exact configured conversation/kind/thread policy and
+verified live-human admission. Receive permission creates only opaque
+source-bound reply authority; proactive permission is a separate alias-only
+grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
+`security_mode: lax` materially widens prompt-injection exposure on static
+routes and must not be treated as control authority. Slack, workspace
+administrators, Slack Connect participants, and conversation members may read
+transported text; this is not an end-to-end encrypted channel.
+Slack-specific review triggers and failure/replay invariants are recorded in
+[`crates/tau-ext-slack/SECURITY.md`](crates/tau-ext-slack/SECURITY.md).
+
 ## Standalone compaction recovery reliability
 
 Standalone compaction and its continuation are harness-owned durable work. Every

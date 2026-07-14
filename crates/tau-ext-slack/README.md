@@ -1,144 +1,179 @@
 # tau-ext-slack
 
-First-party Slack Socket Mode text bridge for Tau. The built-in extension is
-named `std-slack` and is disabled by default.
+First-party, disabled-by-default Slack Socket Mode text bridge (`std-slack`). It
+exposes `slack_register` and `slack_send`; a per-instance `tool_prefix` scopes
+both tools and their group for multi-account deployments.
 
 ## Configuration
 
-Create and install a Slack app manually. Store an app-level `xapp-...` token with
-`connections:write` and a bot `xoxb-...` token as Tau secrets:
+Create a Slack app, install it to the workspace, invite it to every configured
+conversation, and store its `xapp-...` and `xoxb-...` tokens as Tau secrets.
 
 ```yaml
 extensions:
   std-slack:
     enable: true
-    # Optional for multiple Slack accounts: work_slack_register/work_slack_send.
-    # tool_prefix: work
     secrets:
       slack_app_token: {}
       slack_bot_token: {}
     config:
       app_token_secret: slack_app_token
       bot_token_secret: slack_bot_token
-      allowed_user_ids: ["U12345678"]
-      # Optional: strict (default) or lax. Read the warning below before lax.
+      allowed_user_ids: ["U12345678", "W23456789"]
       security_mode: strict
-      # Optional: mentions_only (default) or all_messages.
-      listening_scope: mentions_only
-      # Optional. If omitted or empty, one allowlisted DM can link with `start`.
-      channel_ids: ["C12345678", "C87654321"]
-      # Optional outbound initiation; omission/empty remains reply-only.
-      send_destinations:
+      conversations:
         - alias: team-ops
-          conversation_id: C45678901
+          conversation_id: C12345678
           kind: channel
+          receive: mentions_only
+          proactive_send: true
           description: Operations channel
+        - alias: leadership
+          conversation_id: G23456789
+          kind: channel
+          receive: all_messages
+        - alias: incident-mpim
+          conversation_id: G34567890
+          kind: mpim
+          receive: all_messages
+          proactive_send: true
+        - alias: alice-dm
+          conversation_id: D45678901
+          kind: dm
+          receive: all_messages
         - alias: incident-thread
-          conversation_id: C45678901
+          conversation_id: C12345678
           kind: channel
           thread_ts: "1720000000.123456"
+          proactive_send: true
           description: Fixed incident thread
-        - alias: alice-dm
-          conversation_id: D12345678
-          kind: dm
-          description: Existing direct conversation
+      dynamic_direct_messages:
+        receive: all_messages
       max_message_bytes: 16384
 ```
 
-`security_mode: strict` forwards only verified humans in `allowed_user_ids`.
-`lax` additionally forwards verified human messages, edits, and reactions from
-already configured channels (or the already linked DM); non-allowlisted users
-cannot link DMs or run bridge commands. Lax substantially expands prompt-injection
-exposure but grants no bridge-control or destination-selection authority; accepted ingress activates only its authenticated source-bound reply route.
-All Slack payload text remains untrusted in both modes. Identity verification,
-allowlist/policy classification, and content trust are separate typed envelope
-fields; provider lowering escapes payload text, so lookalike tags have no authority.
+Each `conversations` record is one exact alias/conversation/kind/thread route.
+`receive` independently enables `mentions_only` (`app_mention` events) or
+`all_messages` ingress;
+`proactive_send: true` independently advertises its alias for initiation. A
+record needs at least one permission. `channel` covers public and private native
+channels, `mpim` covers group DMs, and `dm` requires an existing `D...`
+conversation. DM receive is always `all_messages`. A receive-enabled fixed-thread route matches
+replies under its root and the root create itself. A receive-enabled parent
+cannot coexist with a receive-enabled child because the parent already includes
+all threads; send-only parent/child routes and distinct receive-thread siblings
+are valid.
 
-`listening_scope: mentions_only` requires an `app_mention` in configured channels; `all_messages` also accepts eligible unmentioned `message` events. This trigger choice is independent of strict/lax sender admission and never admits bots, unconfigured conversations, or bridge control by lax senders. Slack can deliver one mentioned post as both event types; Tau gives both the same `(channel, ts)` durable dedup identity.
-In configured channels, bridge commands are recognized only from `app_mention`
-events. Unmentioned events accepted by `all_messages` are always prompt content,
-even when they begin with `start`, `to`, or `/select`. Linked DMs recognize
-commands without a mention.
+Aliases match `^[a-z][a-z0-9_-]{0,63}$`; `direct-message` is reserved. At most
+64 records are accepted. IDs and timestamps are exact and unpadded, aliases and
+native routes are unique, one native conversation cannot have conflicting
+kinds, and unknown fields fail closed. A description is trusted model-visible
+operator text, allowed only on proactive routes, and limited to 120 non-control
+Unicode scalars. The removed `channel_ids`, `listening_scope`, and
+`send_destinations` keys are hard errors with migration guidance.
 
-Every setup needs app-token scope `connections:write`, bot-token scope
-`users:read` for ingress identity verification, and `chat:write` for Slack
-replies and command responses. Add the rows needed for enabled behavior:
+### Migration from removed keys
 
-| Behavior | Additional bot event subscriptions | Additional bot token scopes |
+Choose an alias and correct `kind` for each old `channel_ids` id, and set
+`receive` to the old global `listening_scope`. Merge an old proactive destination
+with the same exact conversation/thread into that record; keep distinct fixed
+threads separate. Replace empty-channel implicit DM mode with
+`dynamic_direct_messages`. Convert proactive-only DM/MPIM destinations to static
+records without `receive`, then remove all three old keys.
+
+```yaml
+# old
+channel_ids: [C12345678]
+listening_scope: all_messages
+send_destinations:
+  - { alias: ops, conversation_id: C12345678, kind: channel }
+
+# new
+conversations:
+  - alias: ops
+    conversation_id: C12345678
+    kind: channel
+    receive: all_messages
+    proactive_send: true
+```
+
+Omitting `dynamic_direct_messages` disables discovery. When enabled, an
+allowlisted verified human may send `start` in a one-to-one DM. Tau remembers at
+most 64 exact `D id -> U/W user` bindings until restart. Links coexist with
+static routes, never become proactive aliases, and grant receive-and-source-reply
+authority only. A
+static receive-enabled DM route blocks dynamic linkage for that D id; a
+proactive-only static DM does not.
+
+## Slack events and scopes
+
+Every setup needs app-token scope `connections:write` and bot-token scopes
+`users:read` and `chat:write`. Add the rows used by the configured policy:
+
+| Surface/behavior | Bot event subscription | Bot token scope |
 | --- | --- | --- |
-| Configured-channel mentions | `app_mention` | `app_mentions:read` |
-| Channel edits and `all_messages` | `message.channels` | `channels:history` |
-| Linked direct messages | `message.im` | `im:history` |
-| Reactions to Tau-authored posts | `reaction_added`, `reaction_removed` | `reactions:read` |
+| Public/private channel or MPIM mentions | `app_mention` | `app_mentions:read` |
+| Public channel all messages and edits | `message.channels` | `channels:history` |
+| Private channel all messages and edits | `message.groups` | `groups:history` |
+| MPIM all messages and edits | `message.mpim` | `mpim:history` |
+| Static or dynamic one-to-one DM | `message.im` | `im:history` |
+| Owned-post reactions | `reaction_added`, `reaction_removed` | `reactions:read` |
 
-Private-channel message/edit support analogously requires `message.groups` and
-`groups:history`; MPIM support requires `message.mpim` and `mpim:history`.
-Private channels and MPIMs must also be explicitly listed in `channel_ids`;
-the empty-`channel_ids` linked-DM mode accepts only a one-to-one IM.
-After adding scopes or event subscriptions, reinstall the app to the workspace,
-store the refreshed `xoxb-...` token if Slack changed it, and restart Tau.
-Invite the app to every configured Slack conversation as Slack requires.
-Missing `message.channels`/`channels:history` does not prevent `app_mention`
-delivery, but edits cannot arrive because Slack sends them as `message_changed`
-under the `message.channels` subscription. The app-level token needs
-`connections:write`. Slack App ID, Client ID, Client Secret, and Signing Secret
-are not used by this Socket Mode MVP.
-Incoming Webhooks, Slash Commands, OAuth redirect URLs, `channels:read`,
-`groups:read`, `users:read.email`, `reactions:write`, `chat:write.public`, and
-file scopes are also not required. Tau uses configured conversation ids, never
-writes reactions, and expects the app to be invited to allowed conversations.
+Reinstall after changing scopes/subscriptions and refresh the bot token if Slack
+changes it. The app must be a member of configured conversations.
+`chat:write.public`, `channels:read`, `groups:read`, `users:read.email`,
+signing secrets, webhooks, slash commands, OAuth redirects, `reactions:write`,
+and file scopes are not required.
+One-to-one DMs never use `app_mention`.
+Slack `channel_id_changed` makes the exact configured id stale; Tau fails closed
+until the operator updates the route and restarts.
 
-Operator logs distinguish Socket Mode connect/hello, envelope ACK status, and
-degraded/reconnecting workers without logging Slack payloads, identifiers, or
-secrets. A `users.info` failure logs and emits one bounded warning per
-consecutive failure episode; each affected occurrence is rejected and a later
-successful verification resets the warning limiter.
+## Authorization and routing
 
-## Usage
+`strict` admits only allowlisted Slack-verified live humans. `lax` also admits
+verified humans on static routes, but never grants DM linking, agent selection,
+bridge commands, or destination control. Dynamic DMs remain exact-user and
+allowlist bound even in lax mode. All Slack content remains
+`UntrustedExternal`; identity, policy, and control authority are typed
+separately.
 
-Ask an agent to call `slack_register` with `enabled: true`. Allowed Slack users
-can then use:
+Outside DMs, commands are recognized only when raw trimmed text begins with the exact
+authenticated bot mention, regardless of whether Slack wrapped the occurrence
+as `message` or `app_mention`. Later command-looking text is prompt content.
+Slack's duplicate wrappers share `(conversation, message timestamp)` durable
+identity; local help/control side effects run once. Commands are `start`,
+`agents`, `select <agent>`, and `to <agent> <message>` (with optional `/`).
+Selection is per configured receive route: parent-route threads share selection,
+receive-enabled fixed-thread routes are isolated, and dynamic DMs select per D id.
 
-- `start` — link a DM when `channel_ids` is empty and show help;
-- `agents` — list registered Tau agents;
-- `select <agent-id-or-prefix>` — select a target for later plain text;
-- `to <agent-id-or-prefix> <message>` — send one prompt to an agent;
-- plain text — route to the selected agent, or to the only registered agent.
+An agent calls `slack_register(enabled: true)` to receive messages. Every
+accepted create, edit, or owned-post reaction gets its own opaque, source-bound
+reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
+alias-only `destination`; raw Slack ids and thread selectors are never accepted.
+Proactive aliases do not require registration. Threads always use their immutable
+root, never a child timestamp, and Tau never sets `reply_broadcast`.
 
-With `mentions_only`, mention the bot first in channels, for example
-`@Tau to agent-abc investigate this`. DMs may omit the mention. Replies from an
-agent use `slack_send(message, reply_to)`, where `reply_to` is the opaque
-canonical id shown in the typed Tau envelope. There is no channel, user, or
-thread argument. Each
-configured channel has independent agent selection, and replies return to the
-source-bound configured channel (or linked DM) and thread selected by the exact
-`reply_to` message id. The model-facing `<tau_message>` advertises `reply="slack_send"` only while that route is live; its `message_id` is passed as `reply_to`. Top-level messages receive top-level replies; thread replies remain in
-their originating thread automatically.
-For initiation use `slack_send(message, destination)`, for example
-`{"message":"report complete","destination":"team-ops"}`.
-Allowed users' reaction additions/removals on recent messages posted through
-`slack_send` are routed back to the owning agent with channel, thread, message,
-reaction, event-kind, and user metadata. Other posts and conversations are
-ignored.
-Edits of recent committed incoming messages are routed as explicit immutable
-edit occurrences to the original agent. Their envelopes reference the canonical
-original and Slack revision; unknown or conflicting edits are ignored rather
-than treated as new text.
+Every role granted this extension instance's `slack_send` can use every
+advertised alias without registration. Prompt-injected receive content can
+therefore influence proactive sends available to that role. Keep destination
+sets and roles minimal; use separate roles or separately prefixed Slack instances
+when receive and proactive authority need isolation.
 
-The singular `channel_id` key is intentionally unsupported. Empty, malformed,
-or duplicate ids and duplicate user ids are configuration errors.
+Edits require a recent committed original with matching sender, route, and
+thread. Reactions require a recent post created through `slack_send`, matching
+owner, verified actor, and a covering receive route. Creates survive durable
+replay/restart dedup and can restore edit ownership when Slack retries them;
+runtime links, selections, reply routes, reaction ownership, and registrations
+clear on restart. Tau prevents same-process accepted-send reposts but does not
+claim crash-safe exactly-once delivery.
 
-### Configured proactive transport sends
+Configuration freezes after successful Socket Mode preflight or immediately
+before the first fully authorized Slack post attempt. Later configuration is a
+restart-required error, including if Slack's post result is ambiguous. Invalid
+or denied sends and failed synchronous preflight do not freeze configuration.
 
-Slack initiation is separately authorized by the empty-by-default `send_destinations` list. Each record has `alias`, `conversation_id`, `kind` (`channel`, `mpim`, or `dm`), and optional `description` and fixed `thread_ts`. Inbound `channel_ids` and a runtime-linked DM never imply this outbound right. The `slack_send` tool requires `message` plus exactly one of opaque `reply_to` or configured `destination`; the model sees sorted aliases and trusted descriptions, never native Slack IDs or a raw thread selector. Every enabled agent may use every advertised alias without `slack_register`; normal effective role/tool policy is the agent authorization layer.
-
-Aliases must match `^[a-z][a-z0-9_-]{0,63}$`; at most 64 are accepted.
-`channel` accepts existing `C`/`G` conversations, `mpim` accepts `G`, and
-`dm` accepts an existing `D` conversation—never a `U` user ID. Duplicate aliases
-or exact conversation/thread routes, malformed timestamps, blank/control/overlong
-descriptions, and unknown fields fail configuration. Different fixed threads in
-one conversation are distinct routes.
-Descriptions are limited to 120 Unicode scalars; capability metadata is also
-bounded at the harness boundary. `mpim` routes use existing `G...` conversations.
-
-The extension and harness both fail closed: they revalidate the authenticated connection, current session generation, live call and actual agent/tool, transport, alias, endpoint, native conversation kind/id, and fixed thread. Successful outgoing facts retain the authorization relation and tool call audit. Same-process retries are bounded; transcript replay never posts remotely, and Tau does not claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt injection can still influence a role already granted `slack_send`; isolate ingress roles or keep their destination set minimal. Slack app membership remains required and `chat:write.public` is not needed.
+Production API/socket endpoints require HTTPS/WSS (plaintext is loopback-test
+only). Shutdown and reconnect waits are event-driven. Logs expose bounded,
+identifier-free connect/hello/ACK/degraded/reconnect states and redact tokens,
+websocket URLs, payloads, envelope ids, and native identifiers. A `users.info`
+outage rejects ingress and emits at most one warning per failure episode.

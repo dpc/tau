@@ -1,5 +1,6 @@
 //! Local-fake and loopback lifecycle coverage follows
-//! `DESIGN-tau-ext-slack-lifecycle-testing`.
+//! `DESIGN-tau-ext-slack-lifecycle-testing`; route/security matrices follow
+//! `DESIGN-tau-ext-slack-conversation-policy`.
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -145,6 +146,32 @@ impl SlackClient for FailingAuthClient {
     }
 }
 
+struct FailingPostClient;
+
+impl SlackClient for FailingPostClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("post-only client")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("post-only client")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        unreachable!("post-only client")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        Err("ambiguous Slack post failure".to_owned())
+    }
+}
+
 /// Scripted post client used to verify that Slack-accepted response metadata is
 /// checked once and then retained as an idempotent failure.
 struct MismatchedPostClient {
@@ -221,14 +248,26 @@ impl SlackClient for IdentitySequenceClient {
 }
 
 fn cfg() -> RuntimeConfig {
+    let policy = ConversationPolicy {
+        alias: "team".to_owned(),
+        conversation_id: "C123".to_owned(),
+        kind: ConversationPolicyKind::Channel,
+        receive: Some(ReceiveMode::MentionsOnly),
+        description: None,
+        thread_ts: None,
+    };
     RuntimeConfig {
         app_token: "xapp-test".to_owned(),
         bot_token: "xoxb-test".to_owned(),
         allowed_user_ids: ["U123".to_owned()].into_iter().collect(),
         security_mode: SecurityMode::Strict,
-        listening_scope: ListeningScope::MentionsOnly,
-        configured_channel_ids: ["C123".to_owned()].into_iter().collect(),
-        send_destinations: BTreeMap::new(),
+        conversations: [("team".to_owned(), policy.clone())].into_iter().collect(),
+        parent_receives: [("C123".to_owned(), policy.alias.clone())]
+            .into_iter()
+            .collect(),
+        thread_receives: HashMap::new(),
+        proactive_aliases: BTreeSet::new(),
+        dynamic_direct_messages: None,
         api_base: DEFAULT_API_BASE.to_owned(),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
     }
@@ -236,45 +275,109 @@ fn cfg() -> RuntimeConfig {
 
 fn dm_cfg() -> RuntimeConfig {
     RuntimeConfig {
-        configured_channel_ids: HashSet::new(),
+        conversations: BTreeMap::new(),
+        parent_receives: HashMap::new(),
+        thread_receives: HashMap::new(),
+        dynamic_direct_messages: Some(DynamicDirectMessages {
+            receive: ReceiveMode::AllMessages,
+        }),
         ..cfg()
     }
 }
 
 fn multi_channel_cfg() -> RuntimeConfig {
-    RuntimeConfig {
-        configured_channel_ids: ["C123".to_owned(), "C456".to_owned()].into_iter().collect(),
-        ..cfg()
+    let mut config = cfg();
+    config.conversations.insert(
+        "team-two".to_owned(),
+        ConversationPolicy {
+            alias: "team-two".to_owned(),
+            conversation_id: "C456".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::MentionsOnly),
+            description: None,
+            thread_ts: None,
+        },
+    );
+    reindex_receive_routes(&mut config);
+    config
+}
+
+fn fixed_thread_cfg(kind: ConversationPolicyKind, conversation_id: &str) -> RuntimeConfig {
+    let mut config = cfg();
+    config.conversations.clear();
+    config.conversations.insert(
+        "fixed".to_owned(),
+        ConversationPolicy {
+            alias: "fixed".to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            kind,
+            receive: Some(if kind == ConversationPolicyKind::Dm {
+                ReceiveMode::AllMessages
+            } else {
+                ReceiveMode::MentionsOnly
+            }),
+            description: None,
+            thread_ts: Some("7.0".to_owned()),
+        },
+    );
+    reindex_receive_routes(&mut config);
+    config
+}
+
+fn reindex_receive_routes(config: &mut RuntimeConfig) {
+    config.parent_receives.clear();
+    config.thread_receives.clear();
+    for policy in config
+        .conversations
+        .values()
+        .filter(|policy| policy.receive.is_some())
+    {
+        if let Some(root) = &policy.thread_ts {
+            config.thread_receives.insert(
+                (policy.conversation_id.clone(), root.clone()),
+                policy.alias.clone(),
+            );
+        } else {
+            config
+                .parent_receives
+                .insert(policy.conversation_id.clone(), policy.alias.clone());
+        }
     }
 }
 
 fn proactive_cfg() -> RuntimeConfig {
-    let destinations = [
-        ("team-ops", "C456", SendDestinationKind::Channel, None),
+    let destinations: BTreeMap<String, ConversationPolicy> = [
+        ("team-ops", "C456", ConversationPolicyKind::Channel, None),
         (
             "incident-thread",
             "G789",
-            SendDestinationKind::Mpim,
+            ConversationPolicyKind::Mpim,
             Some("1720000000.123456"),
         ),
-        ("alice-dm", "D123", SendDestinationKind::Dm, None),
+        ("alice-dm", "D123", ConversationPolicyKind::Dm, None),
     ]
     .into_iter()
     .map(|(alias, conversation_id, kind, thread_ts)| {
         (
             alias.to_owned(),
-            SendDestination {
+            ConversationPolicy {
                 alias: alias.to_owned(),
                 conversation_id: conversation_id.to_owned(),
                 kind,
-                description: None,
+                receive: None,
+                description: (alias == "team-ops").then(|| "Trusted ops hint".to_owned()),
                 thread_ts: thread_ts.map(str::to_owned),
             },
         )
     })
     .collect();
     RuntimeConfig {
-        send_destinations: destinations,
+        proactive_aliases: destinations.keys().cloned().collect(),
+        conversations: cfg()
+            .conversations
+            .into_iter()
+            .chain(destinations)
+            .collect(),
         ..cfg()
     }
 }
@@ -324,7 +427,12 @@ fn valid_config_message() -> HarnessOutputMessage {
             "app_token_secret": "app",
             "bot_token_secret": "bot",
             "allowed_user_ids": ["U123"],
-            "channel_ids": ["C123"],
+            "conversations": [{
+                "alias": "team",
+                "conversation_id": "C123",
+                "kind": "channel",
+                "receive": "mentions_only"
+            }],
             "api_base": "http://127.0.0.1:8080/api",
             "max_message_bytes": 16384,
         })),
@@ -341,11 +449,16 @@ fn proactive_config_message() -> HarnessOutputMessage {
         "app_token_secret": "app",
         "bot_token_secret": "bot",
         "allowed_user_ids": ["U123"],
-        "channel_ids": ["C123"],
-        "send_destinations": [{
+        "conversations": [{
+            "alias": "team",
+            "conversation_id": "C123",
+            "kind": "channel",
+            "receive": "mentions_only"
+        }, {
             "alias": "team-ops",
             "conversation_id": "C456",
-            "kind": "channel"
+            "kind": "channel",
+            "proactive_send": true
         }]
     }));
     HarnessOutputMessage::Configure(configure)
@@ -461,10 +574,14 @@ fn extension() -> (
 }
 
 fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> SlackMessage {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (channel_id, text).hash(&mut hasher);
+    let ts = format!("{}.0", hasher.finish());
     SlackMessage {
         event_id: Some(format!("EV-{channel_id}-{text}")),
         channel_id: channel_id.to_owned(),
-        channel_type: channel_type.map(str::to_owned),
+        channel_type: Some(channel_type.unwrap_or("channel").to_owned()),
         user_id: "U123".to_owned(),
         text: text.to_owned(),
         event_type: if channel_type == Some("im") {
@@ -475,16 +592,29 @@ fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> Sl
         .to_owned(),
         subtype: None,
         bot_id: None,
-        ts: Some("1.0".to_owned()),
+        ts: Some(ts),
         thread_ts: None,
     }
+}
+
+fn dual_slack_messages(text: &str) -> (SlackMessage, SlackMessage) {
+    let mut message = slack_message("C123", Some("channel"), text);
+    message.event_type = "message".to_owned();
+    let mut mention = message.clone();
+    mention.event_type = "app_mention".to_owned();
+    mention.event_id = Some(format!(
+        "mention-{}",
+        message.ts.as_deref().unwrap_or("none")
+    ));
+    (message, mention)
 }
 
 fn slack_conversation(channel_id: &str, thread_ts: Option<&str>) -> SlackConversation {
     SlackConversation {
         channel_id: channel_id.to_owned(),
         thread_ts: thread_ts.map(str::to_owned),
-        direct: false,
+        kind: ConversationPolicyKind::Channel,
+        alias: "team".to_owned(),
     }
 }
 
@@ -535,6 +665,12 @@ fn register_agent(ext: &Extension, agent: &str) {
     }
 }
 
+fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
+    reindex_receive_routes(&mut config);
+    ext.apply_config(config).expect("test config");
+    ext.state.lock().expect("state").capability_active = true;
+}
+
 fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     let request = recv_prompt_request(rx);
     match request.draft.operation {
@@ -556,11 +692,19 @@ fn recv_prompt_request(
 }
 
 fn activate_prompt_origin(ext: &Extension, prompt: &tau_proto::TransportMessageIngressRequest) {
+    activate_ingress_route(ext, prompt, "msg-test");
+}
+
+fn activate_ingress_route(
+    ext: &Extension,
+    prompt: &tau_proto::TransportMessageIngressRequest,
+    message_id: &str,
+) {
     apply_output_message(
         &HarnessOutputMessage::TransportMessageIngressResult(
             tau_proto::TransportMessageIngressResult {
                 request_id: prompt.request_id.clone(),
-                message_id: Some(MessageId::new("msg-test")),
+                message_id: Some(MessageId::new(message_id)),
                 outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
                 error: None,
             },
@@ -980,8 +1124,7 @@ fn slack_send_rejects_destination_arguments() {
 #[test]
 fn proactive_send_uses_exact_configured_route_without_registration() {
     let (ext, rx, client) = extension();
-    ext.apply_config(proactive_cfg())
-        .expect("configure aliases");
+    apply_test_config(&ext, proactive_cfg());
     let event = ext.handle_send(tool(
         SEND_TOOL_NAME,
         "agent-a",
@@ -1018,7 +1161,6 @@ fn proactive_send_requires_active_capability_before_posting() {
     let (ext, _rx, client) = extension();
     ext.apply_config(proactive_cfg())
         .expect("configure aliases");
-    ext.state.lock().expect("state").capability_active = false;
     let event = ext.handle_send(tool(
         SEND_TOOL_NAME,
         "agent-a",
@@ -1030,13 +1172,67 @@ fn proactive_send_requires_active_capability_before_posting() {
     assert!(client.sent_pairs().is_empty());
 }
 
+/// A fully authorized proactive attempt freezes configuration immediately
+/// before Slack I/O even when the API result is an ambiguous failure.
+#[test]
+fn proactive_api_failure_still_freezes_configuration() {
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(Arc::new(FailingPostClient), tx);
+    ext.apply_config(proactive_cfg()).expect("config");
+    ext.state.lock().expect("state").capability_active = true;
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(&serde_json::json!({"message":"update","destination":"team-ops"})),
+    ));
+    assert!(matches!(result, Some(Event::ToolError(_))));
+    assert!(ext.state.lock().expect("state").config_frozen);
+    assert!(ext.apply_config(proactive_cfg()).is_err());
+}
+
+/// Restart-required Configure after an accepted proactive post preserves the
+/// pending completion, capability, late correlation, and no-repost disposition.
+#[test]
+fn frozen_proactive_pending_state_survives_reconfigure_and_late_completion() {
+    let (ext, rx, client) = extension();
+    apply_test_config(&ext, proactive_cfg());
+    let invoke = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(&serde_json::json!({"message":"update","destination":"team-ops"})),
+    );
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    assert!(ext.apply_config(cfg()).is_err());
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(state.capability_active);
+        assert_eq!(state.pending_posts.len(), 1);
+        assert_eq!(state.accepted_send_attempts.len(), 1);
+        assert!(
+            state
+                .config
+                .as_ref()
+                .expect("config")
+                .proactive_aliases
+                .contains("team-ops")
+        );
+    }
+    complete_pending_send(&ext, &rx, true);
+    assert!(ext.state.lock().expect("state").pending_posts.is_empty());
+    assert!(ext.handle_send(invoke).is_none());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(HarnessInputMessage::CompleteTransportSend(_))
+    ));
+    assert_eq!(client.sent_pairs().len(), 1);
+}
+
 /// Identical delivery after Slack acceptance resubmits the typed completion
 /// without posting again or fabricating a terminal tool result.
 #[test]
 fn accepted_proactive_replay_resubmits_completion_without_reposting() {
     let (ext, rx, client) = extension();
-    ext.apply_config(proactive_cfg())
-        .expect("configure aliases");
+    apply_test_config(&ext, proactive_cfg());
     let invoke = tool(
         SEND_TOOL_NAME,
         "agent-a",
@@ -1057,8 +1253,7 @@ fn accepted_proactive_replay_resubmits_completion_without_reposting() {
 #[test]
 fn proactive_send_rejects_ambiguous_unknown_and_native_arguments() {
     let (ext, _rx, client) = extension();
-    ext.apply_config(proactive_cfg())
-        .expect("configure aliases");
+    apply_test_config(&ext, proactive_cfg());
     for arguments in [
         serde_json::json!({"message": "x"}),
         serde_json::json!({"message": "x", "reply_to": "msg-x", "destination": "team-ops"}),
@@ -1084,7 +1279,8 @@ fn proactive_send_rejects_ambiguous_unknown_and_native_arguments() {
 /// advertised by the refreshed model schema.
 #[test]
 fn proactive_schema_advertises_only_sorted_aliases() {
-    let spec = send_tool_spec_for_destinations(&proactive_cfg().send_destinations);
+    let config = proactive_cfg();
+    let spec = send_tool_spec_for_destinations(&config.conversations, &config.proactive_aliases);
     let parameters = spec.parameters.expect("parameters");
     let schema = parameters.as_object().expect("object schema");
     let destination = &schema["properties"]["destination"];
@@ -1093,6 +1289,9 @@ fn proactive_schema_advertises_only_sorted_aliases() {
         serde_json::json!(["alice-dm", "incident-thread", "team-ops"])
     );
     let serialized = serde_json::to_string(&parameters).expect("schema json");
+    assert!(serialized.contains("team-ops: Trusted ops hint"));
+    assert!(!serialized.contains("\"team\""));
+    assert!(!serialized.contains(DYNAMIC_DM_LABEL));
     for native in ["C456", "G789", "D123", "1720000000.123456"] {
         assert!(!serialized.contains(native), "schema leaked {native}");
     }
@@ -1113,7 +1312,7 @@ fn accepted_response_route_mismatches_replay_without_reposting() {
         });
         let (tx, _rx) = mpsc::channel();
         let ext = Extension::new(client.clone(), tx);
-        ext.apply_config(proactive_cfg()).expect("configure");
+        apply_test_config(&ext, proactive_cfg());
         ext.state.lock().expect("state").capability_active = true;
         let invoke = tool(
             SEND_TOOL_NAME,
@@ -1134,12 +1333,13 @@ fn accepted_response_route_mismatches_replay_without_reposting() {
     }
 }
 
-/// Accepted-attempt retention rejects conflicting replay, evicts oldest entries
-/// at its independent bound, and configuration reset clears both indexes.
+/// Accepted-attempt retention rejects conflicting replay, remains bounded, and
+/// survives restart-required reconfiguration after an authorized post freezes
+/// policy.
 #[test]
-fn accepted_send_attempts_conflict_bound_and_reset() {
+fn accepted_send_attempts_conflict_bound_and_freeze() {
     let (ext, _rx, client) = extension();
-    ext.apply_config(proactive_cfg()).expect("configure");
+    apply_test_config(&ext, proactive_cfg());
     let first = tool(
         SEND_TOOL_NAME,
         "agent-a",
@@ -1182,16 +1382,15 @@ fn accepted_send_attempts_conflict_bound_and_reset() {
     drop(state);
     let mut reconfigured = proactive_cfg();
     reconfigured.max_message_bytes -= 1;
-    ext.apply_config(reconfigured).expect("reconfigure");
+    assert!(ext.apply_config(reconfigured).is_err());
     let state = ext.state.lock().expect("state");
-    assert!(state.accepted_send_attempts.is_empty());
-    assert!(state.accepted_send_attempt_order.is_empty());
+    assert!(!state.accepted_send_attempts.is_empty());
 }
 
-/// Outbound destination configuration rejects every ambiguous or unsafe shape
-/// while accepting the documented channel, MPIM, DM, and fixed-thread forms.
+/// Unified proactive conversation policy rejects ambiguous or unsafe shapes
+/// while accepting channel, MPIM, DM, and fixed-thread forms.
 #[test]
-fn send_destination_config_validation_matrix() {
+fn proactive_conversation_config_validation_matrix() {
     let mut secrets = BTreeMap::new();
     secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
@@ -1200,7 +1399,7 @@ fn send_destination_config_validation_matrix() {
             "app_token_secret": "app",
             "bot_token_secret": "bot",
             "allowed_user_ids": ["U123"],
-            "send_destinations": destinations,
+            "conversations": destinations,
         }))
         .deserialized::<ExtConfig>()
         .map_err(|error| format!("{error:?}"))
@@ -1208,28 +1407,70 @@ fn send_destination_config_validation_matrix() {
     };
     assert!(
         validate(serde_json::json!([
-            {"alias":"chan","conversation_id":"C123","kind":"channel"},
-            {"alias":"private","conversation_id":"G123","kind":"channel","thread_ts":"1.000001"},
-            {"alias":"group","conversation_id":"G456","kind":"mpim"},
-            {"alias":"direct","conversation_id":"D123","kind":"dm","description":"Alice"}
+            {"alias":"chan","conversation_id":"C123","kind":"channel","proactive_send":true},
+            {"alias":"private","conversation_id":"G123","kind":"channel","thread_ts":"1.000001","proactive_send":true},
+            {"alias":"group","conversation_id":"G456","kind":"mpim","proactive_send":true},
+            {"alias":"direct","conversation_id":"D123","kind":"dm","description":"Alice","proactive_send":true}
         ]))
         .is_ok()
     );
-    for invalid in [
-        serde_json::json!([{"alias":"Bad","conversation_id":"C123","kind":"channel"}]),
-        serde_json::json!([{"alias":"same","conversation_id":"C123","kind":"channel"},{"alias":"same","conversation_id":"C456","kind":"channel"}]),
-        serde_json::json!([{"alias":"one","conversation_id":"C123","kind":"channel"},{"alias":"two","conversation_id":"C123","kind":"channel"}]),
-        serde_json::json!([{"alias":"dm","conversation_id":"U123","kind":"dm"}]),
-        serde_json::json!([{"alias":"dm","conversation_id":"C123","kind":"dm"}]),
-        serde_json::json!([{"alias":"mpim","conversation_id":"D123","kind":"mpim"}]),
-        serde_json::json!([{"alias":"thread","conversation_id":"C123","kind":"channel","thread_ts":"bad"}]),
-        serde_json::json!([{"alias":"blank","conversation_id":"C123","kind":"channel","description":"  "}]),
-        serde_json::json!([{"alias":"control","conversation_id":"C123","kind":"channel","description":"bad\nline"}]),
-        serde_json::json!([{"alias":"unknown","conversation_id":"C123","kind":"channel","extra":true}]),
+    for (invalid, expected) in [
+        (
+            serde_json::json!([{"alias":"Bad","conversation_id":"C123","kind":"channel","proactive_send":true}]),
+            "alias",
+        ),
+        (
+            serde_json::json!([{"alias":"same","conversation_id":"C123","kind":"channel","proactive_send":true},{"alias":"same","conversation_id":"C456","kind":"channel","proactive_send":true}]),
+            "duplicate alias",
+        ),
+        (
+            serde_json::json!([{"alias":"one","conversation_id":"C123","kind":"channel","proactive_send":true},{"alias":"two","conversation_id":"C123","kind":"channel","proactive_send":true}]),
+            "duplicate exact native route",
+        ),
+        (
+            serde_json::json!([{"alias":"dm","conversation_id":"U123","kind":"dm","proactive_send":true}]),
+            "never U/W",
+        ),
+        (
+            serde_json::json!([{"alias":"dm","conversation_id":"C123","kind":"dm","proactive_send":true}]),
+            "kind does not match",
+        ),
+        (
+            serde_json::json!([{"alias":"mpim","conversation_id":"D123","kind":"mpim","proactive_send":true}]),
+            "kind does not match",
+        ),
+        (
+            serde_json::json!([{"alias":"thread","conversation_id":"C123","kind":"channel","thread_ts":"bad","proactive_send":true}]),
+            "thread_ts",
+        ),
+        (
+            serde_json::json!([{"alias":"thread","conversation_id":"C123","kind":"channel","thread_ts":" 1.0","proactive_send":true}]),
+            "thread_ts",
+        ),
+        (
+            serde_json::json!([{"alias":"blank","conversation_id":"C123","kind":"channel","description":"  ","proactive_send":true}]),
+            "description",
+        ),
+        (
+            serde_json::json!([{"alias":"control","conversation_id":"C123","kind":"channel","description":"bad\nline","proactive_send":true}]),
+            "description",
+        ),
+        (
+            serde_json::json!([{"alias":"long","conversation_id":"C123","kind":"channel","description":"x".repeat(121),"proactive_send":true}]),
+            "description",
+        ),
+        (
+            serde_json::json!([{"alias":"unknown","conversation_id":"C123","kind":"channel","proactive_send":true,"extra":true}]),
+            "unknown field",
+        ),
     ] {
-        assert!(validate(invalid).is_err());
+        let error = validate(invalid).expect_err("invalid policy");
+        assert!(
+            error.contains(expected),
+            "{error:?} did not contain {expected}"
+        );
     }
-    let too_many = (0..=SEND_DESTINATION_LIMIT)
+    let too_many = (0..=CONVERSATION_LIMIT)
         .map(|index| {
             serde_json::json!({
                 "alias": format!("route-{index}"),
@@ -1239,7 +1480,7 @@ fn send_destination_config_validation_matrix() {
         })
         .collect();
     assert!(validate(serde_json::Value::Array(too_many)).is_err());
-    assert!(validate(serde_json::json!([])).is_ok());
+    assert!(validate(serde_json::json!([])).is_err());
 }
 
 /// Config validation requires both token secret names, non-empty resolved
@@ -1315,27 +1556,16 @@ fn config_rejects_duplicate_allowlist_entries() {
     secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
 
-    for config in [
-        ExtConfig {
-            app_token_secret: Some("app".to_owned()),
-            bot_token_secret: Some("bot".to_owned()),
-            allowed_user_ids: vec!["U123".to_owned(), "U123".to_owned()],
-            ..Default::default()
-        },
-        ExtConfig {
-            app_token_secret: Some("app".to_owned()),
-            bot_token_secret: Some("bot".to_owned()),
-            allowed_user_ids: vec!["U123".to_owned()],
-            channel_ids: vec!["C123".to_owned(), "C123".to_owned()],
-            ..Default::default()
-        },
-    ] {
-        let error = config
-            .validate(&secrets)
-            .err()
-            .expect("duplicate id must fail");
-        assert!(error.contains("duplicate id"), "{error}");
+    let error = ExtConfig {
+        app_token_secret: Some("app".to_owned()),
+        bot_token_secret: Some("bot".to_owned()),
+        allowed_user_ids: vec!["U123".to_owned(), "U123".to_owned()],
+        ..Default::default()
     }
+    .validate(&secrets)
+    .err()
+    .expect("duplicate id must fail");
+    assert!(error.contains("duplicate id"), "{error}");
 }
 
 /// Empty and malformed ids in either security allowlist fail validation rather
@@ -1345,17 +1575,11 @@ fn config_rejects_empty_and_malformed_allowlist_ids() {
     let mut secrets = BTreeMap::new();
     secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
-    for (users, channels) in [
-        (vec!["".to_owned()], vec![]),
-        (vec!["user-lower".to_owned()], vec![]),
-        (vec!["U123".to_owned()], vec!["".to_owned()]),
-        (vec!["U123".to_owned()], vec!["channel-lower".to_owned()]),
-    ] {
+    for users in [vec!["".to_owned()], vec!["user-lower".to_owned()]] {
         let error = ExtConfig {
             app_token_secret: Some("app".to_owned()),
             bot_token_secret: Some("bot".to_owned()),
             allowed_user_ids: users,
-            channel_ids: channels,
             ..Default::default()
         }
         .validate(&secrets)
@@ -1415,6 +1639,9 @@ fn config_rejects_unsafe_api_base_overrides() {
         app_token_secret: Some("app".to_owned()),
         bot_token_secret: Some("bot".to_owned()),
         allowed_user_ids: vec!["U123".to_owned()],
+        dynamic_direct_messages: Some(DynamicDirectMessages {
+            receive: ReceiveMode::AllMessages,
+        }),
         api_base: Some("http://127.0.0.1:8080/api".to_owned()),
         ..Default::default()
     }
@@ -1428,18 +1655,21 @@ fn config_rejects_unsafe_api_base_overrides() {
 #[test]
 fn config_after_worker_start_is_rejected() {
     let (ext, _rx, _client) = extension();
-    ext.state.lock().expect("lock").worker_started = true;
+    ext.state.lock().expect("lock").config_frozen = true;
     let mut new_cfg = cfg();
-    new_cfg.configured_channel_ids = ["C999".to_owned()].into_iter().collect();
+    new_cfg
+        .conversations
+        .get_mut("team")
+        .expect("team")
+        .conversation_id = "C999".to_owned();
     let err = ext.apply_config(new_cfg).expect_err("locked config");
     assert!(err.contains("restart Tau"));
     assert_eq!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .config
-            .as_ref()
-            .map(|cfg| cfg.configured_channel_ids.contains("C123")),
+        ext.state.lock().expect("lock").config.as_ref().map(|cfg| {
+            cfg.conversations
+                .values()
+                .any(|policy| policy.conversation_id == "C123")
+        }),
         Some(true)
     );
 }
@@ -1486,9 +1716,20 @@ fn channel_reconfiguration_clears_post_ownership() {
         },
         agent_id("agent-a"),
     );
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.capability_active = true;
+        state.pending_capability_request = Some("old-capability".to_owned());
+        state
+            .duplicate_events
+            .insert_new("old-local-effect".to_owned());
+    }
     ext.apply_config(multi_channel_cfg()).expect("reconfigure");
     let state = ext.state.lock().expect("lock");
     assert!(state.registered_agents.is_empty());
+    assert!(!state.capability_active);
+    assert!(state.pending_capability_request.is_none());
+    assert!(state.duplicate_events.seen.is_empty());
     assert!(
         state
             .posted_messages
@@ -1641,7 +1882,7 @@ fn run_malformed_post_start_config_preserves_active_state() {
         frames.iter().any(|frame| matches!(
             frame,
             HarnessInputMessage::ConfigError(error)
-                if error.message.contains("cannot be changed after Socket Mode")
+                if error.message.contains("configuration is frozen")
         )),
         "post-start malformed config should report immutable config"
     );
@@ -1782,13 +2023,18 @@ fn slack_register_toggles_agent_and_starts_worker() {
     {
         let state = ext.state.lock().expect("lock");
         assert!(state.worker_started);
+        assert!(state.config_frozen);
         assert!(state.registered_agents.contains(&agent_id("agent-a")));
     }
+    assert!(ext.apply_config(cfg()).is_err());
     ext.state
         .lock()
         .expect("lock")
-        .selected_agent_by_channel
-        .insert("C123".to_owned(), agent_id("agent-a"));
+        .selected_agent_by_route
+        .insert(
+            SelectionRouteKey::StaticAlias("team".to_owned()),
+            agent_id("agent-a"),
+        );
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
@@ -1802,7 +2048,7 @@ fn slack_register_toggles_agent_and_starts_worker() {
     assert!(matches!(result, Event::ToolResult(_)));
     let state = ext.state.lock().expect("lock");
     assert!(!state.registered_agents.contains(&agent_id("agent-a")));
-    assert!(state.selected_agent_by_channel.is_empty());
+    assert!(state.selected_agent_by_route.is_empty());
     assert!(
         state
             .posted_messages
@@ -1825,7 +2071,11 @@ fn slack_register_reports_initial_auth_failure() {
         panic!("expected tool error");
     };
     assert!(err.message.contains("invalid_auth"));
-    assert!(ext.state.lock().expect("lock").registered_agents.is_empty());
+    assert!(!ext.state.lock().expect("lock").config_frozen);
+    let mut replacement = cfg();
+    replacement.max_message_bytes -= 1;
+    ext.apply_config(replacement)
+        .expect("failed preflight remains reconfigurable");
 }
 
 /// Registered agents reply only to the configured conversation from which
@@ -1833,8 +2083,7 @@ fn slack_register_reports_initial_auth_failure() {
 #[test]
 fn slack_send_uses_originating_conversation() {
     let (ext, rx, client) = extension();
-    ext.apply_config(multi_channel_cfg())
-        .expect("multi-channel config");
+    apply_test_config(&ext, multi_channel_cfg());
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("C456", None, "<@UBOT123> hello"));
     let prompt = recv_prompt_request(&rx);
@@ -1939,7 +2188,9 @@ fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
 fn committed_root_message_edit_references_canonical_original() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> original"));
+    let mut original_message = slack_message("C123", None, "<@UBOT123> original");
+    original_message.ts = Some("1.0".to_owned());
+    ext.process_slack_message(original_message);
     let original = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &original);
 
@@ -2008,6 +2259,7 @@ fn thread_edit_retry_and_original_confusion_fail_closed() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     let mut original = slack_message("C123", None, "<@UBOT123> original");
+    original.ts = Some("1.0".to_owned());
     original.thread_ts = Some("9.0".to_owned());
     ext.process_slack_message(original);
     let ingress = recv_prompt_request(&rx);
@@ -2031,6 +2283,62 @@ fn thread_edit_retry_and_original_confusion_fail_closed() {
             "C123",
             Some("9.0")
         )))
+    );
+}
+
+/// Commit-confirmed edit and reaction occurrences each install their own exact
+/// opaque reply route rather than borrowing only the original create authority.
+#[test]
+fn committed_mutations_install_independent_reply_authority() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let mut original = slack_message("C123", Some("channel"), "<@UBOT123> original");
+    original.ts = Some("1.0".to_owned());
+    ext.process_slack_message(original);
+    let create = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &create);
+
+    ext.process_slack_edit(slack_edit("edit", "C123", "1.0", None, "changed"));
+    let edit = recv_prompt_request(&rx);
+    activate_ingress_route(&ext, &edit, "msg-edit");
+    assert!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"edit reply","reply_to":"msg-edit"}),
+            ),
+        ))
+        .is_none()
+    );
+    complete_pending_send(&ext, &rx, true);
+
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "9.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    ext.process_slack_reaction(slack_reaction("reaction", "reaction_added", "C123", "9.0"));
+    let reaction = recv_prompt_request(&rx);
+    activate_ingress_route(&ext, &reaction, "msg-reaction");
+    let mut reaction_reply = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message":"reaction reply","reply_to":"msg-reaction"}),
+        ),
+    );
+    reaction_reply.call_id = "call-reaction-reply".into();
+    assert!(ext.handle_send(reaction_reply).is_none());
+    assert!(
+        client
+            .sent_pairs()
+            .iter()
+            .any(|(_, text)| text.ends_with("reaction reply"))
     );
 }
 
@@ -2275,6 +2583,118 @@ fn reactions_outside_authorized_owned_posts_are_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
+/// Proactive-only posts cannot receive reactions without covering receive
+/// policy, while a parent receive route covers a proactive fixed-thread post.
+#[test]
+fn reaction_authority_requires_covering_receive_policy() {
+    let (ext, rx, _client) = extension();
+    apply_test_config(&ext, proactive_cfg());
+    assert!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"post","destination":"team-ops"}),
+            ),
+        ))
+        .is_none()
+    );
+    complete_pending_send(&ext, &rx, true);
+    ext.process_slack_reaction(slack_reaction(
+        "proactive-only",
+        "reaction_added",
+        "C456",
+        "1.0",
+    ));
+    assert!(rx.try_recv().is_err());
+
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    let child = ConversationPolicy {
+        alias: "child".to_owned(),
+        conversation_id: "C123".to_owned(),
+        kind: ConversationPolicyKind::Channel,
+        receive: None,
+        description: None,
+        thread_ts: Some("7.0".to_owned()),
+    };
+    config
+        .conversations
+        .insert(child.alias.clone(), child.clone());
+    config.proactive_aliases.insert(child.alias.clone());
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    assert!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"thread post","destination":"child"}),
+            ),
+        ))
+        .is_none()
+    );
+    complete_pending_send(&ext, &rx, true);
+    ext.process_slack_reaction(slack_reaction("covered", "reaction_added", "C123", "1.0"));
+    let reaction = recv_prompt_request(&rx);
+    let conversation = reaction.draft.conversation.expect("conversation");
+    assert_eq!(conversation.display_name.as_deref(), Some("team"));
+    assert_eq!(
+        conversation.thread.expect("thread").stable_id,
+        "7.0".to_owned()
+    );
+}
+
+/// A receive-enabled fixed-thread sibling does not authorize reactions to a
+/// proactive post under a different root in the same native conversation.
+#[test]
+fn fixed_thread_sibling_does_not_cover_proactive_reaction() {
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    config.conversations.clear();
+    let receive = ConversationPolicy {
+        alias: "receive-eight".to_owned(),
+        conversation_id: "C777".to_owned(),
+        kind: ConversationPolicyKind::Channel,
+        receive: Some(ReceiveMode::AllMessages),
+        description: None,
+        thread_ts: Some("8.0".to_owned()),
+    };
+    let proactive = ConversationPolicy {
+        alias: "send-seven".to_owned(),
+        conversation_id: "C777".to_owned(),
+        kind: ConversationPolicyKind::Channel,
+        receive: None,
+        description: None,
+        thread_ts: Some("7.0".to_owned()),
+    };
+    config.conversations.insert(receive.alias.clone(), receive);
+    config
+        .conversations
+        .insert(proactive.alias.clone(), proactive.clone());
+    config.proactive_aliases.insert(proactive.alias);
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    assert!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"thread post","destination":"send-seven"}),
+            ),
+        ))
+        .is_none()
+    );
+    complete_pending_send(&ext, &rx, true);
+    ext.process_slack_reaction(slack_reaction(
+        "wrong-sibling",
+        "reaction_added",
+        "C777",
+        "1.0",
+    ));
+    assert!(rx.try_recv().is_err());
+}
+
 /// Reaction prompts use the authenticated thread from the original outbound
 /// request even when Slack omits it in the response, and conflicting event
 /// metadata can never redirect a root or threaded post.
@@ -2370,7 +2790,8 @@ fn slack_send_rejects_missing_or_forged_origin_context() {
             conversation: SlackConversation {
                 channel_id: "C999".to_owned(),
                 thread_ts: Some("9.0".to_owned()),
-                direct: false,
+                kind: ConversationPolicyKind::Channel,
+                alias: "team".to_owned(),
             },
             user_id: "U123".to_owned(),
             policy_status: SenderPolicyStatus::Allowlisted,
@@ -2487,8 +2908,7 @@ fn configured_channel_rejects_other_conversations() {
 #[test]
 fn configured_channels_keep_independent_agent_selections() {
     let (ext, rx, _client) = extension();
-    ext.apply_config(multi_channel_cfg())
-        .expect("multi-channel config");
+    apply_test_config(&ext, multi_channel_cfg());
     register_agent(&ext, "agent-alpha");
     register_agent(&ext, "agent-beta");
 
@@ -2509,12 +2929,57 @@ fn configured_channels_keep_independent_agent_selections() {
     assert_eq!(ingress_text(&second), "second");
 }
 
-/// In DM-link mode, text before `start` receives guidance and the first linked
-/// DM remains exclusive until restart or reconfiguration.
+/// Receive-enabled fixed-thread siblings own independent selected-agent state.
 #[test]
-fn dm_linking_is_explicit_and_exclusive() {
+fn fixed_thread_siblings_keep_independent_agent_selections() {
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    config.conversations.clear();
+    for (alias, root) in [("one", "1.0"), ("two", "2.0")] {
+        config.conversations.insert(
+            alias.to_owned(),
+            ConversationPolicy {
+                alias: alias.to_owned(),
+                conversation_id: "C777".to_owned(),
+                kind: ConversationPolicyKind::Channel,
+                receive: Some(ReceiveMode::MentionsOnly),
+                description: None,
+                thread_ts: Some(root.to_owned()),
+            },
+        );
+    }
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-one");
+    register_agent(&ext, "agent-two");
+    for (root, agent) in [("1.0", "agent-one"), ("2.0", "agent-two")] {
+        let mut select = slack_message(
+            "C777",
+            Some("channel"),
+            &format!("<@UBOT123> select {agent}"),
+        );
+        select.thread_ts = Some(root.to_owned());
+        ext.process_slack_message(select);
+    }
+    for (root, text) in [("1.0", "first"), ("2.0", "second")] {
+        let mut message = slack_message("C777", Some("channel"), &format!("<@UBOT123> {text}"));
+        message.thread_ts = Some(root.to_owned());
+        ext.process_slack_message(message);
+    }
+    assert_eq!(
+        recv_prompt_request(&rx).target_agent_id,
+        agent_id("agent-one")
+    );
+    assert_eq!(
+        recv_prompt_request(&rx).target_agent_id,
+        agent_id("agent-two")
+    );
+}
+
+/// Dynamic DM discovery requires `start` and retains multiple exact links.
+#[test]
+fn dm_linking_is_explicit_and_multi_link() {
     let (ext, rx, client) = extension();
-    ext.apply_config(dm_cfg()).expect("dm config");
+    apply_test_config(&ext, dm_cfg());
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("D123", Some("im"), "hello before start"));
     assert!(rx.try_recv().is_err());
@@ -2525,24 +2990,143 @@ fn dm_linking_is_explicit_and_exclusive() {
     );
 
     ext.process_slack_message(slack_message("D123", Some("im"), "start"));
-    assert_eq!(
+    assert!(
         ext.state
             .lock()
             .expect("lock")
-            .learned_dm
-            .as_ref()
-            .map(|link| link.channel_id.as_str()),
-        Some("D123")
+            .linked_dms
+            .contains_key("D123")
     );
     ext.process_slack_message(slack_message("D999", Some("im"), "start"));
-    assert_eq!(
+    assert!(
         ext.state
             .lock()
             .expect("lock")
-            .learned_dm
-            .as_ref()
-            .map(|link| link.channel_id.as_str()),
-        Some("D123")
+            .linked_dms
+            .contains_key("D999")
+    );
+    ext.process_slack_message(slack_message("D123", Some("im"), "first DM"));
+    ext.process_slack_message(slack_message("D999", Some("im"), "second DM"));
+    assert_eq!(recv_prompt(&rx), "first DM");
+    assert_eq!(recv_prompt(&rx), "second DM");
+}
+
+/// A dynamic D id remains bound to its exact allowlisted U/W user for prompts,
+/// validation replies, and all bridge-control commands.
+#[test]
+fn dynamic_dm_wrong_user_has_no_ingress_control_or_local_effects() {
+    let (ext, rx, client) = extension();
+    let mut config = dm_cfg();
+    config.allowed_user_ids.insert("U999".to_owned());
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("D123", Some("im"), "start"));
+    let baseline_posts = client.sent_pairs().len();
+
+    for text in [
+        "",
+        "plain",
+        "start",
+        "agents",
+        "select agent-a",
+        "to agent-a hello",
+        "/unknown",
+        "message that is deliberately too long for a tiny configured limit",
+    ] {
+        let mut wrong_user = slack_message("D123", Some("im"), text);
+        wrong_user.user_id = "U999".to_owned();
+        ext.process_slack_message(wrong_user);
+    }
+    assert!(rx.try_recv().is_err());
+    assert_eq!(client.sent_pairs().len(), baseline_posts);
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .selected_agent_by_route
+            .is_empty()
+    );
+}
+
+/// Dynamic DM capacity never evicts/replaces existing exact links, while a
+/// proactive-only static DM remains compatible with dynamic receive linkage.
+#[test]
+fn dynamic_dm_capacity_and_proactive_only_collision_rules() {
+    let (ext, _rx, client) = extension();
+    let mut config = dm_cfg();
+    let proactive = ConversationPolicy {
+        alias: "proactive-dm".to_owned(),
+        conversation_id: "D999".to_owned(),
+        kind: ConversationPolicyKind::Dm,
+        receive: None,
+        description: None,
+        thread_ts: None,
+    };
+    config
+        .conversations
+        .insert(proactive.alias.clone(), proactive.clone());
+    config.proactive_aliases.insert(proactive.alias.clone());
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("D999", Some("im"), "start"));
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .linked_dms
+            .contains_key("D999")
+    );
+
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.linked_dms.clear();
+        for index in 0..DYNAMIC_DM_LIMIT {
+            state.linked_dms.insert(
+                format!("D{index:03}"),
+                LinkedConversation {
+                    user_id: "U123".to_owned(),
+                },
+            );
+        }
+    }
+    ext.process_slack_message(slack_message("DNEW", Some("im"), "start"));
+    let state = ext.state.lock().expect("state");
+    assert_eq!(state.linked_dms.len(), DYNAMIC_DM_LIMIT);
+    assert!(!state.linked_dms.contains_key("DNEW"));
+    assert!(state.linked_dms.contains_key("D000"));
+    drop(state);
+    assert!(
+        client
+            .sent_pairs()
+            .last()
+            .is_some_and(|(_, text)| text.contains("capacity"))
+    );
+}
+
+/// Any static receive-enabled DM scope blocks dynamic broadening, including a
+/// fixed-thread-only receive route.
+#[test]
+fn static_fixed_dm_receive_blocks_dynamic_parent_link() {
+    let (ext, _rx, client) = extension();
+    let mut config = fixed_thread_cfg(ConversationPolicyKind::Dm, "D777");
+    config.dynamic_direct_messages = Some(DynamicDirectMessages {
+        receive: ReceiveMode::AllMessages,
+    });
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("D777", Some("im"), "start"));
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .linked_dms
+            .contains_key("D777")
+    );
+    assert!(
+        client
+            .sent_pairs()
+            .last()
+            .is_some_and(|(_, text)| text.contains("cannot broaden"))
     );
 }
 
@@ -2551,7 +3135,7 @@ fn dm_linking_is_explicit_and_exclusive() {
 #[test]
 fn dm_send_uses_linked_prompt_origin() {
     let (ext, rx, client) = extension();
-    ext.apply_config(dm_cfg()).expect("dm config");
+    apply_test_config(&ext, dm_cfg());
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("D123", Some("im"), "start"));
     let mut question = slack_message("D123", Some("im"), "question");
@@ -2668,6 +3252,7 @@ fn valid_envelopes_are_acked_and_routed() {
             "event": {
                 "type": "app_mention",
                 "channel": "C123",
+                "channel_type": "channel",
                 "user": "U123",
                 "text": "<@UBOT123> hello",
                 "ts": "1.0",
@@ -2705,6 +3290,37 @@ fn malformed_message_thread_metadata_is_rejected() {
         }
     });
     assert!(decode_socket_event(&value).is_none());
+}
+
+/// Missing or malformed create identity, sender, conversation, timestamp, and
+/// message-family metadata fail before ingress or local Slack effects.
+#[test]
+fn malformed_create_metadata_is_silent_and_fail_closed() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let mut cases = Vec::new();
+    let mut missing_ts = slack_message("C123", Some("channel"), "<@UBOT123> x");
+    missing_ts.ts = None;
+    cases.push(missing_ts);
+    let mut bad_ts = slack_message("C123", Some("channel"), "<@UBOT123> x");
+    bad_ts.ts = Some("bad".to_owned());
+    cases.push(bad_ts);
+    cases.push(slack_message(
+        "not-a-conversation",
+        Some("channel"),
+        "<@UBOT123> x",
+    ));
+    let mut bad_user = slack_message("C123", Some("channel"), "<@UBOT123> x");
+    bad_user.user_id = "guest".to_owned();
+    cases.push(bad_user);
+    let mut unsupported = slack_message("C123", Some("mpim"), "<@UBOT123> x");
+    unsupported.event_type = "message".to_owned();
+    cases.push(unsupported);
+    for message in cases {
+        ext.process_slack_message(message);
+    }
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent_pairs().is_empty());
 }
 
 /// Socket Mode reaction envelopes retain stable message identity metadata and
@@ -2834,7 +3450,10 @@ fn all_messages_accepts_unmentioned_posts_and_shares_durable_identity() {
         .config
         .as_mut()
         .expect("config")
-        .listening_scope = ListeningScope::AllMessages;
+        .conversations
+        .get_mut("team")
+        .expect("team")
+        .receive = Some(ReceiveMode::AllMessages);
     register_agent(&ext, "agent-a");
     let mut message = slack_message("C123", None, "ordinary channel text");
     message.event_type = "message".to_owned();
@@ -2859,13 +3478,13 @@ fn all_messages_accepts_unmentioned_posts_and_shares_durable_identity() {
             .as_ref()
             .and_then(|identity| identity.dedup_key.as_ref())
     );
-    assert_eq!(
+    assert!(
         first
             .draft
             .external_identity
             .as_ref()
-            .and_then(|identity| identity.dedup_key.as_deref()),
-        Some("message:C123:1.0")
+            .and_then(|identity| identity.dedup_key.as_deref())
+            .is_some_and(|key| key.starts_with("message:C123:"))
     );
 }
 
@@ -2880,7 +3499,10 @@ fn all_messages_unmentioned_chatter_cannot_invoke_bridge_commands() {
         .config
         .as_mut()
         .expect("config")
-        .listening_scope = ListeningScope::AllMessages;
+        .conversations
+        .get_mut("team")
+        .expect("team")
+        .receive = Some(ReceiveMode::AllMessages);
     register_agent(&ext, "agent-a");
     for text in ["start", "to clarify this", "/select agent-b"] {
         let mut message = slack_message("C123", None, text);
@@ -2891,31 +3513,533 @@ fn all_messages_unmentioned_chatter_cannot_invoke_bridge_commands() {
     assert!(client.sent.lock().expect("lock").is_empty());
 }
 
-/// Listening scope defaults to mentions-only, accepts only the two explicit
-/// values, and rejects ambiguous spellings as configuration errors.
+/// Every removed global/asymmetric key produces actionable migration guidance.
 #[test]
-fn listening_scope_config_default_valid_and_invalid_values() {
-    for (value, expected) in [
-        (serde_json::json!({}), ListeningScope::MentionsOnly),
-        (
-            serde_json::json!({"listening_scope": "mentions_only"}),
-            ListeningScope::MentionsOnly,
+fn removed_conversation_keys_return_migration_error() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    for legacy in [
+        serde_json::json!({"channel_ids":["C123"]}),
+        serde_json::json!({"listening_scope":"mentions_only"}),
+        serde_json::json!({"send_destinations":[]}),
+        serde_json::json!({"channel_ids":null}),
+        serde_json::json!({"listening_scope":null}),
+        serde_json::json!({"send_destinations":null}),
+    ] {
+        let mut value = serde_json::json!({
+            "app_token_secret":"app",
+            "bot_token_secret":"bot",
+            "allowed_user_ids":["U123"],
+        });
+        value
+            .as_object_mut()
+            .expect("object")
+            .extend(legacy.as_object().expect("legacy object").clone());
+        let error = tau_proto::json_to_cbor(&value)
+            .deserialized::<ExtConfig>()
+            .expect("removed key recognized")
+            .validate(&secrets)
+            .err()
+            .expect("removed key rejected");
+        assert!(error.contains("were removed"));
+        assert!(error.contains("conversations[]"));
+        assert!(error.contains("proactive_send"));
+    }
+}
+
+/// Unified conversation validation rejects ambiguous receive authority while
+/// preserving deliberate send-only and fixed-thread combinations.
+#[test]
+fn conversation_policy_receive_collision_matrix() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    let validate = |conversations: serde_json::Value| {
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "app_token_secret": "app",
+            "bot_token_secret": "bot",
+            "allowed_user_ids": ["U123", "W456"],
+            "conversations": conversations,
+        }))
+        .deserialized::<ExtConfig>()
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|config| config.validate(&secrets).map(|_| ()))
+    };
+
+    assert!(validate(serde_json::json!([
+        {"alias":"parent","conversation_id":"C123","kind":"channel","receive":"mentions_only"},
+        {"alias":"thread","conversation_id":"C123","kind":"channel","thread_ts":"1.0","proactive_send":true},
+        {"alias":"dm","conversation_id":"D123","kind":"dm","receive":"all_messages"},
+        {"alias":"mpim","conversation_id":"G123","kind":"mpim","receive":"all_messages"}
+    ])).is_ok());
+    assert!(validate(serde_json::json!([
+        {"alias":"one","conversation_id":"C123","kind":"channel","thread_ts":"1.0","receive":"all_messages"},
+        {"alias":"two","conversation_id":"C123","kind":"channel","thread_ts":"2.0","receive":"mentions_only"}
+    ])).is_ok());
+
+    for invalid in [
+        serde_json::json!([
+            {"alias":"parent","conversation_id":"C123","kind":"channel","receive":"all_messages"},
+            {"alias":"child","conversation_id":"C123","kind":"channel","thread_ts":"1.0","receive":"mentions_only"}
+        ]),
+        serde_json::json!([{"alias":"dm","conversation_id":"D123","kind":"dm","receive":"mentions_only"}]),
+        serde_json::json!([{"alias":"direct-message","conversation_id":"D123","kind":"dm","proactive_send":true}]),
+        serde_json::json!([{"alias":"inert","conversation_id":"C123","kind":"channel"}]),
+        serde_json::json!([{"alias":"padded","conversation_id":" C123","kind":"channel","proactive_send":true}]),
+        serde_json::json!([
+            {"alias":"channel","conversation_id":"G123","kind":"channel","proactive_send":true},
+            {"alias":"mpim","conversation_id":"G123","kind":"mpim","receive":"all_messages"}
+        ]),
+        serde_json::json!([{"alias":"receive","conversation_id":"C123","kind":"channel","receive":"all_messages","description":"not proactive"}]),
+    ] {
+        assert!(validate(invalid).is_err());
+    }
+}
+
+/// Operator-facing deserialization covers combined permissions, fixed MPIM/DM
+/// threads, dynamic-DM modes, Enterprise users, and exact unpadded ID bounds.
+#[test]
+fn operator_conversation_config_parsing_matrix() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    let validate = |value: serde_json::Value| {
+        tau_proto::json_to_cbor(&value)
+            .deserialized::<ExtConfig>()
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|config| config.validate(&secrets).map(|_| ()))
+    };
+    let base = |users: serde_json::Value,
+                conversations: serde_json::Value,
+                dynamic: Option<serde_json::Value>| {
+        let mut value = serde_json::json!({
+            "app_token_secret":"app",
+            "bot_token_secret":"bot",
+            "allowed_user_ids":users,
+            "conversations":conversations,
+        });
+        if let Some(dynamic) = dynamic {
+            value["dynamic_direct_messages"] = dynamic;
+        }
+        value
+    };
+    assert!(validate(base(
+        serde_json::json!(["W123"]),
+        serde_json::json!([
+            {"alias":"combined","conversation_id":"C123","kind":"channel","receive":"all_messages","proactive_send":true},
+            {"alias":"mpim-thread","conversation_id":"G123","kind":"mpim","thread_ts":"1.0","receive":"mentions_only"},
+            {"alias":"dm-thread","conversation_id":"D123","kind":"dm","thread_ts":"2.0","receive":"all_messages"}
+        ]),
+        Some(serde_json::json!({"receive":"all_messages"})),
+    ))
+    .is_ok());
+    assert!(
+        validate(base(
+            serde_json::json!(["U123"]),
+            serde_json::json!([]),
+            Some(serde_json::json!({"receive":"all_messages"})),
+        ))
+        .is_ok()
+    );
+    for invalid in [
+        base(
+            serde_json::json!([" U123"]),
+            serde_json::json!([{"alias":"x","conversation_id":"C123","kind":"channel","proactive_send":true}]),
+            None,
         ),
-        (
-            serde_json::json!({"listening_scope": "all_messages"}),
-            ListeningScope::AllMessages,
+        base(
+            serde_json::json!([format!("U{}", "1".repeat(64))]),
+            serde_json::json!([{"alias":"x","conversation_id":"C123","kind":"channel","proactive_send":true}]),
+            None,
+        ),
+        base(
+            serde_json::json!(["U123"]),
+            serde_json::json!([{"alias":"x","conversation_id":" C123","kind":"channel","proactive_send":true}]),
+            None,
+        ),
+        base(
+            serde_json::json!(["U123"]),
+            serde_json::json!([]),
+            Some(serde_json::json!({"receive":"mentions_only"})),
+        ),
+        base(
+            serde_json::json!(["U123"]),
+            serde_json::json!([]),
+            Some(serde_json::json!({"receive":"all_messages","extra":true})),
         ),
     ] {
-        let config = tau_proto::json_to_cbor(&value)
-            .deserialized::<ExtConfig>()
-            .expect("valid listening scope");
-        assert_eq!(config.listening_scope, expected);
+        assert!(validate(invalid).is_err());
     }
-    let error =
-        tau_proto::json_to_cbor(&serde_json::json!({"listening_scope": "mentions-or-messages"}))
-            .deserialized::<ExtConfig>()
-            .expect_err("invalid scope");
-    assert!(format!("{error:?}").contains("unknown variant"));
+}
+
+/// Fixed-thread roots normalize their root create, MPIMs retain group metadata,
+/// and static DMs receive without dynamic `start`.
+#[test]
+fn static_route_kinds_and_fixed_threads_normalize_ingress() {
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    config.conversations.clear();
+    for policy in [
+        ConversationPolicy {
+            alias: "fixed".to_owned(),
+            conversation_id: "C777".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::MentionsOnly),
+            description: None,
+            thread_ts: Some("7.0".to_owned()),
+        },
+        ConversationPolicy {
+            alias: "group".to_owned(),
+            conversation_id: "G777".to_owned(),
+            kind: ConversationPolicyKind::Mpim,
+            receive: Some(ReceiveMode::AllMessages),
+            description: None,
+            thread_ts: None,
+        },
+        ConversationPolicy {
+            alias: "alice".to_owned(),
+            conversation_id: "D777".to_owned(),
+            kind: ConversationPolicyKind::Dm,
+            receive: Some(ReceiveMode::AllMessages),
+            description: None,
+            thread_ts: None,
+        },
+    ] {
+        config.conversations.insert(policy.alias.clone(), policy);
+    }
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+
+    let mut root = slack_message("C777", Some("channel"), "<@UBOT123> root");
+    root.ts = Some("7.0".to_owned());
+    ext.process_slack_message(root);
+    let root = recv_prompt_request(&rx);
+    let root_conversation = root.draft.conversation.expect("conversation");
+    assert_eq!(root_conversation.display_name.as_deref(), Some("fixed"));
+    assert_eq!(
+        root_conversation
+            .thread
+            .as_ref()
+            .map(|thread| thread.stable_id.as_str()),
+        Some("7.0")
+    );
+
+    let mut mpim = slack_message("G777", Some("mpim"), "group");
+    mpim.event_type = "message".to_owned();
+    ext.process_slack_message(mpim);
+    assert_eq!(
+        recv_prompt_request(&rx)
+            .draft
+            .conversation
+            .expect("conversation")
+            .kind,
+        ConversationKind::Group
+    );
+
+    ext.process_slack_message(slack_message("D777", Some("im"), "direct"));
+    assert_eq!(recv_prompt(&rx), "direct");
+}
+
+/// Private-channel, parent-thread, fixed-thread, and explicit kind matching
+/// cover the remaining native receive matrix and reject sibling/type ambiguity.
+#[test]
+fn channel_kind_and_thread_receive_matrix_is_exact() {
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    for policy in [
+        ConversationPolicy {
+            alias: "private".to_owned(),
+            conversation_id: "G222".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::AllMessages),
+            description: None,
+            thread_ts: None,
+        },
+        ConversationPolicy {
+            alias: "parent".to_owned(),
+            conversation_id: "C444".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::AllMessages),
+            description: None,
+            thread_ts: None,
+        },
+        ConversationPolicy {
+            alias: "fixed".to_owned(),
+            conversation_id: "C555".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::AllMessages),
+            description: None,
+            thread_ts: Some("5.0".to_owned()),
+        },
+    ] {
+        config.conversations.insert(policy.alias.clone(), policy);
+    }
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+
+    let mut private = slack_message("G222", Some("group"), "private");
+    private.event_type = "message".to_owned();
+    ext.process_slack_message(private);
+    assert_eq!(
+        recv_prompt_request(&rx)
+            .draft
+            .conversation
+            .expect("conversation")
+            .display_name
+            .as_deref(),
+        Some("private")
+    );
+
+    let mut parent = slack_message("C444", Some("channel"), "thread");
+    parent.event_type = "message".to_owned();
+    parent.thread_ts = Some("4.0".to_owned());
+    ext.process_slack_message(parent);
+    assert_eq!(
+        recv_prompt_request(&rx)
+            .draft
+            .conversation
+            .expect("conversation")
+            .thread
+            .expect("thread")
+            .stable_id,
+        "4.0"
+    );
+
+    for mut rejected in [
+        slack_message("G222", Some("mpim"), "wrong kind"),
+        slack_message("C555", Some("channel"), "wrong fixed sibling"),
+        slack_message("C123", Some("channel"), "missing type"),
+    ] {
+        rejected.event_type = "message".to_owned();
+        if rejected.channel_id == "C555" {
+            rejected.thread_ts = Some("6.0".to_owned());
+        }
+        if rejected.channel_id == "C123" {
+            rejected.channel_type = None;
+        }
+        ext.process_slack_message(rejected);
+    }
+    assert!(rx.try_recv().is_err());
+}
+
+/// Slack app mentions are message-like and need not carry `channel_type`;
+/// explicit static policy still supplies channel versus MPIM authority.
+#[test]
+fn app_mention_without_channel_type_uses_explicit_static_kind() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let mut mention = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    mention.channel_type = None;
+    ext.process_slack_message(mention);
+    assert_eq!(recv_prompt(&rx), "hello");
+}
+
+/// Every bridge-local response to a fixed-thread root uses the configured root
+/// even though Slack omits `thread_ts` on the root create.
+#[test]
+fn fixed_thread_root_local_replies_never_escape_to_parent() {
+    for text in [
+        "<@UBOT123>",
+        "<@UBOT123> agents",
+        "<@UBOT123> /unknown",
+        "<@UBOT123> message that is deliberately too long",
+    ] {
+        let (ext, rx, client) = extension();
+        let mut config = fixed_thread_cfg(ConversationPolicyKind::Channel, "C777");
+        if text.contains("deliberately too long") {
+            config.max_message_bytes = 20;
+        }
+        apply_test_config(&ext, config);
+        register_agent(&ext, "agent-a");
+        let mut root = slack_message("C777", Some("channel"), text);
+        root.ts = Some("7.0".to_owned());
+        root.thread_ts = None;
+        ext.process_slack_message(root);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(client.sent_thread_ids(), vec![Some("7.0".to_owned())]);
+    }
+
+    let (ext, rx, client) = extension();
+    apply_test_config(
+        &ext,
+        fixed_thread_cfg(ConversationPolicyKind::Channel, "C777"),
+    );
+    let mut root = slack_message("C777", Some("channel"), "<@UBOT123> hello");
+    root.ts = Some("7.0".to_owned());
+    ext.process_slack_message(root);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(client.sent_thread_ids(), vec![Some("7.0".to_owned())]);
+}
+
+/// A fixed-thread root edit normalizes omitted Slack thread metadata while
+/// child edits with absent or conflicting roots remain rejected.
+#[test]
+fn fixed_thread_root_edit_normalizes_omitted_thread() {
+    let (ext, rx, _client) = extension();
+    apply_test_config(
+        &ext,
+        fixed_thread_cfg(ConversationPolicyKind::Channel, "C777"),
+    );
+    register_agent(&ext, "agent-a");
+    let mut root = slack_message("C777", Some("channel"), "<@UBOT123> original");
+    root.ts = Some("7.0".to_owned());
+    ext.process_slack_message(root);
+    let create = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &create);
+
+    ext.process_slack_edit(slack_edit("edit-root", "C777", "7.0", None, "changed"));
+    let edit = recv_prompt_request(&rx);
+    assert_eq!(
+        edit.draft
+            .conversation
+            .expect("conversation")
+            .thread
+            .expect("thread")
+            .stable_id,
+        "7.0"
+    );
+    ext.process_slack_edit(slack_edit("wrong-child", "C777", "8.0", None, "bad"));
+    ext.process_slack_edit(slack_edit("wrong-root", "C777", "7.0", Some("8.0"), "bad"));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Slack's two wrappers for one leading-mention command have identical command
+/// semantics and exactly one bridge-local side effect in either arrival order.
+#[test]
+fn dual_wrapper_commands_have_one_local_effect() {
+    for text in [
+        "<@UBOT123> start",
+        "<@UBOT123> agents",
+        "<@UBOT123> select agent-a",
+        "<@UBOT123> to",
+        "<@UBOT123> /unknown",
+        "<@UBOT123>",
+        "<@UBOT123> message that is deliberately too long",
+    ] {
+        for message_first in [true, false] {
+            let (ext, rx, client) = extension();
+            {
+                let mut state = ext.state.lock().expect("state");
+                let config = state.config.as_mut().expect("config");
+                config.conversations.get_mut("team").expect("team").receive =
+                    Some(ReceiveMode::AllMessages);
+                if text.contains("deliberately too long") {
+                    config.max_message_bytes = 20;
+                }
+            }
+            register_agent(&ext, "agent-a");
+            let (message, mention) = dual_slack_messages(text);
+            if message_first {
+                ext.process_slack_message(message);
+                ext.process_slack_message(mention);
+            } else {
+                ext.process_slack_message(mention);
+                ext.process_slack_message(message);
+            }
+            assert!(rx.try_recv().is_err(), "{text}");
+            assert_eq!(client.sent_pairs().len(), 1, "{text}");
+        }
+    }
+}
+
+/// Valid `to` and ordinary mentioned text reach durable dedup in both wrapper
+/// orders with identical drafts rather than becoming local command side
+/// effects.
+#[test]
+fn dual_wrapper_routed_creates_are_identical() {
+    for text in ["<@UBOT123> to agent-a hello", "<@UBOT123> hello"] {
+        for message_first in [true, false] {
+            let (ext, rx, client) = extension();
+            ext.state
+                .lock()
+                .expect("state")
+                .config
+                .as_mut()
+                .expect("config")
+                .conversations
+                .get_mut("team")
+                .expect("team")
+                .receive = Some(ReceiveMode::AllMessages);
+            register_agent(&ext, "agent-a");
+            let (message, mention) = dual_slack_messages(text);
+            if message_first {
+                ext.process_slack_message(message);
+                ext.process_slack_message(mention);
+            } else {
+                ext.process_slack_message(mention);
+                ext.process_slack_message(message);
+            }
+            let first = recv_prompt_request(&rx);
+            let second = recv_prompt_request(&rx);
+            assert_eq!(first.draft, second.draft);
+            assert!(client.sent_pairs().is_empty());
+        }
+    }
+}
+
+/// Dual wrappers produce only one local routing-error response when no unique
+/// registered target exists.
+#[test]
+fn dual_wrapper_plain_routing_errors_have_one_local_effect() {
+    for registered in [0, 2] {
+        for message_first in [true, false] {
+            let (ext, rx, client) = extension();
+            ext.state
+                .lock()
+                .expect("state")
+                .config
+                .as_mut()
+                .expect("config")
+                .conversations
+                .get_mut("team")
+                .expect("team")
+                .receive = Some(ReceiveMode::AllMessages);
+            for index in 0..registered {
+                register_agent(&ext, &format!("agent-{index}"));
+            }
+            let (message, mention) = dual_slack_messages("<@UBOT123> hello");
+            if message_first {
+                ext.process_slack_message(message);
+                ext.process_slack_message(mention);
+            } else {
+                ext.process_slack_message(mention);
+                ext.process_slack_message(message);
+            }
+            assert!(rx.try_recv().is_err());
+            assert_eq!(client.sent_pairs().len(), 1);
+        }
+    }
+}
+
+/// Leading whitespace is removed before testing the exact authenticated mention
+/// token, so both wrappers retain one bridge-command side effect.
+#[test]
+fn padded_leading_mention_retains_command_authority() {
+    for message_first in [true, false] {
+        let (ext, rx, client) = extension();
+        ext.state
+            .lock()
+            .expect("state")
+            .config
+            .as_mut()
+            .expect("config")
+            .conversations
+            .get_mut("team")
+            .expect("team")
+            .receive = Some(ReceiveMode::AllMessages);
+        register_agent(&ext, "agent-a");
+        let (message, mention) = dual_slack_messages(" <@UBOT123> agents");
+        if message_first {
+            ext.process_slack_message(message);
+            ext.process_slack_message(mention);
+        } else {
+            ext.process_slack_message(mention);
+            ext.process_slack_message(message);
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(client.sent_pairs().len(), 1);
+    }
 }
 
 /// Slack retries and reconnect replays are resubmitted with the same durable
@@ -2929,6 +4053,56 @@ fn duplicate_slack_event_ids_are_resubmitted_for_durable_dedup() {
     ext.process_slack_message(msg);
     assert_eq!(recv_prompt(&rx), "hello");
     assert_eq!(recv_prompt(&rx), "hello");
+}
+
+/// A restart with an alias rename resubmits the same native dedup key but a
+/// conflicting display draft; harness rejection installs no new reply route.
+#[test]
+fn alias_rename_retry_preserves_native_key_and_rejects_route_install() {
+    let (first_ext, first_rx, _client) = extension();
+    register_agent(&first_ext, "agent-a");
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    first_ext.process_slack_message(message.clone());
+    let first = recv_prompt_request(&first_rx);
+    activate_prompt_origin(&first_ext, &first);
+
+    let (second_ext, second_rx, _client) = extension();
+    let mut renamed = cfg();
+    let mut policy = renamed.conversations.remove("team").expect("team");
+    policy.alias = "renamed".to_owned();
+    renamed.conversations.insert(policy.alias.clone(), policy);
+    reindex_receive_routes(&mut renamed);
+    apply_test_config(&second_ext, renamed);
+    register_agent(&second_ext, "agent-a");
+    second_ext.process_slack_message(message);
+    let second = recv_prompt_request(&second_rx);
+    assert_eq!(
+        first
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|id| id.dedup_key.as_ref()),
+        second
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|id| id.dedup_key.as_ref())
+    );
+    assert_ne!(first.draft, second.draft);
+    apply_output_message(
+        &HarnessOutputMessage::TransportMessageIngressResult(
+            tau_proto::TransportMessageIngressResult {
+                request_id: second.request_id,
+                message_id: None,
+                outcome: None,
+                error: Some("dedup_conflict".to_owned()),
+            },
+        ),
+        &second_ext,
+    );
+    let state = second_ext.state.lock().expect("state");
+    assert!(state.reply_routes.is_empty());
+    assert!(state.incoming_messages.is_empty());
 }
 
 /// `to` is transport ingress rather than a local command side effect, so Slack
