@@ -21,6 +21,14 @@ and input for another agent do not wake it. If its deadline is processed first,
 it instead completes normally with `timed_out: true` and warning/`timeout` UI
 metadata. Event-loop processing order decides races exactly once.
 
+The provider-owned generic tool display shows the effective bound as compact
+`Nm` arguments, including the 60-minute cap. Argument-free waits retain their
+existing empty argument display. Live progress and retained/replayed result or
+error blocks preserve the same bounded label; cancellation retains the existing
+generic cancellation presentation because that protocol event has no display
+descriptor. The label is static metadata, not a countdown or
+elapsed/remaining-time update.
+
 Queueing and waiter registration both execute on the harness event-loop thread.
 Starting a wait first checks the same per-agent pending-activation predicate;
 otherwise it registers one waiter. Canonical queueing first stores the input and

@@ -1477,6 +1477,7 @@ mod replay;
 mod semantic_event_router;
 mod subagents_tool;
 pub(crate) use subagents_tool::PeerIoPermit;
+pub use subagents_tool::normalized_wait_timeout_minutes;
 mod transport_messages;
 mod user_skill_invocation;
 
@@ -14237,6 +14238,19 @@ impl Harness {
                 }
                 count += 1;
                 self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                let display = (call.name.as_str() == "wait")
+                    .then(|| {
+                        normalized_wait_timeout_minutes(&call.arguments)
+                            .ok()
+                            .flatten()
+                    })
+                    .flatten()
+                    .map(|minutes| tau_proto::ToolUseState {
+                        args: format!("{minutes}m"),
+                        status: tau_proto::ToolUseStatus::Error,
+                        status_text: "interrupted".to_owned(),
+                        ..Default::default()
+                    });
                 let error = ToolError {
                     call_id: call.call_id.clone(),
                     tool_name: call.name,
@@ -14245,7 +14259,7 @@ impl Harness {
                     details: None,
                     originator: tau_proto::PromptOriginator::User,
 
-                    display: None,
+                    display,
                 };
                 self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
             }

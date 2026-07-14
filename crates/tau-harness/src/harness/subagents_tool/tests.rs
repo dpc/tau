@@ -456,13 +456,18 @@ fn activating_input_wakes_only_target_owned_waits() {
     let replies = tracker.activate_waits_for(&owner);
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].wait_call_id.as_str(), "input-owner");
+    let (result, display) =
+        reply_result_with_display(replies.into_iter().next().expect("input reply"));
     assert_eq!(
-        reply_result(replies.into_iter().next().expect("input reply")),
+        result,
         CborValue::Map(vec![(
             CborValue::Text("input_available".to_owned()),
             CborValue::Bool(true),
         )])
     );
+    let display = display.expect("input-available display");
+    assert_eq!(display.args, "1m");
+    assert_eq!(display.status, ToolUseStatus::Success);
 
     let other_replies = tracker.activate_waits_for(&other);
     assert_eq!(other_replies.len(), 1);
@@ -481,10 +486,14 @@ fn duplicate_input_wait_is_rejected_without_replacing_first() {
             .is_none()
     );
     let duplicate = start_reply(start_wait_input(&mut tracker, &owner, "input-second"));
+    let (message, _, display) = reply_error_with_display(duplicate);
     assert_eq!(
-        reply_error(duplicate).0,
+        message,
         "existing input wait for this agent already in progress"
     );
+    let display = display.expect("duplicate wait display");
+    assert_eq!(display.args, "1m");
+    assert_eq!(display.status, ToolUseStatus::Error);
     let replies = tracker.activate_waits_for(&owner);
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].wait_call_id.as_str(), "input-first");
@@ -610,6 +619,7 @@ fn input_wait_deadlines_are_ordered_and_expire_exactly_once() {
         )])
     );
     let display = display.expect("timeout display");
+    assert_eq!(display.args, "1m");
     assert_eq!(display.status, ToolUseStatus::Warning);
     assert_eq!(display.status_text, "timeout");
     assert!(

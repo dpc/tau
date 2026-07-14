@@ -757,6 +757,60 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
     assert_eq!(display.status, ToolUseStatus::InProgress);
 }
 
+/// Activating-input waits expose their effective bounded timeout through the
+/// provider-owned generic display while argument-free waits stay unchanged.
+#[test]
+fn wait_initial_display_shows_normalized_input_timeout() {
+    let state = BuiltinState::default();
+    let timeout_call = |minutes: i64| AgentToolCall {
+        id: "wait-call".into(),
+        name: ToolName::new(WAIT_TOOL_NAME),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(minutes.into()),
+        )]),
+    };
+
+    assert_eq!(
+        state
+            .initial_display(&timeout_call(7))
+            .expect("wait display")
+            .args,
+        "7m"
+    );
+    assert_eq!(
+        state
+            .initial_display(&timeout_call(1_000_000))
+            .expect("capped wait display")
+            .args,
+        "60m"
+    );
+    assert_eq!(
+        state
+            .initial_display(&AgentToolCall {
+                id: "wait-call".into(),
+                name: ToolName::new(WAIT_TOOL_NAME),
+                tool_type: ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            })
+            .expect("argument-free wait display")
+            .args,
+        ""
+    );
+    let invalid = CborValue::Map(vec![
+        (
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("other-call".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(7.into()),
+        ),
+    ]);
+    assert_eq!(state.wait_initial_display_args(&invalid), "");
+}
+
 /// The message tool progress display must keep the recipient inline and put
 /// the actual delivered text in the rich payload, so UIs can show it even when
 /// the separate message event scrolls by.

@@ -178,6 +178,9 @@ impl BuiltinState {
     }
 
     fn wait_initial_display_args(&self, arguments: &CborValue) -> String {
+        if let Ok(Some(minutes)) = tau_harness::normalized_wait_timeout_minutes(arguments) {
+            return format!("{minutes}m");
+        }
         wait_target_call_id(arguments)
             .and_then(|call_id| self.in_progress_tool_names.get(call_id))
             .map(ToString::to_string)

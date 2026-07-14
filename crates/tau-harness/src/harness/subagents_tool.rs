@@ -1608,9 +1608,11 @@ impl Harness {
                 Ok(WaitTarget::AnyBackground) => {
                     wait_interrupted_any_reply(call_id, visible_tool_name)
                 }
-                Ok(WaitTarget::AnyInput(_)) => {
-                    wait_input_available_reply(call_id, visible_tool_name)
-                }
+                Ok(WaitTarget::AnyInput(timeout)) => wait_input_available_reply(
+                    call_id,
+                    visible_tool_name,
+                    wait_timeout_args(timeout),
+                ),
                 Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
             };
             self.publish_wait_replies(vec![reply]);
@@ -2203,6 +2205,10 @@ const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
 const MAX_INPUT_WAIT_MINUTES: i128 = 60;
 
+fn wait_timeout_args(timeout: Duration) -> String {
+    format!("{}m", timeout.as_secs() / 60)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum WaitTarget {
     Exact(ToolCallId),
@@ -2225,6 +2231,8 @@ struct WaitRequest {
     call_id: ToolCallId,
     tool_name: ToolName,
     owner: AgentId,
+    /// Empty for exact/bare waits; normalized and bounded `Nm` for input waits.
+    display_args: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2318,10 +2326,15 @@ impl WaitTracker {
                 ));
             }
         };
+        let display_args = match &target {
+            WaitTarget::AnyInput(timeout) => wait_timeout_args(*timeout),
+            _ => String::new(),
+        };
         let wait = WaitRequest {
             call_id,
             tool_name,
             owner: owner.clone(),
+            display_args,
         };
         match target {
             WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
@@ -2461,12 +2474,22 @@ impl WaitTracker {
         deadline: Instant,
     ) -> WaitStart {
         if self.input_waiters.contains_key(&owner) {
-            return WaitStart::reply(wait_error_reply(
+            let mut reply = wait_error_reply(
                 wait.call_id,
                 wait.tool_name,
                 "existing input wait for this agent already in progress".to_owned(),
                 None,
-            ));
+            );
+            if let WaitReplyKind::Error { display, .. } = &mut reply.kind {
+                *display = Some(ToolUseState {
+                    args: wait.display_args,
+                    status: ToolUseStatus::Error,
+                    status_text: "existing input wait for this agent already in progress"
+                        .to_owned(),
+                    ..Default::default()
+                });
+            }
+            return WaitStart::reply(reply);
         }
         self.input_waiters.insert(
             owner,
@@ -2491,7 +2514,13 @@ impl WaitTracker {
             .collect();
         due.into_iter()
             .filter_map(|owner| self.input_waiters.remove(&owner))
-            .map(|wait| wait_timed_out_reply(wait.request.call_id, wait.request.tool_name))
+            .map(|wait| {
+                wait_timed_out_reply(
+                    wait.request.call_id,
+                    wait.request.tool_name,
+                    wait.request.display_args,
+                )
+            })
             .collect()
     }
 
@@ -2844,6 +2873,7 @@ impl WaitTracker {
             replies.push(wait_input_available_reply(
                 wait.request.call_id,
                 wait.request.tool_name,
+                wait.request.display_args,
             ));
         }
         replies
@@ -3045,13 +3075,13 @@ fn wait_display_from_source(
     // arbitrary command/path labels when the source tool happened to provide
     // them. Keep the source tool name plus completion severity for the `wait`
     // call itself.
-    let (status, status_text) = display
-        .map(|display| (display.status, display.status_text))
-        .unwrap_or((default_status, default_status_text));
+    let (display_args, status, status_text) = display
+        .map(|display| (display.args, display.status, display.status_text))
+        .unwrap_or((String::new(), default_status, default_status_text));
     ToolUseState {
         args: source_tool_name
             .map(|tool_name| tool_name.to_string())
-            .unwrap_or_default(),
+            .unwrap_or(display_args),
         status,
         status_text: wait_display_status_text(status, status_text),
         ..Default::default()
@@ -3229,7 +3259,25 @@ fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
     }
 }
 
-fn wait_input_available_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitReply {
+/// Validates wait arguments and returns the effective activating-input timeout
+/// in minutes when that mode was selected.
+///
+/// # Errors
+///
+/// Returns the same validation error used by wait invocation when arguments are
+/// malformed, conflicting, repeated, or otherwise unsupported.
+pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
+    match parse_wait_args(arguments)? {
+        WaitTarget::AnyInput(timeout) => Ok(Some(timeout.as_secs() / 60)),
+        _ => Ok(None),
+    }
+}
+
+fn wait_input_available_reply(
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    display_args: String,
+) -> WaitReply {
     wait_result_reply(
         call_id,
         tool_name,
@@ -3238,11 +3286,20 @@ fn wait_input_available_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitR
             CborValue::Text("input_available".to_owned()),
             CborValue::Bool(true),
         )]),
-        None,
+        Some(ToolUseState {
+            args: display_args,
+            status: ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
     )
 }
 
-fn wait_timed_out_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitReply {
+fn wait_timed_out_reply(
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    display_args: String,
+) -> WaitReply {
     WaitReply {
         wait_call_id: call_id,
         wait_tool_name: tool_name,
@@ -3253,7 +3310,12 @@ fn wait_timed_out_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitReply {
             )]),
             display: Some(wait_display_from_source(
                 None,
-                None,
+                Some(ToolUseState {
+                    args: display_args,
+                    status: ToolUseStatus::Warning,
+                    status_text: "timeout".to_owned(),
+                    ..Default::default()
+                }),
                 ToolUseStatus::Warning,
                 "timeout".to_owned(),
             )),

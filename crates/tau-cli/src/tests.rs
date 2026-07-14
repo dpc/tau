@@ -7173,6 +7173,98 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     assert!(vt.screen_contains(80, "strict_tool 0s pending"));
 }
 
+/// The normalized wait bound must be visible both while the call is live and
+/// after its generic result replaces the pending block.
+#[test]
+fn wait_timeout_label_survives_live_to_retained_transition() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let arguments = CborValue::Map(vec![(
+        CborValue::Text("timeout_minutes".to_owned()),
+        CborValue::Integer(75.into()),
+    )]);
+
+    renderer.handle_recorded_at(
+        &tool_started("wait-timeout", "wait", arguments),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &initial_tool_progress("wait-timeout", "wait", "60m", ""),
+        tau_proto::UnixMicros::new(1_100_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "wait 60m"));
+
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "wait-timeout".into(),
+            tool_name: tau_proto::ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("timed_out: true".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "60m".to_owned(),
+                status: tau_proto::ToolUseStatus::Warning,
+                status_text: "timeout".to_owned(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "wait 60m 1s timeout"));
+
+    // Durable replay does not include transient progress, so the terminal
+    // descriptor must remain self-contained.
+    let (_replay_term, replay_handle, replay_vt) = setup(80, 24);
+    let mut replay = EventRenderer::new(
+        replay_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    replay.handle_recorded_at(
+        &tool_started(
+            "replayed-wait",
+            "wait",
+            CborValue::Map(vec![(
+                CborValue::Text("timeout_minutes".to_owned()),
+                CborValue::Integer(75.into()),
+            )]),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    replay.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "replayed-wait".into(),
+            tool_name: tau_proto::ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Map(vec![(
+                CborValue::Text("timed_out".to_owned()),
+                CborValue::Bool(true),
+            )]),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "60m".to_owned(),
+                status: tau_proto::ToolUseStatus::Warning,
+                status_text: "timeout".to_owned(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&replay_handle);
+    assert!(replay_vt.screen_contains(80, "wait 60m 1s timeout"));
+}
+
+/// A running tool call remains visibly pending until its result arrives.
 #[test]
 fn running_tool_call_shows_ellipsis_until_result() {
     let (_term, handle, vt) = setup(80, 24);

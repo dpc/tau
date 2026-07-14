@@ -67,7 +67,7 @@ pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
 pub use crate::error::HarnessError;
 pub use crate::extension::{harness_log_path, session_logs_dir};
 pub use crate::format::{format_extension_event, format_tool_progress};
-pub use crate::harness::{AgentToolCall, Harness};
+pub use crate::harness::{AgentToolCall, Harness, normalized_wait_timeout_minutes};
 pub use crate::internal_tools::{InternalToolHandler, InternalToolHandlers, InternalToolHost};
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV, ROLE_CLI_OVERRIDES_ENV,
