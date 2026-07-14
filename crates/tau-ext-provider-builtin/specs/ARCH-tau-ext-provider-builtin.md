@@ -54,6 +54,16 @@ ready, so the main loop must drain both harness input and worker messages before
 blocking in `wait_for_wake()`. Regression tests should cover worker output that
 wakes the loop before the worker sends its completion marker.
 
+Prewarm workers use the same enqueue-before-wake completion channel but are
+supervised separately from prompt concurrency. Duplicate cache-owner work is
+suppressed, cancellation remains owned until exact completion, and main-loop
+cancel/shutdown/profile transitions wake transport waits without awaiting them
+inline.
+On terminal harness disconnect the loop registry is dropped after cancellation;
+the detached worker retains its cancellation source and finite network bounds,
+so exact completion is no longer reconciled into a loop that has ceased to
+exist.
+
 Delayed retries use one scheduler thread and never retain a worker permit.
 Cooldown keys contain only configured provider namespaces, never account ids,
 tokens, headers, prompts, or response bodies. Retry status uses normalized,

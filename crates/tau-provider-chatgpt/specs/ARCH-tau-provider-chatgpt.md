@@ -53,6 +53,13 @@ after the upgrade and request send, so it is not the connection bound.
 Cancellation ownership and the deadline rationale are recorded in
 [DESIGN-tau-provider-chatgpt-cooperative-cancellation](DESIGN-tau-provider-chatgpt-cooperative-cancellation.md).
 
+Best-effort WebSocket prewarm uses the same shared pool and cooperative abort
+seam from a provider-supervised worker, never the provider event loop. It skips
+an already-reserved same-key socket, has a 30-second upgrade bound plus a
+30-second absolute response bound, and rechecks cancellation before reinstalling
+the socket. Profile and session invalidation atomically remove cached sockets
+and mark reserved sockets so a late owner cannot reinstall stale state.
+
 ## GPT-5.6 Responses modes
 
 The surface choice follows

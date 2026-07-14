@@ -122,8 +122,9 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
     let agent_id = tau_proto::AgentId::parse("agent-ws-context").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
+    let mut abort = crate::NeverAbort;
     runtime
-        .prewarm(&config, session_id.as_str(), &request)
+        .prewarm(&config, session_id.as_str(), &request, &mut abort)
         .expect("prewarm cached websocket");
     let mut turn_state = ChatGptTurnState::new(usize::MAX);
     let mut abort = NeverAbort;

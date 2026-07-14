@@ -51,9 +51,9 @@ use super::{
     apply_raw_json_event, build_ws_envelope, load_provider_stream_cassette,
     record_provider_raw_event_after, stream_idle_timeout_error,
 };
+use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
-use crate::{NeverAbort, TurnAbort};
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
 /// Dated by the server; will need a bump when OpenAI rolls a new
@@ -82,10 +82,21 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 /// How long one WS turn may go without any provider event before Tau treats
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
 const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
+/// Absolute bound for a best-effort cache prewarm after its request is sent.
+const PREWARM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Maximum time allowed for DNS, TCP, TLS, and the WebSocket HTTP upgrade.
 ///
 /// Provider-frame idle time is governed separately after the upgrade succeeds.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Provider event timing bounds for one WebSocket envelope.
+struct EnvelopeTimeouts {
+    /// Maximum quiet interval between provider frames.
+    idle: Duration,
+    /// Optional absolute bound regardless of provider frame activity.
+    absolute: Option<Duration>,
+}
 
 /// Applies the WebSocket-only rate-limit side channel before delegating
 /// ordinary Responses events to the transport-neutral event parser.
@@ -305,17 +316,30 @@ impl WsConn {
         })
     }
 
-    /// Send one non-generating prewarm envelope and wait for the
-    /// provider to finish accepting it. No Tau-visible response
-    /// events are emitted by this layer's caller.
+    /// Sends one non-generating prewarm envelope with an absolute response
+    /// bound.
+    ///
+    /// No Tau-visible response events are emitted. `abort` wakes a silent peer
+    /// and the response wait ends after 30 seconds regardless of nonterminal
+    /// provider activity.
     pub fn run_prewarm(
         &mut self,
         config: &ResponsesConfig,
         request: &PromptPayload<'_>,
+        abort: &mut impl TurnAbort,
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
-        let mut abort = NeverAbort;
-        self.run_envelope("<prewarm>", envelope, None, &mut abort, &mut |_| {})
+        self.run_envelope_with_timeouts(
+            "<prewarm>",
+            envelope,
+            None,
+            abort,
+            EnvelopeTimeouts {
+                idle: PREWARM_RESPONSE_TIMEOUT,
+                absolute: Some(PREWARM_RESPONSE_TIMEOUT),
+            },
+            &mut |_| {},
+        )
     }
 
     fn run_envelope(
@@ -326,25 +350,31 @@ impl WsConn {
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
-        self.run_envelope_with_idle_timeout(
+        self.run_envelope_with_timeouts(
             agent_prompt_id,
             envelope,
             recording_stream,
             abort,
-            TURN_EVENT_TIMEOUT,
+            EnvelopeTimeouts {
+                idle: TURN_EVENT_TIMEOUT,
+                absolute: None,
+            },
             on_update,
         )
     }
 
-    fn run_envelope_with_idle_timeout(
+    fn run_envelope_with_timeouts(
         &mut self,
         agent_prompt_id: &str,
         envelope: super::WsResponseCreate,
         mut recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
-        idle_timeout: Duration,
+        timeouts: EnvelopeTimeouts,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
+        if abort.is_aborted() {
+            return Err(LlmError::Canceled);
+        }
         let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
         self.outbound_tx
             .send(WsCommand::SendText(text))
@@ -363,12 +393,26 @@ impl WsConn {
             if abort.is_aborted() {
                 return Err(LlmError::Canceled);
             }
-            let remaining = idle_timeout.saturating_sub(last_event_at.elapsed());
+            if timeouts
+                .absolute
+                .is_some_and(|timeout| timeout <= turn_started_at.elapsed())
+            {
+                return Err(LlmError::HttpStatus(
+                    0,
+                    "websocket prewarm response timeout".to_owned(),
+                ));
+            }
+            let remaining = timeouts.idle.saturating_sub(last_event_at.elapsed()).min(
+                timeouts
+                    .absolute
+                    .map(|timeout| timeout.saturating_sub(turn_started_at.elapsed()))
+                    .unwrap_or(Duration::MAX),
+            );
             let wait = remaining.min(Duration::from_secs(1));
             let event = match self.inbound_rx.recv_timeout(wait) {
                 Ok(event) => event,
                 Err(std_mpsc::RecvTimeoutError::Timeout)
-                    if last_event_at.elapsed() < idle_timeout =>
+                    if last_event_at.elapsed() < timeouts.idle =>
                 {
                     // Provider-owned response liveness is deadline-driven, not
                     // upstream-event-driven. Wake the outer sampled emitter
@@ -382,7 +426,7 @@ impl WsConn {
                         agent_prompt_id,
                         turn_started_at,
                         last_event_at,
-                        idle_timeout,
+                        timeouts.idle,
                         &state,
                         None,
                     ));

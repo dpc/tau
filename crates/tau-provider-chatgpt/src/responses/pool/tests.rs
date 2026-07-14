@@ -39,6 +39,23 @@ struct TestAbortWaker;
 
 impl TurnAbortWaker for TestAbortWaker {}
 
+/// Guard that exposes and pauses its drop for publication-order tests.
+struct BlockingDropWaker {
+    /// Announces that callback unregistration reached guard drop.
+    entered: std_mpsc::Sender<()>,
+    /// Releases guard drop so physical publication may finish.
+    release: std_mpsc::Receiver<()>,
+}
+
+impl Drop for BlockingDropWaker {
+    fn drop(&mut self) {
+        self.entered.send(()).expect("announce guard drop");
+        self.release.recv().expect("release guard drop");
+    }
+}
+
+impl TurnAbortWaker for BlockingDropWaker {}
+
 fn context(items: &[ContextItem]) -> &'static tau_proto::PromptContext {
     Box::leak(Box::new(tau_proto::PromptContext {
         blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -391,10 +408,9 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
     assert_reusable(&pool, &live_key, &live_config);
 }
 
-/// Prewarm runs on the provider main loop, so it must never park behind an
-/// active same-key reservation. A busy key means a real turn is already
-/// doing the warming work; skip best-effort prewarm instead of delaying
-/// cancellation, worker output, PromptDone, or ACK processing.
+/// Prewarm must never park behind an active same-key reservation. A busy key
+/// means a real turn is already doing the warming work, so duplicate
+/// best-effort work skips without creating another socket.
 #[test]
 fn shared_prewarm_skips_busy_same_key_without_waiting() {
     let (addr, _server) = spawn_fake_codex_server();
@@ -435,14 +451,19 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
                 share_user_cache_key: false,
                 debug_provider_requests: false,
             };
-            let started = std::time::Instant::now();
-            let result = run_prewarm_through_shared_pool(&pool, &config, "same-session", &request);
-            tx.send((started.elapsed(), result.is_ok()))
-                .expect("send prewarm result");
+            let mut abort = crate::NeverAbort;
+            let result = run_prewarm_through_shared_pool(
+                &pool,
+                &config,
+                "same-session",
+                &request,
+                &mut abort,
+            );
+            tx.send(result.is_ok()).expect("send prewarm result");
         })
     };
 
-    let (elapsed, ok) = match rx.recv_timeout(Duration::from_millis(150)) {
+    let ok = match rx.recv_timeout(Duration::from_secs(2)) {
         Ok(result) => result,
         Err(error) => {
             pool.inner.lock().expect("pool lock").busy.remove(&key);
@@ -455,10 +476,6 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
 
     assert!(ok, "skipped prewarm should report success");
     assert!(
-        elapsed < Duration::from_millis(50),
-        "prewarm should not wait for the checkout poll interval; elapsed {elapsed:?}"
-    );
-    assert!(
         pool.inner.lock().expect("pool lock").busy.contains(&key),
         "skipped prewarm must not clear the active worker's reservation"
     );
@@ -467,6 +484,408 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         0,
         "skipped prewarm should not open a socket"
     );
+}
+
+/// A silent peer after successful upgrade must remain cooperatively cancelable;
+/// cancellation discards the socket and releases the exact pool reservation.
+#[test]
+fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
+    let (addr, server) = spawn_fake_codex_server();
+    server.lock().expect("server state").response_delay = Duration::from_secs(10);
+    let config = Arc::new(make_config(
+        &format!("http://{addr}/backend-api"),
+        Some("acc"),
+    ));
+    let pool = Arc::new(SharedWsPool::new());
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let canceled = Arc::new(AtomicBool::new(false));
+    let waker = Arc::new(Mutex::new(None));
+    let (registered_tx, registered_rx) = std_mpsc::channel();
+    let worker = {
+        let pool = Arc::clone(&pool);
+        let config = Arc::clone(&config);
+        let canceled = Arc::clone(&canceled);
+        let waker = Arc::clone(&waker);
+        thread::spawn(move || {
+            let session_id = tau_proto::SessionId::new("silent-prewarm");
+            let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+            let originator = tau_proto::PromptOriginator::User;
+            let request = PromptPayload {
+                system_prompt: "sys",
+                context: context(&[]),
+                tools: &[],
+                params: tau_proto::ModelParams::default(),
+                tool_choice: tau_proto::ToolChoice::default(),
+                compaction: None,
+                originator: &originator,
+                session_id: &session_id,
+                agent_id: &agent_id,
+                share_user_cache_key: false,
+                debug_provider_requests: false,
+            };
+            let mut abort = AtomicAbort {
+                canceled,
+                waker,
+                registered_tx,
+            };
+            run_prewarm_through_shared_pool(&pool, &config, "silent-prewarm", &request, &mut abort)
+        })
+    };
+    registered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("connect cancellation registration");
+    registered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("response cancellation registration");
+    canceled.store(true, Ordering::SeqCst);
+    waker
+        .lock()
+        .expect("abort waker")
+        .as_ref()
+        .expect("active response waker")();
+
+    assert!(matches!(
+        worker.join().expect("prewarm worker"),
+        Err(LlmError::Canceled)
+    ));
+    assert!(
+        matches!(
+            pool.try_checkout(&key, &config.api_key)
+                .expect("checkout after cancel"),
+            TryCheckout::Reserved(None)
+        ),
+        "canceled prewarm must leave no stale socket"
+    );
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// Profile/session invalidation racing a reserved socket must prevent the old
+/// owner from reinstalling it when its in-flight work later completes.
+#[test]
+fn invalidate_all_discards_late_reserved_socket_release() {
+    let (addr, _server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    run_shared_turn(&pool, &config, "invalidate-session", "sp-warm");
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let TryCheckout::Reserved(Some(conn)) = pool
+        .try_checkout(&key, &config.api_key)
+        .expect("reserve warm socket")
+    else {
+        panic!("expected reserved warm socket");
+    };
+    pool.invalidate_all().expect("invalidate pool");
+    pool.release(key.clone(), conn).expect("late release");
+
+    assert!(
+        matches!(
+            pool.try_checkout(&key, &config.api_key)
+                .expect("checkout after invalidation"),
+            TryCheckout::Reserved(None)
+        ),
+        "invalidated owner must not reinstall its stale socket"
+    );
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// Cancellation landing after socket installation but before reservation
+/// publication must remove the staged socket before a waiter can reuse it.
+#[test]
+fn cancel_between_staged_release_and_finish_discards_socket() {
+    let (addr, _server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    run_shared_turn(&pool, &config, "cancel-release", "sp-warm");
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let TryCheckout::Reserved(Some(conn)) = pool
+        .try_checkout(&key, &config.api_key)
+        .expect("reserve warm socket")
+    else {
+        panic!("expected warm socket");
+    };
+    let generation = pool.claim_prewarm(&key).expect("claim prewarm");
+    pool.stage_prewarm_release(&key, conn)
+        .expect("stage prewarm release");
+    pool.invalidate_prewarm(&key, generation)
+        .expect("cancel reserved prewarm");
+    pool.finish_prewarm_release(&key, generation)
+        .expect("finish canceled release");
+
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("checkout after cancellation"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// A staged socket stays busy while cancellation callback authority is being
+/// unregistered, so a same-key waiter cannot take it before publication.
+#[test]
+fn staged_socket_is_not_checkoutable_before_guard_unregisters() {
+    let (addr, _server) = spawn_fake_codex_server();
+    let config = Arc::new(make_config(
+        &format!("http://{addr}/backend-api"),
+        Some("acc"),
+    ));
+    let pool = Arc::new(SharedWsPool::new());
+    run_shared_turn(&pool, &config, "publish-order", "sp-warm");
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let TryCheckout::Reserved(Some(conn)) = pool
+        .try_checkout(&key, &config.api_key)
+        .expect("reserve warm socket")
+    else {
+        panic!("expected warm socket");
+    };
+    let generation = pool.claim_prewarm(&key).expect("claim prewarm");
+    let (entered_tx, entered_rx) = std_mpsc::channel();
+    let (release_tx, release_rx) = std_mpsc::channel();
+    let publisher = {
+        let pool = Arc::clone(&pool);
+        let key = key.clone();
+        thread::spawn(move || {
+            let mut reservation = PrewarmReservation {
+                pool: &pool,
+                key,
+                generation,
+                armed: true,
+            };
+            reservation
+                .publish(
+                    conn,
+                    Box::new(BlockingDropWaker {
+                        entered: entered_tx,
+                        release: release_rx,
+                    }),
+                    &mut NeverAbort,
+                )
+                .expect("publish socket");
+        })
+    };
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("publication reaches guard unregister");
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("checkout during unregister"),
+        TryCheckout::Busy
+    ));
+    release_tx.send(()).expect("finish unregister");
+    publisher.join().expect("publisher");
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("checkout after publication"),
+        TryCheckout::Reserved(Some(_))
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// Leaving prewarm work before normal release cannot strand the same-key busy
+/// flag because scope-bound ownership abandons it.
+#[test]
+fn prewarm_reservation_drop_cleans_up_early_exit() {
+    let config = make_config("https://example.invalid/backend-api", Some("acc"));
+    let pool = SharedWsPool::new();
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reserve prewarm"),
+        TryCheckout::Reserved(None)
+    ));
+    {
+        let _reservation = PrewarmReservation {
+            pool: &pool,
+            key: key.clone(),
+            generation: pool.claim_prewarm(&key).expect("claim prewarm"),
+            armed: true,
+        };
+    }
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reserve after unwind"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// The changed shared-pool prewarm path must install one socket that the next
+/// real prompt reuses rather than opening a duplicate connection.
+#[test]
+fn shared_prewarm_socket_is_reused_by_real_turn() {
+    let (addr, server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    let session_id = tau_proto::SessionId::new("shared-prewarm-reuse");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let mut abort = NeverAbort;
+    run_prewarm_through_shared_pool(&pool, &config, session_id.as_str(), &request, &mut abort)
+        .expect("shared prewarm");
+    run_shared_turn(&pool, &config, session_id.as_str(), "sp-after-prewarm");
+
+    let state = server.lock().expect("server state");
+    assert_eq!(state.upgrade_count, 1);
+    assert_eq!(state.requests.len(), 2);
+}
+
+/// A failed production prewarm connect must abandon its reservation so later
+/// work can retry the same cache owner.
+#[test]
+fn shared_prewarm_connect_failure_releases_reservation() {
+    let config = make_config("file:///unsupported", Some("acc"));
+    let pool = SharedWsPool::new();
+    let session_id = tau_proto::SessionId::new("prewarm-failure");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let key = PoolKey::for_request(&config, &request);
+    let mut abort = NeverAbort;
+    assert!(
+        run_prewarm_through_shared_pool(&pool, &config, session_id.as_str(), &request, &mut abort,)
+            .is_err()
+    );
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reservation after failure"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// Cancellation visible before a cached prewarm starts must prevent any
+/// `response.create` send and leave the key available for later work.
+#[test]
+fn already_canceled_cached_prewarm_sends_no_request() {
+    let (addr, server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    run_shared_turn(&pool, &config, "already-canceled", "sp-warm");
+    let session_id = tau_proto::SessionId::new("already-canceled");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let key = PoolKey::for_request(&config, &request);
+    let (registered_tx, _registered_rx) = std_mpsc::channel();
+    let mut abort = AtomicAbort {
+        canceled: Arc::new(AtomicBool::new(true)),
+        waker: Arc::new(Mutex::new(None)),
+        registered_tx,
+    };
+    assert!(matches!(
+        run_prewarm_through_shared_pool(&pool, &config, session_id.as_str(), &request, &mut abort,),
+        Err(LlmError::Canceled)
+    ));
+    assert_eq!(
+        server.lock().expect("server state").requests.len(),
+        1,
+        "canceled prewarm must not send after the warm-up turn"
+    );
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reservation after cancellation"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("release test reservation");
+}
+
+/// Dropping ownership after staging must remove both the staged socket and busy
+/// reservation if normal publication cannot finish.
+#[test]
+fn staged_prewarm_reservation_drop_removes_socket() {
+    let (addr, _server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    run_shared_turn(&pool, &config, "staged-drop", "sp-warm");
+    let key = pool_key_for(
+        &config,
+        "test-agent",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let TryCheckout::Reserved(Some(conn)) = pool
+        .try_checkout(&key, &config.api_key)
+        .expect("reserve warm socket")
+    else {
+        panic!("expected warm socket");
+    };
+    let generation = pool.claim_prewarm(&key).expect("claim prewarm");
+    let reservation = PrewarmReservation {
+        pool: &pool,
+        key: key.clone(),
+        generation,
+        armed: true,
+    };
+    pool.stage_prewarm_release(&key, conn)
+        .expect("stage release");
+    drop(reservation);
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reservation after staged drop"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("release test reservation");
 }
 
 /// Different prompt-cache thread keys should not be serialized by the same-key
@@ -1096,6 +1515,16 @@ fn non_run_turn_errors_are_not_recoverable() {
     }
 }
 
+/// The absolute prewarm deadline owns the whole cache-only attempt and must not
+/// trigger the cached-socket reopen path for another response wait.
+#[test]
+fn prewarm_absolute_timeout_is_not_recoverable() {
+    assert!(!is_recoverable_ws_error(&LlmError::HttpStatus(
+        0,
+        "websocket prewarm response timeout".to_owned(),
+    )));
+}
+
 /// Account-level caps (usage_limit_reached etc.) ride the same
 /// `stream error: …` envelope as transport hiccups but are NOT
 /// fixable by reopening the socket. The pool must surface them
@@ -1451,7 +1880,7 @@ fn pool_key_separates_responses_modes() {
     let prompt_context = context(&[]);
     let request = PromptPayload {
         system_prompt: "sys",
-        context: &prompt_context,
+        context: prompt_context,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

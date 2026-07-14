@@ -29,5 +29,18 @@ separate bounded provider connection deadline. Their transient connecting event
 contains only fixed status text: endpoints, account identifiers, credentials, and
 raw transport diagnostics remain inside the provider process.
 
+ChatGPT prewarm uses a separate main-loop-owned supervisor. Duplicate work is
+suppressed per provider/target-agent cache owner and total concurrent work is
+capped at the default WebSocket pool capacity; real prompts, cancel,
+shutdown/disconnect, and profile rotation wake and cancel the worker. The
+transport bounds upgrade and response time, and pool invalidation prevents
+stale reserved sockets from returning after profile/session boundaries.
+Terminal harness disconnect drops loop-side completion tracking only after
+cancellation; detached work retains its abort source and finite bounds.
+Prewarm cancellation callbacks run under their private registry lock and may
+only enqueue a transport wake or invalidate a pool generation. Guard
+unregistration joins an already-started callback and is the socket-publication
+boundary; callback code must never re-enter that registry.
+
 The worker and transport cancellation design is recorded by
 [DESIGN-tau-ext-provider-builtin-bounded-prompt-workers](specs/DESIGN-tau-ext-provider-builtin-bounded-prompt-workers.md).

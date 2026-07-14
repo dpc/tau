@@ -64,7 +64,7 @@ pub trait TurnAbort {
 }
 
 /// Guard for a registered [`TurnAbort`] waker.
-pub trait TurnAbortWaker {}
+pub trait TurnAbortWaker: Send {}
 
 /// Cancellation source that never aborts.
 pub struct NeverAbort;
@@ -209,11 +209,23 @@ impl ChatGptRuntime {
     }
 
     /// Best-effort non-generating prewarm for a later ChatGPT prompt.
+    ///
+    /// The caller must run this on supervised blocking work rather than its
+    /// event loop. `abort` owns cancellation of connection, response wait, and
+    /// socket installation. A fresh upgrade is bounded to 30 seconds and the
+    /// response has a separate 30-second absolute bound. Success retains the
+    /// socket for the matching real prompt; failure leaves no reservation or
+    /// cached replacement behind. Socket publication unregisters its abort
+    /// callback and then rechecks [`TurnAbort::is_aborted`] before releasing
+    /// the same-key reservation, so custom abort implementations cannot
+    /// publish cancellation that was already authoritative at callback
+    /// retirement.
     pub fn prewarm(
         &self,
         config: &responses::ResponsesConfig,
         session_id: &str,
         request: &common::PromptPayload<'_>,
+        abort: &mut impl TurnAbort,
     ) -> Result<(), common::LlmError> {
         if !config.supports_websocket {
             tracing::debug!(
@@ -224,8 +236,22 @@ impl ChatGptRuntime {
             return Ok(());
         }
 
-        responses::pool::run_prewarm_through_shared_pool(&self.ws_pool, config, session_id, request)
-            .map(|_| ())
+        responses::pool::run_prewarm_through_shared_pool(
+            &self.ws_pool,
+            config,
+            session_id,
+            request,
+            abort,
+        )
+        .map(|_| ())
+    }
+
+    /// Invalidates cached sockets and prevents currently reserved sockets from
+    /// being reinstalled after a provider profile or session boundary.
+    pub fn invalidate_all_websockets(&self) -> Result<(), common::LlmError> {
+        self.ws_pool
+            .invalidate_all()
+            .map_err(responses::pool::WsTurnError::into_llm_error)
     }
 
     /// Runs unary remote compaction and invalidates any pre-boundary WebSocket

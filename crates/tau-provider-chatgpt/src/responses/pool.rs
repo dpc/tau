@@ -30,8 +30,10 @@ use lru::LruCache;
 
 use super::ResponsesConfig;
 use super::ws::WsConn;
+#[cfg(test)]
+use crate::NeverAbort;
+use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload};
-use crate::{NeverAbort, TurnAbort};
 
 /// Default soft cap on simultaneously-cached WS connections.
 ///
@@ -197,6 +199,7 @@ impl Default for WsPool {
 /// same-key callers wait for that turn to release/drop the socket instead of
 /// opening a second socket for the same chain. Different keys can still run
 /// their network turns concurrently.
+#[derive(Clone)]
 pub struct SharedWsPool {
     inner: Arc<Mutex<SharedWsPoolInner>>,
     changed: Arc<Condvar>,
@@ -206,6 +209,10 @@ struct SharedWsPoolInner {
     pool: WsPool,
     busy: HashSet<PoolKey>,
     invalidated_busy: HashSet<PoolKey>,
+    /// Exact generation allowed to cancel or retire each active prewarm key.
+    prewarm_owners: std::collections::HashMap<PoolKey, u64>,
+    /// Wrapping source of process-local prewarm ownership generations.
+    next_prewarm_owner: u64,
     abort_wake_generation: u64,
 }
 
@@ -216,6 +223,8 @@ impl SharedWsPool {
                 pool: WsPool::new(),
                 busy: HashSet::new(),
                 invalidated_busy: HashSet::new(),
+                prewarm_owners: std::collections::HashMap::new(),
+                next_prewarm_owner: 0,
                 abort_wake_generation: 0,
             })),
             changed: Arc::new(Condvar::new()),
@@ -242,11 +251,60 @@ impl SharedWsPool {
         Ok(())
     }
 
+    /// Assigns an exact generation to the current prewarm reservation.
+    fn claim_prewarm(&self, key: &PoolKey) -> Result<u64, WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        let generation = inner.next_prewarm_owner;
+        inner.next_prewarm_owner = inner.next_prewarm_owner.wrapping_add(1);
+        inner.prewarm_owners.insert(key.clone(), generation);
+        Ok(generation)
+    }
+
+    /// Invalidates only if the callback still belongs to the same prewarm.
+    fn invalidate_prewarm(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        if inner.prewarm_owners.get(key) != Some(&generation) {
+            return Ok(());
+        }
+        inner.pool.conns.pop(key);
+        if inner.busy.contains(key) {
+            inner.invalidated_busy.insert(key.clone());
+        }
+        Ok(())
+    }
+
+    /// Abandons only the exact prewarm generation that still owns the busy key.
+    fn abandon_prewarm(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        if inner.prewarm_owners.get(key) != Some(&generation) {
+            return Ok(());
+        }
+        inner.pool.conns.pop(key);
+        inner.prewarm_owners.remove(key);
+        inner.busy.remove(key);
+        inner.invalidated_busy.remove(key);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// Invalidates every cached and currently reserved socket.
+    ///
+    /// Reserved sockets remain owned by their worker until it finishes, but
+    /// their eventual release is discarded. This lets the
+    /// provider invalidate prewarm work atomically across profile or session
+    /// changes without taking socket ownership away from an active thread.
+    pub(crate) fn invalidate_all(&self) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.pool.conns.clear();
+        let busy = inner.busy.iter().cloned().collect::<Vec<_>>();
+        inner.invalidated_busy.extend(busy);
+        Ok(())
+    }
+
     /// Try to reserve `key` without waiting for an active same-key turn. This
-    /// is used by best-effort prewarm requests that run on the provider
-    /// main loop: if a real turn already owns the reservation, prewarm
-    /// should skip rather than delaying cancellation, worker output,
-    /// PromptDone, or ACK handling.
+    /// is used by best-effort supervised prewarm workers: if a real turn
+    /// already owns the reservation, prewarm should skip rather than
+    /// creating duplicate same-key work.
     fn try_checkout(
         &self,
         key: &PoolKey,
@@ -256,6 +314,7 @@ impl SharedWsPool {
         if inner.busy.contains(key) {
             return Ok(TryCheckout::Busy);
         }
+        inner.prewarm_owners.remove(key);
         inner.busy.insert(key.clone());
         Ok(TryCheckout::Reserved(
             inner.pool.checkout(key, current_bearer),
@@ -286,6 +345,7 @@ impl SharedWsPool {
         if abort.is_aborted() {
             return Err(WsTurnError::Canceled);
         }
+        inner.prewarm_owners.remove(key);
         inner.busy.insert(key.clone());
         Ok(inner.pool.checkout(key, current_bearer))
     }
@@ -310,6 +370,32 @@ impl SharedWsPool {
             inner.pool.release(key.clone(), conn);
         }
         inner.busy.remove(&key);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// Installs a prewarmed socket while retaining its reservation until the
+    /// cancellation callback has been unregistered.
+    fn stage_prewarm_release(&self, key: &PoolKey, conn: WsConn) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        if !inner.invalidated_busy.contains(key) {
+            inner.pool.release(key.clone(), conn);
+        }
+        Ok(())
+    }
+
+    /// Completes a staged prewarm release after cancellation can no longer
+    /// target this owner, then wakes a same-key prompt waiter.
+    fn finish_prewarm_release(&self, key: &PoolKey, generation: u64) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        if inner.prewarm_owners.get(key) != Some(&generation) {
+            return Ok(());
+        }
+        if inner.invalidated_busy.remove(key) {
+            inner.pool.conns.pop(key);
+        }
+        inner.prewarm_owners.remove(key);
+        inner.busy.remove(key);
         self.changed.notify_all();
         Ok(())
     }
@@ -389,6 +475,53 @@ fn pool_poisoned<T>(error: std::sync::PoisonError<T>) -> WsTurnError {
 enum TryCheckout {
     Reserved(Option<WsConn>),
     Busy,
+}
+
+/// Scope-bound ownership of one prewarm pool reservation.
+struct PrewarmReservation<'a> {
+    /// Pool whose busy key must be released.
+    pool: &'a SharedWsPool,
+    /// Exact reserved key.
+    key: PoolKey,
+    /// Generation proving this guard still owns the key.
+    generation: u64,
+    /// False only after normal staged release completed.
+    armed: bool,
+}
+
+impl PrewarmReservation<'_> {
+    /// Prevents drop cleanup after normal pool release.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Publishes one staged socket only after cancellation callback retirement.
+    fn publish(
+        &mut self,
+        conn: WsConn,
+        cancel_guard: Box<dyn crate::TurnAbortWaker>,
+        abort: &mut impl TurnAbort,
+    ) -> Result<(), WsTurnError> {
+        self.pool.stage_prewarm_release(&self.key, conn)?;
+        // Busy ownership remains held while this joins an already-started
+        // cancellation callback or unregisters before later cancellation.
+        drop(cancel_guard);
+        if abort.is_aborted() {
+            return Err(WsTurnError::Canceled);
+        }
+        self.pool
+            .finish_prewarm_release(&self.key, self.generation)?;
+        self.disarm();
+        Ok(())
+    }
+}
+
+impl Drop for PrewarmReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.pool.abandon_prewarm(&self.key, self.generation);
+        }
+    }
 }
 
 enum VcrTurnSetup {
@@ -795,7 +928,8 @@ pub fn run_prewarm_through_pool(
     let key = PoolKey::for_request(config, request);
 
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
-        match conn.run_prewarm(config, request) {
+        let mut abort = NeverAbort;
+        match conn.run_prewarm(config, request, &mut abort) {
             Ok(state) => {
                 pool.release(key, conn);
                 return Ok(state);
@@ -820,7 +954,7 @@ pub fn run_prewarm_through_pool(
     let mut abort = NeverAbort;
     let mut conn = WsConn::connect(config, &key.thread_id, &mut abort)?;
     pool.stats.upgrades += 1;
-    match conn.run_prewarm(config, request) {
+    match conn.run_prewarm(config, request, &mut abort) {
         Ok(state) => {
             pool.release(key, conn);
             Ok(state)
@@ -832,47 +966,28 @@ pub fn run_prewarm_through_pool(
     }
 }
 
-/// Thread-safe prewarm entry point. It reserves only the matching key while the
-/// network prewarm is in flight, so prompt workers on other keys can continue
-/// to check out/release pooled sockets concurrently. If that key is already
-/// reserved, prewarm is skipped because it is best-effort main-loop work.
+/// Thread-safe prewarm entry point for a supervised blocking worker.
+///
+/// It reserves only the matching key while network work is in flight, so prompt
+/// workers on other keys continue concurrently. A busy same key skips. The
+/// caller-owned abort source covers connect, response wait, and a staged socket
+/// release that cannot race cancellation; errors and unwind abandon the exact
+/// reservation. Publication unregisters its callback and rechecks
+/// [`TurnAbort::is_aborted`] before waking any same-key waiter.
 pub fn run_prewarm_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
     session_id: &str,
     request: &crate::common::PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
 ) -> Result<crate::common::StreamState, LlmError> {
     let key = PoolKey::for_request(config, request);
 
-    if let TryCheckout::Reserved(cached) = pool
+    let cached = if let TryCheckout::Reserved(cached) = pool
         .try_checkout(&key, &config.api_key)
         .map_err(WsTurnError::into_llm_error)?
     {
-        if let Some(mut conn) = cached {
-            match conn.run_prewarm(config, request) {
-                Ok(state) => {
-                    pool.release(key, conn)
-                        .map_err(WsTurnError::into_llm_error)?;
-                    return Ok(state);
-                }
-                Err(err) if is_recoverable_ws_error(&err) => {
-                    pool.bump_silent_reconnects()
-                        .map_err(WsTurnError::into_llm_error)?;
-                    tracing::info!(
-                        target: crate::LOG_TARGET,
-                        session_id,
-                        error = %err,
-                        "Codex WS connection lost during prewarm; reopening",
-                    );
-                    drop(conn);
-                }
-                Err(other) => {
-                    drop(conn);
-                    pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
-                    return Err(other);
-                }
-            }
-        }
+        cached
     } else {
         tracing::debug!(
             target: crate::LOG_TARGET,
@@ -880,27 +995,73 @@ pub fn run_prewarm_through_shared_pool(
             "skipping prompt prewarm: websocket pool key is busy",
         );
         return Ok(crate::common::StreamState::new());
+    };
+    let mut reservation = PrewarmReservation {
+        pool,
+        key: key.clone(),
+        generation: pool
+            .claim_prewarm(&key)
+            .map_err(WsTurnError::into_llm_error)?,
+        armed: true,
+    };
+    let cancel_pool = pool.clone();
+    let cancel_key = key.clone();
+    let cancel_generation = reservation.generation;
+    let cancel_guard = abort.register_waker(Arc::new(move || {
+        let _ = cancel_pool.invalidate_prewarm(&cancel_key, cancel_generation);
+    }));
+
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
     }
 
-    let mut abort = NeverAbort;
-    let mut conn = match WsConn::connect(config, &key.thread_id, &mut abort) {
-        Ok(conn) => conn,
-        Err(error) => {
-            pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
-            return Err(error);
+    if let Some(mut conn) = cached {
+        match conn.run_prewarm(config, request, abort) {
+            Ok(state) => {
+                if abort.is_aborted() {
+                    return Err(LlmError::Canceled);
+                }
+                reservation
+                    .publish(conn, cancel_guard, abort)
+                    .map_err(WsTurnError::into_llm_error)?;
+                return Ok(state);
+            }
+            Err(err) if is_recoverable_ws_error(&err) => {
+                pool.bump_silent_reconnects()
+                    .map_err(WsTurnError::into_llm_error)?;
+                tracing::info!(
+                    target: crate::LOG_TARGET,
+                    session_id,
+                    error = %err,
+                    "Codex WS connection lost during prewarm; reopening",
+                );
+                drop(conn);
+            }
+            Err(other) => {
+                drop(conn);
+                return Err(other);
+            }
         }
+    }
+
+    let mut conn = match pool.connect_reserved_fresh(&key, config, abort, WsConn::connect) {
+        Ok(conn) => conn,
+        Err(error) => return Err(error.into_llm_error()),
     };
     pool.record_fresh_open()
         .map_err(WsTurnError::into_llm_error)?;
-    match conn.run_prewarm(config, request) {
+    match conn.run_prewarm(config, request, abort) {
         Ok(state) => {
-            pool.release(key, conn)
+            if abort.is_aborted() {
+                return Err(LlmError::Canceled);
+            }
+            reservation
+                .publish(conn, cancel_guard, abort)
                 .map_err(WsTurnError::into_llm_error)?;
             Ok(state)
         }
         Err(err) => {
             drop(conn);
-            pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
             Err(err)
         }
     }

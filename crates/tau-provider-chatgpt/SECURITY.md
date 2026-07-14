@@ -24,3 +24,8 @@ reservation.
 The five-minute provider-frame idle watchdog begins only after a successful
 upgrade and request send; it is not the connection deadline. Revisit both bounds
 when upstream handshakes, proxy behavior, or cancellation ownership changes.
+
+Best-effort prewarm runs as provider-supervised work rather than on the event
+loop. It has at most a 30-second upgrade plus a 30-second absolute response
+wait, observes cancel/shutdown/profile invalidation through the transport abort
+waker, and cannot reinstall a socket after cancellation or invalidation.

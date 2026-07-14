@@ -292,6 +292,242 @@ fn prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+/// Builds the cache-only prefix corresponding to [`prompt`].
+fn prewarm() -> tau_proto::AgentPromptPrewarmRequested {
+    let prompt = prompt();
+    tau_proto::AgentPromptPrewarmRequested {
+        agent_id: prompt.agent_id,
+        session_id: prompt.session_id,
+        system_prompt: prompt.system_prompt,
+        context: prompt.context,
+        tools: prompt.tools,
+        model: Some(prompt.model),
+        model_params: prompt.model_params,
+        tool_choice: prompt.tool_choice,
+        originator: prompt.originator,
+        share_user_cache_key: prompt.share_user_cache_key,
+    }
+}
+
+/// A silent prewarm and a duplicate request must remain off the provider loop;
+/// dispatching the real prompt cancels the warm work and completes normally.
+#[test]
+fn silent_duplicate_prewarm_does_not_block_real_prompt() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[
+        live_event(11, Event::AgentPromptPrewarmRequested(prewarm())),
+        live_event(12, Event::AgentPromptPrewarmRequested(prewarm())),
+    ]));
+    let (started_tx, started_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let executor_count = Arc::clone(&executions);
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
+        executor_count.fetch_add(1, Ordering::SeqCst);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let _guard = execution.abort.register_waker(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        started_tx.send(()).expect("announce prewarm start");
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("real prompt cancels silent prewarm");
+        assert!(
+            execution.abort.is_aborted(),
+            "wake must represent owned cancellation"
+        );
+    });
+    let prompt_executor: PromptExecutor = Arc::new(|execution| {
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                ),
+            )))
+            .expect("finished");
+        writer.flush().expect("flush fake response");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            prompt_executor,
+            prewarm_executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("prewarm worker starts");
+    input.push(encode_frames(&[live_event(
+        13,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+    });
+    input.close();
+    runtime.join().expect("provider exits");
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        1,
+        "duplicate prewarm must not start a second worker"
+    );
+}
+
+/// Session shutdown must wake silent prewarm transport work and retain worker
+/// ownership until its exact completion reaches the provider loop.
+#[test]
+fn session_shutdown_cancels_and_joins_silent_prewarm() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptPrewarmRequested(prewarm()),
+    )]));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (canceled_tx, canceled_rx) = mpsc::channel();
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let _guard = execution.abort.register_waker(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        started_tx.send(()).expect("announce prewarm start");
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown cancels silent prewarm");
+        assert!(execution.abort.is_aborted());
+        canceled_tx.send(()).expect("announce cancellation");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors(
+            runtime_input,
+            output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            production_prompt_executor(),
+            prewarm_executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("prewarm worker starts");
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "session-1".into(),
+        }),
+    )]));
+    canceled_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("shutdown reaches prewarm");
+    input.close();
+    runtime.join().expect("provider joins canceled prewarm");
+}
+
+/// Mutable credential rotation observed by unrelated prompt resolution must
+/// cancel old-profile prewarm work rather than waiting for another prewarm.
+#[test]
+fn profile_rotation_cancels_active_prewarm() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptPrewarmRequested(prewarm()),
+    )]));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (canceled_tx, canceled_rx) = mpsc::channel();
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let _guard = execution.abort.register_waker(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        started_tx.send(()).expect("announce prewarm start");
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("profile rotation cancels prewarm");
+        assert!(execution.abort.is_aborted());
+        canceled_tx.send(()).expect("announce cancellation");
+    });
+    let prompt_executor: PromptExecutor = Arc::new(|execution| {
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                ),
+            )))
+            .expect("finished");
+        writer.flush().expect("flush fake response");
+    });
+    let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
+    let startup_profiles = profiles.lock().expect("profiles").clone();
+    let load_profiles = Arc::clone(&profiles);
+    let output = SharedWriter::default();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors(
+            runtime_input,
+            output,
+            startup_profiles,
+            move || load_profiles.lock().expect("profiles").clone(),
+            1,
+            prompt_executor,
+            prewarm_executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("prewarm worker starts");
+    {
+        let mut profiles = profiles.lock().expect("profiles");
+        let BuiltinProviderProfile::Chatgpt(profile) = profiles
+            .providers
+            .get_mut(&ProviderName::new("chatgpt"))
+            .expect("chatgpt profile")
+        else {
+            panic!("expected ChatGPT profile");
+        };
+        profile.auth.access_token = "rotated-access".to_owned();
+    }
+    let mut rotated_prompt = prompt();
+    rotated_prompt.agent_id = tau_proto::AgentId::parse("agent-2").expect("agent id");
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(rotated_prompt),
+    )]));
+    canceled_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("profile reconciliation reaches active prewarm");
+    input.close();
+    runtime.join().expect("provider exits");
+}
+
 /// Builds scheduler-owned logical state without starting a provider worker.
 fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
     let mut prompt = prompt();

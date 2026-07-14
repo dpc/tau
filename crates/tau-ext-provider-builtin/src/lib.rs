@@ -11,6 +11,8 @@
 //! `DESIGN-tau-ext-provider-builtin-structured-retry-facts` and
 //! `DESIGN-tau-ext-provider-builtin-durable-session-diagnostics`.
 
+mod prewarm;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -24,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dialoguer::{Confirm, Input};
+use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -1010,6 +1013,31 @@ where
     W: Write + Send + 'static,
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
+    run_inner_with_executors(
+        reader,
+        writer,
+        startup_profiles,
+        load_prompt_profiles,
+        prompt_concurrency_limit,
+        prompt_executor,
+        production_prewarm_executor(),
+    )
+}
+
+fn run_inner_with_executors<R, W, F>(
+    reader: R,
+    writer: W,
+    startup_profiles: BuiltinProviderProfiles,
+    load_prompt_profiles: F,
+    prompt_concurrency_limit: usize,
+    prompt_executor: PromptExecutor,
+    prewarm_executor: PrewarmExecutor,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let startup_responses_modes = startup_profiles.startup_responses_modes();
     let runtime = ProviderRuntime {
@@ -1017,12 +1045,15 @@ where
         startup_responses_modes,
         prompt_concurrency_limit,
         prompt_executor,
+        prewarm_executor,
         worker_tx,
         worker_rx,
         worker_waker: None,
         retry_scheduler: None,
         shared_cooldowns: BTreeMap::new(),
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
+        prewarm_supervisor: PrewarmSupervisor::default(),
+        prewarm_profile_identities: BTreeMap::new(),
         cancellation: Arc::new(CancellationState::default()),
         prompt_queue: VecDeque::new(),
         session_debug_allowed: BTreeMap::new(),
@@ -1146,6 +1177,7 @@ where
                             DispatchOutcome::Continue => {}
                             DispatchOutcome::Disconnect(_) => {
                                 runtime.state_mut().cancellation.shutdown();
+                                runtime.state_mut().cancel_all_prewarms();
                                 let _state = runtime.finish_detached();
                                 return Ok(());
                             }
@@ -1188,6 +1220,8 @@ struct ProviderRuntime<F> {
     prompt_concurrency_limit: usize,
     /// Starts provider backend execution for one prompt job.
     prompt_executor: PromptExecutor,
+    /// Runs one finite prewarm attempt outside the provider main loop.
+    prewarm_executor: PrewarmExecutor,
     /// Sender used by prompt workers to return frames and completion notices.
     worker_tx: Sender<WorkerMessage>,
     /// Receiver used by the runtime loop to drain worker output.
@@ -1200,6 +1234,10 @@ struct ProviderRuntime<F> {
     shared_cooldowns: BTreeMap<ProviderName, SharedCooldown>,
     /// Shared ChatGPT backend runtime for prewarm and prompt execution.
     chatgpt_runtime: Arc<ChatGptRuntime>,
+    /// Main-loop ownership and cancellation for prewarm workers.
+    prewarm_supervisor: PrewarmSupervisor,
+    /// Last observed auth/profile identity for each prewarmed namespace.
+    prewarm_profile_identities: BTreeMap<ProviderName, u64>,
     /// Cooperative cancellation state shared with prompt workers.
     cancellation: Arc<CancellationState>,
     /// Prompt jobs accepted while all worker slots were occupied.
@@ -1258,6 +1296,7 @@ where
         config: &responses::ResponsesConfig,
         handle: &ClientHandle,
     ) -> ClientResult<bool> {
+        self.reconcile_prewarm_profile(provider, config);
         let identity = quota_profile_identity(config);
         if let Some(event) = self.quota.ensure_profile(provider.clone(), identity) {
             handle.send(HarnessInputMessage::emit(event))?;
@@ -1312,8 +1351,11 @@ where
         let backend = resolve_prompt_backend(model, profiles).unwrap_or(PromptBackend::Unavailable);
         if let PromptBackend::Responses(config) = &backend {
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
-        } else if let Some(event) = self.quota.clear_profile(&model.provider) {
-            handle.send(HarnessInputMessage::emit(event))?;
+        } else {
+            self.clear_prewarm_profile(&model.provider);
+            if let Some(event) = self.quota.clear_profile(&model.provider) {
+                handle.send(HarnessInputMessage::emit(event))?;
+            }
         }
         Ok(backend)
     }
@@ -1364,6 +1406,7 @@ where
     fn is_finished(&self) -> bool {
         self.input_closed
             && self.active_prompts == 0
+            && self.prewarm_supervisor.is_empty()
             && self.prompt_queue.is_empty()
             && self
                 .retry_scheduler
@@ -1373,6 +1416,7 @@ where
 
     fn begin_input_shutdown(&mut self) {
         self.input_closed = true;
+        self.cancel_all_prewarms();
         self.cancellation.shutdown();
         if let Some(scheduler) = &self.retry_scheduler {
             scheduler.cancel_all();
@@ -1382,7 +1426,7 @@ where
     fn handle_event(&mut self, event: Event, handle: &ClientHandle) -> ClientResult<()> {
         match event {
             Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
-            Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm),
+            Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm)?,
             Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt, handle)?,
             Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel, handle)?,
             Event::UiRetryPrompt(retry) => self.handle_retry_prompt(retry)?,
@@ -1399,14 +1443,90 @@ where
         );
     }
 
-    fn prewarm_backend(&mut self, prewarm: tau_proto::AgentPromptPrewarmRequested) {
+    fn prewarm_backend(
+        &mut self,
+        prewarm: tau_proto::AgentPromptPrewarmRequested,
+    ) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
-        handle_prewarm(
-            &prewarm,
-            &mut profiles,
-            &self.chatgpt_runtime,
-            &self.session_debug_allowed,
-        );
+        let requested_provider = prewarm.model.as_ref().map(|model| model.provider.clone());
+        let Some((model, config)) = resolve_prewarm_backend(&prewarm, &mut profiles) else {
+            if let Some(provider) = requested_provider {
+                self.clear_prewarm_profile(&provider);
+            }
+            return Ok(());
+        };
+        self.reconcile_prewarm_profile(&model.provider, &config);
+        let key = PrewarmKey {
+            provider: model.provider,
+            agent_id: prewarm.agent_id.clone(),
+        };
+        let Some((generation, abort)) = self.prewarm_supervisor.begin(key.clone()) else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                session_id = %prewarm.session_id,
+                "skipping prompt prewarm: duplicate or supervisor capacity reached",
+            );
+            return Ok(());
+        };
+        let debug_provider_requests =
+            debug_provider_requests_for(&prewarm.session_id, &self.session_debug_allowed);
+        let executor = self.prewarm_executor.clone();
+        let runtime = self.chatgpt_runtime.clone();
+        let tx = self.worker_tx.clone();
+        let waker = self
+            .worker_waker
+            .as_ref()
+            .expect("provider runtime worker waker is installed before dispatch")
+            .clone();
+        thread::spawn(move || {
+            executor(PrewarmExecution {
+                runtime,
+                config,
+                request: prewarm,
+                debug_provider_requests,
+                abort,
+            });
+            let _ =
+                send_worker_message(&tx, &waker, WorkerMessage::PrewarmDone { key, generation });
+        });
+        Ok(())
+    }
+
+    fn reconcile_prewarm_profile(
+        &mut self,
+        provider: &ProviderName,
+        config: &responses::ResponsesConfig,
+    ) {
+        let identity = quota_profile_identity(config);
+        let changed = self
+            .prewarm_profile_identities
+            .insert(provider.clone(), identity)
+            .is_some_and(|previous| previous != identity);
+        if changed {
+            self.cancel_all_prewarms();
+            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "failed to invalidate websocket pool after profile change: {error}",
+                );
+            }
+        }
+    }
+
+    fn clear_prewarm_profile(&mut self, provider: &ProviderName) {
+        if self.prewarm_profile_identities.remove(provider).is_some() {
+            self.cancel_all_prewarms();
+            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "failed to invalidate websocket pool after profile removal: {error}",
+                );
+            }
+        }
+    }
+
+    fn cancel_all_prewarms(&mut self) {
+        self.prewarm_supervisor.cancel_all();
     }
 
     fn handle_prompt_created(
@@ -1440,6 +1560,10 @@ where
         prompt: tau_proto::AgentPromptCreated,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
+        self.prewarm_supervisor.cancel_key(&PrewarmKey {
+            provider: prompt.model.provider.clone(),
+            agent_id: prompt.agent_id.clone(),
+        });
         let mut profiles = self.load_profiles();
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
         let mut frame_writer = handle_frame_writer(handle);
@@ -1489,6 +1613,7 @@ where
         cancel: tau_proto::UiCancelPrompt,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
+        self.cancel_all_prewarms();
         let Some(apid) = cancel.agent_prompt_id else {
             self.cancellation.cancel_all();
             self.cancel_generation = self.cancel_generation.saturating_add(1);
@@ -1530,7 +1655,14 @@ where
                 agent_prompt_id: None,
             },
             handle,
-        )
+        )?;
+        if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "failed to invalidate websocket pool after session shutdown: {error}",
+            );
+        }
+        Ok(())
     }
 
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
@@ -1554,6 +1686,9 @@ where
                 }
                 Ok(WorkerMessage::PromptDone) => {
                     self.active_prompts = self.active_prompts.saturating_sub(1);
+                }
+                Ok(WorkerMessage::PrewarmDone { key, generation }) => {
+                    self.prewarm_supervisor.complete(&key, generation);
                 }
                 Ok(WorkerMessage::Retry { mut job, decision }) => {
                     if self.input_closed
@@ -1760,7 +1895,10 @@ where
                                 );
                             }
                         } else if let Some(event) = self.quota.clear_profile(&provider) {
+                            self.clear_prewarm_profile(&provider);
                             handle.send(HarnessInputMessage::emit(event))?;
+                        } else {
+                            self.clear_prewarm_profile(&provider);
                         }
                     }
                 }
@@ -1849,6 +1987,23 @@ fn validate_worker_output_for_commit(
 }
 
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
+
+/// Owned inputs for one finite prewarm worker attempt.
+struct PrewarmExecution {
+    /// Shared ChatGPT runtime and connection pool.
+    runtime: Arc<ChatGptRuntime>,
+    /// Resolved immutable backend configuration.
+    config: responses::ResponsesConfig,
+    /// Owned prefix request received from the harness.
+    request: tau_proto::AgentPromptPrewarmRequested,
+    /// Whether this durable session permits provider request captures.
+    debug_provider_requests: bool,
+    /// Supervisor-owned cancellation source.
+    abort: PrewarmAbort,
+}
+
+/// Injected finite prewarm attempt used by production and runtime tests.
+type PrewarmExecutor = Arc<dyn Fn(PrewarmExecution) + Send + Sync + 'static>;
 
 struct PromptJob {
     agent_prompt_id: tau_proto::AgentPromptId,
@@ -2321,6 +2476,13 @@ enum WorkerMessage {
     },
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
+    /// Exact supervised prewarm worker completion.
+    PrewarmDone {
+        /// Cache owner whose work finished.
+        key: PrewarmKey,
+        /// Generation captured when the main loop admitted the work.
+        generation: u64,
+    },
     /// Retryable attempt outcome returned with the still-pending logical
     /// prompt.
     Retry {
@@ -2742,6 +2904,18 @@ fn production_prompt_executor() -> PromptExecutor {
                 );
             }
         }
+    })
+}
+
+fn production_prewarm_executor() -> PrewarmExecutor {
+    Arc::new(|mut execution| {
+        handle_resolved_prewarm(
+            &execution.request,
+            &execution.config,
+            &execution.runtime,
+            execution.debug_provider_requests,
+            &mut execution.abort,
+        );
     })
 }
 
@@ -3187,19 +3361,17 @@ fn is_canceled_by_harness(error: &common::LlmError) -> bool {
     matches!(error, common::LlmError::Canceled)
 }
 
-fn handle_prewarm(
+fn resolve_prewarm_backend(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
-    chatgpt_runtime: &ChatGptRuntime,
-    session_debug_allowed: &BTreeMap<tau_proto::SessionId, bool>,
-) {
+) -> Option<(ModelId, responses::ResponsesConfig)> {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
             target: LOG_TARGET,
             agent_id = %prewarm.agent_id,
             "skipping prompt prewarm: no selected model",
         );
-        return;
+        return None;
     };
     let Some(config) = resolve_responses_backend(model, profiles) else {
         tracing::debug!(
@@ -3208,8 +3380,18 @@ fn handle_prewarm(
             model = %model,
             "skipping prompt prewarm: unsupported backend",
         );
-        return;
+        return None;
     };
+    Some((model.clone(), config))
+}
+
+fn handle_resolved_prewarm(
+    prewarm: &tau_proto::AgentPromptPrewarmRequested,
+    config: &responses::ResponsesConfig,
+    chatgpt_runtime: &ChatGptRuntime,
+    debug_provider_requests: bool,
+    abort: &mut impl TurnAbort,
+) {
     let session_id_str = prewarm.session_id.as_str();
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
@@ -3222,13 +3404,10 @@ fn handle_prewarm(
         share_user_cache_key: prewarm.share_user_cache_key,
         session_id: &prewarm.session_id,
         agent_id: &prewarm.agent_id,
-        debug_provider_requests: debug_provider_requests_for(
-            &prewarm.session_id,
-            session_debug_allowed,
-        ),
+        debug_provider_requests,
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
-    match chatgpt_runtime.prewarm(&config, session_id_str, &request) {
+    match chatgpt_runtime.prewarm(config, session_id_str, &request, abort) {
         Ok(()) => {
             tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
         }

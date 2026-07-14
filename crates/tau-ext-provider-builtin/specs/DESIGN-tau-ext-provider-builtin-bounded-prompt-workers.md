@@ -33,6 +33,26 @@ the same cancellation mutex: either cancellation snapshots an existing waker or
 a later old-generation registration observes the generation change and wakes
 immediately. Callbacks run after releasing the mutex.
 
+Best-effort ChatGPT WebSocket prewarm runs on separately supervised finite
+workers and never occupies the manual runtime loop or a prompt-worker permit.
+The main loop admits at most one worker per provider/target-agent cache owner
+and at most the default WebSocket pool capacity across the process,
+owns its cancellation until an exact generation-tagged completion, and cancels
+it for a matching real prompt, cancel, shutdown, disconnect, or changed
+credential/profile identity. Prewarm transport itself supplies the finite
+network deadlines; completion returns through the enqueue-before-wake worker
+channel while the runtime remains attached. Terminal transport disconnect
+cancels all work and drops the loop-side registry; each detached worker retains
+its own cancellation source and finite transport bounds until process exit or
+completion.
+
+Unlike prompt cancellation callbacks, prewarm abort callbacks execute while
+the prewarm callback registry is locked. They are restricted to nonblocking
+transport wake enqueue or WebSocket-pool invalidation and must not re-enter the
+abort registry. Dropping the pool-invalidation callback guard is therefore the
+logical socket-publication boundary: it either waits for an already-started
+cancellation callback to finish or unregisters before later cancellation begins.
+
 ChatGPT/Codex fresh WebSocket upgrades also register the prompt abort waker and
 are independently deadline-bounded. Before that work begins, the provider emits
 only the fixed `Connecting to provider…` status; endpoint, account, credential,

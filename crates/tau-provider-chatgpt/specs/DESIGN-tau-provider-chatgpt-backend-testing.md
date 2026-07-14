@@ -19,6 +19,9 @@ WebSocket changes should cover observable turn/pool contracts such as pool-key
 identity, reservation/release behavior, reconnect behavior, provider-stream
 idle timeouts, cancellation returning typed `LlmError::Canceled`, and abort
 wakers waking blocked turn waits without relying on short receive polling.
+Prewarm regressions should also cover a silent upgraded peer, duplicate
+same-key admission, cancellation cleanup, invalidation racing late release, and
+successful socket reuse.
 Parser and streaming changes should keep using focused event/delta/snapshot
 regression tests, with broader provider response streaming guidance in
 `../../docs/testing.md`.

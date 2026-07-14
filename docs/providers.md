@@ -249,6 +249,10 @@ Fresh setup emits a fixed content-free connecting status, and the
 DNS/TCP/TLS/WebSocket upgrade is cancellation-aware and bounded to 30 seconds.
 Timeout is classified as retryable transport work; failure or cancellation
 releases the same-key pool reservation.
+Best-effort prefix prewarm is capped and supervised outside the provider event
+loop. Matching prompt work, cancellation, shutdown, and mutable-profile rotation
+wake it. The upgrade and prewarm response each have a 30-second bound, and a
+canceled or invalidated worker cannot reinstall its socket.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
 Standard mode publishes and requests parallel direct tool calls; Lite

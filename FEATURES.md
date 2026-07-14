@@ -627,6 +627,11 @@ Fresh setup emits a fixed secret-free connecting status and races
 DNS/TCP/TLS/WebSocket upgrade against cancellation and a 30-second deadline.
 Timeout is a retryable transport failure, and every failed or canceled upgrade
 releases its same-key reservation.
+Best-effort cache prewarm runs on a separate capped supervised worker rather
+than the provider event loop. A matching real prompt, cancellation, shutdown,
+or profile rotation wakes it; its upgrade and non-generating response each have
+a 30-second bound, and cancellation/profile invalidation cannot publish a stale
+socket back into the pool.
 WebSocket-capable ChatGPT/Codex models stay on the WebSocket transport:
 retryable WebSocket failures return to Tau's in-memory logical-prompt scheduler, and
 terminal WebSocket errors are surfaced instead of silently falling back to

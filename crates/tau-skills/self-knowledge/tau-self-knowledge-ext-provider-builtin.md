@@ -74,6 +74,12 @@ DNS/TCP/TLS/upgrade against the prompt cancellation registry and a 30-second
 deadline. Timeout is retryable transport work; all unsuccessful upgrades release
 their same-key reservation.
 
+Best-effort ChatGPT cache prewarm runs on a capped supervised worker, not the
+provider event loop. Matching real work, cancellation, shutdown, or profile
+rotation wakes it. Its connection and non-generating response phases are each
+bounded to 30 seconds, and stale canceled/invalidated sockets cannot return to
+the pool.
+
 After setup, ChatGPT/Codex live streams have a separate default five-minute idle watchdog on both HTTP/SSE and WebSocket. The timer resets on each SSE `data:` event or WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte trickles, and is not an absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt, clears tentative output, and parks the logical prompt for another attempt.
 
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures; trusted later `Retry-After` and reset hints remain lower bounds. Retry state exists only for the running process/session and is not replayed after cold restart.

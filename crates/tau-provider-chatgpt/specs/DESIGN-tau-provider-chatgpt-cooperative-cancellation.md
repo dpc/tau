@@ -27,3 +27,8 @@ registered wake notification; timeout is a sanitized retryable transport error.
 Either outcome abandons the same-key pool reservation before control returns to
 the prompt scheduler. This connection deadline is independent of the
 five-minute provider-frame idle watchdog.
+
+Cache prewarm uses the same abort-waker contract but is independently finite:
+the upgrade retains the 30-second connection deadline and the non-generating
+response has a 30-second absolute deadline. Cancellation is rechecked before a
+successful socket can return to the pool.

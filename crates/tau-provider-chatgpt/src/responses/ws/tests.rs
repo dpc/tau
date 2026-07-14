@@ -324,12 +324,15 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
             text: r#"{"type":"response.output_text.delta","delta":"hello"}"#.into(),
         })
         .expect("queue partial WS frame");
-    let result = conn.run_envelope_with_idle_timeout(
+    let result = conn.run_envelope_with_timeouts(
         "ap-stalled-ws",
         envelope,
         None,
         &mut abort,
-        Duration::from_millis(50),
+        EnvelopeTimeouts {
+            idle: Duration::from_millis(50),
+            absolute: None,
+        },
         &mut |_| {},
     );
 
@@ -343,6 +346,43 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     assert!(body.contains("idle="), "{body}");
     assert!(body.contains("idle_timeout="), "{body}");
     assert!(body.contains("partial_output=true"), "{body}");
+}
+
+/// Prewarm has an absolute response bound independent of provider frame
+/// activity, so a peer cannot keep supervised work alive with nonterminal data.
+#[test]
+fn prewarm_absolute_timeout_bounds_nonterminal_frame_stream() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let envelope = build_ws_envelope(&config, &request, None, Some(false));
+    let mut abort = NeverAbort;
+    for _ in 0..4 {
+        inbound_tx
+            .send(InboundEvent::Event {
+                text: r#"{"type":"response.output_text.delta","delta":"x"}"#.into(),
+            })
+            .expect("queue nonterminal frame");
+    }
+
+    let result = conn.run_envelope_with_timeouts(
+        "<prewarm>",
+        envelope,
+        None,
+        &mut abort,
+        EnvelopeTimeouts {
+            idle: Duration::from_secs(1),
+            absolute: Some(Duration::from_millis(20)),
+        },
+        &mut |_| std::thread::sleep(Duration::from_millis(10)),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LlmError::HttpStatus(0, body))
+            if body == "websocket prewarm response timeout"
+    ));
 }
 
 /// Quota parsing is mode-independent: standard and Lite WebSocket turns both
