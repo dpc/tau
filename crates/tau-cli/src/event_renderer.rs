@@ -2970,30 +2970,6 @@ impl EventRenderer {
                 format!("@{active_agents}"),
             );
         }
-        let quota_model = self.current_agent_id.as_ref().map_or_else(
-            || self.current_model.clone(),
-            |agent_id| self.agent_models.get(agent_id).cloned(),
-        );
-        let quota =
-            quota_model.and_then(|model| self.quota_pacing.classify(&model, unix_time_millis()));
-        if let Some(quota) = quota {
-            let style = match quota {
-                crate::provider_quota::QuotaPacing::FarUnder => quota_under_style,
-                crate::provider_quota::QuotaPacing::Aligned => quota_aligned_style,
-                crate::provider_quota::QuotaPacing::Over => quota_over_style,
-                crate::provider_quota::QuotaPacing::Danger => quota_danger_style,
-                crate::provider_quota::QuotaPacing::Unknown => quota_unknown_style,
-            };
-            push_status_chip(
-                &mut right_themed,
-                style,
-                &mut right_needs_space,
-                quota.chip().to_owned(),
-            );
-        }
-        if let Some(timer) = &self.tool_timer {
-            timer.set_quota_active(quota.is_some());
-        }
         if let Some(context) = self.context_status_chip() {
             push_status_chip(
                 &mut right_themed,
@@ -3029,6 +3005,31 @@ impl EventRenderer {
                 &mut right_needs_space,
                 full_render_count.to_string(),
             );
+        }
+
+        let quota_model = self.current_agent_id.as_ref().map_or_else(
+            || self.current_model.clone(),
+            |agent_id| self.agent_models.get(agent_id).cloned(),
+        );
+        let quota =
+            quota_model.and_then(|model| self.quota_pacing.classify(&model, unix_time_millis()));
+        if let Some(quota) = quota {
+            let style = match quota {
+                crate::provider_quota::QuotaPacing::FarUnder => quota_under_style,
+                crate::provider_quota::QuotaPacing::Aligned => quota_aligned_style,
+                crate::provider_quota::QuotaPacing::Over => quota_over_style,
+                crate::provider_quota::QuotaPacing::Danger => quota_danger_style,
+                crate::provider_quota::QuotaPacing::Unknown => quota_unknown_style,
+            };
+            push_status_chip(
+                &mut right_themed,
+                style,
+                &mut right_needs_space,
+                quota.chip().to_owned(),
+            );
+        }
+        if let Some(timer) = &self.tool_timer {
+            timer.set_quota_active(quota.is_some());
         }
 
         let bg = self

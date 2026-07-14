@@ -4485,7 +4485,12 @@ fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
     ));
     sync(&handle);
 
-    assert!(vt.screen_contains(16, "Q-"));
+    let status_row = vt
+        .screen_text(16)
+        .into_iter()
+        .find(|row| row.contains("Q-"))
+        .expect("narrow status row");
+    assert!(status_row.ends_with("Q-"));
     assert!(!vt.screen_contains(16, "Q!"));
 }
 
@@ -4752,8 +4757,10 @@ fn focused_agent_context_usage_event_replaces_unknown_context_window() {
     assert!(!status_row.contains("#-/200k"));
 }
 
+/// Main-tool progress and context retain their relative order while quota
+/// pacing occupies the final, rightmost status position.
 #[test]
-fn model_status_shows_main_tool_usage_before_context() {
+fn model_status_shows_main_tools_then_context_then_quota() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4761,8 +4768,9 @@ fn model_status_shows_main_tool_usage_before_context() {
         cli_test_theme(),
     );
 
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
-        model: Some("test/model".into()),
+        model: Some(model.clone()),
         context_window: Some(200_000),
         role: "engineer".into(),
         baseline_params: None,
@@ -4775,11 +4783,12 @@ fn model_status_shows_main_tool_usage_before_context() {
             percent_used: Some(6),
         },
     ));
+    renderer.handle(&danger_quota_event(&model));
 
     // Regression coverage for the bottom status bar: main-agent tool
     // usage should mirror generic tool progress chips (`%complete/total`)
-    // and should render immediately before the context chip, while
-    // side-conversation tool calls stay rolled up under their delegate.
+    // and should render immediately before the context chip. Quota remains
+    // final, while side-conversation calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         agent_prompt_id: "side-sp".into(),
         agent_id: tau_proto::AgentId::parse("q1").expect("agent id"),
@@ -4813,12 +4822,12 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row after side response");
-    assert!(status_row.ends_with("#12k/200k"));
+    assert!(status_row.ends_with("#12k/200k Q!"));
     assert!(!status_row.contains('%'));
 
-    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
-        "main-sp", "s1",
-    )));
+    let mut created = agent_prompt_created("main-sp", "s1");
+    created.model = model.clone();
+    renderer.handle(&Event::AgentPromptCreated(created));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "main-sp",
         vec![
@@ -4847,7 +4856,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .find(|row| row.contains("@main"))
         .expect("status row after main response");
     assert!(
-        status_row.ends_with("%0/2 #12k/200k"),
+        status_row.ends_with("%0/2 #12k/200k Q!"),
         "unexpected status row: {status_row:?}"
     );
 
@@ -4882,7 +4891,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after tool result");
-    assert!(status_row.ends_with("%1/2 #12k/200k"));
+    assert!(status_row.ends_with("%1/2 #12k/200k Q!"));
 
     // Regression coverage for turn visibility: once an extension/sub-agent
     // prompt becomes active, it must not steal the main transcript's tool chip;
@@ -4903,7 +4912,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .find(|row| row.contains("@main"))
         .expect("status row after side prompt starts");
     assert!(
-        status_row.ends_with("%1/2 @1 #12k/200k"),
+        status_row.ends_with("%1/2 @1 #12k/200k Q!"),
         "unexpected status row: {status_row:?}"
     );
     assert!(status_row.contains('%'));
@@ -4925,23 +4934,22 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after second main tool result during side turn");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k Q!"));
     assert!(status_row.contains('%'));
 
     // Main tool completions that arrive while a side conversation is active
     // update the visible main counters. The side conversation's own tool usage
     // remains hidden from the main status chip.
-    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
-        "main-follow-up-sp",
-        "s1",
-    )));
+    let mut follow_up = agent_prompt_created("main-follow-up-sp", "s1");
+    follow_up.model = model;
+    renderer.handle(&Event::AgentPromptCreated(follow_up));
     sync(&handle);
     let status_row = vt
         .screen_text(100)
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after main prompt resumes");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k Q!"));
 
     // The main agent's final no-tool response ends the tool-using turn and
     // hides the chip while preserving context stats.
@@ -4955,7 +4963,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after final main response");
-    assert!(status_row.ends_with("@1 #12k/200k"));
+    assert!(status_row.ends_with("@1 #12k/200k Q!"));
     assert!(!status_row.contains('%'));
 
     // Starting a new user task in the same session also keeps the chip hidden
@@ -4974,8 +4982,28 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after next prompt");
-    assert!(status_row.ends_with("@1 #12k/200k"));
+    assert!(status_row.ends_with("@1 #12k/200k Q!"));
     assert!(!status_row.contains('%'));
+
+    renderer.apply_setting("show-ui-io", "true");
+    renderer.apply_setting("redraw-counter", "true");
+    handle.invalidate_screen();
+    sync(&handle);
+    let full_render_count = handle.full_render_count();
+    renderer.handle_ui_io_sample(super::event_renderer::UiIoStats {
+        uplink_max_bytes_per_sec: 1024,
+        downlink_max_bytes_per_sec: 2048,
+    });
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("@main"))
+        .expect("status row with optional diagnostics");
+    assert!(
+        status_row.ends_with(&format!("@1 #12k/200k io ↑1K ↓2K {full_render_count} Q!")),
+        "unexpected status row: {status_row:?}"
+    );
 }
 
 #[test]
