@@ -244,6 +244,11 @@ profile. Retry status is visible and says how to cancel. Profiles and
 credentials are resolved again when delayed work becomes due. This state lasts
 only for the process/session lifetime; Tau deliberately does not replay
 ambiguous in-flight requests after a cold restart.
+`/retry` initially bypasses a shared cooldown for only the selected prompt. A
+successful terminal response from that probe invalidates the exact cooldown it
+tested and wakes same-profile peers with stable anti-herd jitter. Error,
+cancellation, stale probes, and best-effort quota display updates do not clear
+inference cooldowns.
 It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.
 WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
 WS failures return to the shared logical-prompt scheduler, and terminal WS errors are
@@ -299,4 +304,6 @@ The command applies only while that exact logical prompt is parked in the
 provider retry scheduler; it does not resend completed work or start a second
 prompt. It overrides the selected job's remaining delay once, including a
 server-requested delay, while retaining normal worker concurrency limits and
-leaving other delayed jobs untouched.
+initially leaving other delayed jobs untouched. A validated successful terminal
+from that exact attempt clears its matching current shared cooldown and wakes
+only peers constrained by that cooldown generation with anti-herd jitter.

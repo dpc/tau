@@ -509,6 +509,29 @@ fn quota_profile_identity(config: &responses::ResponsesConfig) -> u64 {
     hasher.finish()
 }
 
+fn responses_profile_identity(config: &responses::ResponsesConfig) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "responses".hash(&mut hasher);
+    config.base_url.hash(&mut hasher);
+    config.account_id.hash(&mut hasher);
+    config.api_key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match backend {
+        PromptBackend::Unavailable => return None,
+        PromptBackend::Responses(config) => return Some(responses_profile_identity(config)),
+        PromptBackend::ChatCompletions { provider, .. } => {
+            "chat_completions".hash(&mut hasher);
+            provider.base_url.hash(&mut hasher);
+            provider.api_key.hash(&mut hasher);
+        }
+    }
+    Some(hasher.finish())
+}
+
 fn full_quota_window(
     observation: tau_provider_chatgpt::quota::QuotaWindowObservation,
     observed_at_unix_ms: u64,
@@ -1051,8 +1074,10 @@ where
         worker_waker: None,
         retry_scheduler: None,
         shared_cooldowns: BTreeMap::new(),
+        shared_cooldown_generation: 0,
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
         prewarm_supervisor: PrewarmSupervisor::default(),
+        provider_profile_identities: BTreeMap::new(),
         prewarm_profile_identities: BTreeMap::new(),
         cancellation: Arc::new(CancellationState::default()),
         prompt_queue: VecDeque::new(),
@@ -1232,11 +1257,17 @@ struct ProviderRuntime<F> {
     retry_scheduler: Option<RetryScheduler>,
     /// Account/profile cooldowns, keyed without credentials or account ids.
     shared_cooldowns: BTreeMap<ProviderName, SharedCooldown>,
+    /// Monotonic generation allocated whenever shared cooldown evidence
+    /// changes.
+    shared_cooldown_generation: u64,
     /// Shared ChatGPT backend runtime for prewarm and prompt execution.
     chatgpt_runtime: Arc<ChatGptRuntime>,
     /// Main-loop ownership and cancellation for prewarm workers.
     prewarm_supervisor: PrewarmSupervisor,
-    /// Last observed auth/profile identity for each prewarmed namespace.
+    /// Last resolved inference identity for every configured provider
+    /// namespace.
+    provider_profile_identities: BTreeMap<ProviderName, Option<u64>>,
+    /// Last Responses identity used to supervise prewarm transport state.
     prewarm_profile_identities: BTreeMap<ProviderName, u64>,
     /// Cooperative cancellation state shared with prompt workers.
     cancellation: Arc<CancellationState>,
@@ -1349,6 +1380,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<PromptBackend> {
         let backend = resolve_prompt_backend(model, profiles).unwrap_or(PromptBackend::Unavailable);
+        self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
         } else {
@@ -1455,6 +1487,7 @@ where
             }
             return Ok(());
         };
+        self.reconcile_provider_profile(&model.provider, Some(responses_profile_identity(&config)));
         self.reconcile_prewarm_profile(&model.provider, &config);
         let key = PrewarmKey {
             provider: model.provider,
@@ -1492,6 +1525,23 @@ where
         Ok(())
     }
 
+    fn reconcile_provider_profile(&mut self, provider: &ProviderName, identity: Option<u64>) {
+        let changed = self
+            .provider_profile_identities
+            .insert(provider.clone(), identity)
+            .is_some_and(|previous| previous != identity);
+        if changed {
+            self.release_shared_cooldown(provider);
+            self.cancel_all_prewarms();
+            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "failed to invalidate websocket pool after profile change: {error}",
+                );
+            }
+        }
+    }
+
     fn reconcile_prewarm_profile(
         &mut self,
         provider: &ProviderName,
@@ -1522,6 +1572,16 @@ where
                     "failed to invalidate websocket pool after profile removal: {error}",
                 );
             }
+        }
+    }
+
+    /// Invalidates one provider profile's cooldown and advances only its parked
+    /// logical prompts with stable anti-herd jitter.
+    fn release_shared_cooldown(&mut self, provider: &ProviderName) {
+        if let Some(cooldown) = self.shared_cooldowns.remove(provider)
+            && let Some(scheduler) = &self.retry_scheduler
+        {
+            scheduler.release_cooldown(provider.clone(), cooldown.generation, Instant::now());
         }
     }
 
@@ -1566,6 +1626,7 @@ where
         });
         let mut profiles = self.load_profiles();
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
+        let profile_identity = backend_profile_identity(&backend);
         let mut frame_writer = handle_frame_writer(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
@@ -1577,9 +1638,11 @@ where
             ),
             prompt,
             backend,
+            profile_identity,
             retry_state: PromptRetryState::default(),
             cancel_generation: self.cancel_generation,
             manual_cooldown_bypass: false,
+            cooldown_probe: None,
         };
         if let Some(cooldown) = self
             .shared_cooldowns
@@ -1587,12 +1650,20 @@ where
             .copied()
             .filter(|cooldown| cooldown.not_before > Instant::now())
         {
+            let now = Instant::now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
             emit_retry_status(&job, cooldown.class, due, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
-                .schedule(job, due);
+                .schedule(
+                    job,
+                    now,
+                    Some(CooldownConstraint {
+                        generation: cooldown.generation,
+                        boundary: cooldown.not_before,
+                    }),
+                );
         } else {
             self.enqueue_or_start_prompt(job);
         }
@@ -1672,6 +1743,7 @@ where
                     message,
                     cancel_generation,
                     agent_prompt_id,
+                    cooldown_probe,
                 }) => {
                     if let Some(message) = validate_worker_output_for_commit(
                         message,
@@ -1681,6 +1753,16 @@ where
                         &agent_prompt_id,
                         &self.cancellation,
                     ) {
+                        if let Some(probe) = cooldown_probe
+                            && successful_probe_matches(
+                                &message,
+                                &agent_prompt_id,
+                                &probe,
+                                &self.shared_cooldowns,
+                            )
+                        {
+                            self.release_shared_cooldown(&probe.provider);
+                        }
                         handle.send(message)?;
                     }
                 }
@@ -1703,48 +1785,70 @@ where
                         .retry_state
                         .next_delay(decision.class, job.agent_prompt_id.as_str());
                     let hint_delay = decision.retry_after.unwrap_or(Duration::ZERO);
-                    let hint_jitter = if decision.retry_after.is_some() {
+                    let hint_jitter = decision.retry_after.map_or(Duration::ZERO, |_| {
                         Duration::from_secs(
                             1 + stable_retry_hash(
                                 job.agent_prompt_id.as_str(),
                                 job.retry_state.attempts,
                             ) % RESET_BOUNDARY_JITTER_MAX.as_secs(),
                         )
-                    } else {
-                        Duration::ZERO
-                    };
+                    });
                     let now = Instant::now();
                     let common_due = now
                         .checked_add(policy_delay.max(hint_delay))
                         // An overflowing hint is nonsensical. Fall back to the
                         // class cadence rather than retrying immediately.
                         .unwrap_or_else(|| now.checked_add(policy_delay).unwrap_or(now));
-                    let mut due = common_due.checked_add(hint_jitter).unwrap_or(common_due);
                     let provider = job.prompt.model.provider.clone();
-                    if decision.class.shares_cooldown() {
+                    let current_identity = self.provider_profile_identities.get(&provider).copied();
+                    let may_share = decision.class.shares_cooldown()
+                        && current_identity == Some(job.profile_identity);
+                    let hinted_due = common_due.checked_add(hint_jitter).unwrap_or(common_due);
+                    let independent_due = if may_share {
+                        now.checked_add(policy_delay).unwrap_or(now)
+                    } else {
+                        hinted_due
+                    };
+                    let mut due = independent_due;
+                    let mut cooldown_constraint = None;
+                    if may_share {
+                        self.shared_cooldown_generation = self
+                            .shared_cooldown_generation
+                            .checked_add(1)
+                            .expect("shared cooldown generation exhausted");
+                        let generation = self.shared_cooldown_generation;
                         let shared =
                             self.shared_cooldowns
                                 .entry(provider)
                                 .or_insert(SharedCooldown {
                                     not_before: common_due,
                                     class: decision.class,
+                                    generation,
                                 });
+                        shared.generation = generation;
                         if shared.not_before < common_due {
                             shared.not_before = common_due;
                             shared.class = decision.class;
-                        } else {
-                            due = cooldown_due_for_job(shared.not_before, &job);
                         }
+                        due = independent_due.max(cooldown_due_for_job(shared.not_before, &job));
+                        cooldown_constraint = Some(CooldownConstraint {
+                            generation,
+                            boundary: shared.not_before,
+                        });
                         self.retry_scheduler
                             .as_ref()
                             .expect("retry scheduler starts with the runtime waker")
-                            .extend_cooldown(job.prompt.model.provider.clone(), shared.not_before);
+                            .extend_cooldown(
+                                job.prompt.model.provider.clone(),
+                                shared.not_before,
+                                generation,
+                            );
                     }
                     emit_retry_status(&job, decision.class, due, handle)?;
                     self.retry_scheduler
                         .as_ref()
                         .expect("retry scheduler starts with the runtime waker")
-                        .schedule(job, due);
+                        .schedule(job, independent_due, cooldown_constraint);
                 }
                 Ok(WorkerMessage::RetryDue(mut job)) => {
                     if let Some(scheduler) = &self.retry_scheduler {
@@ -1762,6 +1866,7 @@ where
                     let mut profiles = self.load_profiles();
                     job.backend =
                         self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
+                    job.profile_identity = backend_profile_identity(&job.backend);
                     self.prompt_queue.push_back(job);
                 }
                 Ok(WorkerMessage::ManualRetry {
@@ -1792,7 +1897,17 @@ where
                                 &mut profiles,
                                 handle,
                             )?;
+                            owned_job.profile_identity =
+                                backend_profile_identity(&owned_job.backend);
                             owned_job.manual_cooldown_bypass = true;
+                            owned_job.cooldown_probe = self
+                                .shared_cooldowns
+                                .get(&owned_job.prompt.model.provider)
+                                .filter(|cooldown| cooldown.not_before > Instant::now())
+                                .map(|cooldown| CooldownProbe {
+                                    provider: owned_job.prompt.model.provider.clone(),
+                                    generation: cooldown.generation,
+                                });
                             self.prompt_queue.push_back(owned_job);
                             tau_proto::RetryPromptStatus::Accepted
                         }
@@ -1927,12 +2042,20 @@ where
             let Some(job) = self.prompt_queue.remove(index) else {
                 continue;
             };
+            let now = Instant::now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
             emit_retry_status(&job, cooldown.class, due, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
-                .schedule(job, due);
+                .schedule(
+                    job,
+                    now,
+                    Some(CooldownConstraint {
+                        generation: cooldown.generation,
+                        boundary: cooldown.not_before,
+                    }),
+                );
         }
         Ok(())
     }
@@ -1986,6 +2109,42 @@ fn validate_worker_output_for_commit(
     )))
 }
 
+/// Returns whether a committed frame authoritatively proves provider success.
+fn is_successful_terminal_for(
+    message: &HarnessInputMessage,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+) -> bool {
+    let HarnessInputMessage::Emit(emit) = message else {
+        return false;
+    };
+    let Event::ProviderResponseFinished(finished) = emit.event.as_ref() else {
+        return false;
+    };
+    finished.agent_prompt_id == *agent_prompt_id
+        && finished.error.is_none()
+        && finished.failure_kind.is_none()
+        && matches!(
+            finished.stop_reason,
+            ProviderStopReason::EndTurn
+                | ProviderStopReason::ToolCalls
+                | ProviderStopReason::Length
+        )
+}
+
+/// Checks that a successful terminal belongs to the still-current cooldown
+/// generation captured by its manually admitted attempt.
+fn successful_probe_matches(
+    message: &HarnessInputMessage,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    probe: &CooldownProbe,
+    cooldowns: &BTreeMap<ProviderName, SharedCooldown>,
+) -> bool {
+    is_successful_terminal_for(message, agent_prompt_id)
+        && cooldowns
+            .get(&probe.provider)
+            .is_some_and(|cooldown| cooldown.generation == probe.generation)
+}
+
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 
 /// Owned inputs for one finite prewarm worker attempt.
@@ -2010,11 +2169,15 @@ struct PromptJob {
     debug_provider_requests: bool,
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
+    /// Inference profile identity used by the next finite attempt.
+    profile_identity: Option<u64>,
     retry_state: PromptRetryState,
     /// Runtime global-cancel generation at logical prompt creation.
     cancel_generation: u64,
     /// Lets one manually released job pass a still-active shared cooldown once.
     manual_cooldown_bypass: bool,
+    /// Shared cooldown generation this job was manually admitted to probe.
+    cooldown_probe: Option<CooldownProbe>,
 }
 
 /// Shared provider-profile lower bound and its visible normalized reason.
@@ -2024,6 +2187,17 @@ struct SharedCooldown {
     not_before: Instant,
     /// Failure class that established the current lower bound.
     class: RetryClass,
+    /// Monotonic evidence generation used to reject stale successful probes.
+    generation: u64,
+}
+
+/// Exact shared cooldown generation a manually admitted attempt may invalidate.
+#[derive(Clone, Debug)]
+struct CooldownProbe {
+    /// Provider profile whose cooldown was bypassed.
+    provider: ProviderName,
+    /// Cooldown generation current when the scheduler transferred the job.
+    generation: u64,
 }
 
 fn cooldown_due_for_job(not_before: Instant, job: &PromptJob) -> Instant {
@@ -2092,8 +2266,21 @@ fn stable_retry_hash(prompt_id: &str, attempt: u64) -> u64 {
 
 struct ScheduledPrompt {
     due: Instant,
+    /// Prompt-local eligibility before any shared provider cooldown.
+    independent_due: Instant,
+    /// Shared cooldown generation currently constraining this entry.
+    cooldown_generation: Option<u64>,
     sequence: u64,
     job: PromptJob,
+}
+
+/// One shared provider cooldown currently constraining a scheduled prompt.
+#[derive(Clone, Copy)]
+struct CooldownConstraint {
+    /// Exact cooldown evidence generation.
+    generation: u64,
+    /// Common provider-contact boundary before prompt-local jitter.
+    boundary: Instant,
 }
 
 /// Deterministic delayed-prompt queue owned by the single retry scheduler.
@@ -2111,7 +2298,12 @@ struct RetryScheduleQueue {
 
 impl RetryScheduleQueue {
     /// Adds one logical prompt at its current eligible deadline.
-    fn schedule(&mut self, due: Instant, job: PromptJob) -> Result<(), Box<PromptJob>> {
+    fn schedule(
+        &mut self,
+        independent_due: Instant,
+        cooldown: Option<CooldownConstraint>,
+        job: PromptJob,
+    ) -> Result<(), Box<PromptJob>> {
         if self
             .prompts
             .iter()
@@ -2119,9 +2311,14 @@ impl RetryScheduleQueue {
         {
             return Err(Box::new(job));
         }
+        let due = cooldown.map_or(independent_due, |constraint| {
+            independent_due.max(cooldown_due_for_job(constraint.boundary, &job))
+        });
         self.sequence = self.sequence.saturating_add(1);
         self.prompts.push(ScheduledPrompt {
             due,
+            independent_due,
+            cooldown_generation: cooldown.map(|constraint| constraint.generation),
             sequence: self.sequence,
             job,
         });
@@ -2159,11 +2356,34 @@ impl RetryScheduleQueue {
     }
 
     /// Monotonically moves same-provider prompts beyond a shared cooldown.
-    fn extend_cooldown(&mut self, provider: &ProviderName, due: Instant) {
+    fn extend_cooldown(&mut self, provider: &ProviderName, due: Instant, generation: u64) {
         let mut updated = BinaryHeap::new();
         while let Some(mut scheduled) = self.prompts.pop() {
-            if scheduled.job.prompt.model.provider == *provider && scheduled.due < due {
-                scheduled.due = cooldown_due_for_job(due, &scheduled.job);
+            if scheduled.job.prompt.model.provider == *provider {
+                if scheduled.cooldown_generation.is_none() {
+                    scheduled.independent_due = scheduled.due;
+                }
+                scheduled.cooldown_generation = Some(generation);
+                scheduled.due = scheduled
+                    .independent_due
+                    .max(cooldown_due_for_job(due, &scheduled.job));
+            }
+            updated.push(scheduled);
+        }
+        self.prompts = updated;
+    }
+
+    /// Advances only matching provider prompts after an authoritative probe.
+    fn release_cooldown(&mut self, provider: &ProviderName, generation: u64, now: Instant) {
+        let mut updated = BinaryHeap::new();
+        while let Some(mut scheduled) = self.prompts.pop() {
+            if scheduled.job.prompt.model.provider == *provider
+                && scheduled.cooldown_generation == Some(generation)
+            {
+                scheduled.cooldown_generation = None;
+                scheduled.due = scheduled
+                    .independent_due
+                    .max(cooldown_due_for_job(now, &scheduled.job));
             }
             updated.push(scheduled);
         }
@@ -2235,7 +2455,10 @@ impl Ord for ScheduledPrompt {
 
 enum SchedulerCommand {
     Schedule {
-        due: Instant,
+        /// Prompt-local eligibility before shared provider policy.
+        independent_due: Instant,
+        /// Optional shared provider constraint applied at insertion.
+        cooldown: Option<CooldownConstraint>,
         job: Box<PromptJob>,
     },
     Cancel(tau_proto::AgentPromptId),
@@ -2247,6 +2470,17 @@ enum SchedulerCommand {
     ExtendCooldown {
         provider: ProviderName,
         due: Instant,
+        /// New shared-cooldown evidence generation.
+        generation: u64,
+    },
+    /// Removes one exact shared-cooldown generation from matching entries.
+    ReleaseCooldown {
+        /// Provider namespace whose parked work may be released.
+        provider: ProviderName,
+        /// Exact shared-cooldown generation being invalidated.
+        generation: u64,
+        /// Release instant used as the anti-herd jitter boundary.
+        now: Instant,
     },
 }
 
@@ -2271,12 +2505,18 @@ impl RetryScheduler {
         }
     }
 
-    fn schedule(&self, job: PromptJob, due: Instant) {
+    fn schedule(
+        &self,
+        job: PromptJob,
+        independent_due: Instant,
+        cooldown: Option<CooldownConstraint>,
+    ) {
         self.delayed_count.fetch_add(1, AtomicOrdering::Relaxed);
         if self
             .commands
             .send(SchedulerCommand::Schedule {
-                due,
+                independent_due,
+                cooldown,
                 job: Box::new(job),
             })
             .is_err()
@@ -2305,10 +2545,20 @@ impl RetryScheduler {
         });
     }
 
-    fn extend_cooldown(&self, provider: ProviderName, due: Instant) {
-        let _ = self
-            .commands
-            .send(SchedulerCommand::ExtendCooldown { provider, due });
+    fn extend_cooldown(&self, provider: ProviderName, due: Instant, generation: u64) {
+        let _ = self.commands.send(SchedulerCommand::ExtendCooldown {
+            provider,
+            due,
+            generation,
+        });
+    }
+
+    fn release_cooldown(&self, provider: ProviderName, generation: u64, now: Instant) {
+        let _ = self.commands.send(SchedulerCommand::ReleaseCooldown {
+            provider,
+            generation,
+            now,
+        });
     }
 
     fn is_empty(&self) -> bool {
@@ -2340,8 +2590,12 @@ fn run_retry_scheduler(
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match command {
-            Ok(SchedulerCommand::Schedule { due, job }) => {
-                if let Err(duplicate) = queue.schedule(due, *job) {
+            Ok(SchedulerCommand::Schedule {
+                independent_due,
+                cooldown,
+                job,
+            }) => {
+                if let Err(duplicate) = queue.schedule(independent_due, cooldown, *job) {
                     // A duplicated logical APID makes ownership ambiguous. Fail
                     // the logical prompt closed once rather than retaining either
                     // entry and risking two later dispatches.
@@ -2419,8 +2673,19 @@ fn run_retry_scheduler(
                     },
                 );
             }
-            Ok(SchedulerCommand::ExtendCooldown { provider, due }) => {
-                queue.extend_cooldown(&provider, due);
+            Ok(SchedulerCommand::ExtendCooldown {
+                provider,
+                due,
+                generation,
+            }) => {
+                queue.extend_cooldown(&provider, due, generation);
+            }
+            Ok(SchedulerCommand::ReleaseCooldown {
+                provider,
+                generation,
+                now,
+            }) => {
+                queue.release_cooldown(&provider, generation, now);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -2441,6 +2706,8 @@ enum PromptBackend {
 
 struct PromptExecution {
     job: PromptJob,
+    /// Cooldown generation this exact finite attempt may invalidate.
+    cooldown_probe: Option<CooldownProbe>,
     output_tx: Sender<WorkerMessage>,
     output_waker: ManualRuntimeWaker,
     cancellation: Arc<CancellationState>,
@@ -2462,6 +2729,7 @@ impl PromptExecution {
             self.output_waker.clone(),
             self.job.cancel_generation,
             self.job.agent_prompt_id.clone(),
+            self.cooldown_probe.clone(),
         )))
     }
 }
@@ -2473,6 +2741,8 @@ enum WorkerMessage {
         message: Box<HarnessInputMessage>,
         cancel_generation: u64,
         agent_prompt_id: tau_proto::AgentPromptId,
+        /// Cooldown generation carried by the manually admitted attempt.
+        cooldown_probe: Option<CooldownProbe>,
     },
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
@@ -2562,6 +2832,8 @@ enum HarnessInputMessageTarget {
         cancel_generation: u64,
         /// Prompt identity used for targeted-cancel commit validation.
         agent_prompt_id: tau_proto::AgentPromptId,
+        /// Exact cooldown probe authority attached to this finite attempt.
+        cooldown_probe: Option<CooldownProbe>,
     },
 }
 
@@ -2591,6 +2863,7 @@ impl HarnessInputMessageWrite {
         waker: ManualRuntimeWaker,
         cancel_generation: u64,
         agent_prompt_id: tau_proto::AgentPromptId,
+        cooldown_probe: Option<CooldownProbe>,
     ) -> Self {
         Self {
             target: HarnessInputMessageTarget::Worker {
@@ -2598,6 +2871,7 @@ impl HarnessInputMessageWrite {
                 waker,
                 cancel_generation,
                 agent_prompt_id,
+                cooldown_probe,
             },
             buf: Vec::new(),
         }
@@ -2613,6 +2887,7 @@ impl HarnessInputMessageWrite {
                 waker,
                 cancel_generation,
                 agent_prompt_id,
+                cooldown_probe,
             } => send_worker_message(
                 tx,
                 waker,
@@ -2620,6 +2895,7 @@ impl HarnessInputMessageWrite {
                     message: Box::new(message),
                     cancel_generation: *cancel_generation,
                     agent_prompt_id: agent_prompt_id.clone(),
+                    cooldown_probe: cooldown_probe.clone(),
                 },
             )
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")),
@@ -2919,10 +3195,12 @@ fn production_prewarm_executor() -> PrewarmExecutor {
     })
 }
 
-fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext) {
+fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext) {
     *active_prompts += 1;
+    let cooldown_probe = job.cooldown_probe.take();
     let execution = PromptExecution {
         job,
+        cooldown_probe,
         output_tx: context.worker_tx.clone(),
         output_waker: context.worker_waker.clone(),
         cancellation: context.cancellation.clone(),

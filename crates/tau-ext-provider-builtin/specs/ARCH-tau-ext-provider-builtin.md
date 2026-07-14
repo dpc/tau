@@ -68,6 +68,13 @@ Delayed retries use one scheduler thread and never retain a worker permit.
 Cooldown keys contain only configured provider namespaces, never account ids,
 tokens, headers, prompts, or response bodies. Retry status uses normalized,
 bounded provider-independent reasons rather than provider-authored prose.
+The main runtime loop generates shared cooldown evidence and attaches an exact
+generation only to a manually admitted finite probe attempt. A validated
+successful terminal may remove that generation; the scheduler then removes only
+its matching constraints, preserving prompt-local deadlines and ownership while
+adding stable release jitter. Inference profile identities cover every backend
+family and rotation invalidates old-profile cooldowns. Quota acquisition and
+display telemetry never own or mutate inference cooldowns.
 
 ## Cancellation, EOF, and disconnect
 

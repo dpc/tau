@@ -73,6 +73,10 @@ Manual `/retry` coverage must drive the scheduler/runtime boundary
 deterministically: assert delayed-count transfer, timer/manual and
 shutdown/manual ownership races, one-shot cooldown bypass, and that a failed
 manually released attempt increments accounting once and parks again normally.
+Successful-probe coverage must also prove exact attempt/profile/generation
+validation, peer and chained-continuation wakeup, independent-deadline and
+cross-provider isolation, stale/error/cancel negatives, identity rotation, and
+that quota telemetry alone cannot release inference cooldowns.
 CLI coverage must separately prove static completion, exact argument-free
 parsing without prompt resubmission, and requester-visible result rendering.
 

@@ -30,4 +30,12 @@ An explicit user `/retry` may atomically remove one exact `AgentPromptId` from
 the delayed scheduler before its deadline. This deliberately shortens even a
 trusted server delay for that job only. The same owned job and retry accounting
 are preserved, peers remain parked, and the released job bypasses the shared
-cooldown once before entering the normal bounded worker queue.
+cooldown once before entering the normal bounded worker queue. If that attempt
+commits a successful terminal response, it authoritatively invalidates the exact
+provider-profile cooldown generation it probed. Matching parked peers advance
+with stable prompt-local anti-herd jitter; unrelated providers remain untouched.
+Cancellation, failure, and a success from an older generation do not release a
+current cooldown. Replacing the configured profile identity also invalidates the
+old profile's cooldown, while best-effort quota display telemetry never does.
+The telemetry non-authority follows
+[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).

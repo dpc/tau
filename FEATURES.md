@@ -640,8 +640,11 @@ HTTP/SSE.
 The built-in `/retry` command releases the selected agent's exact currently
 parked logical prompt immediately, without recreating or resubmitting it. The
 provider scheduler remains authoritative: running, capacity-queued, completed,
-terminal, and historical prompts are not eligible; shared cooldown peers remain
-parked; and a later retryable failure resumes ordinary accounting and backoff.
+terminal, and historical prompts are not eligible; shared cooldown peers
+initially remain parked; and a later retryable failure resumes ordinary
+accounting and backoff. A validated successful terminal from the released probe
+clears only the matching current cooldown generation and wakes its peers with
+stable anti-herd jitter. Errors, cancellation, and stale successes do not.
 
 After setup, live ChatGPT/Codex streams have a separate default five-minute idle watchdog for both
 HTTP/SSE and WebSocket transports. The timer resets on each SSE `data:` event or

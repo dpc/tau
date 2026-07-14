@@ -528,6 +528,118 @@ fn profile_rotation_cancels_active_prewarm() {
     runtime.join().expect("provider exits");
 }
 
+/// Ensures credential identity rotation invalidates the old profile cooldown
+/// and releases its parked work without relying on quota display telemetry.
+#[test]
+fn profile_identity_rotation_releases_old_shared_cooldown() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if execution.job.agent_prompt_id.as_str() == "sp-1"
+            && execution.job.retry_state.attempts == 0
+        {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::UsageWindow)
+                        .with_retry_after(Some(Duration::from_secs(86_400))),
+                },
+            )
+            .expect("park old-profile prompt");
+            return;
+        }
+        let id = execution.job.agent_prompt_id.clone();
+        let mut finished = simple_finished(
+            id.clone(),
+            execution.job.prompt.agent_id.clone(),
+            execution.job.prompt.originator.clone(),
+            "replace error",
+        );
+        finished.error = None;
+        finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))
+            .expect("successful terminal");
+        writer.flush().expect("flush terminal");
+        completed_tx
+            .send(id.to_string())
+            .expect("report completion");
+    });
+    let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
+    let startup_profiles = profiles.lock().expect("profiles").clone();
+    let load_profiles = Arc::clone(&profiles);
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            startup_profiles,
+            move || load_profiles.lock().expect("profiles").clone(),
+            2,
+            executor,
+        )
+        .expect("run provider");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+
+    {
+        let mut profiles = profiles.lock().expect("profiles");
+        let BuiltinProviderProfile::Chatgpt(profile) = profiles
+            .providers
+            .get_mut(&ProviderName::new("chatgpt"))
+            .expect("chatgpt profile")
+        else {
+            panic!("expected ChatGPT profile");
+        };
+        profile.auth.access_token = "rotated-access".to_owned();
+    }
+    let mut rotated = prompt();
+    rotated.agent_prompt_id = "rotated".into();
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(rotated),
+    )]));
+
+    let deadline = Instant::now() + Duration::from_secs(7);
+    let mut completed = std::collections::BTreeSet::new();
+    while completed.len() < 2 {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("profile rotation releases before jitter bound");
+        completed.insert(
+            completed_rx
+                .recv_timeout(remaining)
+                .expect("old and rotated-profile prompts finish"),
+        );
+    }
+    assert_eq!(
+        completed,
+        std::collections::BTreeSet::from(["rotated".to_owned(), "sp-1".to_owned()])
+    );
+    input.close();
+    runtime.join().expect("provider exits");
+}
+
 /// Builds scheduler-owned logical state without starting a provider worker.
 fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
     let mut prompt = prompt();
@@ -538,9 +650,11 @@ fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         debug_provider_requests: false,
         prompt,
         backend: PromptBackend::Unavailable,
+        profile_identity: None,
         retry_state: PromptRetryState::default(),
         cancel_generation: 0,
         manual_cooldown_bypass: false,
+        cooldown_probe: None,
     }
 }
 
@@ -566,14 +680,14 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
     let mut queue = RetryScheduleQueue::default();
     for id in ["same-1", "same-2", "same-3", "same-4"] {
         queue
-            .schedule(initial_due, scheduled_job(id, "limited"))
+            .schedule(initial_due, None, scheduled_job(id, "limited"))
             .unwrap_or_else(|_| panic!("unique parked prompt"));
     }
     queue
-        .schedule(unaffected_due, scheduled_job("peer", "healthy"))
+        .schedule(unaffected_due, None, scheduled_job("peer", "healthy"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
 
-    queue.extend_cooldown(&ProviderName::new("limited"), extended_boundary);
+    queue.extend_cooldown(&ProviderName::new("limited"), extended_boundary, 1);
 
     let deadlines = queue.deadlines();
     assert_eq!(queue.len(), 5);
@@ -582,6 +696,7 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
         .filter(|(_, provider, _)| provider.as_str() == "limited")
         .map(|(_, _, due)| *due)
         .collect::<Vec<_>>();
+    assert_eq!(limited.len(), 4);
     assert!(
         limited.iter().all(|due| *due > extended_boundary),
         "same-scope prompts need positive jitter after the common boundary: {limited:?}"
@@ -618,6 +733,204 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
     assert_eq!(queue.len(), 4);
 }
 
+/// Ensures a successful probe advances only its provider's parked prompts,
+/// retaining positive distinct stable jitter and all scheduler ownership.
+#[test]
+fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
+    let epoch = Instant::now();
+    let far_due = epoch + Duration::from_secs(86_400);
+    let unrelated_due = epoch + Duration::from_secs(90);
+    let mut queue = RetryScheduleQueue::default();
+    for id in ["limited-1", "limited-2", "limited-3"] {
+        queue
+            .schedule(
+                epoch,
+                Some(CooldownConstraint {
+                    generation: 1,
+                    boundary: far_due,
+                }),
+                scheduled_job(id, "limited"),
+            )
+            .unwrap_or_else(|_| panic!("unique parked prompt"));
+    }
+    let independent_due = epoch + Duration::from_secs(45);
+    queue
+        .schedule(
+            independent_due,
+            None,
+            scheduled_job("independent", "limited"),
+        )
+        .unwrap_or_else(|_| panic!("unique independent backoff"));
+    queue
+        .schedule(
+            epoch,
+            Some(CooldownConstraint {
+                generation: 2,
+                boundary: far_due,
+            }),
+            scheduled_job("newer-generation", "limited"),
+        )
+        .unwrap_or_else(|_| panic!("unique newer-generation cooldown"));
+    queue
+        .schedule(unrelated_due, None, scheduled_job("unrelated", "healthy"))
+        .unwrap_or_else(|_| panic!("unique parked prompt"));
+
+    queue.release_cooldown(&ProviderName::new("limited"), 1, epoch);
+
+    let deadlines = queue.deadlines();
+    let released = deadlines
+        .iter()
+        .filter(|(id, _, _)| id.as_str().starts_with("limited-"))
+        .map(|(_, _, due)| *due)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        queue.len(),
+        6,
+        "release must not transfer or duplicate ownership"
+    );
+    assert!(released.iter().all(|due| *due > epoch && *due < far_due));
+    assert_eq!(
+        released
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        released.len(),
+        "stable anti-herd jitter must remain distinct"
+    );
+    assert!(deadlines.iter().any(|(id, provider, due)| {
+        id.as_str() == "unrelated" && provider.as_str() == "healthy" && *due == unrelated_due
+    }));
+    assert!(deadlines.iter().any(|(id, provider, due)| {
+        id.as_str() == "independent" && provider.as_str() == "limited" && *due == independent_due
+    }));
+    assert!(
+        deadlines
+            .iter()
+            .any(|(id, _, due)| { id.as_str() == "newer-generation" && *due > far_due })
+    );
+}
+
+/// Proves only a non-error terminal from the exact captured generation may
+/// invalidate a shared cooldown; stale, error, and canceled terminals may not.
+#[test]
+fn successful_probe_requires_current_generation_and_successful_terminal() {
+    let provider = ProviderName::new("limited");
+    let prompt_id: tau_proto::AgentPromptId = "probe".into();
+    let probe = CooldownProbe {
+        provider: provider.clone(),
+        generation: 7,
+    };
+    let cooldowns = BTreeMap::from([(
+        provider,
+        SharedCooldown {
+            not_before: Instant::now() + Duration::from_secs(60),
+            class: RetryClass::UsageWindow,
+            generation: 7,
+        },
+    )]);
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    let mut successful = simple_finished(
+        prompt_id.clone(),
+        agent_id.clone(),
+        tau_proto::PromptOriginator::User,
+        "replace error",
+    );
+    successful.error = None;
+    successful.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    let success_message =
+        HarnessInputMessage::emit(Event::ProviderResponseFinished(successful.clone()));
+    assert!(successful_probe_matches(
+        &success_message,
+        &prompt_id,
+        &probe,
+        &cooldowns
+    ));
+    assert!(!successful_probe_matches(
+        &success_message,
+        &tau_proto::AgentPromptId::from("different"),
+        &probe,
+        &cooldowns
+    ));
+
+    let stale_probe = CooldownProbe {
+        generation: 6,
+        ..probe.clone()
+    };
+    assert!(!successful_probe_matches(
+        &success_message,
+        &prompt_id,
+        &stale_probe,
+        &cooldowns
+    ));
+
+    let error_message =
+        HarnessInputMessage::emit(Event::ProviderResponseFinished(simple_finished(
+            prompt_id.clone(),
+            agent_id,
+            tau_proto::PromptOriginator::User,
+            "provider error",
+        )));
+    assert!(!successful_probe_matches(
+        &error_message,
+        &prompt_id,
+        &probe,
+        &cooldowns
+    ));
+
+    let cancellation = CancellationState::default();
+    cancellation.cancel(prompt_id.clone());
+    let canceled_message = validate_worker_output_for_commit(
+        Box::new(success_message),
+        0,
+        0,
+        false,
+        &prompt_id,
+        &cancellation,
+    )
+    .expect("successful output becomes a canceled terminal");
+    assert!(!successful_probe_matches(
+        &canceled_message,
+        &prompt_id,
+        &probe,
+        &cooldowns
+    ));
+}
+
+/// Ensures inference profile identity covers non-Responses credentials and
+/// backend family, so their rotation cannot inherit an old shared cooldown.
+#[test]
+fn inference_profile_identity_tracks_chat_completions_rotation() {
+    let provider = ChatCompletionsProvider {
+        base_url: "https://generic.invalid/v1".to_owned(),
+        api_key: "old-key".to_owned(),
+        models: vec![chat_model("model")],
+        ..ChatCompletionsProvider::default()
+    };
+    let old = PromptBackend::ChatCompletions {
+        provider: provider.clone(),
+        model: chat_model("model"),
+    };
+    let mut rotated = provider;
+    rotated.api_key = "new-key".to_owned();
+    let new = PromptBackend::ChatCompletions {
+        provider: rotated,
+        model: chat_model("model"),
+    };
+    let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let responses = resolve_prompt_backend(&prompt().model, &mut profiles)
+        .expect("configured Responses backend");
+
+    assert_ne!(
+        backend_profile_identity(&old),
+        backend_profile_identity(&new)
+    );
+    assert_ne!(
+        backend_profile_identity(&new),
+        backend_profile_identity(&responses),
+        "backend-kind replacement changes inference identity"
+    );
+}
+
 /// Verifies targeted and global delayed cancellation remove only the intended
 /// logical prompts and never wait for their far-future deadlines.
 #[test]
@@ -625,10 +938,10 @@ fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
     let due = Instant::now() + Duration::from_secs(86_400);
     let mut queue = RetryScheduleQueue::default();
     queue
-        .schedule(due, scheduled_job("target", "limited"))
+        .schedule(due, None, scheduled_job("target", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
     queue
-        .schedule(due, scheduled_job("peer", "limited"))
+        .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
 
     let canceled = queue.cancel(&"target".into());
@@ -650,14 +963,14 @@ fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
     let now = Instant::now();
     let mut timer_wins = RetryScheduleQueue::default();
     timer_wins
-        .schedule(now, scheduled_job("timer-wins", "limited"))
+        .schedule(now, None, scheduled_job("timer-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
     assert!(timer_wins.pop_due(now).is_some());
     assert!(timer_wins.cancel(&"timer-wins".into()).is_empty());
 
     let mut manual_wins = RetryScheduleQueue::default();
     manual_wins
-        .schedule(now, scheduled_job("manual-wins", "limited"))
+        .schedule(now, None, scheduled_job("manual-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
     assert_eq!(manual_wins.cancel(&"manual-wins".into()).len(), 1);
     assert!(manual_wins.pop_due(now).is_none());
@@ -670,10 +983,10 @@ fn retry_schedule_queue_double_manual_release_moves_exactly_one_job() {
     let due = Instant::now() + Duration::from_secs(60);
     let mut queue = RetryScheduleQueue::default();
     queue
-        .schedule(due, scheduled_job("target", "limited"))
+        .schedule(due, None, scheduled_job("target", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
     queue
-        .schedule(due, scheduled_job("peer", "limited"))
+        .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
 
     let first = queue.cancel(&"target".into());
@@ -700,7 +1013,10 @@ fn retry_schedule_queue_manual_transfer_preserves_logical_prompt_state() {
     job.debug_provider_requests = true;
     let expected_prompt = job.prompt.clone();
     let mut queue = RetryScheduleQueue::default();
-    assert!(queue.schedule(due, job).is_ok(), "unique parked prompt");
+    assert!(
+        queue.schedule(due, None, job).is_ok(),
+        "unique parked prompt"
+    );
 
     let mut transferred = queue.cancel(&"target".into()).pop().expect("parked job");
     assert_eq!(transferred.retry_state.attempts, 7);
@@ -742,6 +1058,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         ))),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
+        cooldown_probe: None,
     })
     .expect("queue target delta");
     for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
@@ -751,6 +1068,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
             ))),
             cancel_generation: 0,
             agent_prompt_id: id.clone(),
+            cooldown_probe: None,
         })
         .expect("queue terminal");
     }
@@ -762,6 +1080,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         message,
         cancel_generation,
         agent_prompt_id,
+        cooldown_probe: _,
     }) = rx.try_recv()
     {
         if let Some(message) = validate_worker_output_for_commit(
@@ -1057,9 +1376,9 @@ fn retry_schedule_rejects_duplicate_prompt_identity() {
     let mut queue = RetryScheduleQueue::default();
     let due = Instant::now() + Duration::from_secs(30);
     queue
-        .schedule(due, scheduled_job("same", "limited"))
+        .schedule(due, None, scheduled_job("same", "limited"))
         .unwrap_or_else(|_| panic!("first owner"));
-    let duplicate = queue.schedule(due, scheduled_job("same", "limited"));
+    let duplicate = queue.schedule(due, None, scheduled_job("same", "limited"));
     assert!(duplicate.is_err(), "duplicate APID must be returned");
     assert_eq!(queue.len(), 1, "original remains the sole parked owner");
 }
@@ -1276,6 +1595,297 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
             if result.request_id.as_str() == "count-transfer"
                 && result.status == tau_proto::RetryPromptStatus::Accepted
     )));
+}
+
+/// Reproduces quota recovery end to end: one successful manual probe releases a
+/// same-provider attempt-zero peer, and a chained continuation is not
+/// re-parked.
+#[test]
+fn successful_manual_probe_wakes_peer_and_admits_chained_continuation() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let executor_calls = Arc::clone(&calls);
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let id = execution.job.agent_prompt_id.to_string();
+        executor_calls.lock().expect("call log").push(id.clone());
+        if id == "sp-1" && execution.job.retry_state.attempts == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::UsageWindow)
+                        .with_retry_after(Some(Duration::from_secs(86_400))),
+                },
+            )
+            .expect("park initial usage failure");
+            return;
+        }
+        let mut finished = simple_finished(
+            execution.job.agent_prompt_id.clone(),
+            execution.job.prompt.agent_id.clone(),
+            execution.job.prompt.originator.clone(),
+            "replace error",
+        );
+        finished.error = None;
+        finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))
+            .expect("successful terminal");
+        writer.flush().expect("flush successful terminal");
+        completed_tx.send(id).expect("report successful attempt");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            2,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    let mut peer = prompt();
+    peer.agent_prompt_id = "peer".into();
+    input.push(encode_frames(&[
+        live_event(12, Event::AgentPromptCreated(peer)),
+        live_event(
+            13,
+            Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+                request_id: tau_proto::RetryPromptRequestId::parse("quota-probe")
+                    .expect("retry request id"),
+                session_id: "session-1".into(),
+                target_agent_id: None,
+                agent_prompt_id: Some("sp-1".into()),
+            }),
+        ),
+    ]));
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("manual probe succeeds"),
+        "sp-1"
+    );
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+    });
+
+    let mut chained = prompt();
+    chained.agent_prompt_id = "chained".into();
+    input.push(encode_frames(&[live_event(
+        14,
+        Event::AgentPromptCreated(chained),
+    )]));
+    let deadline = Instant::now() + Duration::from_secs(7);
+    let mut completed = std::collections::BTreeSet::new();
+    while completed.len() < 2 {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("released work completes before jitter bound");
+        completed.insert(
+            completed_rx
+                .recv_timeout(remaining)
+                .expect("peer and chained continuation complete"),
+        );
+    }
+    assert_eq!(
+        completed,
+        std::collections::BTreeSet::from(["chained".to_owned(), "peer".to_owned()])
+    );
+
+    input.close();
+    runtime.join().expect("provider exits after released work");
+    let frames = decode_frames(&output.bytes());
+    assert!(!frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.agent_prompt_id.as_str() == "chained"
+                && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+    )));
+    for id in ["sp-1", "peer", "chained"] {
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderPromptSubmitted(submitted))
+                        if submitted.agent_prompt_id.as_str() == id
+                ))
+                .count(),
+            1,
+            "{id} has one submitted lifecycle"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseFinished(finished))
+                        if finished.agent_prompt_id.as_str() == id
+                ))
+                .count(),
+            1,
+            "{id} has one terminal lifecycle"
+        );
+    }
+    let calls = calls.lock().expect("call log");
+    assert_eq!(calls.iter().filter(|id| id.as_str() == "sp-1").count(), 2);
+    assert_eq!(
+        calls.iter().filter(|id| id.as_str() == "peer").count(),
+        1,
+        "peer remains attempt zero until the successful probe releases it"
+    );
+    assert_eq!(
+        calls.iter().filter(|id| id.as_str() == "chained").count(),
+        1
+    );
+}
+
+/// Ensures best-effort quota telemetry cannot clear inference cooldown state or
+/// admit a same-provider peer before its trusted reset boundary.
+#[test]
+fn quota_telemetry_does_not_release_shared_inference_cooldown() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        attempt_tx
+            .send(execution.job.agent_prompt_id.to_string())
+            .expect("report attempt");
+        let model = execution.job.prompt.model.clone();
+        let PromptBackend::Responses(config) = &execution.job.backend else {
+            panic!("configured Responses backend");
+        };
+        let profile_identity = quota_profile_identity(config);
+        let output_tx = execution.output_tx.clone();
+        let output_waker = execution.output_waker.clone();
+        send_worker_message(
+            &output_tx,
+            &output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::UsageWindow)
+                    .with_retry_after(Some(Duration::from_secs(86_400))),
+            },
+        )
+        .expect("park usage failure");
+        send_worker_message(
+            &output_tx,
+            &output_waker,
+            WorkerMessage::QuotaRolling {
+                model,
+                profile_identity,
+                observation: tau_provider_chatgpt::quota::RollingQuotaObservation {
+                    windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+                        limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
+                            .expect("limit id"),
+                        window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
+                            .expect("window id"),
+                        used_basis_points: 0,
+                        window_seconds: Some(604_800),
+                        reset_at_unix_seconds: Some(2_100_000_000),
+                        remaining_seconds: None,
+                    }],
+                    active_limit_id: Some(
+                        tau_proto::ProviderQuotaLimitId::parse("codex").expect("limit id"),
+                    ),
+                    binding_provenance: Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent),
+                },
+                observed_at_unix_ms: now_ms(),
+            },
+        )
+        .expect("inject quota telemetry");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            2,
+            executor,
+        )
+        .expect("run provider");
+    });
+    assert_eq!(attempt_rx.recv().expect("initial attempt"), "sp-1");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames
+            .iter()
+            .any(|frame| matches!(input_event(frame), Some(Event::ProviderQuotaPatch(_))))
+    });
+    let mut peer = prompt();
+    peer.agent_prompt_id = "telemetry-peer".into();
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(peer),
+    )]));
+    assert!(
+        attempt_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "quota telemetry must not admit a peer parked by inference policy"
+    );
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "telemetry-peer"
+                        && update.status.as_ref().is_some_and(|status| {
+                            status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
+                        })
+            )
+        })
+    });
+    input.close();
+    runtime.join().expect("provider exits");
 }
 
 /// Ensures ordered session shutdown wins against a following manual request:

@@ -10,6 +10,14 @@ discarded after rotation. Every prompt and retry-time credential reload
 reconciles the profile before rolling observations can commit. Quota I/O is
 best-effort and independent from prompt concurrency and retry budget.
 
+Shared inference cooldown recovery remains main-loop authorized. Only a
+cancellation-validated successful terminal from the exact finite attempt that
+probed the current generation may clear it; quota telemetry is never recovery
+authority. Scheduler release preserves independent prompt deadlines, delayed
+ownership/counting, and unrelated providers or generations. Configured
+credential, endpoint, or backend-family identity rotation invalidates only the
+old provider profile cooldown.
+
 The cross-component authority and no-guessed-applicability rule are defined by
 [DESIGN-provider-quota-pacing](../../specs/DESIGN-provider-quota-pacing.md).
 
