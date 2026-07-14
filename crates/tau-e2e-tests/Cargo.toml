@@ -15,8 +15,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+image.workspace = true
 serde_json.workspace = true
 tau-config.workspace = true
 tau-harness.workspace = true
+tau-proto.workspace = true
 tau-vcr.workspace = true
 tempfile.workspace = true

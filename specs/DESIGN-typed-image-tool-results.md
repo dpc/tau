@@ -6,17 +6,31 @@ Local image inspection is a native tool-result capability, not text containing
 base64 and not a synthesized user message. A successful image-producing
 function call retains its call id and normalized text result while carrying
 ordered typed image content as canonical encoded bytes, closed MIME type,
-dimensions, and high detail. Provider adapters lower that semantic content only
-on explicitly audited routes.
+dimensions, and high provider detail. Provider adapters lower that semantic
+content only on explicitly audited routes.
 
 The first surface is `tau-ext-shell`'s one-image `read_image(path)` tool. It
 inherits the extension's ordinary filesystem authority and session lifecycle.
 It accepts PNG, JPEG, and WebP, reads an opened regular file once, enforces
 source, decoded-allocation, dimension, pixel, output, record, and provider
 request bounds, rejects animation, applies orientation, strips metadata by
-re-encoding, and prepares bounded high-detail pixels. Crop, original detail,
-GIF, caches, thumbnails, attachments, multiple images, and other provider
-adapters are outside this version.
+re-encoding, and prepares pixels with a named local profile. Bare calls use the
+compatible `high` profile bounded to a 2048-pixel side and 2,500 32-by-32
+patches. Explicit experimental `overview` calls use 1024-side/600-patch bounds
+for coarse inspection. An optional half-open region selects pixels from the
+EXIF-oriented source before profile resizing. Both profiles remain provider
+high detail: overview is a local raster transform, not provider low detail.
+Original detail, equality suppression, GIF, caches, thumbnails, attachments,
+multiple images, provider uploads, and image storage indirection are outside
+this version.
+
+Safe result metadata reports pre-orientation source dimensions, full oriented
+dimensions, the selected oriented-source region, prepared dimensions, patch
+count, encoded byte count, and profile. Canonical transformed bytes and
+dimensions remain the sole authority for provider request and context
+accounting. Overview remains experimental and must not become the bare default
+or normative general guidance until the opt-in live visual-fidelity oracle
+meets its [documented gates](../docs/read-image-fidelity-oracle.md).
 
 The harness exposes an image-producing tool only when the exact provider model
 route publishes both image-input and image-tool-result modalities. GPT-5.6

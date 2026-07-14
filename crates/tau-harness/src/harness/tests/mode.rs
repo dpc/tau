@@ -841,8 +841,8 @@ fn embedded_mode_can_run_shell_commands() {
     assert!(!r.is_empty(), "shell response should not be empty");
 }
 
-/// Ensures traced embedded shell runs still return final output when transient
-/// progress is missed.
+/// Ensures a full embedded shell round returns final output when progress is
+/// missed and traces the correlated call/result without provider bytes.
 #[test]
 fn traced_embedded_returns_shell_output_when_progress_is_missed() {
     let td = TempDir::new().expect("tempdir");
@@ -852,6 +852,11 @@ fn traced_embedded_returns_shell_output_when_progress_is_missed() {
     // completes before the subscription writer drains, but the final
     // response must still arrive and lifecycle tracing is covered above.
     assert!(!o.response.is_empty(), "shell response should not be empty");
+    assert_eq!(o.tool_calls.len(), 1);
+    assert_eq!(o.tool_calls[0].name.as_str(), "shell");
+    assert_eq!(o.tool_results.len(), 1);
+    assert_eq!(o.tool_results[0].call_id, o.tool_calls[0].call_id);
+    assert!(o.tool_results[0].provider_content.is_empty());
 }
 
 /// Ensures daemon-mode shell interactions report lifecycle events and clean up

@@ -280,8 +280,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         description: Some(
             "Read one local PNG, JPEG, or WebP image for visual inspection. The image is \
              decoded under strict byte, dimension, pixel, and memory limits, normalized \
-             without source metadata, resized to bounded high detail, and returned as native \
-             typed image content rather than base64 text."
+             without source metadata, optionally cropped in EXIF-oriented source coordinates, \
+             resized with the high profile by default or the experimental bounded overview \
+             profile, and returned as native typed image content rather than base64 text."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -291,6 +292,40 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 "path": {
                     "type": "string",
                     "description": "Path to one local PNG, JPEG, or WebP image"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["high", "overview"],
+                    "default": "high",
+                    "description": "Local preparation profile. `high` (the default) preserves the existing 2048-side/2500-patch bounds. `overview` is experimental, intended only for coarse inspection, and is bounded to 1024 pixels on a side and 600 32px patches."
+                },
+                "region": {
+                    "type": "object",
+                    "description": "Optional crop in pixels of the EXIF-oriented source raster, before mode resizing. Uses a top-left origin and half-open extents.",
+                    "properties": {
+                        "x": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": u32::MAX
+                        },
+                        "y": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": u32::MAX
+                        },
+                        "width": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": u32::MAX
+                        },
+                        "height": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": u32::MAX
+                        }
+                    },
+                    "required": ["x", "y", "width", "height"],
+                    "additionalProperties": false
                 }
             },
             "required": ["path"],

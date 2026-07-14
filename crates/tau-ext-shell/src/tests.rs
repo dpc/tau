@@ -102,11 +102,170 @@ fn read_image_returns_typed_provider_content() {
     let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
     assert_eq!(image.media_type, tau_proto::ImageMediaType::Png);
     assert_eq!((image.width, image.height), (4, 3));
+    assert_eq!(cbor_map_text(&output.result, "mode"), Some("high"));
+    assert_eq!(cbor_map_int(&output.result, "patches"), Some(1));
+    assert_eq!(
+        cbor_map_int(&output.result, "bytes"),
+        i64::try_from(image.data.len()).ok()
+    );
+    assert_eq!(output.display.stats.bytes, Some(image.data.len() as u64));
+    assert_eq!(
+        cbor_map_value(&output.result, "region"),
+        Some(&CborValue::Map(vec![
+            (
+                CborValue::Text("x".to_owned()),
+                CborValue::Integer(0.into())
+            ),
+            (
+                CborValue::Text("y".to_owned()),
+                CborValue::Integer(0.into())
+            ),
+            (
+                CborValue::Text("width".to_owned()),
+                CborValue::Integer(4.into())
+            ),
+            (
+                CborValue::Text("height".to_owned()),
+                CborValue::Integer(3.into())
+            ),
+        ]))
+    );
     let decoded = image::load_from_memory_with_format(&image.data, image::ImageFormat::Png)
         .expect("prepared image remains a decodable PNG");
     assert_eq!((decoded.width(), decoded.height()), (4, 3));
     assert!(matches!(output.result, CborValue::Map(_)));
     assert!(!format!("{:?}", output.result).contains("137, 80, 78, 71"));
+}
+
+/// Locks bare-call compatibility against explicit high at a resizing boundary,
+/// including canonical bytes, dimensions, and patch accounting.
+#[test]
+fn read_image_bare_call_matches_explicit_high_for_large_image() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("large.png");
+    let source = image::DynamicImage::new_rgb8(1601, 1601);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    source
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode PNG");
+    std::fs::write(&path, bytes.into_inner()).expect("write PNG");
+    let path = path.display().to_string();
+    let bare = read_image(&cbor_text_map(vec![("path", &path)])).expect("bare high");
+    let explicit = read_image(&CborValue::Map(vec![
+        (CborValue::Text("path".to_owned()), CborValue::Text(path)),
+        (
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text("high".to_owned()),
+        ),
+    ]))
+    .expect("explicit high");
+    assert_eq!(
+        (provider_image(&bare).width, provider_image(&bare).height),
+        (1569, 1569)
+    );
+    assert_eq!(cbor_map_int(&bare.result, "patches"), Some(2500));
+    assert_eq!(provider_image(&bare).data, provider_image(&explicit).data);
+    assert_eq!(bare.result, explicit.result);
+}
+
+/// Ensures the public tool reports exact transform metadata and directs only
+/// the cropped canonical raster into provider content.
+#[test]
+fn read_image_overview_crop_reports_transform_metadata() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("fixture.png");
+    let source = image::DynamicImage::new_rgb8(100, 80);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    source
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode PNG");
+    std::fs::write(&path, bytes.into_inner()).expect("write PNG");
+    let region = CborValue::Map(vec![
+        (
+            CborValue::Text("x".to_owned()),
+            CborValue::Integer(10.into()),
+        ),
+        (
+            CborValue::Text("y".to_owned()),
+            CborValue::Integer(20.into()),
+        ),
+        (
+            CborValue::Text("width".to_owned()),
+            CborValue::Integer(64.into()),
+        ),
+        (
+            CborValue::Text("height".to_owned()),
+            CborValue::Integer(32.into()),
+        ),
+    ]);
+    let output = read_image(&CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.display().to_string()),
+        ),
+        (
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text("overview".to_owned()),
+        ),
+        (CborValue::Text("region".to_owned()), region.clone()),
+    ]))
+    .expect("read overview crop");
+
+    assert_eq!(cbor_map_text(&output.result, "mode"), Some("overview"));
+    assert_eq!(cbor_map_int(&output.result, "source_width"), Some(100));
+    assert_eq!(cbor_map_int(&output.result, "source_height"), Some(80));
+    assert_eq!(cbor_map_int(&output.result, "oriented_width"), Some(100));
+    assert_eq!(cbor_map_int(&output.result, "oriented_height"), Some(80));
+    assert_eq!(cbor_map_int(&output.result, "width"), Some(64));
+    assert_eq!(cbor_map_int(&output.result, "height"), Some(32));
+    assert_eq!(cbor_map_int(&output.result, "patches"), Some(2));
+    let result_region = cbor_map_value(&output.result, "region");
+    assert_eq!(result_region, Some(&region));
+    let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
+    assert_eq!((image.width, image.height), (64, 32));
+    assert_eq!(image.detail, tau_proto::ImageDetail::High);
+    assert_eq!(
+        cbor_map_int(&output.result, "bytes"),
+        i64::try_from(image.data.len()).ok()
+    );
+    assert_eq!(output.display.stats.bytes, Some(image.data.len() as u64));
+}
+
+fn cbor_map_value<'a>(map: &'a CborValue, name: &str) -> Option<&'a CborValue> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| {
+        matches!(key, CborValue::Text(key) if key == name).then_some(value)
+    })
+}
+
+fn provider_image(output: &crate::display::ToolOutput) -> &tau_proto::ImageContent {
+    let tau_proto::ToolResultContentPart::Image(image) = &output.provider_content[0];
+    image
+}
+
+/// Locks the model-visible experimental mode and complete oriented-region
+/// schema.
+#[test]
+fn read_image_schema_exposes_bounded_overview_and_complete_region() {
+    let tool = registered_tool_specs(false)
+        .into_iter()
+        .find(|tool| tool.name == READ_IMAGE_TOOL_NAME)
+        .expect("read_image tool");
+    let parameters = tool.parameters.expect("parameters");
+    assert_eq!(
+        parameters["properties"]["mode"]["enum"],
+        serde_json::json!(["high", "overview"])
+    );
+    assert_eq!(
+        parameters["properties"]["region"]["required"],
+        serde_json::json!(["x", "y", "width", "height"])
+    );
+    assert_eq!(
+        parameters["properties"]["region"]["additionalProperties"],
+        serde_json::json!(false)
+    );
 }
 
 type TestExtensionReader = EventReader<BufReader<UnixStream>>;
@@ -659,6 +818,8 @@ fn replayed_shell_tool_delivery_does_not_run_tool() {
     );
 }
 
+/// Covers startup registration defaults, groups, names, and core tool schemas
+/// through the real extension protocol publication path.
 #[test]
 fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
     let (mut reader, mut writer) = spawn_extension();

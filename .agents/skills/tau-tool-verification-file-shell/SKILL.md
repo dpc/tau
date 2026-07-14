@@ -12,15 +12,22 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Tool-specific guidelines
 
-`read_image` accepts exactly one PNG, JPEG, or WebP path and has no crop,
-detail, or multi-image arguments. Verify that it sniffs and fully decodes bytes
-rather than trusting the extension, rejects animated or oversized inputs, and
-returns a typed image part paired with the original tool call. Provider-visible
-base64 must exist only inside a native Responses `input_image` data URL, never
-ordinary tool text or a synthetic user message. Generic UI/debug output should
-show only format, dimensions, encoded byte count, and high detail. If the active
-route lacks explicit image input and image tool-result modalities, the tool
-should be absent.
+`read_image` accepts exactly one PNG, JPEG, or WebP path, an optional
+`mode: high | overview`, and an optional `{x,y,width,height}` region; it has no
+multi-image or original-detail form. Bare calls and explicit high calls must
+retain the 2048-side/2,500-patch profile. Experimental overview must stay within
+1024 pixels on either side and 600 rounded-up 32-by-32 patches. Regions use
+half-open coordinates in the EXIF-oriented source, reject zero, overflow, and
+out-of-bounds extents, crop before mode resizing, and report the exact
+source/oriented/region/output geometry, profile, patches, and canonical byte
+count. Verify that the tool sniffs and fully decodes bytes rather than trusting
+the extension, rejects animated or oversized inputs, and returns one typed image
+part paired with the original tool call. Both local profiles remain provider
+high detail. Provider-visible base64 must exist only inside a native Responses
+`input_image` data URL, never ordinary tool text or a synthetic user message.
+Generic UI/debug output must expose metadata only. If the active route lacks
+explicit image input and image tool-result modalities, the tool should be
+absent.
 
 The output of `read` and `shell` is intentionally similar, and should support
 the same semantics. The meaning of the line prefix is different: line number vs stdout/stderr information
@@ -67,4 +74,3 @@ that tool schema.
 
 Other commands should adhere to pre-existing conventions and naming used in
 standard tools.
-

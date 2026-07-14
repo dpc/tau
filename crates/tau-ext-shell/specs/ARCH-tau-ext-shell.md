@@ -9,11 +9,18 @@ at most 8192 pixels and decoded area at most 16,777,216 pixels. Decoder-reported
 output is capped at 64 MiB before allocation and one extension-wide permit
 bounds concurrent decoded memory. WebP uses a stricter 4,194,304-pixel and
 32-MiB decoded-output cap because its decoder has additional workspace
-allocations. Animated inputs are rejected. EXIF orientation
-is applied, metadata is stripped through same-format re-encoding, and
-high-detail output is resized to a 2048-pixel side and 2,500 32-by-32 patches.
-The typed image is provider/transcript data; generic display metadata contains
-path, format, dimensions, byte count, and detail without bytes.
+allocations. Crop and resize may temporarily hold the decoder's bounded raster
+and one equally bounded transformed raster (at most 128 MiB combined); the
+single extension-wide decode permit covers this whole preparation interval.
+Animated inputs are rejected. EXIF orientation is applied before
+an optional half-open oriented-source region crop. Metadata is stripped through
+same-format re-encoding. Bare and explicit `high` output retains the
+2048-pixel-side and 2,500-patch bounds; experimental `overview` uses 1024-side
+and 600-patch bounds. Both are provider high-detail content because overview is
+a local transform. The typed transformed image is provider/transcript data and
+therefore drives request/context accounting; generic display metadata contains
+safe source/oriented/region/output geometry, profile, patches, format, and byte
+count without bytes.
 
 ## Per-agent cwd metadata
 

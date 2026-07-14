@@ -9,7 +9,7 @@ use tau_proto::{
     CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart, ToolUseStats,
 };
 
-use crate::argument::argument_text;
+use crate::argument::{argument_text, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, ok_display};
 use crate::tools::world::ShellWorld;
 
@@ -21,10 +21,203 @@ const MAX_WEBP_SOURCE_PIXELS: u64 = 4_194_304;
 const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HIGH_SIDE: u32 = 2048;
 const MAX_HIGH_PATCHES: u64 = 2500;
+const MAX_OVERVIEW_SIDE: u32 = 1024;
+const MAX_OVERVIEW_PATCHES: u64 = 600;
 const PATCH_SIDE: u64 = 32;
 const MAX_CONCURRENT_DECODES: usize = 1;
 
 static DECODE_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+/// Named local image-preparation profile selected by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageMode {
+    /// Compatibility profile with the existing 2048-side/2,500-patch limits.
+    High,
+    /// Experimental coarse-inspection profile with tighter 1024/600 limits.
+    Overview,
+}
+
+impl ImageMode {
+    /// Parse the optional model-visible mode, preserving high as the default.
+    fn from_arguments(arguments: &CborValue) -> Result<Self, String> {
+        match optional_argument_text(arguments, "mode")?.as_deref() {
+            None | Some("high") => Ok(Self::High),
+            Some("overview") => Ok(Self::Overview),
+            Some(_) => Err("argument `mode` must be `high` or `overview`".to_owned()),
+        }
+    }
+
+    /// Stable metadata spelling for the selected profile.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Overview => "overview",
+        }
+    }
+
+    /// Maximum prepared side and patch count for this profile.
+    fn bounds(self) -> (u32, u64) {
+        match self {
+            Self::High => (MAX_HIGH_SIDE, MAX_HIGH_PATCHES),
+            Self::Overview => (MAX_OVERVIEW_SIDE, MAX_OVERVIEW_PATCHES),
+        }
+    }
+
+    /// Calculate the initial proportional resize and final patch-bounded size.
+    fn dimensions(self, width: u32, height: u32) -> ResizePlan {
+        let (max_side, max_patches) = self.bounds();
+        let side_scale = f64::from(max_side) / f64::from(width.max(height));
+        let patches = patch_count(width, height);
+        let patch_scale = (max_patches as f64 / patches as f64).sqrt();
+        let scale = 1.0_f64.min(side_scale).min(patch_scale);
+        let initial = if scale < 1.0 {
+            ImageDimensions {
+                width: (f64::from(width) * scale).floor().max(1.0) as u32,
+                height: (f64::from(height) * scale).floor().max(1.0) as u32,
+            }
+        } else {
+            ImageDimensions { width, height }
+        };
+        let mut target = initial;
+        while max_patches < patch_count(target.width, target.height) {
+            target.width = target.width.saturating_sub(1).max(1);
+            target.height = target.height.saturating_sub(1).max(1);
+        }
+        ResizePlan { initial, target }
+    }
+}
+
+/// One raster size used while calculating a bounded resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ImageDimensions {
+    /// Raster width in pixels.
+    width: u32,
+    /// Raster height in pixels.
+    height: u32,
+}
+
+/// Compatibility-preserving initial and final dimensions for one resize.
+struct ResizePlan {
+    /// First proportional resize performed by the historical algorithm.
+    initial: ImageDimensions,
+    /// Final dimensions after any one-pixel patch-budget reductions.
+    target: ImageDimensions,
+}
+
+/// Half-open crop rectangle in pixels of the EXIF-oriented source raster.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ImageRegion {
+    /// Left edge in oriented-source pixels.
+    x: u32,
+    /// Top edge in oriented-source pixels.
+    y: u32,
+    /// Non-zero crop width in oriented-source pixels.
+    width: u32,
+    /// Non-zero crop height in oriented-source pixels.
+    height: u32,
+}
+
+impl ImageRegion {
+    /// Parse an optional strict region object from tool arguments.
+    fn from_arguments(arguments: &CborValue) -> Result<Option<Self>, String> {
+        let CborValue::Map(arguments) = arguments else {
+            return Ok(None);
+        };
+        let Some(value) = arguments.iter().find_map(|(key, value)| {
+            matches!(key, CborValue::Text(key) if key == "region").then_some(value)
+        }) else {
+            return Ok(None);
+        };
+        let CborValue::Map(entries) = value else {
+            return Err("argument `region` must be an object".to_owned());
+        };
+        for (key, _) in entries {
+            match key {
+                CborValue::Text(key) if matches!(key.as_str(), "x" | "y" | "width" | "height") => {}
+                CborValue::Text(key) => {
+                    return Err(format!("argument `region` has unknown field `{key}`"));
+                }
+                _ => return Err("argument `region` field names must be strings".to_owned()),
+            }
+        }
+        Ok(Some(Self {
+            x: region_u32(entries, "x")?,
+            y: region_u32(entries, "y")?,
+            width: region_extent(entries, "width")?,
+            height: region_extent(entries, "height")?,
+        }))
+    }
+
+    /// Select the complete oriented source raster.
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Validate this half-open extent against an oriented source raster.
+    fn validate(self, width: u32, height: u32) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("argument `region` width and height must be non-zero".to_owned());
+        }
+        let right = self
+            .x
+            .checked_add(self.width)
+            .ok_or_else(|| "argument `region` horizontal extent overflows".to_owned())?;
+        let bottom = self
+            .y
+            .checked_add(self.height)
+            .ok_or_else(|| "argument `region` vertical extent overflows".to_owned())?;
+        if width < right || height < bottom {
+            return Err(format!(
+                "argument `region` ({},{} {}x{}) is outside oriented source {}x{}",
+                self.x, self.y, self.width, self.height, width, height
+            ));
+        }
+        Ok(())
+    }
+
+    /// Encode safe region metadata for generic result surfaces.
+    fn into_value(self) -> CborValue {
+        CborValue::Map(vec![
+            (
+                CborValue::Text("x".to_owned()),
+                CborValue::Integer(i64::from(self.x).into()),
+            ),
+            (
+                CborValue::Text("y".to_owned()),
+                CborValue::Integer(i64::from(self.y).into()),
+            ),
+            (
+                CborValue::Text("width".to_owned()),
+                CborValue::Integer(i64::from(self.width).into()),
+            ),
+            (
+                CborValue::Text("height".to_owned()),
+                CborValue::Integer(i64::from(self.height).into()),
+            ),
+        ])
+    }
+}
+
+/// Canonical image plus source-transform metadata safe for generic surfaces.
+struct PreparedImage {
+    /// Typed canonical content directed only to image-capable providers.
+    content: ImageContent,
+    /// Decoder-reported width before EXIF orientation.
+    source_width: u32,
+    /// Decoder-reported height before EXIF orientation.
+    source_height: u32,
+    /// Full raster width after EXIF orientation.
+    oriented_width: u32,
+    /// Full raster height after EXIF orientation.
+    oriented_height: u32,
+    /// Exact oriented-source selection prepared for output.
+    region: ImageRegion,
+}
 
 /// RAII permit limiting aggregate decoded-image memory in this extension.
 struct DecodePermit;
@@ -58,6 +251,8 @@ pub(crate) fn read_image(
     arguments: &CborValue,
     world: &mut ShellWorld,
 ) -> Result<ToolOutput, ToolFailure> {
+    let mode = ImageMode::from_arguments(arguments).map_err(ToolFailure::from)?;
+    let requested_region = ImageRegion::from_arguments(arguments).map_err(ToolFailure::from)?;
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let path = PathBuf::from(path);
     let display_path = path.display().to_string();
@@ -66,13 +261,17 @@ pub(crate) fn read_image(
         .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_path.clone()))?;
 
     let _permit = DecodePermit::acquire();
-    let image = prepare_image(&bytes)
+    let prepared = prepare_image(&bytes, mode, requested_region)
         .map_err(|message| ToolFailure::from(message).with_args(display_path.clone()))?;
+    let image = prepared.content;
     let format = image.media_type.mime_type();
     let byte_count = image.data.len();
+    let patches = patch_count(image.width, image.height);
     let summary = format!(
-        "{format} image, {}x{}, {byte_count} bytes, high detail",
-        image.width, image.height
+        "{format} image, {}x{}, {patches} patches, {byte_count} bytes, {} mode",
+        image.width,
+        image.height,
+        mode.as_str()
     );
     let result = CborValue::Map(vec![
         (
@@ -96,13 +295,52 @@ pub(crate) fn read_image(
             CborValue::Integer(i64::try_from(byte_count).unwrap_or(i64::MAX).into()),
         ),
         (
+            CborValue::Text("patches".to_owned()),
+            CborValue::Integer(i64::try_from(patches).unwrap_or(i64::MAX).into()),
+        ),
+        (
             CborValue::Text("detail".to_owned()),
             CborValue::Text("high".to_owned()),
         ),
+        (
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text(mode.as_str().to_owned()),
+        ),
+        (
+            CborValue::Text("source_width".to_owned()),
+            CborValue::Integer(i64::from(prepared.source_width).into()),
+        ),
+        (
+            CborValue::Text("source_height".to_owned()),
+            CborValue::Integer(i64::from(prepared.source_height).into()),
+        ),
+        (
+            CborValue::Text("oriented_width".to_owned()),
+            CborValue::Integer(i64::from(prepared.oriented_width).into()),
+        ),
+        (
+            CborValue::Text("oriented_height".to_owned()),
+            CborValue::Integer(i64::from(prepared.oriented_height).into()),
+        ),
+        (
+            CborValue::Text("region".to_owned()),
+            prepared.region.into_value(),
+        ),
     ]);
     let display_args = format!(
-        "{display_path}  {format} {}x{}  {byte_count} bytes  high",
-        image.width, image.height
+        "{display_path}  {format}  mode={}  source={}x{}  oriented={}x{}  \
+         region={},{} {}x{}  output={}x{}  {patches} patches  {byte_count} bytes",
+        mode.as_str(),
+        prepared.source_width,
+        prepared.source_height,
+        prepared.oriented_width,
+        prepared.oriented_height,
+        prepared.region.x,
+        prepared.region.y,
+        prepared.region.width,
+        prepared.region.height,
+        image.width,
+        image.height
     );
     let mut display = ok_display(display_args);
     display.stats = ToolUseStats {
@@ -116,7 +354,11 @@ pub(crate) fn read_image(
     })
 }
 
-fn prepare_image(bytes: &[u8]) -> Result<ImageContent, String> {
+fn prepare_image(
+    bytes: &[u8],
+    mode: ImageMode,
+    requested_region: Option<ImageRegion>,
+) -> Result<PreparedImage, String> {
     let mut reader = ImageReader::new(Cursor::new(bytes));
     reader = reader
         .with_guessed_format()
@@ -134,8 +376,8 @@ fn prepare_image(bytes: &[u8]) -> Result<ImageContent, String> {
     let mut decoder = reader
         .into_decoder()
         .map_err(|error| format!("cannot decode image header: {error}"))?;
-    let (width, height) = decoder.dimensions();
-    validate_source_dimensions(width, height, source_format)?;
+    let (source_width, source_height) = decoder.dimensions();
+    validate_source_dimensions(source_width, source_height, source_format)?;
     let decoded_bytes = decoder.total_bytes();
     validate_decoded_allocation(source_format, decoded_bytes)?;
     let orientation = decoder
@@ -144,7 +386,14 @@ fn prepare_image(bytes: &[u8]) -> Result<ImageContent, String> {
     let mut decoded = DynamicImage::from_decoder(decoder)
         .map_err(|error| format!("cannot decode image: {error}"))?;
     decoded.apply_orientation(orientation);
-    decoded = resize_for_high_detail(decoded);
+    let (oriented_width, oriented_height) = decoded.dimensions();
+    let region =
+        requested_region.unwrap_or_else(|| ImageRegion::full(oriented_width, oriented_height));
+    region.validate(oriented_width, oriented_height)?;
+    if region != ImageRegion::full(oriented_width, oriented_height) {
+        decoded = decoded.crop_imm(region.x, region.y, region.width, region.height);
+    }
+    decoded = resize_for_mode(decoded, mode);
     let (width, height) = decoded.dimensions();
 
     let mut data = Cursor::new(Vec::new());
@@ -157,13 +406,44 @@ fn prepare_image(bytes: &[u8]) -> Result<ImageContent, String> {
             "normalized image exceeds {MAX_ENCODED_BYTES} byte limit"
         ));
     }
-    Ok(ImageContent {
-        media_type: source_format,
-        data: data.into(),
-        width,
-        height,
-        detail: ImageDetail::High,
+    Ok(PreparedImage {
+        content: ImageContent {
+            media_type: source_format,
+            data: data.into(),
+            width,
+            height,
+            // Overview is a local transform, not provider `low` detail.
+            detail: ImageDetail::High,
+        },
+        source_width,
+        source_height,
+        oriented_width,
+        oriented_height,
+        region,
     })
+}
+
+fn region_extent(entries: &[(CborValue, CborValue)], name: &str) -> Result<u32, String> {
+    let value = region_u32(entries, name)?;
+    if value == 0 {
+        return Err(format!("argument `region.{name}` must be non-zero"));
+    }
+    Ok(value)
+}
+
+fn region_u32(entries: &[(CborValue, CborValue)], name: &str) -> Result<u32, String> {
+    let value = entries
+        .iter()
+        .find_map(|(key, value)| {
+            matches!(key, CborValue::Text(key) if key == name).then_some(value)
+        })
+        .ok_or_else(|| format!("argument `region.{name}` is required"))?;
+    let CborValue::Integer(value) = value else {
+        return Err(format!("argument `region.{name}` must be an integer"));
+    };
+    let value = u32::try_from(i128::from(*value))
+        .map_err(|_| format!("argument `region.{name}` must fit in an unsigned 32-bit integer"))?;
+    Ok(value)
 }
 
 fn validate_decoded_allocation(
@@ -225,22 +505,19 @@ fn validate_source_dimensions(
     Ok(())
 }
 
-fn resize_for_high_detail(mut image: DynamicImage) -> DynamicImage {
+fn resize_for_mode(mut image: DynamicImage, mode: ImageMode) -> DynamicImage {
     let (width, height) = image.dimensions();
-    let side_scale = f64::from(MAX_HIGH_SIDE) / f64::from(width.max(height));
-    let patches = patch_count(width, height);
-    let patch_scale = (MAX_HIGH_PATCHES as f64 / patches as f64).sqrt();
-    let scale = 1.0_f64.min(side_scale).min(patch_scale);
-    if scale < 1.0 {
-        let target_width = (f64::from(width) * scale).floor().max(1.0) as u32;
-        let target_height = (f64::from(height) * scale).floor().max(1.0) as u32;
+    let plan = mode.dimensions(width, height);
+    if plan.initial != (ImageDimensions { width, height }) {
         image = image.resize_exact(
-            target_width,
-            target_height,
+            plan.initial.width,
+            plan.initial.height,
             image::imageops::FilterType::Triangle,
         );
     }
-    while MAX_HIGH_PATCHES < patch_count(image.width(), image.height()) {
+    // Preserve the high profile's existing sequence of one-pixel resamples so
+    // bare calls retain byte-for-byte preparation behavior.
+    while (image.width(), image.height()) != (plan.target.width, plan.target.height) {
         let width = image.width().saturating_sub(1).max(1);
         let height = image.height().saturating_sub(1).max(1);
         image = image.resize_exact(width, height, image::imageops::FilterType::Triangle);
@@ -332,96 +609,4 @@ fn webp_has_animation_chunk(bytes: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Ensures every v1 format is decoded and deterministically re-encoded as
-    /// the same closed media type while retaining truthful dimensions.
-    #[test]
-    fn prepares_png_jpeg_and_webp() {
-        for (format, expected) in [
-            (ImageFormat::Png, ImageMediaType::Png),
-            (ImageFormat::Jpeg, ImageMediaType::Jpeg),
-            (ImageFormat::WebP, ImageMediaType::Webp),
-        ] {
-            let source = DynamicImage::new_rgb8(3, 2);
-            let mut bytes = Cursor::new(Vec::new());
-            source.write_to(&mut bytes, format).expect("encode fixture");
-            let prepared = prepare_image(bytes.get_ref()).expect("prepare image");
-            assert_eq!(prepared.media_type, expected);
-            assert_eq!((prepared.width, prepared.height), (3, 2));
-            assert!(!prepared.data.is_empty());
-        }
-    }
-
-    /// Ensures extension or filename claims cannot make unsupported bytes cross
-    /// the typed image boundary.
-    #[test]
-    fn rejects_non_raster_input() {
-        let error = prepare_image(b"<svg/>").expect_err("SVG is unsupported");
-        assert!(error.contains("unsupported image format"));
-    }
-
-    /// Ensures high-detail preparation resizes large square images to the patch
-    /// budget rather than allowing provider cost to escape the local bound.
-    #[test]
-    fn high_detail_resize_obeys_patch_budget() {
-        let image = DynamicImage::new_rgba8(3000, 3000);
-        let resized = resize_for_high_detail(image);
-        assert!(resized.width() <= MAX_HIGH_SIDE);
-        assert!(resized.height() <= MAX_HIGH_SIDE);
-        assert!(patch_count(resized.width(), resized.height()) <= MAX_HIGH_PATCHES);
-    }
-
-    /// Ensures a 4096-square RGBA16 decode is rejected from decoder-reported
-    /// bytes before allocating its roughly 128 MiB output buffer.
-    #[test]
-    fn rejects_rgba16_sized_decode_allocation() {
-        let rgba16_bytes = 4096_u64 * 4096 * 8;
-        assert!(
-            validate_decoded_allocation(ImageMediaType::Png, rgba16_bytes)
-                .expect_err("oversized decoded allocation")
-                .contains("limit")
-        );
-    }
-
-    /// Ensures WebP's decoder workspace uncertainty receives a stricter source
-    /// pixel limit than PNG and JPEG.
-    #[test]
-    fn rejects_webp_above_workspace_pixel_budget() {
-        assert!(validate_source_dimensions(2048, 2049, ImageMediaType::Webp).is_err());
-        assert!(validate_source_dimensions(2048, 2049, ImageMediaType::Png).is_ok());
-    }
-
-    /// Ensures APNG and animated-WebP control chunks are rejected before any
-    /// frame decode, even when the generic image decoder would expose frame
-    /// one.
-    #[test]
-    fn rejects_png_and_webp_animation_chunks() {
-        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
-        apng.extend_from_slice(&0_u32.to_be_bytes());
-        apng.extend_from_slice(b"acTL");
-        apng.extend_from_slice(&0_u32.to_be_bytes());
-        assert!(reject_animation(&apng, ImageMediaType::Png).is_err());
-
-        let mut webp = b"RIFF\x00\x00\x00\x00WEBP".to_vec();
-        webp.extend_from_slice(b"ANIM");
-        webp.extend_from_slice(&0_u32.to_le_bytes());
-        assert!(reject_animation(&webp, ImageMediaType::Webp).is_err());
-    }
-
-    /// Ensures image debug output exposes metadata but never raw pixel bytes.
-    #[test]
-    fn image_content_debug_redacts_bytes() {
-        let image = ImageContent {
-            media_type: ImageMediaType::Png,
-            data: vec![1, 2, 3, 4].into(),
-            width: 1,
-            height: 1,
-            detail: ImageDetail::High,
-        };
-        let debug = format!("{image:?}");
-        assert!(debug.contains("<4 bytes>"));
-        assert!(!debug.contains("[1, 2, 3, 4]"));
-    }
-}
+mod tests;

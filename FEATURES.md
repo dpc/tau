@@ -431,9 +431,16 @@ Registers the everyday tools the agent uses to inspect and edit a project:
 tool for testing. The shell command and any wrapper prefix are configurable:
 
 `read_image(path)` reads one PNG, JPEG, or WebP under normal shell filesystem
-authority and returns bounded high-detail typed image content. It is exposed
-only when the exact provider route supports native image tool results (initially
-GPT-5.6 ChatGPT Responses); generic UI and debug surfaces show metadata only.
+authority and returns bounded high-detail typed image content. Bare calls retain
+the loss-averse 2048-side/2,500-patch preparation. Callers may explicitly choose
+experimental `mode: "overview"` (1024-side/600-patch, coarse inspection only)
+and/or a half-open `region` in EXIF-oriented source pixels; cropping happens
+before profile resizing. Safe metadata reports source, oriented, selected-region,
+and output geometry plus patches and canonical bytes. Overview is not the
+default and must not be recommended generally until the live fidelity oracle
+passes. The tool is exposed only when the exact provider route supports native
+image tool results (initially GPT-5.6 ChatGPT Responses); generic UI and debug
+surfaces show metadata only.
 
 ```json5
 "core-shell": {

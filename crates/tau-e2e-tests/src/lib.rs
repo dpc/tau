@@ -91,11 +91,22 @@ impl VcrFixture {
         Ok(Some(fixture))
     }
 
+    /// Override the stable session id used for cassette correlation.
+    ///
+    /// Non-portable characters are replaced so callers can derive
+    /// collision-free ids from descriptive test and trial names.
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: &str) -> Self {
+        self.session_id = sanitize_name(session_id);
+        self
+    }
+
     /// Runs one real embedded Tau turn and returns its trace.
     ///
     /// VCR mismatch or missing cassette errors surface as the returned harness
-    /// error. Callers should assert on the returned progress messages when a
-    /// test needs to prove that a specific tool was actually invoked.
+    /// error. Callers should assert embedded `tool_calls` and byte-free
+    /// `tool_results` when a test needs to prove a specific invocation and
+    /// observed terminal result; progress messages are presentation-only.
     pub fn run_turn(&self, prompt: &str) -> Result<InteractionOutcome, tau_harness::HarnessError> {
         run_embedded_message_with_options(
             &self.harness_state_dir,
@@ -108,6 +119,28 @@ impl VcrFixture {
                 })
                 .build(),
         )
+    }
+
+    /// Write deterministic fixture bytes into the shell extension's working
+    /// directory.
+    ///
+    /// `relative_path` must be one normal filename rather than a path
+    /// traversal.
+    pub fn write_work_file(
+        &self,
+        relative_path: impl AsRef<Path>,
+        bytes: &[u8],
+    ) -> Result<PathBuf, std::io::Error> {
+        let path = relative_path.as_ref();
+        if path.components().count() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "fixture path must be one filename",
+            ));
+        }
+        let path = self.work_dir.join(path);
+        std::fs::write(&path, bytes)?;
+        Ok(path)
     }
 
     fn write_harness_config(

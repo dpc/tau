@@ -4,8 +4,15 @@ Status: inferred
 
 Image-tool tests generate deterministic PNG/JPEG/WebP fixtures, exercise
 sniffing, animation rejection, decoder-reported output allocation, the stricter
-WebP workspace budget, and high-detail bounds. They assert foreground-only
-registration and typed provider content separately from metadata-only display.
+WebP workspace budget, unchanged high-detail geometry, experimental overview
+bounds, EXIF-orientation-before-crop ordering, and crop extent failures. Stable
+synthetic geometry fixtures quantify high, overview, and native crop behavior.
+They assert foreground-only registration and typed provider content separately
+from metadata-only display. A separately gated opt-in real-provider oracle
+checks coarse overview and fine high/crop observations; it is evidence required
+before changing the default or general image-inspection guidance, not part of
+hermetic CI. Its protocol and gates are documented in
+[`read_image` visual-fidelity oracle](../../../docs/read-image-fidelity-oracle.md).
 Cross-crate provider tests own Responses wire shape, Lite detail omission, route
 fail-closed behavior, request-wide raw/data-URL budgets, and digest-preserving
 diagnostic data-URL redaction.

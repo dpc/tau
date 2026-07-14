@@ -129,10 +129,21 @@ fn validate_serve_options(options: &ServeOptions) -> Result<(), HarnessError> {
 }
 
 /// One completed user interaction with optional progress updates.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InteractionOutcome {
+    /// Human-readable extension lifecycle messages observed during the turn.
     pub lifecycle_messages: Vec<String>,
+    /// Human-readable tool progress messages observed during the turn.
     pub progress_messages: Vec<String>,
+    /// Provider-requested tool calls observed by an embedded interaction.
+    ///
+    /// Daemon trace helpers leave this empty because their narrow subscription
+    /// intentionally does not expose uncorrelated runtime tool traffic.
+    pub tool_calls: Vec<tau_proto::ToolCallItem>,
+    /// Terminal tool results observed by an embedded interaction, with typed
+    /// provider content removed. Daemon trace helpers leave this empty.
+    pub tool_results: Vec<tau_proto::ToolResult>,
+    /// Final assistant response text.
     pub response: String,
 }
 
@@ -822,6 +833,8 @@ fn handle_daemon_trace_event(
             return Ok(Some(InteractionOutcome {
                 lifecycle_messages: std::mem::take(state.lifecycle_messages),
                 progress_messages: std::mem::take(state.progress_messages),
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
                 response: assistant_text_from_output_items(&finished.output_items)
                     .unwrap_or_default(),
             }));

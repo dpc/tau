@@ -21386,3 +21386,47 @@ fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
         "reserved first-party category must be rejected at construction"
     );
 }
+/// An embedded tool round retains provider-requested arguments and observed
+/// terminal metadata while stripping directed image bytes from the trace.
+#[test]
+fn embedded_tool_trace_records_call_and_byte_free_result() {
+    let call = ToolCallItem {
+        call_id: "call-image".into(),
+        name: ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text("overview".to_owned()),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    };
+    let mut calls = Vec::new();
+    super::super::record_embedded_tool_calls(&[ContextItem::ToolCall(call.clone())], &mut calls);
+    assert_eq!(calls, vec![call]);
+
+    let result = ToolResult {
+        call_id: "call-image".into(),
+        tool_name: ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Map(vec![(
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text("overview".to_owned()),
+        )]),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: vec![1, 2, 3].into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let observed = super::super::byte_free_embedded_tool_result(&result);
+    assert_eq!(observed.result, result.result);
+    assert!(observed.provider_content.is_empty());
+}

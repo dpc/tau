@@ -19781,6 +19781,8 @@ impl Harness {
 
         let started_at = Instant::now();
         let mut progress_messages = Vec::new();
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
         loop {
             self.process_runtime_deadlines();
             let remaining = RESPONSE_TIMEOUT
@@ -19818,6 +19820,12 @@ impl Harness {
                     if let Some(Event::ToolProgress(progress)) = event {
                         progress_messages.push(format_tool_progress(progress));
                     }
+                    if let Some(Event::ProviderResponseFinished(response)) = event {
+                        record_embedded_tool_calls(&response.output_items, &mut tool_calls);
+                    }
+                    if let Some(Event::ToolResult(result)) = event {
+                        tool_results.push(byte_free_embedded_tool_result(result));
+                    }
                     let is_final = matches!(
                         event,
                         Some(Event::ProviderResponseFinished(r))
@@ -19835,6 +19843,8 @@ impl Harness {
                         return Ok(InteractionOutcome {
                             lifecycle_messages: Vec::new(),
                             progress_messages,
+                            tool_calls,
+                            tool_results,
                             response: final_text.unwrap_or_default(),
                         });
                     }
@@ -20010,6 +20020,26 @@ impl Harness {
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
     }
+}
+
+/// Record exact provider-requested calls for an isolated embedded interaction.
+fn record_embedded_tool_calls(
+    items: &[tau_proto::ContextItem],
+    calls: &mut Vec<tau_proto::ToolCallItem>,
+) {
+    calls.extend(items.iter().filter_map(|item| {
+        let tau_proto::ContextItem::ToolCall(call) = item else {
+            return None;
+        };
+        Some(call.clone())
+    }));
+}
+
+/// Clone terminal embedded metadata while excluding directed image bytes.
+fn byte_free_embedded_tool_result(result: &tau_proto::ToolResult) -> tau_proto::ToolResult {
+    let mut result = result.clone();
+    result.provider_content.clear();
+    result
 }
 
 fn prompt_context_without_image_bytes(

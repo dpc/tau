@@ -3586,9 +3586,11 @@ dependencies = [
 name = "tau-e2e-tests"
 version = "0.1.0"
 dependencies = [
+ "image",
  "serde_json",
  "tau-config",
  "tau-harness",
+ "tau-proto",
  "tau-vcr",
  "tempfile",
 ]
