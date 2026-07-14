@@ -158,6 +158,52 @@ version-specific tools rather than silently skipping their checks.
 
 Create a scratch directory in `/tmp` for your experiments and always avoid dangerous or disruptive actions during testing.
 
+#### Model-visible parallel-call probe
+
+Test parallel tool calling through the actual provider and harness, rather than
+inferring support from a capability flag. In **one assistant message**, emit
+four sibling calls to the available shell tool (`shell` or `shell_command`).
+Do not use a batching/parallel-wrapper tool, and do not launch any of the four
+calls from a later assistant turn: either would bypass the provider behavior
+this probe is intended to test.
+
+Use these four commands as the respective call arguments:
+
+```sh
+python3 -c 'import time; ident="parallel-1"; start=time.time_ns(); time.sleep(3); end=time.time_ns(); print(f"id={ident} start_ns={start} end_ns={end} elapsed_ms={(end-start)/1_000_000:.3f}")'
+python3 -c 'import time; ident="parallel-2"; start=time.time_ns(); time.sleep(3); end=time.time_ns(); print(f"id={ident} start_ns={start} end_ns={end} elapsed_ms={(end-start)/1_000_000:.3f}")'
+python3 -c 'import time; ident="parallel-3"; start=time.time_ns(); time.sleep(3); end=time.time_ns(); print(f"id={ident} start_ns={start} end_ns={end} elapsed_ms={(end-start)/1_000_000:.3f}")'
+python3 -c 'import time; ident="parallel-4"; start=time.time_ns(); time.sleep(3); end=time.time_ns(); print(f"id={ident} start_ns={start} end_ns={end} elapsed_ms={(end-start)/1_000_000:.3f}")'
+```
+
+Interpret the model-visible results by call identity, not by result-delivery
+order. For each interval use `[start_ns, end_ns]`, and compute the overall
+makespan as `max(end_ns) - min(start_ns)`. Normal process startup and scheduler
+jitter mean starts and ends need not be exactly equal.
+
+* **PASS:** all four results are present, each elapsed time is approximately
+  three seconds, the intervals have a common overlap
+  (`max(start_ns) < min(end_ns)`), and the makespan is normally about three to
+  five seconds (use six seconds as a conservative upper bound).
+* **FAIL — serialized execution:** all four calls were emitted together, but
+  their approximately three-second intervals are sequential/non-overlapping
+  and the makespan is approximately twelve seconds (ten seconds or more is a
+  useful lower bound).
+* **FAIL — provider emission:** the provider/model does not emit all four
+  sibling calls in the one assistant message. Do not issue missing calls in
+  later turns and misreport that as a parallel test.
+* **INCONCLUSIVE:** report partial overlap, unexpected per-call duration,
+  missing/malformed output, or a makespan between the pass and serialized
+  bounds, then repeat the one-turn probe before assigning the failure to a
+  layer.
+
+When all four calls were visibly emitted in one assistant message but their
+recorded execution intervals serialize, provider emission succeeded and the
+evidence points to harness/extension scheduling. If the provider never emits
+the four sibling calls, execution-layer concurrency was not tested. Report the
+classification, four identity-tagged intervals and elapsed times, makespan,
+overlap observation, and which layer the available evidence implicates.
+
 For every tool thoroughly consider all corner cases, including ones which are not covered
 in this document.
 
