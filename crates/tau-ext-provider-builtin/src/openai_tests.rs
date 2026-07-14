@@ -119,6 +119,57 @@ impl Read for BlockingInput {
     }
 }
 
+/// Manually advanced monotonic clock used by retry runtime acceptance tests.
+struct VirtualRetryClock {
+    /// Current virtual instant.
+    now: Mutex<Instant>,
+    /// Scheduler command sender attached when the actor starts.
+    scheduler: Mutex<Option<std::sync::Weak<SyncSender<SchedulerCommand>>>>,
+}
+
+impl VirtualRetryClock {
+    /// Creates a clock at a fixed monotonic epoch.
+    fn new(now: Instant) -> Self {
+        Self {
+            now: Mutex::new(now),
+            scheduler: Mutex::new(None),
+        }
+    }
+
+    /// Advances time and synchronously interrupts any far-future actor wait.
+    fn advance(&self, duration: Duration) {
+        let mut now = self.now.lock().expect("virtual retry clock");
+        *now = now.checked_add(duration).expect("virtual time overflow");
+        drop(now);
+        if let Some(scheduler) = self
+            .scheduler
+            .lock()
+            .expect("scheduler sender")
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            let (acknowledged, ack) = mpsc::sync_channel(0);
+            scheduler
+                .send(SchedulerCommand::Wake {
+                    acknowledged: Some(acknowledged),
+                })
+                .expect("wake virtual scheduler");
+            ack.recv_timeout(Duration::from_secs(1))
+                .expect("virtual scheduler observed advanced time");
+        }
+    }
+}
+
+impl RetryClock for VirtualRetryClock {
+    fn now(&self) -> Instant {
+        *self.now.lock().expect("virtual retry clock")
+    }
+
+    fn attach_scheduler(&self, commands: std::sync::Weak<SyncSender<SchedulerCommand>>) {
+        *self.scheduler.lock().expect("scheduler sender") = Some(commands);
+    }
+}
+
 fn chatgpt_auth() -> OpenAiAuth {
     OpenAiAuth {
         access_token: "access".to_owned(),
@@ -532,6 +583,7 @@ fn profile_rotation_cancels_active_prewarm() {
 /// and releases its parked work without relying on quota display telemetry.
 #[test]
 fn profile_identity_rotation_releases_old_shared_cooldown() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     input.push(encode_frames(&[live_event(
         11,
@@ -580,16 +632,23 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
     let output = SharedWriter::default();
     let runtime_output = output.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(0);
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        run_inner_with_executors_and_clock(
             runtime_input,
             runtime_output,
             startup_profiles,
             move || load_profiles.lock().expect("profiles").clone(),
             2,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         )
         .expect("run provider");
+        runtime_done_tx.send(()).expect("report provider shutdown");
     });
     wait_for_runtime_frames(&output, |frames| {
         frames.iter().any(|frame| {
@@ -620,23 +679,27 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         Event::AgentPromptCreated(rotated),
     )]));
 
-    let deadline = Instant::now() + Duration::from_secs(7);
-    let mut completed = std::collections::BTreeSet::new();
-    while completed.len() < 2 {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("profile rotation releases before jitter bound");
-        completed.insert(
-            completed_rx
-                .recv_timeout(remaining)
-                .expect("old and rotated-profile prompts finish"),
-        );
-    }
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rotated-profile prompt finishes"),
+        "rotated"
+    );
+    clock.advance(Duration::from_secs(RESET_BOUNDARY_JITTER_MAX.as_secs() + 1));
+    let completed = std::collections::BTreeSet::from([
+        "rotated".to_owned(),
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("virtual-time old-profile prompt finishes"),
+    ]);
     assert_eq!(
         completed,
         std::collections::BTreeSet::from(["rotated".to_owned(), "sp-1".to_owned()])
     );
     input.close();
+    runtime_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("profile-rotation runtime and scheduler shut down");
     runtime.join().expect("provider exits");
 }
 
@@ -810,6 +873,57 @@ fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
     );
 }
 
+/// Ensures the actor's synchronous mutation seam preserves exact-generation
+/// authority and independent deadlines rather than hiding policy in timer I/O.
+#[test]
+fn retry_scheduler_state_release_is_generation_scoped_and_deadline_safe() {
+    let epoch = Instant::now();
+    let independent_due = epoch + Duration::from_secs(30);
+    let boundary = epoch + Duration::from_secs(5 * 86_400);
+    let mut state = RetrySchedulerState::default();
+    for (id, generation) in [("current", 7), ("newer", 8)] {
+        assert!(
+            state
+                .step(SchedulerCommand::Schedule {
+                    independent_due,
+                    cooldown: Some(CooldownConstraint {
+                        generation,
+                        boundary,
+                    }),
+                    job: Box::new(scheduled_job(id, "limited")),
+                })
+                .is_empty()
+        );
+    }
+    assert!(
+        state
+            .step(SchedulerCommand::ReleaseCooldown {
+                provider: ProviderName::new("limited"),
+                generation: 7,
+                now: epoch,
+            })
+            .is_empty()
+    );
+
+    assert!(
+        state
+            .advance(independent_due - Duration::from_nanos(1))
+            .is_empty(),
+        "release cannot discard the prompt-local deadline"
+    );
+    let due = state.advance(
+        independent_due
+            .checked_add(RESET_BOUNDARY_JITTER_MAX)
+            .expect("bounded virtual time"),
+    );
+    assert_eq!(due.len(), 1);
+    assert!(matches!(
+        &due[0],
+        RetrySchedulerAction::Due(job) if job.agent_prompt_id.as_str() == "current"
+    ));
+    assert_eq!(state.queue.len(), 1, "newer evidence remains parked");
+}
+
 /// Proves only a non-error terminal from the exact captured generation may
 /// invalidate a shared cooldown; stale, error, and canceled terminals may not.
 #[test]
@@ -837,14 +951,22 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
     );
     successful.error = None;
     successful.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    for stop_reason in [
+        tau_proto::ProviderStopReason::EndTurn,
+        tau_proto::ProviderStopReason::ToolCalls,
+        tau_proto::ProviderStopReason::Length,
+    ] {
+        successful.stop_reason = stop_reason;
+        let success_message =
+            HarnessInputMessage::emit(Event::ProviderResponseFinished(successful.clone()));
+        assert!(
+            successful_probe_matches(&success_message, &prompt_id, &probe, &cooldowns),
+            "{stop_reason:?} is authoritative after commit validation"
+        );
+    }
+    successful.stop_reason = tau_proto::ProviderStopReason::EndTurn;
     let success_message =
         HarnessInputMessage::emit(Event::ProviderResponseFinished(successful.clone()));
-    assert!(successful_probe_matches(
-        &success_message,
-        &prompt_id,
-        &probe,
-        &cooldowns
-    ));
     assert!(!successful_probe_matches(
         &success_message,
         &tau_proto::AgentPromptId::from("different"),
@@ -877,17 +999,43 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
         &cooldowns
     ));
 
+    for stop_reason in [
+        tau_proto::ProviderStopReason::Error,
+        tau_proto::ProviderStopReason::RepetitionDetected,
+    ] {
+        let mut non_success = successful.clone();
+        non_success.stop_reason = stop_reason;
+        assert!(!successful_probe_matches(
+            &HarnessInputMessage::emit(Event::ProviderResponseFinished(non_success)),
+            &prompt_id,
+            &probe,
+            &cooldowns
+        ));
+    }
+    let mut typed_failure = successful.clone();
+    typed_failure.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+    assert!(!successful_probe_matches(
+        &HarnessInputMessage::emit(Event::ProviderResponseFinished(typed_failure)),
+        &prompt_id,
+        &probe,
+        &cooldowns
+    ));
+
     let cancellation = CancellationState::default();
     cancellation.cancel(prompt_id.clone());
-    let canceled_message = validate_worker_output_for_commit(
+    let (canceled_message, released_provider) = validate_worker_output_and_probe_for_commit(
         Box::new(success_message),
-        0,
-        0,
-        false,
+        (0, 0, false),
         &prompt_id,
         &cancellation,
+        Some(&probe),
+        &cooldowns,
     )
     .expect("successful output becomes a canceled terminal");
+    assert!(
+        released_provider.is_none(),
+        "cancellation validation must precede release authority"
+    );
     assert!(!successful_probe_matches(
         &canceled_message,
         &prompt_id,
@@ -1597,43 +1745,119 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
     )));
 }
 
-/// Reproduces quota recovery end to end: one successful manual probe releases a
-/// same-provider attempt-zero peer, and a chained continuation is not
-/// re-parked.
+/// Reproduces the `tau-agent-rrqmwy` quota incident under virtual time.
+///
+/// This is the Stage 1 acceptance gate: quota display has no scheduler
+/// authority, one successful ToolCalls probe releases its exact generation,
+/// attempt-zero peers and a deterministic tool-result continuation progress,
+/// and all provider-owned work reaches one terminal without a wall-clock wait.
 #[test]
-fn successful_manual_probe_wakes_peer_and_admits_chained_continuation() {
+fn rrqmwy_virtual_time_quota_recovery_acceptance() {
+    let epoch = Instant::now();
+    let clock = Arc::new(VirtualRetryClock::new(epoch));
     let input = BlockingInput::default();
+    let mut probe = prompt();
+    probe.agent_prompt_id = "probe".into();
     input.push(encode_frames(&[live_event(
         11,
-        Event::AgentPromptCreated(prompt()),
+        Event::AgentPromptCreated(probe),
     )]));
+
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let executor_calls = Arc::clone(&calls);
     let (completed_tx, completed_rx) = mpsc::channel();
     let executor: PromptExecutor = Arc::new(move |execution| {
         let id = execution.job.agent_prompt_id.to_string();
         executor_calls.lock().expect("call log").push(id.clone());
-        if id == "sp-1" && execution.job.retry_state.attempts == 0 {
+        if id == "probe" && execution.job.retry_state.attempts == 0 {
+            let PromptBackend::Responses(config) = &execution.job.backend else {
+                panic!("probe uses canonical Responses profile");
+            };
+            let profile_identity = quota_profile_identity(config);
+            let output_tx = execution.output_tx.clone();
+            let output_waker = execution.output_waker.clone();
             send_worker_message(
-                &execution.output_tx,
-                &execution.output_waker,
+                &output_tx,
+                &output_waker,
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::UsageWindow)
-                        .with_retry_after(Some(Duration::from_secs(86_400))),
+                        .with_retry_after(Some(Duration::from_secs(5 * 86_400))),
                 },
             )
-            .expect("park initial usage failure");
+            .expect("install five-day usage-window cooldown");
+            for used_basis_points in [10_000, 0] {
+                send_worker_message(
+                    &output_tx,
+                    &output_waker,
+                    WorkerMessage::QuotaRolling {
+                        model: model_id(CHATGPT_PROVIDER_NAME, "gpt-5.6-sol"),
+                        profile_identity,
+                        observation: tau_provider_chatgpt::quota::RollingQuotaObservation {
+                            windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+                                limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
+                                    .expect("limit id"),
+                                window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
+                                    .expect("window id"),
+                                used_basis_points,
+                                window_seconds: Some(5 * 86_400),
+                                reset_at_unix_seconds: Some(2_100_000_000),
+                                remaining_seconds: None,
+                            }],
+                            active_limit_id: Some(
+                                tau_proto::ProviderQuotaLimitId::parse("codex").expect("limit id"),
+                            ),
+                            binding_provenance: Some(
+                                tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
+                            ),
+                        },
+                        observed_at_unix_ms: now_ms(),
+                    },
+                )
+                .expect("publish display-only quota transition");
+            }
             return;
         }
+        if id == "continuation" {
+            assert_eq!(
+                execution
+                    .job
+                    .prompt
+                    .context
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        tau_proto::ContextBlock::ToolResults(results) => Some(results.items.len()),
+                        _ => None,
+                    })
+                    .sum::<usize>(),
+                1,
+                "continuation contains one deterministic tool result"
+            );
+        }
+
         let mut finished = simple_finished(
             execution.job.agent_prompt_id.clone(),
             execution.job.prompt.agent_id.clone(),
             execution.job.prompt.originator.clone(),
-            "replace error",
+            "deterministic success",
         );
         finished.error = None;
-        finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+        finished.stop_reason = if id == "probe" {
+            tau_proto::ProviderStopReason::ToolCalls
+        } else {
+            tau_proto::ProviderStopReason::EndTurn
+        };
+        if id == "probe" {
+            finished.output_items = vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+                call_id: "call-no-side-effect".into(),
+                name: tau_proto::ToolName::new("test_no_side_effect"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: tau_proto::CborValue::Null,
+                raw_arguments_json: Some("null".to_owned()),
+                responses_envelope: None,
+            })];
+        }
         let mut writer = execution.frame_writer();
         writer
             .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
@@ -1643,97 +1867,225 @@ fn successful_manual_probe_wakes_peer_and_admits_chained_continuation() {
         writer.flush().expect("flush successful terminal");
         completed_tx.send(id).expect("report successful attempt");
     });
-    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+
+    let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    profiles.providers.insert(
+        ProviderName::new("healthy"),
+        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+            base_url: "https://healthy.invalid/v1".to_owned(),
+            api_key: "fixture-key".to_owned(),
+            models: vec![chat_model("model")],
+            ..ChatCompletionsProvider::default()
+        }),
+    );
     let prompt_profiles = profiles.clone();
     let output = SharedWriter::default();
     let runtime_output = output.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(0);
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        run_inner_with_executors_and_clock(
             runtime_input,
             runtime_output,
             profiles,
             move || prompt_profiles.clone(),
             2,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         )
         .expect("run provider");
+        runtime_done_tx.send(()).expect("report provider shutdown");
     });
 
     wait_for_runtime_frames(&output, |frames| {
-        frames.iter().any(|frame| {
-            matches!(
-                input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
-                    if update.agent_prompt_id.as_str() == "sp-1"
-                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
-            )
-        })
+        frames
+            .iter()
+            .filter(|frame| matches!(input_event(frame), Some(Event::ProviderQuotaPatch(_))))
+            .count()
+            == 2
     });
-    let mut peer = prompt();
-    peer.agent_prompt_id = "peer".into();
+    assert_eq!(calls.lock().expect("call log").as_slice(), ["probe"]);
+
+    let mut peer_one = prompt();
+    peer_one.agent_prompt_id = "peer-1".into();
+    let mut peer_two = prompt();
+    peer_two.agent_prompt_id = "peer-2".into();
+    let mut unrelated = prompt();
+    unrelated.agent_prompt_id = "unrelated".into();
+    unrelated.model = model_id("healthy", "model");
     input.push(encode_frames(&[
-        live_event(12, Event::AgentPromptCreated(peer)),
-        live_event(
-            13,
-            Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
-                request_id: tau_proto::RetryPromptRequestId::parse("quota-probe")
-                    .expect("retry request id"),
-                session_id: "session-1".into(),
-                target_agent_id: None,
-                agent_prompt_id: Some("sp-1".into()),
-            }),
-        ),
+        live_event(12, Event::AgentPromptCreated(peer_one)),
+        live_event(13, Event::AgentPromptCreated(peer_two)),
+        live_event(14, Event::AgentPromptCreated(unrelated)),
     ]));
     assert_eq!(
         completed_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("manual probe succeeds"),
-        "sp-1"
+            .recv_timeout(Duration::from_secs(1))
+            .expect("unrelated provider progresses"),
+        "unrelated"
     );
     wait_for_runtime_frames(&output, |frames| {
+        ["peer-1", "peer-2"].iter().all(|id| {
+            frames.iter().any(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseUpdated(update))
+                        if update.agent_prompt_id.as_str() == *id
+                            && update.status.as_ref().is_some_and(|status| {
+                                status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
+                            })
+                )
+            })
+        })
+    });
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["probe", "unrelated"]
+    );
+
+    let retry = |request_id: &str| {
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse(request_id)
+                .expect("retry request id"),
+            session_id: "session-1".into(),
+            target_agent_id: None,
+            agent_prompt_id: Some("probe".into()),
+        })
+    };
+    input.push(encode_frames(&[
+        live_event(15, retry("one-probe")),
+        live_event(16, retry("duplicate-probe")),
+    ]));
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("manual probe succeeds"),
+        "probe"
+    );
+    let probe_frames = wait_for_runtime_frames(&output, |frames| {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
+                Some(Event::ProviderRetryPromptResult(result))
+                    if result.request_id.as_str() == "one-probe"
+                        && result.status == tau_proto::RetryPromptStatus::Accepted
+            )
+        }) && frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResult(result))
+                    if result.request_id.as_str() == "duplicate-probe"
+                        && result.status == tau_proto::RetryPromptStatus::NotParked
+            )
+        }) && frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
                 Some(Event::ProviderResponseFinished(finished))
-                    if finished.agent_prompt_id.as_str() == "sp-1"
+                    if finished.agent_prompt_id.as_str() == "probe"
+                        && finished.stop_reason == tau_proto::ProviderStopReason::ToolCalls
+                        && finished.error.is_none()
+                        && finished.failure_kind.is_none()
             )
         })
     });
+    assert_eq!(
+        probe_frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResult(_))
+            ))
+            .count(),
+        2,
+        "both competing /retry controls resolve exactly once"
+    );
 
-    let mut chained = prompt();
-    chained.agent_prompt_id = "chained".into();
+    // The harness-owned Stage 3 gate covers routing/renderer composition. Here
+    // a deterministic no-side-effect result is paired to the validated call and
+    // submitted as a production provider continuation.
+    let mut continuation = prompt();
+    continuation.agent_prompt_id = "continuation".into();
+    continuation
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    call_id: "call-no-side-effect".into(),
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                        "fixture-result".to_owned(),
+                    )),
+                    provider_content: Vec::new(),
+                }],
+            },
+        ));
     input.push(encode_frames(&[live_event(
-        14,
-        Event::AgentPromptCreated(chained),
+        17,
+        Event::AgentPromptCreated(continuation),
     )]));
-    let deadline = Instant::now() + Duration::from_secs(7);
-    let mut completed = std::collections::BTreeSet::new();
-    while completed.len() < 2 {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("released work completes before jitter bound");
-        completed.insert(
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("continuation progresses"),
+        "continuation"
+    );
+
+    clock.advance(Duration::from_secs(RESET_BOUNDARY_JITTER_MAX.as_secs() + 1));
+    let mut released = std::collections::BTreeSet::new();
+    while released.len() < 2 {
+        released.insert(
             completed_rx
-                .recv_timeout(remaining)
-                .expect("peer and chained continuation complete"),
+                .recv_timeout(Duration::from_secs(1))
+                .expect("virtual-time released peer"),
         );
     }
     assert_eq!(
-        completed,
-        std::collections::BTreeSet::from(["chained".to_owned(), "peer".to_owned()])
+        released,
+        std::collections::BTreeSet::from(["peer-1".to_owned(), "peer-2".to_owned()])
     );
 
+    wait_for_runtime_frames(&output, |frames| {
+        ["peer-1", "peer-2", "unrelated", "continuation"]
+            .iter()
+            .all(|id| {
+                frames.iter().any(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderResponseFinished(finished))
+                            if finished.agent_prompt_id.as_str() == *id
+                                && finished.stop_reason == tau_proto::ProviderStopReason::EndTurn
+                                && finished.error.is_none()
+                                && finished.failure_kind.is_none()
+                    )
+                })
+            })
+    });
     input.close();
-    runtime.join().expect("provider exits after released work");
+    runtime_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("provider and scheduler shut down after draining");
+    runtime
+        .join()
+        .expect("provider drains all active and delayed work");
     let frames = decode_frames(&output.bytes());
-    assert!(!frames.iter().any(|frame| matches!(
-        input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
-            if update.agent_prompt_id.as_str() == "chained"
-                && update.status.as_ref().is_some_and(|status| status.retry.is_some())
-    )));
-    for id in ["sp-1", "peer", "chained"] {
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResult(_))
+            ))
+            .count(),
+        2,
+        "manual controls have no duplicate late result"
+    );
+    for id in ["probe", "peer-1", "peer-2", "unrelated", "continuation"] {
         assert_eq!(
             frames
                 .iter()
@@ -1744,7 +2096,7 @@ fn successful_manual_probe_wakes_peer_and_admits_chained_continuation() {
                 ))
                 .count(),
             1,
-            "{id} has one submitted lifecycle"
+            "{id} submitted exactly once"
         );
         assert_eq!(
             frames
@@ -1756,20 +2108,33 @@ fn successful_manual_probe_wakes_peer_and_admits_chained_continuation() {
                 ))
                 .count(),
             1,
-            "{id} has one terminal lifecycle"
+            "{id} terminated exactly once"
         );
     }
-    let calls = calls.lock().expect("call log");
-    assert_eq!(calls.iter().filter(|id| id.as_str() == "sp-1").count(), 2);
     assert_eq!(
-        calls.iter().filter(|id| id.as_str() == "peer").count(),
+        frames
+            .iter()
+            .filter_map(|frame| match input_event(frame) {
+                Some(Event::ProviderResponseFinished(finished)) => Some(&finished.output_items),
+                _ => None,
+            })
+            .flatten()
+            .filter(|item| matches!(item, ContextItem::ToolCall(_)))
+            .count(),
         1,
-        "peer remains attempt zero until the successful probe releases it"
+        "the probe emits one tool call without duplication"
     );
-    assert_eq!(
-        calls.iter().filter(|id| id.as_str() == "chained").count(),
-        1
-    );
+    assert!(!frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.agent_prompt_id.as_str() == "continuation"
+                && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+    )));
+    let calls = calls.lock().expect("call log");
+    assert_eq!(calls.iter().filter(|id| id.as_str() == "probe").count(), 2);
+    for id in ["peer-1", "peer-2", "unrelated", "continuation"] {
+        assert_eq!(calls.iter().filter(|call| call.as_str() == id).count(), 1);
+    }
 }
 
 /// Ensures best-effort quota telemetry cannot clear inference cooldown state or

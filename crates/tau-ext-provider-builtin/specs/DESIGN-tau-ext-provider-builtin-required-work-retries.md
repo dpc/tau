@@ -39,3 +39,11 @@ current cooldown. Replacing the configured profile identity also invalidates the
 old profile's cooldown, while best-effort quota display telemetry never does.
 The telemetry non-authority follows
 [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+
+Scheduler mutation is implemented as synchronous, single-owner command
+transitions plus an explicit monotonic-time advance, both returning ownership
+actions for the provider actor to deliver. The production actor adds only
+channel transport and timer waiting. Tests may inject and advance the
+monotonic clock, so multi-day cooldown, exact-generation release, independent
+deadlines, and anti-herd wakeup are acceptance-tested without network access,
+wall sleeps, or quota telemetry acting as scheduler policy.

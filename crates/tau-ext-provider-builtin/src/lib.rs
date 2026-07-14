@@ -1061,18 +1061,56 @@ where
     W: Write + Send + 'static,
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
+    run_inner_with_executors_and_clock(
+        reader,
+        writer,
+        startup_profiles,
+        load_prompt_profiles,
+        prompt_concurrency_limit,
+        RuntimeExecutors {
+            prompt: prompt_executor,
+            prewarm: prewarm_executor,
+            retry_clock: Arc::new(SystemRetryClock),
+        },
+    )
+}
+
+/// Effectful executors and retry clock injected into the provider runtime.
+struct RuntimeExecutors {
+    /// Runs one finite prompt attempt.
+    prompt: PromptExecutor,
+    /// Runs one finite transport prewarm.
+    prewarm: PrewarmExecutor,
+    /// Supplies retry policy's monotonic time.
+    retry_clock: Arc<dyn RetryClock>,
+}
+
+fn run_inner_with_executors_and_clock<R, W, F>(
+    reader: R,
+    writer: W,
+    startup_profiles: BuiltinProviderProfiles,
+    load_prompt_profiles: F,
+    prompt_concurrency_limit: usize,
+    executors: RuntimeExecutors,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let startup_responses_modes = startup_profiles.startup_responses_modes();
     let runtime = ProviderRuntime {
         load_prompt_profiles,
         startup_responses_modes,
         prompt_concurrency_limit,
-        prompt_executor,
-        prewarm_executor,
+        prompt_executor: executors.prompt,
+        prewarm_executor: executors.prewarm,
         worker_tx,
         worker_rx,
         worker_waker: None,
         retry_scheduler: None,
+        retry_clock: executors.retry_clock,
         shared_cooldowns: BTreeMap::new(),
         shared_cooldown_generation: 0,
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
@@ -1255,6 +1293,8 @@ struct ProviderRuntime<F> {
     worker_waker: Option<ManualRuntimeWaker>,
     /// Single timer scheduler shared by every delayed logical prompt.
     retry_scheduler: Option<RetryScheduler>,
+    /// Monotonic clock used by retry policy and scheduler admission.
+    retry_clock: Arc<dyn RetryClock>,
     /// Account/profile cooldowns, keyed without credentials or account ids.
     shared_cooldowns: BTreeMap<ProviderName, SharedCooldown>,
     /// Monotonic generation allocated whenever shared cooldown evidence
@@ -1297,7 +1337,11 @@ where
     }
 
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
-        self.retry_scheduler = Some(RetryScheduler::start(self.worker_tx.clone(), waker.clone()));
+        self.retry_scheduler = Some(RetryScheduler::start(
+            self.worker_tx.clone(),
+            waker.clone(),
+            Arc::clone(&self.retry_clock),
+        ));
         self.worker_waker = Some(waker);
     }
 
@@ -1581,7 +1625,11 @@ where
         if let Some(cooldown) = self.shared_cooldowns.remove(provider)
             && let Some(scheduler) = &self.retry_scheduler
         {
-            scheduler.release_cooldown(provider.clone(), cooldown.generation, Instant::now());
+            scheduler.release_cooldown(
+                provider.clone(),
+                cooldown.generation,
+                self.retry_clock.now(),
+            );
         }
     }
 
@@ -1648,11 +1696,11 @@ where
             .shared_cooldowns
             .get(&job.prompt.model.provider)
             .copied()
-            .filter(|cooldown| cooldown.not_before > Instant::now())
+            .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
         {
-            let now = Instant::now();
+            let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, handle)?;
+            emit_retry_status(&job, cooldown.class, due, now, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -1745,23 +1793,18 @@ where
                     agent_prompt_id,
                     cooldown_probe,
                 }) => {
-                    if let Some(message) = validate_worker_output_for_commit(
-                        message,
-                        cancel_generation,
-                        self.cancel_generation,
-                        self.input_closed,
-                        &agent_prompt_id,
-                        &self.cancellation,
-                    ) {
-                        if let Some(probe) = cooldown_probe
-                            && successful_probe_matches(
-                                &message,
-                                &agent_prompt_id,
-                                &probe,
-                                &self.shared_cooldowns,
-                            )
-                        {
-                            self.release_shared_cooldown(&probe.provider);
+                    if let Some((message, released_provider)) =
+                        validate_worker_output_and_probe_for_commit(
+                            message,
+                            (cancel_generation, self.cancel_generation, self.input_closed),
+                            &agent_prompt_id,
+                            &self.cancellation,
+                            cooldown_probe.as_ref(),
+                            &self.shared_cooldowns,
+                        )
+                    {
+                        if let Some(provider) = released_provider {
+                            self.release_shared_cooldown(&provider);
                         }
                         handle.send(message)?;
                     }
@@ -1793,7 +1836,7 @@ where
                             ) % RESET_BOUNDARY_JITTER_MAX.as_secs(),
                         )
                     });
-                    let now = Instant::now();
+                    let now = self.retry_clock.now();
                     let common_due = now
                         .checked_add(policy_delay.max(hint_delay))
                         // An overflowing hint is nonsensical. Fall back to the
@@ -1844,7 +1887,7 @@ where
                                 generation,
                             );
                     }
-                    emit_retry_status(&job, decision.class, due, handle)?;
+                    emit_retry_status(&job, decision.class, due, now, handle)?;
                     self.retry_scheduler
                         .as_ref()
                         .expect("retry scheduler starts with the runtime waker")
@@ -1903,7 +1946,7 @@ where
                             owned_job.cooldown_probe = self
                                 .shared_cooldowns
                                 .get(&owned_job.prompt.model.provider)
-                                .filter(|cooldown| cooldown.not_before > Instant::now())
+                                .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
                                 .map(|cooldown| CooldownProbe {
                                     provider: owned_job.prompt.model.provider.clone(),
                                     generation: cooldown.generation,
@@ -2034,7 +2077,7 @@ where
                 .get(index)
                 .and_then(|job| self.shared_cooldowns.get(&job.prompt.model.provider))
                 .copied()
-                .filter(|cooldown| cooldown.not_before > Instant::now())
+                .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
             else {
                 index += 1;
                 continue;
@@ -2042,9 +2085,9 @@ where
             let Some(job) = self.prompt_queue.remove(index) else {
                 continue;
             };
-            let now = Instant::now();
+            let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, handle)?;
+            emit_retry_status(&job, cooldown.class, due, now, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -2107,6 +2150,30 @@ fn validate_worker_output_for_commit(
             "(cancelled by harness)",
         ),
     )))
+}
+
+/// Validates cancellation before deriving any successful-probe release action.
+fn validate_worker_output_and_probe_for_commit(
+    message: Box<HarnessInputMessage>,
+    commit_state: (u64, u64, bool),
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    cancellation: &CancellationState,
+    probe: Option<&CooldownProbe>,
+    cooldowns: &BTreeMap<ProviderName, SharedCooldown>,
+) -> Option<(HarnessInputMessage, Option<ProviderName>)> {
+    let (dispatch_generation, current_generation, input_closed) = commit_state;
+    let message = validate_worker_output_for_commit(
+        message,
+        dispatch_generation,
+        current_generation,
+        input_closed,
+        agent_prompt_id,
+        cancellation,
+    )?;
+    let released_provider = probe
+        .filter(|probe| successful_probe_matches(&message, agent_prompt_id, probe, cooldowns))
+        .map(|probe| probe.provider.clone());
+    Some((message, released_provider))
 }
 
 /// Returns whether a committed frame authoritatively proves provider success.
@@ -2482,26 +2549,198 @@ enum SchedulerCommand {
         /// Release instant used as the anti-herd jitter boundary.
         now: Instant,
     },
+    /// Interrupts a timer wait after an injected clock advances.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed by injected virtual clocks")
+    )]
+    Wake {
+        /// Acknowledges that the actor observed the new clock value.
+        acknowledged: Option<SyncSender<()>>,
+    },
 }
 
+/// Monotonic retry clock, injectable so long quota windows need no wall wait.
+trait RetryClock: Send + Sync {
+    /// Returns the current monotonic scheduler instant.
+    fn now(&self) -> Instant;
+
+    /// Receives the actor command channel for virtual-time wakeups.
+    fn attach_scheduler(&self, _commands: std::sync::Weak<SyncSender<SchedulerCommand>>) {}
+}
+
+/// Production retry clock backed by the process monotonic clock.
+struct SystemRetryClock;
+
+impl RetryClock for SystemRetryClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// One deterministic output produced by synchronous scheduler mutation.
+enum RetrySchedulerAction {
+    /// A delayed job became eligible.
+    Due(PromptJob),
+    /// A delayed job was canceled, with the ownership-count adjustment.
+    Canceled {
+        /// Logical job whose terminal cancellation must be emitted.
+        job: PromptJob,
+        /// Number of delayed ownership entries consumed.
+        delayed_count: usize,
+    },
+    /// Result of an exact manual ownership transfer.
+    Manual {
+        /// Transferred job, or `None` when it was not parked.
+        job: Option<PromptJob>,
+        /// Correlation ID for the control request.
+        request_id: tau_proto::RetryPromptRequestId,
+        /// Requested logical prompt.
+        agent_prompt_id: tau_proto::AgentPromptId,
+    },
+}
+
+/// Synchronous single-owner retry scheduler state.
+///
+/// The actor is only transport and waiting: every mutation and resulting
+/// ownership action happens here and is directly testable at a supplied time.
+#[derive(Default)]
+struct RetrySchedulerState {
+    /// Delayed logical-prompt queue.
+    queue: RetryScheduleQueue,
+}
+
+impl RetrySchedulerState {
+    /// Applies one command atomically and returns all immediate ownership
+    /// actions.
+    fn step(&mut self, command: SchedulerCommand) -> Vec<RetrySchedulerAction> {
+        match command {
+            SchedulerCommand::Schedule {
+                independent_due,
+                cooldown,
+                job,
+            } => {
+                if let Err(duplicate) = self.queue.schedule(independent_due, cooldown, *job)
+                    && let Some(original) = self.queue.cancel(&duplicate.agent_prompt_id).pop()
+                {
+                    return vec![RetrySchedulerAction::Canceled {
+                        job: original,
+                        delayed_count: 2,
+                    }];
+                }
+                Vec::new()
+            }
+            SchedulerCommand::Cancel(prompt_id) => self
+                .queue
+                .cancel(&prompt_id)
+                .into_iter()
+                .map(|job| RetrySchedulerAction::Canceled {
+                    job,
+                    delayed_count: 1,
+                })
+                .collect(),
+            SchedulerCommand::CancelAll => self
+                .queue
+                .cancel_all()
+                .into_iter()
+                .map(|job| RetrySchedulerAction::Canceled {
+                    job,
+                    delayed_count: 1,
+                })
+                .collect(),
+            SchedulerCommand::RetryNow {
+                request_id,
+                agent_prompt_id,
+            } => {
+                let mut matches = self.queue.cancel(&agent_prompt_id);
+                if matches.len() > 1 {
+                    let action = matches.pop().map(|job| RetrySchedulerAction::Canceled {
+                        job,
+                        delayed_count: matches.len() + 1,
+                    });
+                    return action
+                        .into_iter()
+                        .chain(std::iter::once(RetrySchedulerAction::Manual {
+                            job: None,
+                            request_id,
+                            agent_prompt_id,
+                        }))
+                        .collect();
+                }
+                vec![RetrySchedulerAction::Manual {
+                    job: matches.pop(),
+                    request_id,
+                    agent_prompt_id,
+                }]
+            }
+            SchedulerCommand::ExtendCooldown {
+                provider,
+                due,
+                generation,
+            } => {
+                self.queue.extend_cooldown(&provider, due, generation);
+                Vec::new()
+            }
+            SchedulerCommand::ReleaseCooldown {
+                provider,
+                generation,
+                now,
+            } => {
+                self.queue.release_cooldown(&provider, generation, now);
+                Vec::new()
+            }
+            SchedulerCommand::Wake { .. } => Vec::new(),
+        }
+    }
+
+    /// Advances supplied virtual time and returns every newly eligible job.
+    fn advance(&mut self, now: Instant) -> Vec<RetrySchedulerAction> {
+        std::iter::from_fn(|| self.queue.pop_due(now))
+            .map(RetrySchedulerAction::Due)
+            .collect()
+    }
+
+    /// Returns the next timer boundary.
+    fn next_due(&self) -> Option<Instant> {
+        self.queue.next_due()
+    }
+}
+
+/// RAII owner of the delayed-work scheduler actor.
+///
+/// Dropping the last strong command sender disconnects the actor, then joins
+/// its thread. `delayed_count` tracks jobs owned by either the bounded command
+/// channel or synchronous scheduler state until the provider consumes an
+/// action.
 struct RetryScheduler {
-    commands: SyncSender<SchedulerCommand>,
+    /// Last strong sender whose drop terminates the scheduler actor.
+    commands: Arc<SyncSender<SchedulerCommand>>,
+    /// Count of logical prompts currently owned outside the provider main loop.
     delayed_count: Arc<AtomicUsize>,
+    /// Joinable actor thread; dropping the scheduler disconnects and joins it.
+    actor: Option<thread::JoinHandle<()>>,
 }
 
 impl RetryScheduler {
-    fn start(worker_tx: Sender<WorkerMessage>, worker_waker: ManualRuntimeWaker) -> Self {
+    fn start(
+        worker_tx: Sender<WorkerMessage>,
+        worker_waker: ManualRuntimeWaker,
+        clock: Arc<dyn RetryClock>,
+    ) -> Self {
         // Bound scheduler admission independently of the parked-job heap. The
         // harness already caps outstanding manual controls, and backpressure
         // here also covers internal schedule/cancel/cooldown producers.
         let (commands, receiver) = mpsc::sync_channel(1_024);
+        let commands = Arc::new(commands);
+        clock.attach_scheduler(Arc::downgrade(&commands));
         let delayed_count = Arc::new(AtomicUsize::new(0));
-        thread::spawn(move || {
-            run_retry_scheduler(receiver, worker_tx, worker_waker);
+        let actor = thread::spawn(move || {
+            run_retry_scheduler(receiver, worker_tx, worker_waker, clock);
         });
         Self {
             commands,
             delayed_count,
+            actor: Some(actor),
         }
     }
 
@@ -2570,19 +2809,17 @@ fn run_retry_scheduler(
     commands: Receiver<SchedulerCommand>,
     worker_tx: Sender<WorkerMessage>,
     worker_waker: ManualRuntimeWaker,
+    clock: Arc<dyn RetryClock>,
 ) {
-    let mut queue = RetryScheduleQueue::default();
+    let mut state = RetrySchedulerState::default();
     loop {
-        while let Some(job) = queue.pop_due(Instant::now()) {
-            if send_worker_message(&worker_tx, &worker_waker, WorkerMessage::RetryDue(job)).is_err()
-            {
-                return;
-            }
+        if !send_scheduler_actions(state.advance(clock.now()), &worker_tx, &worker_waker) {
+            return;
         }
-        let command = match queue.next_due() {
+        let command = match state.next_due() {
             Some(next_due) => commands.recv_timeout(
                 next_due
-                    .checked_duration_since(Instant::now())
+                    .checked_duration_since(clock.now())
                     .unwrap_or(Duration::ZERO),
             ),
             None => commands
@@ -2590,107 +2827,68 @@ fn run_retry_scheduler(
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match command {
-            Ok(SchedulerCommand::Schedule {
-                independent_due,
-                cooldown,
-                job,
-            }) => {
-                if let Err(duplicate) = queue.schedule(independent_due, cooldown, *job) {
-                    // A duplicated logical APID makes ownership ambiguous. Fail
-                    // the logical prompt closed once rather than retaining either
-                    // entry and risking two later dispatches.
-                    if let Some(original) = queue.cancel(&duplicate.agent_prompt_id).pop() {
-                        let _ = send_worker_message(
-                            &worker_tx,
-                            &worker_waker,
-                            WorkerMessage::DelayedCanceled {
-                                job: original,
-                                delayed_count: 2,
-                            },
-                        );
+            Ok(command) => {
+                let acknowledged = match &command {
+                    SchedulerCommand::Wake { acknowledged } => acknowledged.clone(),
+                    _ => None,
+                };
+                if !send_scheduler_actions(state.step(command), &worker_tx, &worker_waker) {
+                    return;
+                }
+                if let Some(acknowledged) = acknowledged {
+                    // A virtual-time wake is a barrier: all jobs made due by
+                    // the new instant reach the provider worker channel first.
+                    if !send_scheduler_actions(
+                        state.advance(clock.now()),
+                        &worker_tx,
+                        &worker_waker,
+                    ) {
+                        return;
                     }
+                    let _ = acknowledged.send(());
                 }
-            }
-            Ok(SchedulerCommand::Cancel(prompt_id)) => {
-                for job in queue.cancel(&prompt_id) {
-                    let _ = send_worker_message(
-                        &worker_tx,
-                        &worker_waker,
-                        WorkerMessage::DelayedCanceled {
-                            job,
-                            delayed_count: 1,
-                        },
-                    );
-                }
-            }
-            Ok(SchedulerCommand::CancelAll) => {
-                for job in queue.cancel_all() {
-                    let _ = send_worker_message(
-                        &worker_tx,
-                        &worker_waker,
-                        WorkerMessage::DelayedCanceled {
-                            job,
-                            delayed_count: 1,
-                        },
-                    );
-                }
-            }
-            Ok(SchedulerCommand::RetryNow {
-                request_id,
-                agent_prompt_id,
-            }) => {
-                let mut matches = queue.cancel(&agent_prompt_id);
-                if matches.len() > 1 {
-                    if let Some(job) = matches.pop() {
-                        let _ = send_worker_message(
-                            &worker_tx,
-                            &worker_waker,
-                            WorkerMessage::DelayedCanceled {
-                                job,
-                                delayed_count: matches.len() + 1,
-                            },
-                        );
-                    }
-                    let _ = send_worker_message(
-                        &worker_tx,
-                        &worker_waker,
-                        WorkerMessage::ManualRetry {
-                            job: None,
-                            request_id,
-                            agent_prompt_id,
-                        },
-                    );
-                    continue;
-                }
-                let job = matches.pop();
-                let _ = send_worker_message(
-                    &worker_tx,
-                    &worker_waker,
-                    WorkerMessage::ManualRetry {
-                        job,
-                        request_id,
-                        agent_prompt_id,
-                    },
-                );
-            }
-            Ok(SchedulerCommand::ExtendCooldown {
-                provider,
-                due,
-                generation,
-            }) => {
-                queue.extend_cooldown(&provider, due, generation);
-            }
-            Ok(SchedulerCommand::ReleaseCooldown {
-                provider,
-                generation,
-                now,
-            }) => {
-                queue.release_cooldown(&provider, generation, now);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+impl Drop for RetryScheduler {
+    fn drop(&mut self) {
+        // Disconnect the actor before joining; virtual clocks retain only Weak.
+        let (replacement, _) = mpsc::sync_channel(0);
+        self.commands = Arc::new(replacement);
+        if let Some(actor) = self.actor.take() {
+            let _ = actor.join();
+        }
+    }
+}
+
+/// Delivers pure scheduler actions to the provider actor.
+fn send_scheduler_actions(
+    actions: Vec<RetrySchedulerAction>,
+    worker_tx: &Sender<WorkerMessage>,
+    worker_waker: &ManualRuntimeWaker,
+) -> bool {
+    actions.into_iter().all(|action| {
+        let message = match action {
+            RetrySchedulerAction::Due(job) => WorkerMessage::RetryDue(job),
+            RetrySchedulerAction::Canceled { job, delayed_count } => {
+                WorkerMessage::DelayedCanceled { job, delayed_count }
+            }
+            RetrySchedulerAction::Manual {
+                job,
+                request_id,
+                agent_prompt_id,
+            } => WorkerMessage::ManualRetry {
+                job,
+                request_id,
+                agent_prompt_id,
+            },
+        };
+        send_worker_message(worker_tx, worker_waker, message).is_ok()
+    })
 }
 
 #[derive(Clone)]
@@ -3275,11 +3473,10 @@ fn emit_retry_status(
     job: &PromptJob,
     class: RetryClass,
     due: Instant,
+    now: Instant,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
-    let delay = due
-        .checked_duration_since(Instant::now())
-        .unwrap_or(Duration::ZERO);
+    let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
     let text = format!(
         "{}; next attempt in about {}s (attempt {}). Tau will keep trying; cancel the prompt to stop.",
         class.public_reason(),
