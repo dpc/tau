@@ -87,6 +87,15 @@ the queue model. Failures must include the seed and proptest-minimized command
 trace. Scheduled CI can increase the deterministic budget with
 `TAU_SCHEDULER_MODEL_CASES`; the ordinary default must remain fast, sleep-free,
 and reliable.
+Boundary acceptance should keep representative wire contracts in their owning
+adapters: local Responses HTTP/SSE and WebSocket failures plus generic Chat
+Completions/OpenRouter failures must traverse production parsing and typed retry
+classification. The joined incident gate may then consume that typed decision;
+the feature-gated causal fixture carries its manually retried probe into an
+embedded deterministic tool round, then feeds those exact committed events
+through renderer state to assert main, global, and watched
+activity become idle. These gates use loopback peers and explicit completion
+signals only—never provider auth, Internet access, model prose, tmux, or sleeps.
 CLI coverage must separately prove static completion, exact argument-free
 parsing without prompt resubmission, and requester-visible result rendering.
 

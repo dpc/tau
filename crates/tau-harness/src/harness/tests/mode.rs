@@ -859,6 +859,58 @@ fn traced_embedded_returns_shell_output_when_progress_is_missed() {
     assert!(o.tool_results[0].provider_content.is_empty());
 }
 
+/// Ensures an embedded deterministic echo-tool round preserves exact provider
+/// lifecycle cardinality and naturally clears every harness in-flight prompt.
+#[test]
+fn embedded_deterministic_tool_round_clears_prompt_lifecycle() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = echo_harness(td.path().join("state")).expect("start embedded harness");
+    let outcome = harness
+        .send_user_message("s1", "quota lifecycle fixture", None)
+        .expect("complete deterministic tool round");
+    assert_eq!(outcome.tool_calls.len(), 1);
+    assert_eq!(outcome.tool_calls[0].name.as_str(), "echo");
+    assert_eq!(outcome.tool_results.len(), 1);
+    assert_eq!(
+        outcome.tool_results[0].call_id, outcome.tool_calls[0].call_id,
+        "the continuation must carry the exact deterministic tool result"
+    );
+
+    let events = event_log_events(&harness);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderPromptSubmitted(_)))
+            .count(),
+        2,
+        "initial tool call and tool-result continuation submit once each"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        2,
+        "both logical prompts reach exactly one terminal"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::ToolResult(_)))
+            .count(),
+        1,
+        "the no-side-effect echo tool executes exactly once"
+    );
+    assert!(
+        harness
+            .agents
+            .values()
+            .all(|agent| agent.in_flight_prompt.is_none()),
+        "committed continuation terminal must clear harness in-flight state"
+    );
+    harness.shutdown().expect("shutdown embedded harness");
+}
+
 /// Ensures daemon-mode shell interactions report lifecycle events and clean up
 /// their owned socket path after the daemon exits.
 #[test]

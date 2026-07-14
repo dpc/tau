@@ -1863,6 +1863,39 @@ fn http_error_delivers_active_quota_limit_before_failure() {
     );
 }
 
+/// Ensures a canonical usage-window failure crosses the real HTTP/SSE boundary
+/// and retains the trusted lower-bound reset hint used by the outer scheduler.
+#[test]
+fn local_http_sse_usage_window_contract_returns_typed_retry() {
+    let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
+        base_url: spawn_http_error_server_with_headers(
+            429,
+            r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":432000}}"#,
+            "retry-after: 60\r\n",
+        ),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let mut abort = crate::NeverAbort;
+    let error = match responses_stream("ap-wire-quota", &config, &request, &mut abort, &mut |_| {})
+    {
+        Err(error) => error,
+        Ok(_) => panic!("canonical quota response must fail this attempt"),
+    };
+    let decision = error
+        .retry_decision()
+        .expect("usage-window failure remains scheduler-owned");
+    assert_eq!(
+        decision.class,
+        tau_provider::retry_policy::RetryClass::UsageWindow
+    );
+    assert_eq!(
+        decision.retry_after,
+        Some(std::time::Duration::from_secs(432_000))
+    );
+}
+
 /// `codex.rate_limits` is a WebSocket side channel; an SSE data event with the
 /// same provider-authored JSON cannot manufacture a default-pool route binding.
 #[test]

@@ -18,6 +18,45 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Malformed JSON must fail the causal trace instead of silently dropping a
+/// lifecycle record and weakening cardinality assertions.
+#[test]
+fn causal_trace_parser_rejects_malformed_line() {
+    let error =
+        parse_published_events("{not-json").expect_err("malformed causal trace must fail closed");
+    assert!(matches!(error, CausalQuotaError::TraceJson { line: 1, .. }));
+}
+
+/// Published records without decodable events fail while valid diagnostics are
+/// ignored.
+#[test]
+fn causal_trace_parser_rejects_invalid_published_payload() {
+    let raw = concat!(
+        "{\"type\":\"disconnected\"}\n",
+        "{\"type\":\"published\",\"event\":{\"type\":\"not-an-event\"}}\n"
+    );
+    let error =
+        parse_published_events(raw).expect_err("invalid published payload must fail closed");
+    assert!(matches!(
+        error,
+        CausalQuotaError::TraceEvent { line: 2, .. }
+    ));
+}
+
+/// Valid JSON still requires an object record with a string discriminator.
+#[test]
+fn causal_trace_parser_rejects_missing_or_non_string_type() {
+    for raw in ["{}", "null", "{\"type\":7}"] {
+        assert!(
+            matches!(
+                parse_published_events(raw),
+                Err(CausalQuotaError::TraceShape { line: 1, .. })
+            ),
+            "unexpected acceptance for {raw}"
+        );
+    }
+}
+
 /// Ensures the public `TestRuntime` fixture supports both embedded and daemon
 /// harness paths, preventing regressions where one end-to-end mode loses access
 /// to isolated state or the echo provider.

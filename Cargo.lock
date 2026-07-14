@@ -3557,6 +3557,7 @@ dependencies = [
  "tau-harness-tools",
  "tau-proto",
  "tau-session-inspect",
+ "tau-test-support",
  "tau-themes",
  "tempfile",
  "time",
@@ -4021,6 +4022,7 @@ dependencies = [
 name = "tau-test-support"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tau-config",
  "tau-core",
  "tau-ext-provider-builtin",

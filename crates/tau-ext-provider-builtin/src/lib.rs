@@ -12,6 +12,10 @@
 //! `DESIGN-tau-ext-provider-builtin-durable-session-diagnostics`.
 
 mod prewarm;
+#[cfg(feature = "quota-test-support")]
+mod quota_test_support;
+#[cfg(any(test, feature = "quota-test-support"))]
+mod scripted_http;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -27,6 +31,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dialoguer::{Confirm, Input};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
+#[cfg(feature = "quota-test-support")]
+pub use quota_test_support::run_quota_recovery_fixture;
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,

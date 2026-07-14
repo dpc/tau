@@ -22,6 +22,8 @@ workspace = true
 # echo-provider-driven tool calls; without this feature, tau-harness has
 # no dependency on tau-ext-shell at all.
 echo-agent = ["dep:tau-ext-shell"]
+# Exposes one provider-runner injection helper to the dedicated test-support crate.
+provider-test-support = ["echo-agent"]
 
 [dependencies]
 blake3.workspace = true

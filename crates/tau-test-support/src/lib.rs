@@ -7,11 +7,176 @@ use std::time::{Duration, Instant};
 use tau_config::settings::TauDirs;
 use tau_core::{AgentStore, AgentStoreError, PolicyStore, SessionStore};
 use tau_harness::{
-    HarnessError, ServeOptions, run_daemon_with_echo, run_embedded_message_with_echo,
-    send_daemon_message,
+    HarnessError, InteractionOutcome, ServeOptions, run_daemon_with_echo,
+    run_embedded_message_with_echo, run_embedded_message_with_test_provider, send_daemon_message,
 };
 use tau_session_inspect::{InspectError, open_policy_store, open_session_store};
 use tempfile::TempDir;
+
+/// Completed causal quota fixture plus the exact harness-committed event trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CausalQuotaOutcome {
+    /// Embedded interaction result, including the exact tool call and result.
+    pub interaction: InteractionOutcome,
+    /// Ordered events committed by the harness during the interaction.
+    pub events: Vec<tau_proto::Event>,
+}
+
+/// Failure while running or decoding the causal quota fixture.
+#[derive(Debug)]
+pub enum CausalQuotaError {
+    /// Embedded harness/provider execution failed.
+    Harness(HarnessError),
+    /// Local trace storage could not be read.
+    Io(std::io::Error),
+    /// One trace line was not valid JSON.
+    TraceJson {
+        /// One-based line number in `events.jsonl`.
+        line: usize,
+        /// Original JSON decoder failure.
+        source: serde_json::Error,
+    },
+    /// A published event payload was incompatible with the protocol schema.
+    TraceEvent {
+        /// One-based line number in `events.jsonl`.
+        line: usize,
+        /// Original typed-event decoder failure.
+        source: serde_json::Error,
+    },
+    /// A valid JSON line did not satisfy the trace record schema.
+    TraceShape {
+        /// One-based line number in `events.jsonl`.
+        line: usize,
+        /// Description of the invalid record shape.
+        message: String,
+    },
+}
+
+impl std::fmt::Display for CausalQuotaError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Harness(error) => write!(formatter, "causal quota harness: {error}"),
+            Self::Io(error) => write!(formatter, "causal quota trace I/O: {error}"),
+            Self::TraceJson { line, source } => {
+                write!(
+                    formatter,
+                    "invalid causal trace JSON on line {line}: {source}"
+                )
+            }
+            Self::TraceEvent { line, source } => {
+                write!(
+                    formatter,
+                    "invalid published event on causal trace line {line}: {source}"
+                )
+            }
+            Self::TraceShape { line, message } => {
+                write!(
+                    formatter,
+                    "invalid causal trace record on line {line}: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CausalQuotaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Harness(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::TraceJson { source, .. } | Self::TraceEvent { source, .. } => Some(source),
+            Self::TraceShape { .. } => None,
+        }
+    }
+}
+
+impl From<HarnessError> for CausalQuotaError {
+    fn from(error: HarnessError) -> Self {
+        Self::Harness(error)
+    }
+}
+
+impl From<std::io::Error> for CausalQuotaError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Runs the feature-gated quota provider through the embedded harness.
+///
+/// The returned trace causally spans local Responses classification, manual
+/// provider retry, tool execution, tool-result continuation, and final harness
+/// commit. It performs no external network or credential access.
+pub fn run_causal_quota_fixture(
+    state_dir: impl Into<PathBuf>,
+) -> Result<CausalQuotaOutcome, CausalQuotaError> {
+    fn provider_runner(
+        reader: std::os::unix::net::UnixStream,
+        writer: std::os::unix::net::UnixStream,
+    ) -> Result<(), String> {
+        tau_ext_provider_builtin::run_quota_recovery_fixture(reader, writer)
+    }
+
+    let state_dir = state_dir.into();
+    let interaction = run_embedded_message_with_test_provider(
+        &state_dir,
+        "s1",
+        "causal quota fixture",
+        provider_runner,
+    )?;
+    let trace_path = tau_config::settings::sessions_dir_of(&state_dir)
+        .join("s1")
+        .join("events.jsonl");
+    let raw = std::fs::read_to_string(trace_path)?;
+    let events = parse_published_events(&raw)?;
+    Ok(CausalQuotaOutcome {
+        interaction,
+        events,
+    })
+}
+
+/// Parses every debug-trace line and fails closed on malformed published data.
+fn parse_published_events(raw: &str) -> Result<Vec<tau_proto::Event>, CausalQuotaError> {
+    let mut events = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line_number = index + 1;
+        let entry: serde_json::Value =
+            serde_json::from_str(line).map_err(|source| CausalQuotaError::TraceJson {
+                line: line_number,
+                source,
+            })?;
+        let object = entry
+            .as_object()
+            .ok_or_else(|| CausalQuotaError::TraceShape {
+                line: line_number,
+                message: "record must be an object".to_owned(),
+            })?;
+        let record_type = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CausalQuotaError::TraceShape {
+                line: line_number,
+                message: "record must have a string type".to_owned(),
+            })?;
+        if record_type != "published" {
+            continue;
+        }
+        let payload = object
+            .get("event")
+            .cloned()
+            .ok_or_else(|| CausalQuotaError::TraceShape {
+                line: line_number,
+                message: "published record has no event".to_owned(),
+            })?;
+        let event =
+            serde_json::from_value(payload).map_err(|source| CausalQuotaError::TraceEvent {
+                line: line_number,
+                source,
+            })?;
+        events.push(event);
+    }
+    Ok(events)
+}
 
 /// Temporary runtime paths for end-to-end tests.
 #[derive(Debug)]

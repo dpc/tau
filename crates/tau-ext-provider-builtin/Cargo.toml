@@ -14,6 +14,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Narrow deterministic provider runner used only by cross-crate acceptance tests.
+quota-test-support = []
+
 [dependencies]
 dialoguer.workspace = true
 serde.workspace = true

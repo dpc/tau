@@ -52,6 +52,8 @@ pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
     AgentId::parse(value.as_ref()).expect("harness stores only valid agent ids")
 }
 
+#[cfg(feature = "provider-test-support")]
+pub use crate::daemon::run_embedded_message_with_test_provider;
 pub use crate::daemon::{
     EPHEMERAL_ENV, EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
     get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,

@@ -180,6 +180,62 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
     );
 }
 
+/// Ensures a provider-authored usage-window error received from an actual local
+/// WebSocket reaches the common classifier without a silent reconnect.
+#[test]
+fn local_websocket_usage_window_contract_returns_typed_retry() {
+    let (addr, server) = spawn_fake_codex_server();
+    server.lock().expect("server state lock").scripted_error = Some(serde_json::json!({
+        "type": "error",
+        "error": {
+            "code": "usage_limit_reached",
+            "message": "weekly allocation exhausted",
+            "resets_in_seconds": 432000
+        }
+    }));
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let session_id = tau_proto::SessionId::new("session-wire-error");
+    let agent_id = tau_proto::AgentId::parse("agent-wire-error").expect("agent id");
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let mut pool = WsPool::new();
+    let error = match run_turn_through_pool(
+        &mut pool,
+        &config,
+        "session-wire-error",
+        "ap-wire-error",
+        &request,
+        &mut |_| {},
+    ) {
+        Err(error) => error.into_llm_error(),
+        Ok(_) => panic!("scripted WebSocket error must fail this attempt"),
+    };
+    let decision = error
+        .retry_decision()
+        .expect("usage-window error remains scheduler-owned");
+    assert_eq!(
+        decision.class,
+        tau_provider::retry_policy::RetryClass::UsageWindow
+    );
+    assert_eq!(decision.retry_after, Some(Duration::from_secs(432_000)));
+    assert_eq!(
+        server.lock().expect("server state lock").upgrade_count,
+        1,
+        "account errors must not trigger a silent reconnect"
+    );
+}
+
 /// Concurrent same-key turns must serialize at the shared-pool reservation
 /// boundary. Without that reservation, both workers can observe an empty
 /// map while the first turn owns the socket and open two sockets for one
@@ -1595,6 +1651,8 @@ struct ServerState {
     /// when its idle reaper fires. Tests use this to exercise
     /// the silent-reconnect path.
     fault: Option<MidStreamCloseFault>,
+    /// Optional provider error envelope emitted instead of the normal success.
+    scripted_error: Option<serde_json::Value>,
 }
 
 /// "After connection index `on_conn_index` has fully served
@@ -1666,7 +1724,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             Message::Text(text) => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                let (fault_now, response_delay) = {
+                let (fault_now, response_delay, scripted_error) = {
                     let mut s = state.lock().expect("server state lock");
                     s.requests.push(parsed.clone());
                     s.turns_per_connection[conn_idx] += 1;
@@ -1675,7 +1733,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     let fault_now = s
                         .fault
                         .filter(|f| f.on_conn_index == conn_idx && turn_counter >= f.after_turn);
-                    (fault_now, s.response_delay)
+                    (fault_now, s.response_delay, s.scripted_error.clone())
                 };
                 turn_counter += 1;
                 if !response_delay.is_zero() {
@@ -1693,6 +1751,12 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     })));
                     finish_server_turn(&state);
                     return;
+                }
+                if let Some(error) = scripted_error {
+                    ws.send(Message::Text(error.to_string().into()))
+                        .expect("write scripted provider error");
+                    finish_server_turn(&state);
+                    continue;
                 }
                 // Stream a tiny canned event sequence: one
                 // visible-text delta, then completed.

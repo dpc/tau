@@ -15,13 +15,16 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+serde_json.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
-tau-harness = { workspace = true, features = ["echo-agent"] }
+tau-ext-provider-builtin = { workspace = true, features = [
+  "quota-test-support",
+] }
+tau-harness = { workspace = true, features = ["provider-test-support"] }
+tau-proto.workspace = true
 tau-session-inspect.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
-tau-ext-provider-builtin.workspace = true
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }
-tau-proto.workspace = true

@@ -179,6 +179,32 @@ fn chatgpt_auth() -> OpenAiAuth {
     }
 }
 
+/// Starts one local Responses endpoint that returns the canonical incident
+/// failure and its trusted five-day reset hint.
+fn spawn_usage_window_responses_server() -> (String, thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind Responses server");
+    let address = listener.local_addr().expect("Responses server address");
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept Responses request");
+        let request = crate::scripted_http::read_bounded_http_request(&mut socket)
+            .expect("read bounded Responses request");
+        assert!(
+            String::from_utf8_lossy(&request.request_line).contains("/responses"),
+            "incident attempt must traverse the production Responses route"
+        );
+        assert!(!request.body.is_empty(), "Responses request body");
+        let body = r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":432000}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 60\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write canonical quota response");
+    });
+    (format!("http://{address}"), server)
+}
+
 fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
     models.iter().map(|model| model.id.to_string()).collect()
 }
@@ -2064,6 +2090,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         Event::AgentPromptCreated(probe),
     )]));
 
+    let (wire_base_url, wire_server) = spawn_usage_window_responses_server();
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let executor_calls = Arc::clone(&calls);
     let (completed_tx, completed_rx) = mpsc::channel();
@@ -2075,6 +2102,30 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 panic!("probe uses canonical Responses profile");
             };
             let profile_identity = quota_profile_identity(config);
+            let mut wire_config = config.clone();
+            wire_config.base_url = wire_base_url.clone();
+            wire_config.supports_websocket = false;
+            let runtime = ChatGptRuntime::new();
+            let mut abort = tau_provider_chatgpt::NeverAbort;
+            let decision = {
+                let mut writer = execution.frame_writer();
+                handle_prompt(
+                    &id,
+                    &wire_config,
+                    &execution.job.prompt,
+                    &mut writer,
+                    &mut abort,
+                    ChatGptPromptExecutionContext {
+                        debug_provider_requests: false,
+                        runtime: &runtime,
+                    },
+                    &mut |_| {},
+                )
+                .expect("run canonical local Responses attempt")
+                .expect("usage-window response must remain pending")
+            };
+            assert_eq!(decision.class, RetryClass::UsageWindow);
+            assert_eq!(decision.retry_after, Some(Duration::from_secs(5 * 86_400)));
             let output_tx = execution.output_tx.clone();
             let output_waker = execution.output_waker.clone();
             send_worker_message(
@@ -2082,8 +2133,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 &output_waker,
                 WorkerMessage::Retry {
                     job: execution.job,
-                    decision: RetryDecision::new(RetryClass::UsageWindow)
-                        .with_retry_after(Some(Duration::from_secs(5 * 86_400))),
+                    decision,
                 },
             )
             .expect("install five-day usage-window cooldown");
@@ -2209,6 +2259,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             .count()
             == 2
     });
+    wire_server.join().expect("canonical Responses server");
     assert_eq!(calls.lock().expect("call log").as_slice(), ["probe"]);
 
     let mut peer_one = prompt();

@@ -2220,6 +2220,12 @@ impl EventRenderer {
         self.main_agent_turn_active
     }
 
+    /// Reports whether the selected main agent has effective live activity.
+    #[cfg(test)]
+    fn main_agent_is_in_progress_for_test(&self) -> bool {
+        self.main_agent_turn_active && self.agent_activity.is_in_progress()
+    }
+
     /// Returns a clone of the shared Fast-mode mirror, used by configurable
     /// bindings.
     pub(crate) fn fast_service_tier_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {

@@ -504,6 +504,46 @@ pub fn run_embedded_message_with_echo(
     Ok(outcome)
 }
 
+/// Runs one embedded interaction with a feature-gated deterministic provider
+/// runner and the no-side-effect echo tool.
+///
+/// This narrow seam is available only to cross-crate acceptance tests; normal
+/// harness builds cannot inject provider runners.
+#[cfg(feature = "provider-test-support")]
+pub fn run_embedded_message_with_test_provider(
+    state_dir: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+    provider_runner: fn(UnixStream, UnixStream) -> Result<(), String>,
+) -> Result<InteractionOutcome, HarnessError> {
+    let state_dir = state_dir.into();
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    let mut harness = Harness::new_with_provider(
+        state_dir,
+        dirs,
+        provider_runner,
+        echo_tools(),
+        session_id,
+        tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
+    )?;
+    disable_echo_tool_context_gate_for_tests(&mut harness);
+    harness.enable_echo_tool_for_tests();
+    let mut outcome = match harness.send_user_message(session_id, message, None) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = harness.shutdown();
+            return Err(error);
+        }
+    };
+    harness.shutdown()?;
+    outcome.lifecycle_messages = harness.lifecycle_messages.clone();
+    Ok(outcome)
+}
+
 /// In-process tool list used by the echo-provider test helpers. Lives
 /// here so the only call site that depends on `tau-ext-shell` is
 /// gated behind the `echo-agent` feature.

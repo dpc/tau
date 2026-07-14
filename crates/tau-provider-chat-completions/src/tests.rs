@@ -38,6 +38,24 @@ fn provider() -> ChatCompletionsProvider {
     }
 }
 
+/// Reads through the HTTP request line without assuming one TCP read contains
+/// it.
+fn read_request_line(socket: &mut std::net::TcpStream) -> String {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !bytes.ends_with(b"\r\n") {
+        assert!(
+            bytes.len() < 8 * 1024,
+            "fixture request line must remain bounded"
+        );
+        socket.read_exact(&mut byte).expect("read request line");
+        bytes.push(byte[0]);
+    }
+    String::from_utf8(bytes).expect("ASCII HTTP request line")
+}
+
 #[test]
 fn debug_provider_request_dir_requires_existing_session_dir() {
     // Provider diagnostics are allowed to create their own debug subdirectory,
@@ -157,6 +175,59 @@ fn reqwest_transport_streams_local_success_response() {
     assert_eq!(finished.stop_reason, ProviderStopReason::EndTurn);
     assert!(!finished.output_items.is_empty());
     server.join().expect("server join");
+}
+
+/// Ensures both generic Chat Completions and the OpenRouter compatibility route
+/// turn a real local 429 response into the same scheduler-owned throttle retry.
+#[test]
+fn local_http_throttle_contract_covers_generic_and_openrouter_routes() {
+    use std::io::Write as _;
+
+    let model = provider().models[0].clone();
+    let openrouter = crate::openrouter::OpenRouterProfile {
+        api_key: "fixture-openrouter-key".to_owned(),
+        models: vec![model.clone()],
+    }
+    .to_chat_completions();
+    for mut configured in [provider(), openrouter] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
+        let address = listener.local_addr().expect("server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            assert!(
+                read_request_line(&mut socket).contains("/chat/completions"),
+                "attempt must traverse the production Chat Completions route"
+            );
+            let body = r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#;
+            write!(
+                socket,
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 37\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+        configured.base_url = format!("http://{address}");
+        let configured_model = configured.models[0].clone();
+        let prompt = prompt();
+        let mut bytes = Vec::new();
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        let outcome = run_prompt_attempt_for_provider(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &configured,
+            &configured_model,
+            false,
+            &mut writer,
+            &mut || false,
+        );
+        let PromptAttemptOutcome::Retry(decision) = outcome else {
+            panic!("canonical local 429 must remain scheduler-owned");
+        };
+        assert_eq!(decision.class, RetryClass::Throttle);
+        assert_eq!(decision.retry_after, Some(Duration::from_secs(37)));
+        server.join().expect("server join");
+    }
 }
 
 /// Ensures Chat Completions streaming updates emit append deltas rather than

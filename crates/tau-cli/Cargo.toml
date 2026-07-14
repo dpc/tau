@@ -43,5 +43,6 @@ built.workspace = true
 
 [dev-dependencies]
 tau-cli-term-raw = { workspace = true }
+tau-test-support.workspace = true
 tempfile.workspace = true
 vt100.workspace = true

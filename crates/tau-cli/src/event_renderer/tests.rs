@@ -748,3 +748,97 @@ fn role_effort_completions_include_max() {
     assert_eq!(items[0].value, "max");
     assert_eq!(items[0].description, "maximum reasoning effort for GPT-5.6");
 }
+
+/// Ensures the real embedded harness tool/continuation event sequence leaves
+/// main, global, and watched activity idle when rendered without synthetic
+/// prompt cleanup.
+#[test]
+fn embedded_tool_continuation_trace_renders_fully_idle() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    let outcome =
+        tau_test_support::run_causal_quota_fixture(&state_dir).expect("causal quota fixture");
+    assert_eq!(outcome.interaction.tool_calls.len(), 1);
+    assert_eq!(outcome.interaction.tool_results.len(), 1);
+    let events = outcome.events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, tau_proto::Event::ProviderPromptSubmitted(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, tau_proto::Event::ProviderResponseFinished(_)))
+            .count(),
+        2
+    );
+
+    let fixture_agent = events
+        .iter()
+        .find_map(|event| match event {
+            tau_proto::Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
+            _ => None,
+        })
+        .expect("fixture agent");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.current_session_id = Some("s1".into());
+    renderer.switch_agent(fixture_agent.to_string());
+    let mut saw_main_active = false;
+    let mut saw_global_active = false;
+    for event in &events {
+        renderer.handle(event);
+        saw_main_active |= renderer.main_agent_is_in_progress_for_test();
+        saw_global_active |= renderer
+            .agent_in_progress_state()
+            .load(std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let mut watched_renderer = renderer_for_agent_id_tests();
+    watched_renderer.current_session_id = Some("s1".into());
+    watched_renderer.current_agent_id = Some("manager".to_owned());
+    watched_renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![fixture_agent.clone()],
+            changed_agent_id: Some(fixture_agent),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    let mut saw_watched_active = false;
+    for event in &events {
+        watched_renderer.handle(event);
+        saw_watched_active |= watched_renderer.active_side_agent_count() == 1;
+    }
+
+    assert!(
+        saw_main_active,
+        "submitted causal prompt must activate main UI"
+    );
+    assert!(
+        saw_global_active,
+        "submitted causal prompt must activate global UI"
+    );
+    assert!(
+        saw_watched_active,
+        "the same causal prompt must activate watched-agent fallback state"
+    );
+    assert!(
+        !renderer.main_agent_is_in_progress_for_test(),
+        "final user terminal must clear effective main-turn activity"
+    );
+    assert!(
+        !renderer
+            .agent_in_progress_state()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "tool result and continuation terminal must clear global activity"
+    );
+    assert_eq!(
+        watched_renderer.active_side_agent_count(),
+        0,
+        "the causal terminal must naturally clear watched-agent activity"
+    );
+}
