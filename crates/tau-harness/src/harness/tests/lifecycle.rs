@@ -147,6 +147,7 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         supported_tool_types: vec![],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
+        supports_parallel_tool_calls: true,
         default_affinity: 100,
         context_window: 4_096,
         efforts: vec![tau_proto::Effort::Medium],
@@ -1254,6 +1255,31 @@ fn handshaking_tool_register_is_not_active_before_ready() {
     assert!(!prompt.system_prompt.contains("STAGED TOOL PROMPT"));
     assert!(!prompt.system_prompt.contains("STAGED EXTENSION PROMPT"));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Concrete provider model metadata, rather than a manually assembled template
+/// context, controls parallel-tool guidance in normal and preview rendering.
+#[test]
+fn provider_model_parallel_capability_flows_into_prompt_rendering() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let model: tau_proto::ModelId = "test/model".parse().expect("model id");
+    let mut info = staged_provider_model("test/model");
+    info.supports_parallel_tool_calls = false;
+    h.provider_model_info.insert(model.clone(), info);
+    h.selected_model = Some(model);
+
+    let normal = h.build_system_prompt_for_role(&h.selected_role);
+    let preview = h
+        .build_system_prompt_for_role_preview(&h.selected_role)
+        .expect("preview prompt");
+
+    assert!(normal.contains("at most one tool call"));
+    assert!(preview.contains("at most one tool call"));
+    assert!(!normal.contains("Maximize use of parallel tool calls"));
+    assert!(!preview.contains("Maximize use of parallel tool calls"));
     h.shutdown().expect("shutdown");
 }
 
@@ -2733,7 +2759,12 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
     assert!(!h.discovered_skills.contains_key("staged-skill"));
     let prompt_agent_id = tau_proto::AgentId::parse(&agent_id).expect("agent id");
     let before_prompt = h
-        .try_build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id), &[])
+        .try_build_system_prompt_for_role_and_agent(
+            &h.selected_role,
+            Some(&prompt_agent_id),
+            &[],
+            None,
+        )
         .expect("prompt renders");
     assert!(!before_prompt.contains("STAGED SKILL DESCRIPTION"));
     assert!(!before_prompt.contains("STAGED CONTEXT VALUE"));
@@ -2748,7 +2779,12 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 
     assert!(h.discovered_skills.contains_key("staged-skill"));
     let after_prompt = h
-        .try_build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id), &[])
+        .try_build_system_prompt_for_role_and_agent(
+            &h.selected_role,
+            Some(&prompt_agent_id),
+            &[],
+            None,
+        )
         .expect("prompt renders");
     assert!(after_prompt.contains("STAGED SKILL DESCRIPTION"));
     assert!(after_prompt.contains("STAGED CONTEXT VALUE"));

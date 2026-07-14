@@ -22,3 +22,13 @@ wakers waking blocked turn waits without relying on short receive polling.
 Parser and streaming changes should keep using focused event/delta/snapshot
 regression tests, with broader provider response streaming guidance in
 `../../docs/testing.md`.
+
+Changes to a default route or protocol surface require a capability matrix
+covering direct function/custom calls, parallel generation, programmatic/code
+mode, hosted tools, images/detail, reasoning continuity, compaction,
+chaining/replay, HTTP/WebSocket, quota/retry/fallback, and profile/auth scope.
+Golden requests cover every supported mode. Prompt tests must prove that no
+unsupported capability is advertised, and the default mode must retain an
+end-to-end multi-tool lifecycle test. Reference-client metadata is evidence,
+not by itself a Tau requirement; compatibility modes remain explicit and never
+become retry fallbacks without a separately approved design.

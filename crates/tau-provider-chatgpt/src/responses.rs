@@ -125,6 +125,33 @@ pub enum ResponsesSurface {
     ChatGpt,
 }
 
+/// Startup-selected ChatGPT Responses protocol contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesMode {
+    /// Standard Responses request lowering with ordinary parallel tool calls.
+    #[default]
+    Standard,
+    /// Legacy Responses Lite lowering retained for explicit profile
+    /// compatibility.
+    LiteCompatibility,
+}
+
+impl ResponsesMode {
+    /// Returns whether this mode uses the legacy Responses Lite wire contract.
+    #[must_use]
+    pub const fn is_lite_compatibility(self) -> bool {
+        matches!(self, Self::LiteCompatibility)
+    }
+
+    /// Stable cache and connection-pool identity component for this mode.
+    pub(crate) const fn cache_identity(self) -> &'static str {
+        match self {
+            Self::Standard => "responses-surface:standard",
+            Self::LiteCompatibility => "responses-surface:lite-compatibility",
+        }
+    }
+}
+
 impl ResponsesSurface {
     fn responses_url(self, base_url: &str) -> String {
         let _ = self;
@@ -176,6 +203,8 @@ pub(super) fn record_provider_raw_event_after(
 pub struct ResponsesConfig {
     /// Responses API surface used for endpoint and request-body differences.
     pub surface: ResponsesSurface,
+    /// Startup-stable Responses protocol contract for this profile/model route.
+    pub mode: ResponsesMode,
     /// Base URL for the selected surface, without the final Responses path.
     pub base_url: String,
     /// Bearer credential to send in the `Authorization` header.
@@ -230,8 +259,8 @@ pub struct ResponsesConfig {
     /// Whether this provider supports server-side context compaction.
     pub supports_compaction: bool,
     /// Whether this provider accepts the `prompt_cache_key` field.
-    /// The wire key is derived per `(base_url, agent lifetime)` and is stable
-    /// across prompt originators for the same target agent.
+    /// The wire key is derived per `(base_url, mode, agent lifetime)` and is
+    /// stable across prompt originators for the same target agent.
     pub supports_prompt_cache_key: bool,
 }
 
@@ -450,7 +479,7 @@ fn send_compact_request(
     );
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     let permit = acquire_compact_transport(abort)?;
-    let thread_id = request.prompt_cache_key(&config.base_url);
+    let thread_id = request.prompt_cache_key(&config.base_url, config.mode);
     let config = config.clone();
     let completion = std::sync::Arc::new((
         std::sync::Mutex::new(CompactCompletion::default()),
@@ -531,7 +560,7 @@ fn compact_http_request(
     if let Some(account_id) = &config.account_id {
         req = req.header("chatgpt-account-id", account_id);
     }
-    if crate::uses_responses_lite(&config.model_id) {
+    if config.mode.is_lite_compatibility() {
         req = req.header(RESPONSES_LITE_HEADER, "true");
     }
     let mut response = req
@@ -625,7 +654,7 @@ fn responses_stream_live_with_idle_timeout(
     if let Some(ref account_id) = config.account_id {
         req = req.header("chatgpt-account-id", account_id);
     }
-    if crate::uses_responses_lite(&config.model_id) {
+    if config.mode.is_lite_compatibility() {
         req = req.header(RESPONSES_LITE_HEADER, "true");
     }
 
@@ -1846,7 +1875,7 @@ fn build_request(
             _ => (context_items.as_slice(), None),
         };
 
-    let responses_lite = crate::uses_responses_lite(&config.model_id);
+    let responses_lite = config.mode.is_lite_compatibility();
     let mut input = build_input_items(config, input_items, responses_lite);
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
@@ -1884,7 +1913,7 @@ fn build_request(
         }
         (None, Vec::new(), Some(false))
     } else {
-        (instructions, tools, None)
+        (instructions, tools, Some(true))
     };
 
     let effort = if config.supports_reasoning_effort {
@@ -1900,7 +1929,7 @@ fn build_request(
     let reasoning = if effort.is_some() || summary.is_some() || responses_lite {
         Some(ReasoningRequest {
             effort,
-            context: Some(ReasoningContext::AllTurns),
+            context: responses_lite.then_some(ReasoningContext::AllTurns),
             summary,
         })
     } else {
@@ -1915,7 +1944,7 @@ fn build_request(
     };
     let prompt_cache_key = config
         .supports_prompt_cache_key
-        .then(|| request.prompt_cache_key(&config.base_url));
+        .then(|| request.prompt_cache_key(&config.base_url, config.mode));
     let include: Vec<&'static str> = if config.supports_encrypted_reasoning {
         vec!["reasoning.encrypted_content"]
     } else {
@@ -1924,9 +1953,7 @@ fn build_request(
     // Responses Lite does not support server-side compaction. Keep the Lite
     // request shape intact and suppress context management even if a stale or
     // direct caller supplies compaction metadata.
-    let context_management = if responses_lite {
-        None
-    } else {
+    let context_management = if config.supports_compaction && !responses_lite {
         request.compaction.map(|compaction| {
             vec![ContextManagementRequest {
                 ty: "compaction",
@@ -1935,6 +1962,8 @@ fn build_request(
                 })),
             }]
         })
+    } else {
+        None
     };
 
     ResponsesRequest {
@@ -2030,7 +2059,7 @@ pub(super) fn build_ws_envelope(
 ) -> WsResponseCreate {
     let mut body = build_request(config, request, cached_response_id);
     body.stream = None;
-    if crate::uses_responses_lite(&config.model_id) {
+    if config.mode.is_lite_compatibility() {
         body.client_metadata = Some(ResponsesClientMetadata {
             responses_lite: "true",
         });

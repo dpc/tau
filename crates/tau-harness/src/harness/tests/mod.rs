@@ -1239,6 +1239,7 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
                         supported_tool_types: vec![],
                         input_modalities: Vec::new(),
                         tool_result_modalities: Vec::new(),
+                        supports_parallel_tool_calls: true,
                         default_affinity: 0,
                         context_window: 1_000,
                         efforts: vec![tau_proto::Effort::Medium],

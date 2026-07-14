@@ -56,12 +56,18 @@ The harness assembles prompts and routes provider-owned turns to this extension.
 ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay within that finite provider attempt; an ambiguous failed attempt then returns to the logical-prompt scheduler.
 
 ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
-window and include `max` among their published reasoning choices. Normal inference
-uses Responses Lite without legacy inline context management. Manual and automatic
-compaction use the separate unary `/codex/responses/compact` operation and install
-one validated replacement-window transcript boundary.
+window and include `max` among their published reasoning choices. They use
+standard Responses and parallel direct tool calls by default. Legacy Responses
+Lite is available only by setting `responses_lite_compatibility: true` on that
+ChatGPT profile (or answering Yes during `tau provider add`) and restarting.
+Tau never changes modes as a retry fallback. Both modes omit legacy inline
+context management; manual and automatic compaction use the unary
+`/codex/responses/compact` operation and install one validated
+replacement-window transcript boundary. The startup mode also separates prompt
+cache/thread/socket identity, causing one cold transition after upgrade, while
+quota and retry identity remain account/provider based.
 
-The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys are stable per target agent and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface instead of silently falling back to HTTP/SSE.
+The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account, startup-selected Responses mode, and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys use the same mode-aware identity and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface instead of silently falling back to HTTP/SSE.
 
 Fresh WebSocket setup first emits a fixed secret-free connecting status, then races
 DNS/TCP/TLS/upgrade against the prompt cancellation registry and a 30-second

@@ -8,6 +8,7 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         supported_tool_types: Vec::new(),
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
+        supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: 100_000,
         efforts: vec![tau_proto::Effort::Off],

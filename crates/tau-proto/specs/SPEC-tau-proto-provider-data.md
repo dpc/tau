@@ -120,3 +120,9 @@ representation.
 `ProviderResponseFinished.failure_kind` carries a closed, display-prose-independent category for
 terminal provider request rejection. `context_window_exceeded` allows lifecycle consumers to
 reason about the outcome without parsing the bounded human-readable `error` field.
+
+`ProviderModelInfo.supports_parallel_tool_calls` describes whether the exact
+published provider/model route can generate multiple direct tool calls in one
+response. It is an effective route capability, not abstract model metadata.
+Legacy publishers that omit it decode as `true`; publishers serialize their
+effective value explicitly.

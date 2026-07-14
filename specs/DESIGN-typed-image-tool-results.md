@@ -1,6 +1,6 @@
 # DESIGN-typed-image-tool-results: Typed local image tool results
 
-Status: confirmed, 2026-07-13, user
+Status: confirmed, 2026-07-14, dpc
 
 Local image inspection is a native tool-result capability, not text containing
 base64 and not a synthesized user message. A successful image-producing
@@ -22,7 +22,8 @@ The harness exposes an image-producing tool only when the exact provider model
 route publishes both image-input and image-tool-result modalities. GPT-5.6
 Sol/Terra/Luna on the ChatGPT Responses surface are the audited initial routes.
 Responses lowering uses `function_call_output.output[]` with text followed by
-`input_image`; Responses Lite receives prepared high-detail pixels but omits
+`input_image`; standard GPT-5.6 Responses preserves `detail: high`, while
+Responses Lite receives prepared high-detail pixels but omits
 the `detail` field. Unsupported projections contain a bounded omission marker
 and never send image bytes.
 

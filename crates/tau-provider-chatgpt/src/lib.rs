@@ -303,9 +303,18 @@ fn compute_ws_pool_delta(
 /// Returns the hardcoded model publication records for one ChatGPT account.
 #[must_use]
 pub fn models_for_provider(provider: &ProviderName) -> Vec<ProviderModelInfo> {
+    models_for_provider_mode(provider, responses::ResponsesMode::Standard)
+}
+
+/// Returns model publication records for one startup-selected ChatGPT profile.
+#[must_use]
+pub fn models_for_provider_mode(
+    provider: &ProviderName,
+    mode: responses::ResponsesMode,
+) -> Vec<ProviderModelInfo> {
     CHATGPT_MODELS
         .iter()
-        .map(|model| model_info(provider, model))
+        .map(|model| model_info(provider, model, effective_mode(model, mode)))
         .collect()
 }
 
@@ -316,9 +325,27 @@ pub fn config_for_model(
     access_token: String,
     account_id: Option<String>,
 ) -> responses::ResponsesConfig {
+    config_for_model_mode(
+        model,
+        access_token,
+        account_id,
+        responses::ResponsesMode::Standard,
+    )
+}
+
+/// Returns a Responses backend config for a startup-selected profile mode.
+#[must_use]
+pub fn config_for_model_mode(
+    model: &ModelName,
+    access_token: String,
+    account_id: Option<String>,
+    requested_mode: responses::ResponsesMode,
+) -> responses::ResponsesConfig {
     let model_id = model.as_str();
+    let mode = effective_mode(model_id, requested_mode);
     responses::ResponsesConfig {
         surface: responses::ResponsesSurface::ChatGpt,
+        mode,
         base_url: DEFAULT_BASE_URL.to_owned(),
         api_key: access_token,
         model_id: model_id.to_owned(),
@@ -330,12 +357,16 @@ pub fn config_for_model(
         supports_phase: is_known_phase_capable_model_id(model_id),
         supports_encrypted_reasoning: true,
         supports_websocket: true,
-        supports_compaction: !uses_responses_lite(model_id),
+        supports_compaction: !is_gpt_5_6(model_id),
         supports_prompt_cache_key: true,
     }
 }
 
-fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
+fn model_info(
+    provider: &ProviderName,
+    model: &str,
+    mode: responses::ResponsesMode,
+) -> ProviderModelInfo {
     ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
@@ -360,6 +391,7 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
         } else {
             vec![tau_proto::InputModality::Text]
         },
+        supports_parallel_tool_calls: !mode.is_lite_compatibility(),
         default_affinity: default_affinity_for_model(model),
         context_window: effective_context_window_for_model(model),
         efforts: efforts_for_model(model),
@@ -370,9 +402,9 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ThinkingSummary::Concise,
             ThinkingSummary::Detailed,
         ],
-        supports_compaction: !uses_responses_lite(model),
-        supports_standalone_compaction: uses_responses_lite(model),
-        standalone_compaction_threshold: uses_responses_lite(model)
+        supports_compaction: !is_gpt_5_6(model),
+        supports_standalone_compaction: is_gpt_5_6(model),
+        standalone_compaction_threshold: is_gpt_5_6(model)
             .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
     }
 }
@@ -402,8 +434,12 @@ fn effective_context_window_for_model(model: &str) -> u64 {
     raw_context_window_for_model(model) * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
 }
 
-fn uses_responses_lite(model: &str) -> bool {
-    is_gpt_5_6(model)
+fn effective_mode(model: &str, requested: responses::ResponsesMode) -> responses::ResponsesMode {
+    if is_gpt_5_6(model) {
+        requested
+    } else {
+        responses::ResponsesMode::Standard
+    }
 }
 
 fn is_gpt_5_6(model: &str) -> bool {

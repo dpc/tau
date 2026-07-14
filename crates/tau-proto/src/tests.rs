@@ -997,6 +997,7 @@ fn representative_events() -> Vec<Event> {
                 supported_tool_types: vec![],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
+                supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
@@ -3757,16 +3758,19 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     assert!(legacy.supported_tool_types.is_empty());
     assert!(legacy.input_modalities.is_empty());
     assert!(legacy.tool_result_modalities.is_empty());
+    assert!(legacy.supports_parallel_tool_calls);
 
     value["supported_tool_types"] = serde_json::json!(["function", "custom"]);
     value["input_modalities"] = serde_json::json!(["text", "image"]);
     value["tool_result_modalities"] = serde_json::json!(["text", "image"]);
+    value["supports_parallel_tool_calls"] = serde_json::json!(false);
     let explicit: ProviderModelInfo =
         serde_json::from_value(value).expect("explicit model metadata");
     assert_eq!(
         explicit.supported_tool_types,
         [ToolType::Function, ToolType::Custom]
     );
+    assert!(!explicit.supports_parallel_tool_calls);
     let encoded = serde_json::to_value(explicit).expect("serialize model metadata");
     assert_eq!(
         encoded["supported_tool_types"],
@@ -3780,6 +3784,7 @@ fn provider_model_supported_tool_types_json_roundtrip() {
         encoded["tool_result_modalities"],
         serde_json::json!(["text", "image"])
     );
+    assert_eq!(encoded["supports_parallel_tool_calls"], false);
 }
 /// Terminal provider failure categories have stable snake-case wire values,
 /// while old response frames without the additive field remain decodable.

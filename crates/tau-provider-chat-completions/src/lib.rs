@@ -472,6 +472,7 @@ pub fn models_for_provider(
             supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
+            supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: model.context_window,
             efforts: model_efforts(model.compat.unwrap_or(provider.compat)),

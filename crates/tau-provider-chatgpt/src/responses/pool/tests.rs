@@ -9,7 +9,7 @@ use tungstenite::Message;
 
 use super::*;
 use crate::common::PromptPayload;
-use crate::responses::ResponsesSurface;
+use crate::responses::{ResponsesMode, ResponsesSurface};
 use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
 
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
@@ -648,7 +648,7 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
         share_user_cache_key: false,
         debug_provider_requests: false,
     };
-    let expected = request.prompt_cache_key(&config.base_url);
+    let expected = request.prompt_cache_key(&config.base_url, config.mode);
 
     run_turn_through_pool(
         &mut pool,
@@ -850,7 +850,8 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         on_conn_index: 0,
         after_turn: 1,
     });
-    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let mut config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    config.mode = ResponsesMode::LiteCompatibility;
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
@@ -917,6 +918,13 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     //   #1: turn-2 on conn-0 (had chain id; this is the one that died)
     //   #2: turn-2 replay on conn-1 (chain stripped for fresh WS)
     assert_eq!(s.requests.len(), 3, "expected one WS replay envelope");
+    assert!(s.requests.iter().all(|request| {
+        request
+            .pointer("/client_metadata/ws_request_header_x_openai_internal_codex_responses_lite")
+            .and_then(serde_json::Value::as_str)
+            == Some("true")
+            && request["parallel_tool_calls"] == false
+    }));
     assert!(
         s.requests[1].get("previous_response_id").is_some(),
         "turn-2 on the warm socket should still carry the chain id (warm cache path)"
@@ -1412,6 +1420,7 @@ fn run_shared_turn_for_agent(
 
 fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
     ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: base_url.into(),
         api_key: "test".into(),
@@ -1427,6 +1436,37 @@ fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
         supports_prompt_cache_key: false,
         supports_encrypted_reasoning: false,
     }
+}
+
+/// Opposite startup-selected Responses modes derive distinct pool keys even
+/// for the same account, endpoint, and durable agent.
+#[test]
+fn pool_key_separates_responses_modes() {
+    let mut standard = make_config("https://chatgpt.com/backend-api", Some("acct"));
+    let mut lite = standard.clone();
+    standard.mode = ResponsesMode::Standard;
+    lite.mode = ResponsesMode::LiteCompatibility;
+    let session_id = tau_proto::SessionId::new("mode-test");
+    let agent_id = tau_proto::AgentId::parse("mode-agent").expect("agent id");
+    let prompt_context = context(&[]);
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: &prompt_context,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    assert_ne!(
+        PoolKey::for_request(&standard, &request),
+        PoolKey::for_request(&lite, &request)
+    );
 }
 /// A provider-authored context rejection must never enter the cached-socket
 /// silent reconnect path that replays the full logical request.

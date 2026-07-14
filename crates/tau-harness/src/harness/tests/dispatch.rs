@@ -2925,6 +2925,7 @@ fn provider_model_info(
         supported_tool_types: vec![],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
+        supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window,
         efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
@@ -4989,6 +4990,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     supported_tool_types: vec![],
                     input_modalities: Vec::new(),
                     tool_result_modalities: Vec::new(),
+                    supports_parallel_tool_calls: true,
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -5011,6 +5013,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             supported_tool_types: vec![],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
+            supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -5101,6 +5104,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     supported_tool_types: vec![],
                     input_modalities: Vec::new(),
                     tool_result_modalities: Vec::new(),
+                    supports_parallel_tool_calls: true,
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -5123,6 +5127,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             supported_tool_types: vec![],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
+            supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -5492,9 +5497,13 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
     h.shutdown().expect("shutdown");
 }
 
+/// A provider response remains lossless even when it returns multiple calls
+/// after declaring parallel calls unsupported. Every sequentially completed
+/// result must reach the follow-up prompt; otherwise a stale local tree head
+/// can orphan a result and produce an upstream unbalanced-call rejection.
 #[test]
 fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
-    // Regression: when several tool calls complete in sequence, every
+    // When several tool calls complete in sequence, every
     // ToolResult must end up on the current branch so the follow-up
     // prompt sees a balanced tool_use ↔ tool_result set. A previous
     // bug let `publish_event` (used by the ToolResult/ToolError path)
@@ -5507,6 +5516,10 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    let model_id: tau_proto::ModelId = "test/model".parse().expect("model id");
+    let mut model_info = provider_model_info(model_id.clone(), 1_000);
+    model_info.supports_parallel_tool_calls = false;
+    h.provider_model_info.insert(model_id, model_info);
 
     append_user_message_via_event(&mut h, "s1", "go");
     let cid = ensure_test_user_agent(&mut h);
@@ -10875,6 +10888,7 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             supported_tool_types: vec![],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
+            supports_parallel_tool_calls: true,
             default_affinity: 0,
             context_window: 1_000,
             efforts: vec![tau_proto::Effort::Medium],

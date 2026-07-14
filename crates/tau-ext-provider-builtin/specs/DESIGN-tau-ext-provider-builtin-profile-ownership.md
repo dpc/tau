@@ -14,3 +14,12 @@ to Chat Completions configuration and publish their configured or fetched model
 list. Prompt dispatch resolves exact configured model IDs for the selected
 provider namespace. Missing or invalid mutable profile/model/auth state remains
 visibly pending and is re-resolved before later attempts.
+
+ChatGPT profiles also own `responses_lite_compatibility`. The extension captures
+that route choice at startup for model publication and every later prompt,
+prewarm, retry, and quota resolution. Mutable credential reload and OAuth refresh
+preserve it, but an on-disk mode edit takes effect only after restart. Different
+ChatGPT profile namespaces may select different modes.
+
+The default and compatibility policy is defined by
+[DESIGN-tau-provider-chatgpt-responses-surface-selection](../../tau-provider-chatgpt/specs/DESIGN-tau-provider-chatgpt-responses-surface-selection.md).

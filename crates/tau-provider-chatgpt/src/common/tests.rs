@@ -204,7 +204,10 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
         agent_id: &agent_id,
         debug_provider_requests: false,
     };
-    payload.prompt_cache_key("https://api.openai.com/v1")
+    payload.prompt_cache_key(
+        "https://api.openai.com/v1",
+        crate::responses::ResponsesMode::Standard,
+    )
 }
 
 /// Distinct agents on the same provider endpoint must not share the same
@@ -215,10 +218,12 @@ fn prompt_cache_key_distinct_agents_diverge() {
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            crate::responses::ResponsesMode::Standard,
         ),
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-2").expect("agent id"),
+            crate::responses::ResponsesMode::Standard,
         ),
     );
 }
@@ -231,12 +236,33 @@ fn prompt_cache_key_distinct_base_urls_diverge() {
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            crate::responses::ResponsesMode::Standard,
         ),
         prompt_cache_key_for(
             "https://chatgpt.com/backend-api",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            crate::responses::ResponsesMode::Standard,
         ),
     );
+}
+
+/// Opposite Responses protocol surfaces must never share a durable provider
+/// cache/thread identity for the same endpoint and agent.
+#[test]
+fn prompt_cache_key_separates_responses_modes() {
+    let agent = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    let standard = prompt_cache_key_for(
+        "https://chatgpt.com/backend-api",
+        &agent,
+        crate::responses::ResponsesMode::Standard,
+    );
+    let lite = prompt_cache_key_for(
+        "https://chatgpt.com/backend-api",
+        &agent,
+        crate::responses::ResponsesMode::LiteCompatibility,
+    );
+
+    assert_ne!(standard, lite);
 }
 
 /// Prompt originator must not split cache buckets for the same agent. A

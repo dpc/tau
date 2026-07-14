@@ -61,14 +61,19 @@ pub struct PromptPayload<'a> {
 }
 
 impl PromptPayload<'_> {
-    /// Derive the OpenAI-style prompt-cache UUID for this prompt on `base_url`.
+    /// Derive the OpenAI-style prompt-cache UUID for this prompt and protocol
+    /// identity on `base_url`.
     ///
     /// ChatGPT WebSocket upgrades use the same UUID for their upstream
     /// `session-id` and `thread-id` headers, so callers should derive the value
     /// through this method rather than duplicating the hashing inputs.
     #[must_use]
-    pub fn prompt_cache_key(&self, base_url: &str) -> String {
-        prompt_cache_key_for(base_url, self.agent_id)
+    pub fn prompt_cache_key(
+        &self,
+        base_url: &str,
+        mode: crate::responses::ResponsesMode,
+    ) -> String {
+        prompt_cache_key_for(base_url, self.agent_id, mode)
     }
 }
 
@@ -969,12 +974,19 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 /// Derive the wire `prompt_cache_key` for the OpenAI-style provider cache.
 ///
 /// The resulting UUID is version 8 shaped from a deterministic hash of the
-/// provider endpoint and durable agent lifetime. Prompt provenance/originator
-/// is intentionally excluded so agent-to-agent messages, manager relays, and
-/// direct user prompts keep the target agent on the same provider cache bucket.
-pub fn prompt_cache_key_for(base_url: &str, agent_id: &tau_proto::AgentId) -> String {
+/// provider endpoint, protocol identity, and durable agent lifetime. Prompt
+/// provenance/originator is intentionally excluded so agent-to-agent messages,
+/// manager relays, and direct user prompts keep the target agent on the same
+/// provider cache bucket.
+pub fn prompt_cache_key_for(
+    base_url: &str,
+    agent_id: &tau_proto::AgentId,
+    mode: crate::responses::ResponsesMode,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(base_url.as_bytes());
+    hasher.update(b"protocol:");
+    hasher.update(mode.cache_identity().as_bytes());
     hasher.update(b"agent:");
     hasher.update(agent_id.as_str().as_bytes());
 

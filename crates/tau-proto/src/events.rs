@@ -2511,6 +2511,11 @@ pub struct ProviderModelInfo {
     /// [`Self::input_modalities`]. Omitted legacy metadata means text-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_result_modalities: Vec<InputModality>,
+    /// Whether the exact published route supports multiple tool calls in one
+    /// model response. This is an effective route capability, not merely an
+    /// abstract model capability.
+    #[serde(default = "default_true")]
+    pub supports_parallel_tool_calls: bool,
     /// Provider-published preference for becoming the implicit default model
     /// when the selected role does not name one. Higher values win; ties are
     /// broken by model id for deterministic behavior. Zero means neutral.

@@ -697,6 +697,35 @@ fn prompt_capabilities_are_deterministic() {
     assert_eq!(capabilities.extensions.active, ["z-ext"]);
 }
 
+/// System prompt guidance must never promise parallel tool execution when the
+/// effective provider route publishes a one-call limit.
+#[test]
+fn system_prompt_renders_effective_parallel_tool_capability() {
+    let parallel = build_system_prompt_with_tool_template_context(
+        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
+        &std::collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
+    );
+    let serial = build_system_prompt_with_tool_template_context(
+        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
+        &std::collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default().with_parallel_tool_calls(false),
+    );
+
+    assert!(parallel.contains("execute in parallel"));
+    assert!(!parallel.contains("at most one tool call"));
+    assert!(serial.contains("at most one tool call"));
+    assert!(!serial.contains("Maximize use of parallel tool calls"));
+}
+
 /// Bad fragment templates fail the complete render rather than silently
 /// omitting capability-gated instructions.
 #[test]

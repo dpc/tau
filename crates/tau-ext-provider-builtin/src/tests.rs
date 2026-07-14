@@ -179,6 +179,7 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
     // be produced by an HTTP/SSE fallback POST.
     let (base_url, counts) = spawn_ws_426_server();
     let config = tau_provider_chatgpt::responses::ResponsesConfig {
+        mode: responses::ResponsesMode::Standard,
         surface: tau_provider_chatgpt::responses::ResponsesSurface::ChatGpt,
         base_url: base_url.clone(),
         api_key: "token".to_owned(),
@@ -283,6 +284,129 @@ fn profile_storage_kinds_do_not_carry_openai_prefix() {
     assert_eq!(chatgpt["kind"], "chatgpt");
     assert_eq!(chat_completions["kind"], "chat_completions");
     assert_eq!(openrouter["kind"], "openrouter");
+}
+
+/// ChatGPT's route compatibility flag is optional, omits its standard default,
+/// and round-trips only when explicitly enabled.
+#[test]
+fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
+    let missing: BuiltinProviderProfile = serde_json::from_value(serde_json::json!({
+        "kind": "chatgpt",
+        "auth": {}
+    }))
+    .expect("legacy profile");
+    let BuiltinProviderProfile::Chatgpt(missing) = missing else {
+        panic!("chatgpt profile");
+    };
+    assert!(!missing.responses_lite_compatibility);
+
+    let standard = serde_json::to_value(BuiltinProviderProfile::Chatgpt(ChatGptProfile::default()))
+        .expect("standard profile");
+    assert!(standard.get("responses_lite_compatibility").is_none());
+
+    let lite = BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+        auth: OpenAiAuth::default(),
+        responses_lite_compatibility: true,
+    });
+    let value = serde_json::to_value(&lite).expect("lite profile");
+    assert_eq!(value["responses_lite_compatibility"], true);
+    assert!(matches!(
+        serde_json::from_value::<BuiltinProviderProfile>(value).expect("round trip"),
+        BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            responses_lite_compatibility: true,
+            ..
+        })
+    ));
+}
+
+/// Interactive ChatGPT setup must remain standard-by-default unless the user
+/// explicitly confirms the compatibility prompt.
+#[test]
+fn chatgpt_setup_defaults_responses_lite_compatibility_to_no() {
+    assert!(!DEFAULT_RESPONSES_LITE_COMPATIBILITY);
+}
+
+/// OAuth refresh replaces only credentials, so serializing and reloading the
+/// saved full profile preserves the sibling Responses compatibility setting.
+#[test]
+fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
+    let mut profile = ChatGptProfile {
+        auth: OpenAiAuth::default(),
+        responses_lite_compatibility: true,
+    };
+    profile.replace_auth(OpenAiAuth {
+        access_token: "fresh".to_owned(),
+        refresh_token: "refresh".to_owned(),
+        expires_at_ms: 42,
+        account_id: Some("account".to_owned()),
+    });
+    let saved = serde_json::to_value(BuiltinProviderProfile::Chatgpt(profile))
+        .expect("serialize refreshed profile");
+    let reloaded: BuiltinProviderProfile =
+        serde_json::from_value(saved).expect("reload refreshed profile");
+
+    assert!(matches!(
+        reloaded,
+        BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            responses_lite_compatibility: true,
+            auth: OpenAiAuth { access_token, .. },
+        }) if access_token == "fresh"
+    ));
+}
+
+/// Startup-selected modes independently control same-process publication and
+/// overwrite later disk edits until restart.
+#[test]
+fn chatgpt_profile_modes_are_independent_and_startup_stable() {
+    let standard = ProviderName::new("standard");
+    let lite = ProviderName::new("lite");
+    let mut startup = BuiltinProviderProfiles {
+        providers: BTreeMap::from([
+            (
+                standard.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile::default()),
+            ),
+            (
+                lite.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    auth: OpenAiAuth::default(),
+                    responses_lite_compatibility: true,
+                }),
+            ),
+        ]),
+    };
+    let modes = startup.startup_responses_modes();
+    let models = models_for_profiles(&startup);
+    let standard_sol = models
+        .iter()
+        .find(|model| model.id.provider == standard && model.id.model.as_str() == "gpt-5.6-sol")
+        .expect("standard Sol");
+    let lite_sol = models
+        .iter()
+        .find(|model| model.id.provider == lite && model.id.model.as_str() == "gpt-5.6-sol")
+        .expect("lite Sol");
+    assert!(standard_sol.supports_parallel_tool_calls);
+    assert!(!lite_sol.supports_parallel_tool_calls);
+    assert!(!standard_sol.supports_compaction && standard_sol.supports_standalone_compaction);
+    assert!(!lite_sol.supports_compaction && lite_sol.supports_standalone_compaction);
+
+    for profile in startup.providers.values_mut() {
+        let BuiltinProviderProfile::Chatgpt(profile) = profile else {
+            unreachable!()
+        };
+        profile.responses_lite_compatibility = !profile.responses_lite_compatibility;
+    }
+    startup.apply_startup_responses_modes(&modes);
+    assert!(matches!(
+        startup.providers.get(&standard),
+        Some(BuiltinProviderProfile::Chatgpt(profile))
+            if !profile.responses_lite_compatibility
+    ));
+    assert!(matches!(
+        startup.providers.get(&lite),
+        Some(BuiltinProviderProfile::Chatgpt(profile))
+            if profile.responses_lite_compatibility
+    ));
 }
 
 #[test]

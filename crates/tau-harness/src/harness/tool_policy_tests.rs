@@ -48,6 +48,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         supported_tool_types: vec![],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
+        supports_parallel_tool_calls: true,
         default_affinity: 0,
         context_window: 128_000,
         efforts: vec![Effort::Off],
@@ -590,7 +591,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
     assert!(
         policy
             .harness
-            .try_build_system_prompt_for_role_and_agent(ROLE, None, &exclusive)
+            .try_build_system_prompt_for_role_and_agent(ROLE, None, &exclusive, None)
             .is_ok()
     );
     let (internal, visible) = policy
@@ -625,7 +626,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
         .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
     let error = policy
         .harness
-        .try_build_system_prompt_for_role_and_agent(ROLE, None, &joint)
+        .try_build_system_prompt_for_role_and_agent(ROLE, None, &joint, None)
         .expect_err("joint alias surface must fail");
     assert!(error.to_string().contains("duplicate model-visible name"));
 }

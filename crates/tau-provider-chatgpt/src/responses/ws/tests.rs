@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::responses::ResponsesSurface;
+use crate::responses::{ResponsesMode, ResponsesSurface};
 use crate::{NeverAbort, TurnAbortWaker};
 
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
@@ -61,6 +61,7 @@ fn test_ws_conn() -> (
 
 fn test_responses_config() -> ResponsesConfig {
     ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api_key: "test-token".to_owned(),
@@ -344,14 +345,18 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     assert!(body.contains("partial_output=true"), "{body}");
 }
 
-/// Responses Lite changes only request metadata: ordinary and Lite WebSocket
-/// turns must both surface the official nameless default-pool quota event.
+/// Quota parsing is mode-independent: standard and Lite WebSocket turns both
+/// surface the official nameless default-pool event.
 #[test]
-fn ws_turn_surfaces_nameless_default_quota_for_lite_and_non_lite_models() {
-    for model_id in ["gpt-test", "gpt-5.6-sol"] {
+fn ws_turn_surfaces_nameless_default_quota_in_both_modes() {
+    for (model_id, mode) in [
+        ("gpt-test", ResponsesMode::Standard),
+        ("gpt-5.6-sol", ResponsesMode::LiteCompatibility),
+    ] {
         let (mut conn, inbound_tx, mut outbound_rx) = test_ws_conn();
         let mut config = test_responses_config();
         config.model_id = model_id.to_owned();
+        config.mode = mode;
         let fixture = PromptFixture::new();
         let request = fixture.payload();
         let mut abort = NeverAbort;
@@ -392,7 +397,7 @@ fn ws_turn_surfaces_nameless_default_quota_for_lite_and_non_lite_models() {
             .and_then(serde_json::Value::as_str);
         assert_eq!(
             lite_marker,
-            (model_id == "gpt-5.6-sol").then_some("true"),
+            mode.is_lite_compatibility().then_some("true"),
             "{model_id}"
         );
     }

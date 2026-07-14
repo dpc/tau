@@ -159,6 +159,7 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
 
 fn test_config(base_url: String) -> responses::ResponsesConfig {
     responses::ResponsesConfig {
+        mode: responses::ResponsesMode::Standard,
         surface: responses::ResponsesSurface::ChatGpt,
         base_url,
         api_key: "token".to_owned(),
@@ -328,10 +329,16 @@ fn config_for_model_enables_codex_responses_capabilities() {
     assert!(config.supports_encrypted_reasoning);
 }
 
+/// Exact audited model IDs, rather than a name prefix, control GPT-5.6 image
+/// and standalone-compaction capabilities.
 #[test]
-fn unaudited_gpt_5_6_suffix_does_not_gain_image_or_lite_capabilities() {
+fn unaudited_gpt_5_6_suffix_does_not_gain_audited_route_capabilities() {
     let model = "gpt-5.6-experimental";
-    let info = model_info(&ProviderName::new("chatgpt"), model);
+    let info = model_info(
+        &ProviderName::new("chatgpt"),
+        model,
+        responses::ResponsesMode::Standard,
+    );
     let config = config_for_model(&ModelName::new(model), "token".to_owned(), None);
 
     assert!(
@@ -348,8 +355,7 @@ fn unaudited_gpt_5_6_suffix_does_not_gain_image_or_lite_capabilities() {
 }
 
 /// Ensures request configuration retains each model's raw context window
-/// independently of the effective window published to the harness; non-Lite
-/// models use the raw value for default compaction thresholds.
+/// independently of the effective window published to the harness.
 #[test]
 fn config_uses_model_specific_context_window() {
     let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
@@ -359,15 +365,43 @@ fn config_uses_model_specific_context_window() {
     assert_eq!(gpt_5_5.raw_context_window, DEFAULT_RAW_CONTEXT_WINDOW);
 }
 
-/// Ensures Responses Lite models do not advertise incompatible server-side
-/// compaction while normal Responses models retain that capability.
+/// Ensures GPT-5.6 advertises standalone rather than inline compaction in every
+/// mode while older models retain inline compaction.
 #[test]
-fn config_scopes_compaction_capability_away_from_responses_lite() {
+fn config_scopes_inline_compaction_away_from_gpt_5_6() {
     let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
     let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
 
     assert!(!gpt_5_6.supports_compaction);
     assert!(gpt_5_5.supports_compaction);
+}
+
+/// The compatibility flag affects only the exact audited GPT-5.6 family and
+/// never disables parallel calls or inline compaction for older models.
+#[test]
+fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
+    let provider = ProviderName::new("chatgpt");
+    let older = config_for_model_mode(
+        &ModelName::new("gpt-5.5"),
+        "token".to_owned(),
+        None,
+        responses::ResponsesMode::LiteCompatibility,
+    );
+    let lite_models =
+        models_for_provider_mode(&provider, responses::ResponsesMode::LiteCompatibility);
+    let lite_sol = lite_models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
+        .expect("Lite Sol");
+    let older_info = lite_models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.5")
+        .expect("older model");
+
+    assert_eq!(older.mode, responses::ResponsesMode::Standard);
+    assert!(older.supports_compaction);
+    assert!(!lite_sol.supports_parallel_tool_calls);
+    assert!(older_info.supports_parallel_tool_calls);
 }
 
 #[test]

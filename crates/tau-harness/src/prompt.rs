@@ -72,10 +72,21 @@ pub(crate) struct PromptCapabilities {
 }
 
 /// Tool capability context for one prompt render.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct PromptToolCapabilities {
     /// Sorted, deduplicated model-visible tool names.
     pub(crate) available: Vec<String>,
+    /// Whether the selected effective provider route supports parallel calls.
+    pub(crate) parallel_calls: bool,
+}
+
+impl Default for PromptToolCapabilities {
+    fn default() -> Self {
+        Self {
+            available: Vec::new(),
+            parallel_calls: true,
+        }
+    }
 }
 
 /// Extension capability context for one prompt render.
@@ -97,12 +108,19 @@ impl PromptCapabilities {
         Self {
             tools: PromptToolCapabilities {
                 available: sorted_unique(available_tools),
+                parallel_calls: true,
             },
             extensions: PromptExtensionCapabilities {
                 enabled: sorted_unique(enabled_extensions),
                 active: sorted_unique(active_extensions),
             },
         }
+    }
+
+    /// Set the effective provider route's parallel-tool-call capability.
+    pub(crate) fn with_parallel_tool_calls(mut self, supported: bool) -> Self {
+        self.tools.parallel_calls = supported;
+        self
     }
 }
 

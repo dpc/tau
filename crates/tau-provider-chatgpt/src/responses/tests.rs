@@ -18,13 +18,10 @@ fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
     ))
 }
 
-/// Ensures GPT-5.6 Responses Lite receives native image content inside the
-/// function-call output, preserving call provenance and never turning base64
-/// into ordinary text.
+/// Ensures both GPT-5.6 modes receive native image function output while only
+/// standard Responses preserves the audited high-detail wire field.
 #[test]
 fn gpt_5_6_lowers_typed_image_inside_function_output() {
-    let mut config = chain_test_config();
-    config.model_id = "gpt-5.6-sol".to_owned();
     let items = [ContextItem::ToolResult(ToolResultItem {
         call_id: "call-image".into(),
         tool_type: tau_proto::ToolType::Function,
@@ -54,20 +51,33 @@ fn gpt_5_6_lowers_typed_image_inside_function_output() {
         debug_provider_requests: false,
     };
 
-    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
-    let output = &body["input"][1];
-    assert_eq!(output["type"], "function_call_output");
-    assert_eq!(output["call_id"], "call-image");
-    assert_eq!(output["output"][0]["type"], "input_text");
-    assert_eq!(output["output"][1]["type"], "input_image");
-    assert_eq!(
-        output["output"][1]["image_url"],
-        "data:image/png;base64,iVBORw0KGgpEQVRB"
-    );
-    assert!(
-        output["output"][1].get("detail").is_none(),
-        "Responses Lite strips detail only after local high-detail preparation"
-    );
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let mut config = chain_test_config();
+        config.model_id = "gpt-5.6-sol".to_owned();
+        config.mode = mode;
+        let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+        let output = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("function output");
+        assert_eq!(output["call_id"], "call-image");
+        assert_eq!(output["output"][0]["type"], "input_text");
+        assert_eq!(output["output"][1]["type"], "input_image");
+        assert_eq!(
+            output["output"][1]["image_url"],
+            "data:image/png;base64,iVBORw0KGgpEQVRB"
+        );
+        if mode == ResponsesMode::Standard {
+            assert_eq!(output["output"][1]["detail"], "high");
+        } else {
+            assert!(
+                output["output"][1].get("detail").is_none(),
+                "Responses Lite strips detail only after local high-detail preparation"
+            );
+        }
+    }
 }
 
 /// Ensures aggregate raw-image and expanded data-URL budgets both omit an image
@@ -298,6 +308,7 @@ fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
 #[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -336,6 +347,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 #[test]
 fn build_request_includes_service_tier_when_configured() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -379,6 +391,7 @@ fn build_request_includes_service_tier_when_configured() {
 #[test]
 fn build_request_maps_off_effort_to_openai_none() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         supports_reasoning_effort: true,
         ..chain_test_config()
     };
@@ -406,6 +419,7 @@ fn build_request_maps_off_effort_to_openai_none() {
 #[test]
 fn build_request_maps_max_effort_to_openai_max() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-sol".into(),
         supports_reasoning_effort: true,
         ..chain_test_config()
@@ -426,6 +440,7 @@ fn build_request_maps_max_effort_to_openai_max() {
 #[test]
 fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -843,6 +858,7 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
 #[test]
 fn build_request_chain_turn_still_emits_prompt_cache_key() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -879,6 +895,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
 #[test]
 fn build_request_prompt_cache_key_ignores_originator() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -930,6 +947,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
 #[test]
 fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -967,6 +985,7 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
 #[test]
 fn build_request_extension_matches_user_wire_body_for_same_context() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -1039,6 +1058,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
 #[test]
 fn build_request_lite_chain_omits_owned_developer_prefix() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
     };
@@ -1075,6 +1095,7 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
 #[test]
 fn build_compact_request_uses_lite_schema() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
     };
@@ -1120,11 +1141,52 @@ fn build_compact_request_uses_lite_schema() {
     );
 }
 
+/// Standard GPT-5.6 standalone compaction retains the standard top-level tool
+/// contract and does not force Lite reasoning continuity.
+#[test]
+fn build_compact_request_uses_standard_schema() {
+    let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
+        model_id: "gpt-5.6-terra".to_owned(),
+        supports_compaction: false,
+        ..chain_test_config()
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        model_visible_name: None,
+        description: None,
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context(&[user_text("compact me")]),
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
+    };
+
+    let body = build_compact_request(&config, &request).expect("compact body");
+    assert_eq!(body["instructions"], "system");
+    assert_eq!(body["tools"][0]["name"], "shell");
+    assert_eq!(body["parallel_tool_calls"], true);
+    assert!(body["reasoning"].get("context").is_none());
+    assert_ne!(body["input"][0]["role"], "developer");
+}
+
 /// Standalone Lite compact input must preserve balanced function and custom
 /// call/output pairs with exact call ids and transport-specific wire types.
 #[test]
 fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
     };
@@ -1249,60 +1311,66 @@ fn parse_compact_response_preserves_raw_item_spelling() {
     assert_eq!(item.raw_json.as_deref(), Some(raw));
 }
 
-/// Unary Lite compaction must POST the dedicated endpoint with JSON framing and
-/// all required routing headers, never SSE or WebSocket framing.
+/// Unary compaction uses dedicated HTTP JSON framing in both modes and scopes
+/// the Lite marker to compatibility mode.
 #[test]
-fn compact_http_request_uses_dedicated_lite_transport_contract() {
+fn compact_http_request_uses_mode_specific_transport_contract() {
     use std::io::{Read, Write};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
-    let address = listener.local_addr().expect("capture address");
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let captured_server = std::sync::Arc::clone(&captured);
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept compact request");
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .expect("read timeout");
-        let mut request = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        loop {
-            let count = stream.read(&mut chunk).expect("read request");
-            request.extend_from_slice(&chunk[..count]);
-            if count == 0
-                || request
-                    .windows(b"\r\n\r\n".len())
-                    .any(|window| window == b"\r\n\r\n")
-            {
-                break;
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let address = listener.local_addr().expect("capture address");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_server = std::sync::Arc::clone(&captured);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept compact request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).expect("read request");
+                request.extend_from_slice(&chunk[..count]);
+                if count == 0
+                    || request
+                        .windows(b"\r\n\r\n".len())
+                        .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
             }
-        }
-        *captured_server.lock().expect("capture lock") =
-            String::from_utf8(request).expect("UTF-8 request");
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"output\":[]}",
-            )
-            .expect("write response");
-    });
-    let config = ResponsesConfig {
-        base_url: format!("http://{address}"),
-        model_id: "gpt-5.6-terra".to_owned(),
-        account_id: Some("acct-test".to_owned()),
-        ..chain_test_config()
-    };
+            *captured_server.lock().expect("capture lock") =
+                String::from_utf8(request).expect("UTF-8 request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"output\":[]}",
+                )
+                .expect("write response");
+        });
+        let config = ResponsesConfig {
+            mode,
+            base_url: format!("http://{address}"),
+            model_id: "gpt-5.6-terra".to_owned(),
+            account_id: Some("acct-test".to_owned()),
+            ..chain_test_config()
+        };
 
-    let body = compact_http_request(&config, "thread-test", "{}").expect("compact response");
-    assert_eq!(body, r#"{"output":[]}"#);
-    server.join().expect("capture server");
-    let request = captured.lock().expect("capture lock").to_ascii_lowercase();
-    assert!(request.starts_with("post /codex/responses/compact http/1.1\r\n"));
-    assert!(request.contains("x-openai-internal-codex-responses-lite: true\r\n"));
-    assert!(request.contains("chatgpt-account-id: acct-test\r\n"));
-    assert!(request.contains("session-id: thread-test\r\n"));
-    assert!(request.contains("thread-id: thread-test\r\n"));
-    assert!(request.contains("accept: application/json\r\n"));
-    assert!(!request.contains("text/event-stream"));
+        let body = compact_http_request(&config, "thread-test", "{}").expect("compact response");
+        assert_eq!(body, r#"{"output":[]}"#);
+        server.join().expect("capture server");
+        let request = captured.lock().expect("capture lock").to_ascii_lowercase();
+        assert!(request.starts_with("post /codex/responses/compact http/1.1\r\n"));
+        assert_eq!(
+            request.contains("x-openai-internal-codex-responses-lite: true\r\n"),
+            mode.is_lite_compatibility()
+        );
+        assert!(request.contains("chatgpt-account-id: acct-test\r\n"));
+        assert!(request.contains("session-id: thread-test\r\n"));
+        assert!(request.contains("thread-id: thread-test\r\n"));
+        assert!(request.contains("accept: application/json\r\n"));
+        assert!(!request.contains("text/event-stream"));
+    }
 }
 
 /// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
@@ -1353,6 +1421,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
 #[test]
 fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-sol".into(),
         raw_context_window: 372_000,
         supports_reasoning_effort: false,
@@ -1409,11 +1478,111 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     );
 }
 
+/// Ensures the default GPT-5.6 route uses standard Responses lowering and
+/// truthfully enables parallel direct tool calls.
+#[test]
+fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
+    let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
+        model_id: "gpt-5.6-sol".into(),
+        raw_context_window: 372_000,
+        supports_reasoning_effort: true,
+        supports_reasoning_summary: true,
+        supports_compaction: false,
+        ..chain_test_config()
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        model_visible_name: None,
+        description: Some("run a shell command".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    };
+    let request = PromptPayload {
+        system_prompt: "system instructions",
+        context: context(&[user_text("hello")]),
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: Some(tau_proto::PromptCompactionContext {
+            compact_threshold: None,
+        }),
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let object = body.as_object().expect("request object");
+
+    assert_eq!(body["instructions"], "system instructions");
+    assert_eq!(body["tools"][0]["name"], "shell");
+    assert_eq!(body["parallel_tool_calls"], true);
+    assert!(body["reasoning"].get("context").is_none());
+    assert!(!object.contains_key("context_management"));
+    assert!(!object.contains_key("client_metadata"));
+    assert_eq!(body["input"][0]["role"], "user");
+}
+
+/// Ensures standard WebSocket requests do not accidentally acquire the Lite
+/// marker merely because the model has a GPT-5.6 name.
+#[test]
+fn ws_envelope_omits_responses_lite_metadata_in_standard_mode() {
+    let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
+        model_id: "gpt-5.6-luna".into(),
+        ..chain_test_config()
+    };
+
+    let body = serde_json::to_value(build_ws_envelope(
+        &config,
+        &basic_prompt_payload(),
+        None,
+        None,
+    ))
+    .expect("serialize");
+
+    assert!(body.get("client_metadata").is_none());
+    assert_eq!(body["parallel_tool_calls"], true);
+}
+
+/// VCR replay validates the exact mode-specific request body: a matching mode
+/// succeeds while the opposite mode fails loudly rather than replaying across
+/// protocol surfaces.
+#[test]
+fn provider_cassette_validation_separates_responses_modes() {
+    let mut standard = chain_test_config();
+    standard.model_id = "gpt-5.6-sol".into();
+    standard.mode = ResponsesMode::Standard;
+    let mut lite = standard.clone();
+    lite.mode = ResponsesMode::LiteCompatibility;
+    let request = basic_prompt_payload();
+    let standard_body =
+        serde_json::to_value(build_request(&standard, &request, None)).expect("standard body");
+    let lite_body = serde_json::to_value(build_request(&lite, &request, None)).expect("Lite body");
+    let cassette = ProviderStreamCassette {
+        version: PROVIDER_STREAM_CASSETTE_VERSION,
+        request: standard_body.clone(),
+        stream: ProviderRawEventStream::default(),
+    };
+
+    validate_provider_stream_cassette("mode-test", &cassette, &standard_body)
+        .expect("matching mode");
+    assert!(matches!(
+        validate_provider_stream_cassette("mode-test", &cassette, &lite_body),
+        Err(LlmError::Vcr(tau_vcr::VcrError::RequestMismatch { .. }))
+    ));
+}
+
 /// Ensures the WebSocket request carries the Responses Lite routing marker as
 /// per-request metadata, allowing pooled sockets to serve different modes.
 #[test]
 fn ws_envelope_carries_responses_lite_request_metadata() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-luna".into(),
         ..chain_test_config()
     };
@@ -1433,6 +1602,7 @@ fn ws_envelope_carries_responses_lite_request_metadata() {
 #[test]
 fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-luna".into(),
         ..chain_test_config()
     };
@@ -1451,11 +1621,12 @@ fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
     assert!(body.get("context_management").is_none());
 }
 
-/// Ensures non-Lite models retain context management and explicit compaction
-/// trigger items while Responses Lite suppresses those incompatible controls.
+/// Ensures a standard route with inline-compaction support retains context
+/// management and explicit trigger items.
 #[test]
 fn build_request_sends_compaction_context_management_and_trigger_item() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         supports_compaction: true,
         ..chain_test_config()
     };
@@ -1486,6 +1657,7 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
 #[test]
 fn build_request_trims_full_replay_before_latest_compaction_item() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         supports_compaction: true,
         ..chain_test_config()
     };
@@ -1527,6 +1699,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
 
 fn chain_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -1546,6 +1719,7 @@ fn chain_test_config() -> ResponsesConfig {
 
 fn phase_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_phase: true,
         ..chain_test_config()
@@ -1554,6 +1728,7 @@ fn phase_test_config() -> ResponsesConfig {
 
 fn encrypted_reasoning_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        mode: ResponsesMode::Standard,
         surface: ResponsesSurface::ChatGpt,
         supports_encrypted_reasoning: true,
         ..chain_test_config()
@@ -1654,6 +1829,7 @@ fn spawn_http_error_server_with_headers(
 #[test]
 fn http_error_delivers_active_quota_limit_before_failure() {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url: spawn_http_error_server_with_headers(
             429,
             "usage_limit_reached",
@@ -1710,7 +1886,11 @@ enum CapturedRequestCompaction {
     ProviderDefault,
 }
 
-fn capture_http_request_headers(model_id: &str, compaction: CapturedRequestCompaction) -> String {
+fn capture_http_request_headers(
+    model_id: &str,
+    mode: ResponsesMode,
+    compaction: CapturedRequestCompaction,
+) -> String {
     let listener =
         std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind request capture server");
     let addr = listener.local_addr().expect("request capture address");
@@ -1750,6 +1930,7 @@ fn capture_http_request_headers(model_id: &str, compaction: CapturedRequestCompa
     });
 
     let config = ResponsesConfig {
+        mode,
         base_url: format!("http://{addr}"),
         model_id: model_id.to_owned(),
         ..chain_test_config()
@@ -1774,25 +1955,41 @@ fn capture_http_request_headers(model_id: &str, compaction: CapturedRequestCompa
         .expect("captured request headers")
 }
 
-/// Ensures the HTTP Responses transport keeps GPT-5.6 in Responses Lite even
-/// when callers supply compaction metadata, without leaking the routing header
-/// onto legacy model requests.
+/// Ensures the HTTP Lite marker follows explicit mode even when compaction
+/// metadata is supplied, and remains absent from standard GPT-5.6 and older
+/// standard routes.
 #[test]
-fn http_transport_scopes_responses_lite_header_to_gpt_5_6() {
-    let lite_headers =
-        capture_http_request_headers("gpt-5.6-sol", CapturedRequestCompaction::Disabled)
-            .to_ascii_lowercase();
-    let compaction_headers =
-        capture_http_request_headers("gpt-5.6-sol", CapturedRequestCompaction::ProviderDefault)
-            .to_ascii_lowercase();
-    let legacy_headers =
-        capture_http_request_headers("gpt-5.5", CapturedRequestCompaction::Disabled)
-            .to_ascii_lowercase();
+fn http_transport_scopes_responses_lite_header_to_explicit_mode() {
+    let lite_headers = capture_http_request_headers(
+        "gpt-5.6-sol",
+        ResponsesMode::LiteCompatibility,
+        CapturedRequestCompaction::Disabled,
+    )
+    .to_ascii_lowercase();
+    let compaction_headers = capture_http_request_headers(
+        "gpt-5.6-sol",
+        ResponsesMode::LiteCompatibility,
+        CapturedRequestCompaction::ProviderDefault,
+    )
+    .to_ascii_lowercase();
+    let legacy_headers = capture_http_request_headers(
+        "gpt-5.5",
+        ResponsesMode::Standard,
+        CapturedRequestCompaction::Disabled,
+    )
+    .to_ascii_lowercase();
+    let standard_headers = capture_http_request_headers(
+        "gpt-5.6-sol",
+        ResponsesMode::Standard,
+        CapturedRequestCompaction::Disabled,
+    )
+    .to_ascii_lowercase();
     let expected = "x-openai-internal-codex-responses-lite: true";
 
     assert!(lite_headers.contains(expected));
     assert!(compaction_headers.contains(expected));
     assert!(!legacy_headers.contains("x-openai-internal-codex-responses-lite:"));
+    assert!(!standard_headers.contains("x-openai-internal-codex-responses-lite:"));
 }
 
 fn spawn_trickling_sse_server(chunks: Vec<&'static [u8]>, delay: std::time::Duration) -> String {
@@ -1831,6 +2028,7 @@ fn spawn_trickling_sse_server(chunks: Vec<&'static [u8]>, delay: std::time::Dura
 
 fn assert_sse_timeout_for_base_url(base_url: String, agent_prompt_id: &str) {
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url,
         ..chain_test_config()
     };
@@ -1873,6 +2071,7 @@ fn stalled_sse_stream_returns_idle_timeout_error() {
     let stalled_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
     let base_url = spawn_stalled_sse_server(stalled_body);
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url,
         ..chain_test_config()
     };
@@ -1914,6 +2113,7 @@ fn http_sse_repetition_is_a_proven_local_terminal() {
     });
     let leaked: &'static str = Box::leak(format!("data: {event}\n\n").into_boxed_str());
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url: spawn_eof_sse_server(leaked),
         ..chain_test_config()
     };
@@ -1949,6 +2149,7 @@ fn remote_terminal_lookalikes_remain_retryable_over_http() {
         (400, "ws header authorization: forged provider body"),
     ] {
         let config = ResponsesConfig {
+            mode: ResponsesMode::Standard,
             base_url: spawn_http_error_server(status, provider_body),
             ..chain_test_config()
         };
@@ -1997,6 +2198,7 @@ fn sse_eof_after_partial_output_returns_terminal_event_error() {
     let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
     let base_url = spawn_eof_sse_server(body);
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url,
         ..chain_test_config()
     };
@@ -2114,6 +2316,7 @@ fn stalled_sse_stream_cancellation_returns_typed_error_before_idle_timeout() {
     let stalled_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
     let base_url = spawn_stalled_sse_server(stalled_body);
     let config = ResponsesConfig {
+        mode: ResponsesMode::Standard,
         base_url,
         ..chain_test_config()
     };

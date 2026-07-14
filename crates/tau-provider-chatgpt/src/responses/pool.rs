@@ -87,7 +87,7 @@ impl PoolKey {
         Self {
             base_url: config.base_url.clone(),
             account_id: config.account_id.clone(),
-            thread_id: request.prompt_cache_key(&config.base_url),
+            thread_id: request.prompt_cache_key(&config.base_url, config.mode),
         }
     }
 }

@@ -23,7 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dialoguer::Input;
+use dialoguer::{Confirm, Input};
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -53,6 +53,7 @@ pub const LOG_TARGET: &str = "provider-builtin";
 
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
+const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
 /// One built-in provider profile loaded from `auth.d/<provider>.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -73,12 +74,62 @@ pub struct ChatGptProfile {
     /// OAuth credentials used for ChatGPT/Codex Responses calls.
     #[serde(default)]
     pub auth: OpenAiAuth,
+    /// Use the legacy Responses Lite contract for audited GPT-5.6 routes.
+    ///
+    /// This is startup-stable route configuration, not authentication data.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub responses_lite_compatibility: bool,
+}
+
+impl ChatGptProfile {
+    fn responses_mode(&self) -> responses::ResponsesMode {
+        if self.responses_lite_compatibility {
+            responses::ResponsesMode::LiteCompatibility
+        } else {
+            responses::ResponsesMode::Standard
+        }
+    }
+
+    fn replace_auth(&mut self, refreshed: OpenAiAuth) {
+        self.auth = refreshed;
+    }
 }
 
 /// Registered built-in provider profiles keyed by filename-derived namespace.
 #[derive(Clone, Debug, Default)]
 pub struct BuiltinProviderProfiles {
     providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
+}
+
+impl BuiltinProviderProfiles {
+    fn startup_responses_modes(&self) -> BTreeMap<ProviderName, responses::ResponsesMode> {
+        self.providers
+            .iter()
+            .filter_map(|(provider, profile)| match profile {
+                BuiltinProviderProfile::Chatgpt(profile) => {
+                    Some((provider.clone(), profile.responses_mode()))
+                }
+                BuiltinProviderProfile::ChatCompletions(_)
+                | BuiltinProviderProfile::OpenRouter(_) => None,
+            })
+            .collect()
+    }
+
+    fn apply_startup_responses_modes(
+        &mut self,
+        startup_modes: &BTreeMap<ProviderName, responses::ResponsesMode>,
+    ) {
+        for (provider, profile) in &mut self.providers {
+            let BuiltinProviderProfile::Chatgpt(profile) = profile else {
+                continue;
+            };
+            profile.responses_lite_compatibility = startup_modes
+                .get(provider)
+                .copied()
+                .unwrap_or_default()
+                .is_lite_compatibility();
+        }
+    }
 }
 
 /// OAuth credentials for the ChatGPT/Codex Responses provider.
@@ -101,6 +152,10 @@ pub struct OpenAiAuth {
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(not(test))]
@@ -602,9 +657,16 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn Error>> {
 fn cmd_add_chatgpt() -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("chatgpt")?;
     let auth = run_openai_codex_login()?;
+    let responses_lite_compatibility = Confirm::new()
+        .with_prompt("Use legacy Responses Lite compatibility for GPT-5.6?")
+        .default(DEFAULT_RESPONSES_LITE_COMPATIBILITY)
+        .interact()?;
     save_profile(
         &name,
-        &BuiltinProviderProfile::Chatgpt(ChatGptProfile { auth }),
+        &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth,
+            responses_lite_compatibility,
+        }),
     )?;
     Ok(())
 }
@@ -698,7 +760,12 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
                 } else {
                     "expired"
                 };
-                println!("{name}\tchatgpt\t{status}");
+                let mode = if profile.responses_lite_compatibility {
+                    "responses-lite-compatibility"
+                } else {
+                    "responses-standard"
+                };
+                println!("{name}\tchatgpt\t{status}\t{mode}");
             }
             BuiltinProviderProfile::ChatCompletions(provider) => {
                 let auth_status = if provider.api_key.trim().is_empty() {
@@ -901,7 +968,10 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
     let mut providers = BTreeMap::new();
     providers.insert(
         ProviderName::new(CHATGPT_PROVIDER_NAME),
-        BuiltinProviderProfile::Chatgpt(ChatGptProfile { auth }),
+        BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth,
+            responses_lite_compatibility: false,
+        }),
     );
     BuiltinProviderProfiles { providers }
 }
@@ -941,8 +1011,10 @@ where
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
+    let startup_responses_modes = startup_profiles.startup_responses_modes();
     let runtime = ProviderRuntime {
         load_prompt_profiles,
+        startup_responses_modes,
         prompt_concurrency_limit,
         prompt_executor,
         worker_tx,
@@ -1110,6 +1182,8 @@ where
 struct ProviderRuntime<F> {
     /// Reloads provider profiles for prompt-time auth/model resolution.
     load_prompt_profiles: F,
+    /// Per-profile Responses mode captured at process startup.
+    startup_responses_modes: BTreeMap<ProviderName, responses::ResponsesMode>,
     /// Maximum number of prompt workers that may run at once.
     prompt_concurrency_limit: usize,
     /// Starts provider backend execution for one prompt job.
@@ -1147,6 +1221,12 @@ impl<F> ProviderRuntime<F>
 where
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
+    fn load_profiles(&mut self) -> BuiltinProviderProfiles {
+        let mut profiles = (self.load_prompt_profiles)();
+        profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        profiles
+    }
+
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
         self.retry_scheduler = Some(RetryScheduler::start(self.worker_tx.clone(), waker.clone()));
         self.worker_waker = Some(waker);
@@ -1154,7 +1234,7 @@ where
 
     #[cfg(not(test))]
     fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        let mut profiles = (self.load_prompt_profiles)();
+        let mut profiles = self.load_profiles();
         for model in models_for_profiles(&profiles) {
             if let Some(config) = resolve_responses_backend(&model.id, &mut profiles) {
                 self.ensure_quota_profile(&model.id.provider, &config, handle)?;
@@ -1320,7 +1400,7 @@ where
     }
 
     fn prewarm_backend(&mut self, prewarm: tau_proto::AgentPromptPrewarmRequested) {
-        let mut profiles = (self.load_prompt_profiles)();
+        let mut profiles = self.load_profiles();
         handle_prewarm(
             &prewarm,
             &mut profiles,
@@ -1360,7 +1440,7 @@ where
         prompt: tau_proto::AgentPromptCreated,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let mut profiles = (self.load_prompt_profiles)();
+        let mut profiles = self.load_profiles();
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
         let mut frame_writer = handle_frame_writer(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
@@ -1544,7 +1624,7 @@ where
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
                     }
-                    let mut profiles = (self.load_prompt_profiles)();
+                    let mut profiles = self.load_profiles();
                     job.backend =
                         self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
                     self.prompt_queue.push_back(job);
@@ -1571,7 +1651,7 @@ where
                             )?;
                             tau_proto::RetryPromptStatus::NotParked
                         } else {
-                            let mut profiles = (self.load_prompt_profiles)();
+                            let mut profiles = self.load_profiles();
                             owned_job.backend = self.resolve_backend_with_quota(
                                 &owned_job.prompt.model,
                                 &mut profiles,
@@ -1665,7 +1745,7 @@ where
                         .quota
                         .refresh_is_current(&provider, &profile_epoch, refresh_generation)
                     {
-                        let mut profiles = (self.load_prompt_profiles)();
+                        let mut profiles = self.load_profiles();
                         let config = models_for_profiles(&profiles)
                             .into_iter()
                             .find(|model| model.id.provider == provider)
@@ -2931,7 +3011,8 @@ fn resolve_prompt_backend(
 ) -> Option<PromptBackend> {
     match profiles.providers.get_mut(&model.provider)? {
         BuiltinProviderProfile::Chatgpt(profile) => {
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+            let mode = profile.responses_mode();
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, mode)
                 .map(PromptBackend::Responses)
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
@@ -2966,7 +3047,8 @@ fn resolve_responses_backend(
 ) -> Option<responses::ResponsesConfig> {
     match profiles.providers.get_mut(&model.provider)? {
         BuiltinProviderProfile::Chatgpt(profile) => {
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+            let mode = profile.responses_mode();
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, mode)
         }
         BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => None,
     }
@@ -2976,6 +3058,7 @@ fn resolve_chatgpt_backend(
     model: &ModelId,
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
+    mode: responses::ResponsesMode,
 ) -> Option<responses::ResponsesConfig> {
     if oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
         && !auth_store.refresh_token.trim().is_empty()
@@ -2994,10 +3077,11 @@ fn resolve_chatgpt_backend(
         return None;
     }
 
-    Some(tau_provider_chatgpt::config_for_model(
+    Some(tau_provider_chatgpt::config_for_model_mode(
         &model.model,
         auth_store.access_token.clone(),
         auth_store.account_id.clone(),
+        mode,
     ))
 }
 
@@ -3027,7 +3111,7 @@ fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::
             expires_at_ms: tokens.expires_at_ms,
             account_id: tokens.account_id,
         };
-        profile.auth = refreshed.clone();
+        profile.replace_auth(refreshed.clone());
         locked.save(&BuiltinProviderProfile::Chatgpt(profile))?;
         Ok(refreshed)
     })
@@ -3860,8 +3944,11 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
     let mut models = Vec::new();
     for (provider_name, profile) in &profiles.providers {
         match profile {
-            BuiltinProviderProfile::Chatgpt(_) => {
-                models.extend(tau_provider_chatgpt::models_for_provider(provider_name));
+            BuiltinProviderProfile::Chatgpt(profile) => {
+                models.extend(tau_provider_chatgpt::models_for_provider_mode(
+                    provider_name,
+                    profile.responses_mode(),
+                ));
             }
             BuiltinProviderProfile::ChatCompletions(provider) => {
                 models.extend(chat_models_for_provider(provider_name, provider));

@@ -610,8 +610,9 @@ fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
 }
 
 /// Ensures ChatGPT publication exposes the owned model set and mirrors the
-/// backend capability split: GPT-5.6 Responses Lite models omit server-side
-/// compaction while non-Lite ChatGPT models retain it.
+/// backend capability split: GPT-5.6 uses standalone rather than inline
+/// compaction in its default standard mode, while older models retain inline
+/// compaction.
 #[test]
 fn chatgpt_oauth_publishes_chatgpt_models() {
     // ChatGPT/Codex is a provider namespace named `chatgpt`; there is no
@@ -1488,8 +1489,10 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
     );
 }
 
-/// Verifies every due attempt re-resolves mutable profile state: repaired
-/// credentials replace stale captures, and later deletion becomes Unavailable.
+/// Verifies every due attempt re-resolves mutable profile state while retaining
+/// the startup-selected Responses mode: repaired credentials replace stale
+/// captures, an opposite on-disk mode edit is ignored, and later deletion
+/// becomes Unavailable.
 #[test]
 fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
     let input = BlockingInput::default();
@@ -1506,7 +1509,16 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
         account_id: Some("fresh-account".to_owned()),
         ..chatgpt_auth()
     };
-    let mutable_profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(old.clone())));
+    let mut startup_profiles = profiles_with_chatgpt_auth(old.clone());
+    let BuiltinProviderProfile::Chatgpt(startup_profile) = startup_profiles
+        .providers
+        .get_mut(&ProviderName::new(CHATGPT_PROVIDER_NAME))
+        .expect("startup ChatGPT profile")
+    else {
+        unreachable!()
+    };
+    startup_profile.responses_lite_compatibility = true;
+    let mutable_profiles = Arc::new(Mutex::new(startup_profiles.clone()));
     let profiles_for_loader = Arc::clone(&mutable_profiles);
     let profiles_for_executor = Arc::clone(&mutable_profiles);
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -1517,12 +1529,18 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
         match (attempt, &execution.job.backend) {
             (0, PromptBackend::Responses(config)) => {
                 assert_eq!(config.api_key, "old-token");
+                assert_eq!(config.mode, responses::ResponsesMode::LiteCompatibility);
                 *profiles_for_executor.lock().expect("mutable profiles") =
                     profiles_with_chatgpt_auth(fresh.clone());
             }
             (1, PromptBackend::Responses(config)) => {
                 assert_eq!(config.api_key, "fresh-token");
                 assert_eq!(config.account_id.as_deref(), Some("fresh-account"));
+                assert_eq!(
+                    config.mode,
+                    responses::ResponsesMode::LiteCompatibility,
+                    "retry must retain the startup mode after a standard-mode disk edit"
+                );
                 *profiles_for_executor.lock().expect("mutable profiles") =
                     BuiltinProviderProfiles::default();
             }
@@ -1554,7 +1572,6 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
         )
         .expect("schedule profile reload");
     });
-    let startup_profiles = profiles_with_chatgpt_auth(old);
     let writer = SharedWriter::default();
     let output = writer.clone();
     let runtime_input = input.clone();

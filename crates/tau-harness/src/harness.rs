@@ -2170,6 +2170,7 @@ where
                 supported_tool_types: vec![],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
+                supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off],
@@ -16414,6 +16415,7 @@ impl Harness {
             &role_name,
             durable_agent_id.as_ref(),
             prompt_capability_specs,
+            Some(&model),
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -16529,6 +16531,7 @@ impl Harness {
             &role_name,
             durable_agent_id.as_ref(),
             capability_specs,
+            Some(&model),
         ) {
             Ok(_) => true,
             Err(error) => {
@@ -16583,7 +16586,7 @@ impl Harness {
     fn build_system_prompt_for_role(&self, role_name: &str) -> String {
         let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
-        self.try_build_system_prompt_for_role_and_agent(role_name, None, &specs)
+        self.try_build_system_prompt_for_role_and_agent(role_name, None, &specs, model.as_ref())
             .expect("configured role prompt should render")
     }
 
@@ -16594,7 +16597,12 @@ impl Harness {
         let preview_agent_id = crate::parse_agent_id(RENDERED_PROMPT_PREVIEW_AGENT_ID);
         let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
-        self.try_build_system_prompt_for_role_and_agent(role_name, Some(&preview_agent_id), &specs)
+        self.try_build_system_prompt_for_role_and_agent(
+            role_name,
+            Some(&preview_agent_id),
+            &specs,
+            model.as_ref(),
+        )
     }
 
     fn try_build_system_prompt_for_role_and_agent(
@@ -16602,6 +16610,7 @@ impl Harness {
         role_name: &str,
         agent_id: Option<&tau_proto::AgentId>,
         tool_specs: &[tau_proto::ToolSpec],
+        model: Option<&ModelId>,
     ) -> Result<String, handlebars::RenderError> {
         if let Some(name) = duplicate_model_visible_tool_name(tool_specs) {
             return Err(handlebars::RenderError::from(
@@ -16639,6 +16648,11 @@ impl Harness {
                     .values()
                     .filter(|entry| entry.state == crate::extension::ExtensionState::Ready)
                     .map(|entry| entry.name.clone()),
+            )
+            .with_parallel_tool_calls(
+                model
+                    .and_then(|model| self.provider_model_info.get(model))
+                    .is_none_or(|info| info.supports_parallel_tool_calls),
             ),
         )
     }

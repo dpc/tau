@@ -151,6 +151,7 @@ fn write_startup(
                 supported_tool_types: vec![tau_proto::ToolType::Function],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
+                supports_parallel_tool_calls: true,
                 default_affinity: 0,
                 context_window: 10_000,
                 efforts: vec![tau_proto::Effort::Off],

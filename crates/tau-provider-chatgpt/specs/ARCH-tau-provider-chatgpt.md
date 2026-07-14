@@ -53,35 +53,34 @@ after the upgrade and request send, so it is not the connection bound.
 Cancellation ownership and the deadline rationale are recorded in
 [DESIGN-tau-provider-chatgpt-cooperative-cancellation](DESIGN-tau-provider-chatgpt-cooperative-cancellation.md).
 
-## GPT-5.6 Responses Lite
+## GPT-5.6 Responses modes
 
-The ChatGPT/Codex GPT-5.6 family uses the upstream Responses Lite request contract. HTTP
-requests carry the internal Responses Lite routing header, while WebSocket
-`response.create` messages carry the equivalent per-request `client_metadata` marker so
-pooled sockets remain reusable.
+The surface choice follows
+[DESIGN-tau-provider-chatgpt-responses-surface-selection](DESIGN-tau-provider-chatgpt-responses-surface-selection.md).
+Each profile captures an explicit mode at startup. Standard mode uses top-level
+instructions/tools, requests parallel tool calls, omits forced all-turn reasoning
+context, preserves image detail, and carries no Lite marker. Lite compatibility
+moves declarations and instructions into developer input items, requests serial
+tool calls, forces all-turn reasoning context, omits image detail, and carries the
+HTTP header or per-request WebSocket metadata marker. Retries, reconnect, replay,
+and previous-response chaining retain the selected mode; there is no mode fallback.
 
-Responses Lite is incompatible with legacy inline `context_management`. Tau therefore
-suppresses inline compaction context and trigger items on normal GPT-5.6 inference.
-GPT-5.6 instead advertises standalone compaction: the provider sends a unary HTTP
-`POST /codex/responses/compact` with the Lite header and lowering, and the harness installs
-its output as one replacement-window boundary. Non-Lite models retain their existing
-inline context-management behavior.
+Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
+standalone compaction. The provider sends unary HTTP
+`POST /codex/responses/compact` using the selected mode's lowering and marker, and
+the harness installs its output as one replacement-window boundary. Older models
+retain inline context management and ignore the profile's Lite compatibility flag.
+Hosted Responses tools are not part of either contract; Tau's tools remain
+client-executed definitions.
 
-Responses Lite moves tool declarations and base instructions from the top-level request
-fields into leading developer input items, disables parallel tool calls, and keeps
-reasoning context across all turns. Hosted Responses tools are not part of this
-contract; Tau's tools remain client-executed definitions. Chained Lite WebSocket deltas
-omit the developer prefix already owned by the previous response. Full replay after
-reconnect or compaction includes it again.
-
-ChatGPT model metadata distinguishes the raw provider context window from the effective
-window published to the harness. Server-side compaction thresholds derive from the raw
-window, while UI usage and local context limits use the provider's 95-percent effective
-ceiling.
+ChatGPT model metadata distinguishes the raw provider context window from the
+effective window published to the harness. Standalone compaction thresholds
+derive from the raw window, while UI usage and local context limits use the
+provider's 95-percent effective ceiling.
 
 ## Prompt-cache identity
 
-First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL and durable
+First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL, startup-selected Responses mode, and durable
 target `AgentId`. Prompt provenance (`PromptOriginator`) is intentionally not part of
 the key: a target agent must stay on the same provider cache bucket whether a turn came
 from direct user input, extension-originated work, a manager relay, or an agent-to-agent
@@ -92,8 +91,11 @@ providers, but this crate treats it as a no-op for cache-bucket selection. Any f
 cache-sharing behavior should be explicit agent metadata (for example, a reviewed
 `share_cache_from` design) rather than inferring cache identity from prompt provenance.
 
-WebSocket pool keys must follow the same identity as request `prompt_cache_key` values
+WebSocket pool keys follow the same identity as request `prompt_cache_key` values
 so upstream thread/session headers and request bodies target the same cache bucket.
+Both modes are labeled, intentionally causing one cold cache/socket transition
+when upgrading from the former model-name-derived identity. Quota and retry
+cooldown identity remain account/provider based and do not include the mode.
 
 Provider-visible replay fidelity, sidecar validation, and typed semantic authority are
 specified by

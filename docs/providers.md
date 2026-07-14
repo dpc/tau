@@ -62,6 +62,7 @@ struct ProviderModelInfo {
     supported_tool_types: Vec<ToolType>,
     input_modalities: Vec<InputModality>,
     tool_result_modalities: Vec<InputModality>,
+    supports_parallel_tool_calls: bool,
     default_affinity: i32,
     context_window: u64,
     efforts: Vec<Effort>,
@@ -75,6 +76,8 @@ struct ProviderModelInfo {
 prompt input, while `tool_result_modalities` declares what it accepts inside
 native tool-result output. A tool that returns images is exposed only when both
 lists contain `image`; omitted lists preserve legacy text-only behavior.
+`supports_parallel_tool_calls` is the effective route capability used to make
+system-prompt guidance truthful; it is not merely abstract model metadata.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
 The harness records which extension sent the snapshot and uses that as routing state.
@@ -186,6 +189,31 @@ The built-in provider extension currently covers three profile kinds:
 - user-named OpenAI-compatible Chat Completions profiles with explicit model lists
 - user-named OpenRouter profiles with explicit or fetched model lists
 
+GPT-5.6 ChatGPT profiles use standard Responses by default. The legacy Lite
+contract is available only as an explicit profile compatibility setting:
+
+```json
+{
+  "kind": "chatgpt",
+  "auth": {
+    "access_token": "<existing access token>",
+    "refresh_token": "<existing refresh token>"
+  },
+  "responses_lite_compatibility": true
+}
+```
+
+Add the top-level flag to an existing ChatGPT profile without changing its
+current `auth` fields. `tau provider add` also asks for this setting and defaults
+to No. The selected mode
+is captured at startup, so edits require a Tau restart. OAuth refresh preserves
+the setting. Tau never changes modes during retry, reconnect, replay, chaining,
+or compaction and never falls back to Lite after a standard-route rejection.
+Existing profiles without the field use standard mode. Upgrading intentionally
+causes one prompt-cache/WebSocket cold start for both modes so prior Lite and
+current standard threads cannot collide; quota and retry identity remain shared
+by account/provider.
+
 It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `provider-builtin` extension.
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
@@ -222,11 +250,13 @@ DNS/TCP/TLS/WebSocket upgrade is cancellation-aware and bounded to 30 seconds.
 Timeout is classified as retryable transport work; failure or cancellation
 releases the same-key pool reservation.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
-effective context window and include `max` among their reasoning choices. Normal
-inference stays on Responses Lite and never emits legacy inline context
-management. Manual and threshold-driven compaction use the separate unary
-`/codex/responses/compact` operation, with a provider default threshold of
-334,800 tokens; accepted output becomes one standalone transcript boundary.
+effective context window and include `max` among their reasoning choices.
+Standard mode publishes and requests parallel direct tool calls; Lite
+compatibility publishes its one-call limit. Neither mode emits legacy inline
+context management. Manual and threshold-driven compaction use the separate
+unary `/codex/responses/compact` operation with the selected mode's request
+shape and a provider default threshold of 334,800 tokens; accepted output
+becomes one standalone transcript boundary.
 After setup, ChatGPT/Codex live streams use a separate five-minute idle watchdog on both HTTP/SSE and
 WebSocket transports. The watchdog resets on each SSE `data:` event or
 WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte

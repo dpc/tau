@@ -593,6 +593,13 @@ their provider namespaces. The harness assembles prompts, then routes the
 selected provider's `agent.prompt_created` event directly to this extension;
 there is no built-in `core-agent` process.
 
+GPT-5.6 uses standard Responses with parallel direct tool calls by default.
+Responses Lite is an explicit per-ChatGPT-profile compatibility opt-in, never
+an automatic retry fallback. The choice is startup-stable and separates prompt
+cache/thread/WebSocket-pool identity while retaining account quota and provider
+retry identity. Both GPT-5.6 modes use standalone unary compaction rather than
+legacy inline context management.
+
 Responses conversations chain via `previous_response_id` after the first turn:
 each follow-up request sends only the messages added since the prior
 `response.id` and lets the upstream API carry reasoning state forward
@@ -603,7 +610,7 @@ upstream rejects the stored id (server-side expiry), the provider falls back to
 a full-replay retry once before surfacing the error.
 
 The ChatGPT/Codex surface additionally routes turns over a persistent
-**WebSocket** connection. One connection per `(account, agent)` lives in a
+**WebSocket** connection. One connection per `(account, Responses mode, agent)` lives in a
 small LRU pool inside `provider-builtin`, so the server-side connection-local
 response cache stays warm across turns of the same conversation — including
 when sub-agent delegations are interleaved with the parent. Connections age out
