@@ -4313,6 +4313,64 @@ fn quota_status_renders_all_accessible_compact_chips() {
     }
 }
 
+/// A narrow status line with the real default-plus-Bengalfox account shape
+/// renders pacing from the exact `codex` binding and does not let the unrelated
+/// additional pool's danger state override the selected route.
+#[test]
+fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
+    let (_term, handle, vt) = setup(16, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some(model.clone()),
+        context_window: None,
+        role: "engineer".into(),
+        baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
+    }));
+    let now = super::event_renderer::unix_time_millis();
+    let remaining = 604_800_u64 / 2;
+    let window = |limit_id: &str, used_basis_points| tau_proto::ProviderQuotaWindow {
+        key: tau_proto::ProviderQuotaWindowKey {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+        },
+        used_basis_points,
+        usage_observed_at_unix_ms: now,
+        window_seconds: 604_800,
+        reset_at_unix_seconds: Some(now / 1_000 + remaining),
+        remaining_seconds_at_timing_anchor: Some(remaining as i64),
+        timing_anchor_observed_at_unix_ms: Some(now),
+        server_offset_ms: Some(0),
+        server_offset_observed_at_unix_ms: Some(now),
+    };
+    renderer.handle(&Event::HarnessProviderQuotaChanged(
+        tau_proto::HarnessProviderQuotaChanged {
+            provider: model.provider.clone(),
+            profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-two-pool")
+                .expect("quota epoch"),
+            sequence: 2,
+            windows: vec![window("codex", 1_000), window("codex_bengalfox", 9_500)],
+            route_bindings: vec![tau_proto::ProviderQuotaRouteBinding {
+                model,
+                limit_ids: vec![
+                    tau_proto::ProviderQuotaLimitId::parse("codex").expect("default pool"),
+                ],
+                observed_at_unix_ms: now,
+                provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
+            }],
+        },
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(16, "Q-"));
+    assert!(!vt.screen_contains(16, "Q!"));
+}
+
 #[test]
 fn status_identity_matches_no_agent_placeholder_semantics() {
     let (_term, handle, vt) = setup(100, 24);

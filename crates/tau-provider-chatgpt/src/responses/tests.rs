@@ -1687,6 +1687,23 @@ fn http_error_delivers_active_quota_limit_before_failure() {
     );
 }
 
+/// `codex.rate_limits` is a WebSocket side channel; an SSE data event with the
+/// same provider-authored JSON cannot manufacture a default-pool route binding.
+#[test]
+fn sse_data_does_not_apply_websocket_quota_event_semantics() {
+    let mut state = crate::common::StreamState::new();
+    let mut updates = 0;
+    let terminal = apply_sse_data(
+        &mut state,
+        r#"{"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}}}"#,
+        &mut |_| updates += 1,
+    )
+    .expect("unknown SSE event is harmless");
+    assert!(!terminal);
+    assert!(state.quota_observation.is_none());
+    assert_eq!(updates, 0);
+}
+
 #[derive(Clone, Copy)]
 enum CapturedRequestCompaction {
     Disabled,

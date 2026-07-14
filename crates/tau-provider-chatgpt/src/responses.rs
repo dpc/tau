@@ -1059,11 +1059,6 @@ pub(super) fn apply_raw_json_event(
     data: &str,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    if let Some(observation) = crate::quota::parse_ws_event(data) {
-        state.quota_observation = Some(observation);
-        on_update(state);
-        return Ok(false);
-    }
     let event: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(_) => return Ok(false),

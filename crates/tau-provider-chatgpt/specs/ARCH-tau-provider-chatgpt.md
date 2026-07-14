@@ -11,6 +11,12 @@ facts and preserves independent usage and timing observations; credentials,
 account ids, credits, and provider prose never leave the in-process provider
 boundary. Applicability and UI pacing are owned above this crate as specified
 by [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+The official WebSocket contract assigns a valid nameless `codex.rate_limits`
+turn event to the canonical default `codex` pool. Explicit valid
+`metered_limit_name` or legacy `limit_name` values take precedence, while a
+JSON null is treated as absence. Every present non-null pool field must
+normalize successfully, including a lower-precedence legacy field, or the
+observation is rejected rather than falling back.
 
 ## Typed image tool output
 

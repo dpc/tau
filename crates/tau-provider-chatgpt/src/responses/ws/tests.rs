@@ -241,3 +241,57 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     assert!(body.contains("idle_timeout="), "{body}");
     assert!(body.contains("partial_output=true"), "{body}");
 }
+
+/// Responses Lite changes only request metadata: ordinary and Lite WebSocket
+/// turns must both surface the official nameless default-pool quota event.
+#[test]
+fn ws_turn_surfaces_nameless_default_quota_for_lite_and_non_lite_models() {
+    for model_id in ["gpt-test", "gpt-5.6-sol"] {
+        let (mut conn, inbound_tx, mut outbound_rx) = test_ws_conn();
+        let mut config = test_responses_config();
+        config.model_id = model_id.to_owned();
+        let fixture = PromptFixture::new();
+        let request = fixture.payload();
+        let mut abort = NeverAbort;
+        let mut observed_limit = None;
+
+        for text in [
+            r#"{"type":"codex.rate_limits","plan_type":"plus","rate_limits":{"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_quota"}}"#,
+        ] {
+            inbound_tx
+                .send(InboundEvent::Event { text: text.into() })
+                .expect("queue WS fixture frame");
+        }
+
+        conn.run_turn(
+            &config,
+            "ap-ws-quota",
+            &request,
+            None,
+            &mut abort,
+            &mut |state| {
+                if let Some(observation) = state.quota_observation.as_ref() {
+                    observed_limit = observation
+                        .active_limit_id
+                        .as_ref()
+                        .map(ToString::to_string);
+                }
+            },
+        )
+        .expect("completed WS turn");
+        assert_eq!(observed_limit.as_deref(), Some("codex"), "{model_id}");
+        let WsCommand::SendText(request_text) =
+            outbound_rx.try_recv().expect("sent WS request envelope");
+        let request_json: serde_json::Value =
+            serde_json::from_str(&request_text).expect("valid WS request envelope");
+        let lite_marker = request_json
+            .pointer("/client_metadata/ws_request_header_x_openai_internal_codex_responses_lite")
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            lite_marker,
+            (model_id == "gpt-5.6-sol").then_some("true"),
+            "{model_id}"
+        );
+    }
+}

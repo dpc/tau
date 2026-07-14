@@ -297,16 +297,32 @@ struct WsWindow {
 }
 
 /// Parses one `codex.rate_limits` WebSocket event.
+///
+/// JSON `null` is treated as field absence, matching the official optional
+/// string contract. A non-null explicit string must normalize successfully:
+/// empty, whitespace-only, or otherwise invalid values reject the observation
+/// and cannot fall through to a lower-precedence or default pool.
 pub fn parse_ws_event(body: &str) -> Option<RollingQuotaObservation> {
     let event: WsQuotaEvent = serde_json::from_str(body).ok()?;
     if event.kind != "codex.rate_limits" {
         return None;
     }
-    let limit_id = event
-        .metered_limit_name
-        .as_deref()
-        .or(event.limit_name.as_deref())
-        .and_then(normalize_limit_id)?;
+    let metered_limit_id = match event.metered_limit_name.as_deref() {
+        Some(raw) => Some(normalize_limit_id(raw)?),
+        None => None,
+    };
+    let legacy_limit_id = match event.limit_name.as_deref() {
+        Some(raw) => Some(normalize_limit_id(raw)?),
+        None => None,
+    };
+    // The official Codex contract assigns otherwise-valid nameless
+    // `codex.rate_limits` events to the canonical default pool. This is an
+    // in-band turn observation, not an inference from account pool presence.
+    // Any malformed *present* id still rejects the observation rather than
+    // silently changing its meaning to the default pool.
+    let limit_id = metered_limit_id
+        .or(legacy_limit_id)
+        .or_else(|| normalize_limit_id("codex"))?;
     let mut windows = Vec::new();
     if let Some(rate_limits) = event.rate_limits {
         for (window_id, window) in [

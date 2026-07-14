@@ -81,6 +81,21 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
 const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
 
+/// Applies the WebSocket-only rate-limit side channel before delegating
+/// ordinary Responses events to the transport-neutral event parser.
+fn apply_ws_raw_json_event(
+    state: &mut StreamState,
+    data: &str,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    if let Some(observation) = crate::quota::parse_ws_event(data) {
+        state.quota_observation = Some(observation);
+        on_update(state);
+        return Ok(false);
+    }
+    apply_raw_json_event(state, data, on_update)
+}
+
 type SharedStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Sink = SplitSink<SharedStream, Message>;
 type Stream = SplitStream<SharedStream>;
@@ -361,7 +376,7 @@ impl WsConn {
                     if let Some(stream) = recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string());
                     }
-                    if apply_raw_json_event(&mut state, text.as_ref(), on_update)? {
+                    if apply_ws_raw_json_event(&mut state, text.as_ref(), on_update)? {
                         return Ok(state);
                     }
                 }
@@ -457,7 +472,7 @@ fn run_replay(
             std::time::Duration::from_micros(event.delta_micros),
             100.0,
         ));
-        if apply_raw_json_event(&mut state, &event.raw, on_update)? {
+        if apply_ws_raw_json_event(&mut state, &event.raw, on_update)? {
             break;
         }
     }

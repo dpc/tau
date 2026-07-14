@@ -20,9 +20,13 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
 }
 
 fn quota_window(used_basis_points: u16) -> tau_proto::ProviderQuotaWindow {
+    quota_window_for("codex", used_basis_points)
+}
+
+fn quota_window_for(limit_id: &str, used_basis_points: u16) -> tau_proto::ProviderQuotaWindow {
     tau_proto::ProviderQuotaWindow {
         key: tau_proto::ProviderQuotaWindowKey {
-            limit_id: tau_proto::ProviderQuotaLimitId::parse("codex").expect("quota pool"),
+            limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("quota pool"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary").expect("window id"),
         },
         used_basis_points,
@@ -96,6 +100,55 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
     let snapshot = &harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.sequence, 2);
     assert_eq!(snapshot.windows[0].used_basis_points, 2_000);
+}
+
+/// A full two-pool account snapshot followed by the exact-model default-pool
+/// turn binding projects both pool facts while preserving only `codex` as the
+/// applicable route, matching the provider extension's real event sequence.
+#[test]
+fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    harness.set_provider_models("owner", vec![quota_model()]);
+    let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
+    harness.handle_provider_quota_replace(
+        "owner",
+        tau_proto::ProviderQuotaReplace {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch.clone(),
+            sequence: 1,
+            establishes_new_epoch: true,
+            windows: vec![
+                quota_window_for("codex", 4_400),
+                quota_window_for("codex_bengalfox", 0),
+            ],
+            route_bindings: Vec::new(),
+        },
+    );
+    harness.handle_provider_quota_patch(
+        "owner",
+        tau_proto::ProviderQuotaPatch {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch,
+            sequence: 2,
+            windows: Vec::new(),
+            removed_window_keys: Vec::new(),
+            route_bindings: vec![quota_binding()],
+        },
+    );
+
+    let snapshot = &harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
+    assert_eq!(snapshot.windows.len(), 2);
+    assert_eq!(snapshot.route_bindings.len(), 1);
+    assert_eq!(snapshot.route_bindings[0].model, quota_binding().model);
+    assert_eq!(
+        snapshot.route_bindings[0]
+            .limit_ids
+            .iter()
+            .map(tau_proto::ProviderQuotaLimitId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["codex"]
+    );
 }
 
 /// When duplicate publishers advertise one model, only the effective

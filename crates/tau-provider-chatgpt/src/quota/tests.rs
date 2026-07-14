@@ -158,22 +158,124 @@ fn websocket_event_normalizes_and_binds_named_pool() {
     assert_eq!(observation.windows[1].window_seconds, Some(604_800));
 }
 
-/// A WebSocket event without a valid explicit pool cannot establish model
-/// applicability, even if `codex` is the only familiar account pool.
+/// The ordinary official Codex WebSocket shape omits both optional pool-name
+/// fields, which authoritatively identifies the default `codex` pool for that
+/// exact turn rather than inferring from account pool enumeration.
 #[test]
-fn websocket_event_never_falls_back_to_default_pool() {
-    assert!(
-        parse_ws_event(
-            r#"{"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}}}"#
-        )
-        .is_none()
+fn websocket_event_binds_nameless_official_shape_to_default_pool() {
+    let observation = parse_ws_event(
+        r#"{"type":"codex.rate_limits","plan_type":"plus","rate_limits":{"allowed":true,"limit_reached":false,"secondary":{"used_percent":45,"window_minutes":10080,"reset_at":1700600000}},"code_review_rate_limits":null,"credits":{"has_credits":true,"unlimited":false,"balance":"123"}}"#,
+    )
+    .expect("official nameless quota event");
+    assert_eq!(
+        observation
+            .active_limit_id
+            .expect("default-pool binding")
+            .as_str(),
+        "codex"
     );
+    assert_eq!(
+        observation.binding_provenance,
+        Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent)
+    );
+    assert_eq!(observation.windows.len(), 1);
+    assert_eq!(observation.windows[0].window_seconds, Some(604_800));
+}
+
+/// A present malformed explicit pool remains external untrusted data and must
+/// not be reinterpreted as the otherwise-valid nameless default-pool contract.
+#[test]
+fn websocket_event_rejects_malformed_present_pool() {
     assert!(
         parse_ws_event(
             r#"{"type":"codex.rate_limits","metered_limit_name":"bad pool","rate_limits":{}}"#
         )
         .is_none()
     );
+    assert!(
+        parse_ws_event(
+            r#"{"type":"codex.rate_limits","metered_limit_name":"bad pool","limit_name":"codex","rate_limits":{}}"#
+        )
+        .is_none()
+    );
+}
+
+/// The legacy `limit_name` field remains an authoritative explicit fallback
+/// when the preferred `metered_limit_name` field is absent.
+#[test]
+fn websocket_event_binds_valid_legacy_limit_name() {
+    let observation = parse_ws_event(
+        r#"{"type":"codex.rate_limits","limit_name":"codex_bengalfox","rate_limits":{}}"#,
+    )
+    .expect("valid legacy named event");
+    assert_eq!(
+        observation
+            .active_limit_id
+            .expect("legacy binding")
+            .as_str(),
+        "codex_bengalfox"
+    );
+}
+
+/// Pool-field precedence distinguishes official null/absence from malformed
+/// non-null external data and never lets an invalid preferred value fall
+/// through to a lower-authority field.
+#[test]
+fn websocket_event_pool_field_precedence_is_fail_closed() {
+    let cases = [
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":null,"limit_name":"codex_legacy"}"#,
+            Some("codex_legacy"),
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":null,"limit_name":null}"#,
+            Some("codex"),
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"codex_preferred","limit_name":"codex_legacy"}"#,
+            Some("codex_preferred"),
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"codex_preferred","limit_name":""}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"codex_preferred","limit_name":"  "}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"codex_preferred","limit_name":"bad pool"}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"codex_preferred","limit_name":7}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"","limit_name":"codex_legacy"}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":"  ","limit_name":"codex_legacy"}"#,
+            None,
+        ),
+        (r#"{"type":"codex.rate_limits","limit_name":""}"#, None),
+        (r#"{"type":"codex.rate_limits","limit_name":"  "}"#, None),
+        (
+            r#"{"type":"codex.rate_limits","metered_limit_name":7,"limit_name":"codex_legacy"}"#,
+            None,
+        ),
+        (
+            r#"{"type":"codex.rate_limits","limit_name":{"pool":"codex"}}"#,
+            None,
+        ),
+    ];
+    for (body, expected) in cases {
+        let actual = parse_ws_event(body)
+            .and_then(|observation| observation.active_limit_id)
+            .map(|limit_id| limit_id.to_string());
+        assert_eq!(actual.as_deref(), expected, "{body}");
+    }
 }
 
 /// A full response that cannot fit the protocol window bound is rejected

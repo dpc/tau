@@ -1,6 +1,6 @@
 # DESIGN-provider-quota-pacing: Correctness-first weekly quota pacing
 
-Status: confirmed, 2026-07-13, tau-agent-c79j
+Status: confirmed, 2026-07-14, dpc (tau-agent-c79j, amended by tau-agent-9idt)
 
 Tau presents provider account quota as ephemeral, bounded current state. ChatGPT
 acquires a full account snapshot from authenticated `/wham/usage` and reconciles
@@ -19,9 +19,14 @@ owns generic pacing and presentation.
 ## Applicability
 
 A colored claim requires a fresh explicit `ModelId` to quota-pool binding from
-an in-band route observation. A full account snapshot, the default `codex`
-pool, a display name, or the presence of only one pool is never applicability
-evidence. One explicit pool observation replaces that model's former binding;
+an in-band route observation. A full account snapshot, a display name, or the
+presence of only one pool is never applicability evidence. In the official
+WebSocket contract, a valid `codex.rate_limits` turn event with neither
+`metered_limit_name` nor `limit_name` authoritatively denotes the default
+`codex` pool; this exact-turn signal is distinct from inferring applicability
+from account pool presence. JSON null is absence; every present non-null pool
+field must be a valid normalized id even when a higher-precedence field is also
+present. One explicit pool observation replaces that model's former binding;
 an explicitly reported set means all listed pools apply.
 
 Every bound pool must be present. Only windows within five percent of 604,800

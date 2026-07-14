@@ -1174,6 +1174,58 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     assert_eq!(replaced.route_bindings.len(), 1);
 }
 
+/// The real two-pool account shape remains unbound after full reconciliation,
+/// then an official nameless turn event binds only the exact model to default
+/// `codex` without accidentally selecting the additional Bengalfox pool.
+#[test]
+fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::from("chatgpt/gpt-5.6-sol");
+    let mut quota = QuotaCoordinator::default();
+    quota.ensure_profile(provider.clone(), 7);
+    let (epoch, fetch_sequence) = quota.begin_fetch(&provider).expect("quota fetch");
+    let window =
+        |limit_id: &str, used_basis_points| tau_provider_chatgpt::quota::QuotaWindowObservation {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+            used_basis_points,
+            window_seconds: Some(604_800),
+            reset_at_unix_seconds: Some(2_100_000_000),
+            remaining_seconds: Some(500_000),
+        };
+    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
+        windows: vec![window("codex", 4_400), window("codex_bengalfox", 0)],
+    };
+    let Event::ProviderQuotaReplace(replaced) = quota
+        .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_000_000)
+        .expect("full quota replacement")
+    else {
+        panic!("expected quota replacement");
+    };
+    assert_eq!(replaced.windows.len(), 2);
+    assert!(replaced.route_bindings.is_empty());
+
+    let observation = tau_provider_chatgpt::quota::parse_ws_event(
+        r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":45,"window_minutes":10080,"reset_at":2100000000}}}"#,
+    )
+    .expect("official nameless turn event");
+    let Event::ProviderQuotaPatch(patch) = quota
+        .merge_rolling(model.clone(), 7, observation, 2_000_000_001_000)
+        .expect("quota binding patch")
+    else {
+        panic!("expected quota patch");
+    };
+    assert_eq!(patch.route_bindings.len(), 1);
+    assert_eq!(patch.route_bindings[0].model, model);
+    assert_eq!(patch.route_bindings[0].limit_ids[0].as_str(), "codex");
+    assert!(
+        patch.route_bindings[0]
+            .limit_ids
+            .iter()
+            .all(|id| id.as_str() != "codex_bengalfox")
+    );
+}
+
 /// An old account fetch can never repopulate quota state after a profile epoch
 /// rotates, even when its network response arrives later.
 #[test]
