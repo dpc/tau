@@ -208,6 +208,54 @@ mod tests {
         );
     }
 
+    /// Covers trusted timing-hint boundaries so malformed, negative, missing,
+    /// past, and overflowing inputs cannot fabricate a future reset.
+    #[test]
+    fn rejects_untrusted_reset_hints_and_saturates_past_dates() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let past = httpdate::fmt_http_date(now - Duration::from_secs(60));
+        for value in ["", "nonsense", "-1", "18446744073709551616"] {
+            assert_eq!(parse_retry_after(value, now), None, "{value:?}");
+        }
+        assert_eq!(parse_retry_after(&past, now), Some(Duration::ZERO));
+        for body in [
+            "{}",
+            r#"{"resets_in_seconds":-1}"#,
+            r#"{"resets_in_seconds":"60"}"#,
+            r#"{"resets_at":-1}"#,
+            r#"{"resets_at":18446744073709551616}"#,
+            "not-json",
+        ] {
+            assert_eq!(parse_json_reset_hint(body, now), None, "{body}");
+        }
+        assert_eq!(
+            parse_json_reset_hint(r#"{"resets_at":1}"#, now),
+            Some(Duration::ZERO),
+            "past structured dates saturate without underflow"
+        );
+    }
+
+    /// Locks the shared-versus-prompt-local retry-class policy used by the
+    /// scheduler reference model and provider runtime.
+    #[test]
+    fn retry_class_scope_matrix_is_stable() {
+        for class in [
+            RetryClass::Throttle,
+            RetryClass::UsageWindow,
+            RetryClass::Account,
+            RetryClass::Auth,
+        ] {
+            assert!(class.shares_cooldown(), "{class:?} is provider scoped");
+        }
+        for class in [
+            RetryClass::Transport,
+            RetryClass::Overload,
+            RetryClass::Unknown,
+        ] {
+            assert!(!class.shares_cooldown(), "{class:?} is prompt local");
+        }
+    }
+
     /// Ensures billing and unfamiliar provider codes remain retryable classes.
     #[test]
     fn classifies_account_and_unknown_errors() {

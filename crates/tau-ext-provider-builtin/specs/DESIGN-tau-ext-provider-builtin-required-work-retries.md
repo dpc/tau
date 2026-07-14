@@ -47,3 +47,21 @@ channel transport and timer waiting. Tests may inject and advance the
 monotonic clock, so multi-day cooldown, exact-generation release, independent
 deadlines, and anti-herd wakeup are acceptance-tested without network access,
 wall sleeps, or quota telemetry acting as scheduler policy.
+
+The synchronous transition seam is guarded by a second, independent delayed
+ownership/deadline reference model. Bounded fixed-seed command traces run on
+every change and cover schedule, extend, release, manual transfer, cancellation,
+virtual advance, and duplicate identities. Conservation, exact
+provider/generation scope, independent deadline preservation, and bounded
+progress after a valid release are checked after every scheduler command.
+Runtime fixtures—not synthetic queue commands—own profile rotation, telemetry
+non-authority, cancellation/commit, and provider-side shutdown/EOF.
+Property failures report their seed and the minimized replayable trace;
+scheduled CI may raise the case budget without changing command semantics or
+introducing wall-clock scheduling oracles.
+
+Authority amendment (confirmed by the user for Stage 2): property generation is
+limited to commands owned by the pure scheduler actor. Profile rotation, quota
+telemetry, and EOF/shutdown instead use deterministic production-runtime
+fixtures, where their actual control-plane semantics live. This layered split
+must not be replaced with synthetic queue-level stand-ins.

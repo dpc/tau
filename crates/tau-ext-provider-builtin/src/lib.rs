@@ -1570,12 +1570,22 @@ where
     }
 
     fn reconcile_provider_profile(&mut self, provider: &ProviderName, identity: Option<u64>) {
-        let changed = self
-            .provider_profile_identities
-            .insert(provider.clone(), identity)
-            .is_some_and(|previous| previous != identity);
+        let (changed, removed_cooldown) = reconcile_inference_identity(
+            &mut self.provider_profile_identities,
+            &mut self.shared_cooldowns,
+            provider,
+            identity,
+        );
         if changed {
-            self.release_shared_cooldown(provider);
+            if let Some(cooldown) = removed_cooldown
+                && let Some(scheduler) = &self.retry_scheduler
+            {
+                scheduler.release_cooldown(
+                    provider.clone(),
+                    cooldown.generation,
+                    self.retry_clock.now(),
+                );
+            }
             self.cancel_all_prewarms();
             if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
                 tracing::debug!(
@@ -1837,11 +1847,7 @@ where
                         )
                     });
                     let now = self.retry_clock.now();
-                    let common_due = now
-                        .checked_add(policy_delay.max(hint_delay))
-                        // An overflowing hint is nonsensical. Fall back to the
-                        // class cadence rather than retrying immediately.
-                        .unwrap_or_else(|| now.checked_add(policy_delay).unwrap_or(now));
+                    let common_due = retry_common_due(now, policy_delay, hint_delay);
                     let provider = job.prompt.model.provider.clone();
                     let current_identity = self.provider_profile_identities.get(&provider).copied();
                     let may_share = decision.class.shares_cooldown()
@@ -1855,24 +1861,14 @@ where
                     let mut due = independent_due;
                     let mut cooldown_constraint = None;
                     if may_share {
-                        self.shared_cooldown_generation = self
-                            .shared_cooldown_generation
-                            .checked_add(1)
-                            .expect("shared cooldown generation exhausted");
-                        let generation = self.shared_cooldown_generation;
-                        let shared =
-                            self.shared_cooldowns
-                                .entry(provider)
-                                .or_insert(SharedCooldown {
-                                    not_before: common_due,
-                                    class: decision.class,
-                                    generation,
-                                });
-                        shared.generation = generation;
-                        if shared.not_before < common_due {
-                            shared.not_before = common_due;
-                            shared.class = decision.class;
-                        }
+                        let shared = install_shared_cooldown(
+                            &mut self.shared_cooldowns,
+                            &mut self.shared_cooldown_generation,
+                            provider,
+                            common_due,
+                            decision.class,
+                        );
+                        let generation = shared.generation;
                         due = independent_due.max(cooldown_due_for_job(shared.not_before, &job));
                         cooldown_constraint = Some(CooldownConstraint {
                             generation,
@@ -2116,6 +2112,54 @@ where
             chatgpt_runtime: self.chatgpt_runtime.clone(),
         }
     }
+}
+
+/// Reconciles one material inference identity and removes only that provider's
+/// obsolete shared cooldown when the identity changes or disappears.
+fn reconcile_inference_identity(
+    identities: &mut BTreeMap<ProviderName, Option<u64>>,
+    cooldowns: &mut BTreeMap<ProviderName, SharedCooldown>,
+    provider: &ProviderName,
+    identity: Option<u64>,
+) -> (bool, Option<SharedCooldown>) {
+    let changed = identities
+        .insert(provider.clone(), identity)
+        .is_some_and(|previous| previous != identity);
+    let removed = changed.then(|| cooldowns.remove(provider)).flatten();
+    (changed, removed)
+}
+
+/// Computes the common retry boundary, falling back to generated class cadence
+/// when an otherwise valid trusted hint exceeds the monotonic clock range.
+fn retry_common_due(now: Instant, policy_delay: Duration, hint_delay: Duration) -> Instant {
+    now.checked_add(policy_delay.max(hint_delay))
+        .unwrap_or_else(|| now.checked_add(policy_delay).unwrap_or(now))
+}
+
+/// Installs newer shared evidence without allowing it to shorten an existing
+/// provider boundary.
+fn install_shared_cooldown(
+    cooldowns: &mut BTreeMap<ProviderName, SharedCooldown>,
+    next_generation: &mut u64,
+    provider: ProviderName,
+    common_due: Instant,
+    class: RetryClass,
+) -> SharedCooldown {
+    *next_generation = next_generation
+        .checked_add(1)
+        .expect("shared cooldown generation exhausted");
+    let generation = *next_generation;
+    let shared = cooldowns.entry(provider).or_insert(SharedCooldown {
+        not_before: common_due,
+        class,
+        generation,
+    });
+    shared.generation = generation;
+    if shared.not_before < common_due {
+        shared.not_before = common_due;
+        shared.class = class;
+    }
+    *shared
 }
 
 /// Revalidates queued worker output at the main-loop serialization boundary.
@@ -4618,5 +4662,7 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
 
 #[cfg(test)]
 mod openai_tests;
+#[cfg(test)]
+mod scheduler_model_tests;
 #[cfg(test)]
 mod tests;

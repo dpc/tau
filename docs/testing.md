@@ -77,6 +77,16 @@ Successful-probe coverage must also prove exact attempt/profile/generation
 validation, peer and chained-continuation wakeup, independent-deadline and
 cross-provider isolation, stale/error/cancel negatives, identity rotation, and
 that quota telemetry alone cannot release inference cooldowns.
+The synchronous scheduler state additionally has a bounded reference-model
+gate. Every PR replays fixed seeds over scheduler-owned schedule, extend,
+exact-generation release, manual retry, targeted/global cancellation, virtual
+advance, and duplicate AP commands. Production-runtime fixtures separately own
+identity rotation, telemetry non-authority, shutdown/EOF, cancellation/commit,
+and provider-disconnect coverage rather than simulating those transitions in
+the queue model. Failures must include the seed and proptest-minimized command
+trace. Scheduled CI can increase the deterministic budget with
+`TAU_SCHEDULER_MODEL_CASES`; the ordinary default must remain fast, sleep-free,
+and reliable.
 CLI coverage must separately prove static completion, exact argument-free
 parsing without prompt resubmission, and requester-visible result rendering.
 

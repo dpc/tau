@@ -24,3 +24,6 @@ tau-provider.workspace = true
 tau-provider-chat-completions.workspace = true
 tau-provider-chatgpt.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -62,6 +62,7 @@ unwrap_used = "deny"
 
 [workspace.dependencies]
 httpdate = "1.0.3"
+proptest = "1.7"
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }

@@ -703,8 +703,145 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
     runtime.join().expect("provider exits");
 }
 
+/// Ensures shared retry evidence returned by an old active attempt after
+/// credential rotation cannot reinstall a cooldown for the new identity.
+#[test]
+fn stale_old_identity_retry_cannot_park_new_profile_work() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (old_started_tx, old_started_rx) = mpsc::sync_channel(1);
+    let (release_old_tx, release_old_rx) = mpsc::sync_channel(0);
+    let release_old_rx = Mutex::new(release_old_rx);
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let id = execution.job.agent_prompt_id.to_string();
+        if id == "sp-1" && execution.job.retry_state.attempts == 0 {
+            old_started_tx.send(()).expect("report old attempt");
+            release_old_rx
+                .lock()
+                .expect("old release receiver")
+                .recv_timeout(Duration::from_secs(1))
+                .expect("release stale old attempt");
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::UsageWindow),
+                },
+            )
+            .expect("return stale shared evidence");
+            return;
+        }
+        let mut finished = simple_finished(
+            execution.job.agent_prompt_id.clone(),
+            execution.job.prompt.agent_id.clone(),
+            execution.job.prompt.originator.clone(),
+            "identity-race success",
+        );
+        finished.error = None;
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))
+            .expect("write identity-race terminal");
+        writer.flush().expect("flush identity-race terminal");
+        completed_tx.send(id).expect("report identity-race finish");
+    });
+    let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
+    let startup_profiles = profiles.lock().expect("profiles").clone();
+    let load_profiles = Arc::clone(&profiles);
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(1);
+    let runtime = thread::spawn(move || {
+        let result = run_inner_with_executors_and_clock(
+            runtime_input,
+            runtime_output,
+            startup_profiles,
+            move || load_profiles.lock().expect("profiles").clone(),
+            3,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
+        );
+        runtime_done_tx.send(()).expect("report identity-race exit");
+        result.expect("run identity-race provider");
+    });
+    old_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("old-profile attempt starts");
+    {
+        let mut profiles = profiles.lock().expect("profiles");
+        let BuiltinProviderProfile::Chatgpt(profile) = profiles
+            .providers
+            .get_mut(&ProviderName::new("chatgpt"))
+            .expect("chatgpt profile")
+        else {
+            panic!("expected ChatGPT profile");
+        };
+        profile.auth.access_token = "new-identity".to_owned();
+    }
+    let mut rotated = prompt();
+    rotated.agent_prompt_id = "rotated-first".into();
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(rotated),
+    )]));
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("new identity prompt finishes"),
+        "rotated-first"
+    );
+    release_old_tx.send(()).expect("release old evidence");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "sp-1"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    let mut peer = prompt();
+    peer.agent_prompt_id = "new-peer".into();
+    input.push(encode_frames(&[live_event(
+        13,
+        Event::AgentPromptCreated(peer),
+    )]));
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stale evidence must not park new identity peer"),
+        "new-peer"
+    );
+    clock.advance(Duration::from_secs(2));
+    assert_eq!(
+        completed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("old prompt eventually retries locally"),
+        "sp-1"
+    );
+    input.close();
+    runtime_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("identity-race runtime exits");
+    runtime.join().expect("identity-race runtime joins");
+}
+
 /// Builds scheduler-owned logical state without starting a provider worker.
-fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
+pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
     let mut prompt = prompt();
     prompt.agent_prompt_id = prompt_id.into();
     prompt.model.provider = ProviderName::new(provider);
@@ -924,6 +1061,114 @@ fn retry_scheduler_state_release_is_generation_scoped_and_deadline_safe() {
     assert_eq!(state.queue.len(), 1, "newer evidence remains parked");
 }
 
+/// Ensures newer shared evidence always advances authority generation but can
+/// never shorten the already observed provider boundary.
+#[test]
+fn newer_shorter_shared_evidence_preserves_long_boundary() {
+    let provider = ProviderName::new("limited");
+    let now = Instant::now();
+    let long = now + Duration::from_secs(86_400);
+    let short = now + Duration::from_secs(60);
+    let mut cooldowns = BTreeMap::new();
+    let mut generation = 0;
+    let first = install_shared_cooldown(
+        &mut cooldowns,
+        &mut generation,
+        provider.clone(),
+        long,
+        RetryClass::UsageWindow,
+    );
+    let second = install_shared_cooldown(
+        &mut cooldowns,
+        &mut generation,
+        provider,
+        short,
+        RetryClass::Throttle,
+    );
+    assert_eq!(first.generation, 1);
+    assert_eq!(second.generation, 2, "new evidence advances authority");
+    assert_eq!(second.not_before, long, "new evidence cannot shorten");
+    assert_eq!(
+        second.class,
+        RetryClass::UsageWindow,
+        "the visible reason continues to describe the controlling boundary"
+    );
+    let authoritative = cooldowns
+        .get(&ProviderName::new("limited"))
+        .expect("cooldown");
+    assert_eq!(authoritative.generation, 2);
+    assert_eq!(authoritative.not_before, long);
+    assert_eq!(authoritative.class, RetryClass::UsageWindow);
+}
+
+/// Ensures a syntactically valid maximum trusted hint cannot overflow into an
+/// immediate retry and instead falls back to bounded generated cadence.
+#[test]
+fn overflowing_trusted_hint_falls_back_to_policy_due() {
+    let now = Instant::now();
+    let policy = Duration::from_secs(17);
+    assert_eq!(
+        retry_common_due(now, policy, Duration::from_secs(u64::MAX)),
+        now + policy
+    );
+}
+
+/// Proves configured-to-removed-to-re-added reconciliation clears only the old
+/// provider's shared generation and leaves unrelated cooldown state intact.
+#[test]
+fn removed_and_readded_profile_does_not_inherit_shared_cooldown() {
+    let limited = ProviderName::new("limited");
+    let healthy = ProviderName::new("healthy");
+    let boundary = Instant::now() + Duration::from_secs(86_400);
+    let old = SharedCooldown {
+        not_before: boundary,
+        class: RetryClass::UsageWindow,
+        generation: 7,
+    };
+    let unrelated = SharedCooldown {
+        not_before: boundary,
+        class: RetryClass::Throttle,
+        generation: 3,
+    };
+    let mut identities = BTreeMap::from([(limited.clone(), Some(10)), (healthy.clone(), Some(20))]);
+    let mut cooldowns = BTreeMap::from([(limited.clone(), old), (healthy.clone(), unrelated)]);
+
+    let (removed, old_cooldown) =
+        reconcile_inference_identity(&mut identities, &mut cooldowns, &limited, None);
+    assert!(removed);
+    assert_eq!(old_cooldown.expect("old shared state").generation, 7);
+    assert!(!cooldowns.contains_key(&limited));
+    assert_eq!(
+        cooldowns.get(&healthy).map(|state| state.generation),
+        Some(3),
+        "profile removal is provider scoped"
+    );
+    cooldowns.insert(
+        limited.clone(),
+        SharedCooldown {
+            not_before: boundary,
+            class: RetryClass::Auth,
+            generation: 8,
+        },
+    );
+
+    let (readded, inherited) =
+        reconcile_inference_identity(&mut identities, &mut cooldowns, &limited, Some(11));
+    assert!(readded);
+    assert_eq!(
+        inherited
+            .expect("unavailable-profile shared state")
+            .generation,
+        8
+    );
+    assert!(!cooldowns.contains_key(&limited));
+    assert_eq!(identities.get(&limited), Some(&Some(11)));
+    assert_eq!(
+        cooldowns.get(&healthy).map(|state| state.generation),
+        Some(3)
+    );
+}
+
 /// Proves only a non-error terminal from the exact captured generation may
 /// invalidate a shared cooldown; stale, error, and canceled terminals may not.
 #[test]
@@ -1044,8 +1289,8 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
     ));
 }
 
-/// Ensures inference profile identity covers non-Responses credentials and
-/// backend family, so their rotation cannot inherit an old shared cooldown.
+/// Ensures material Responses, Chat Completions, OpenRouter, unavailable, and
+/// backend-family changes produce the intended inference identity boundaries.
 #[test]
 fn inference_profile_identity_tracks_chat_completions_rotation() {
     let provider = ChatCompletionsProvider {
@@ -1061,7 +1306,13 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
     let mut rotated = provider;
     rotated.api_key = "new-key".to_owned();
     let new = PromptBackend::ChatCompletions {
-        provider: rotated,
+        provider: rotated.clone(),
+        model: chat_model("model"),
+    };
+    let mut moved = rotated;
+    moved.base_url = "https://replacement.invalid/v1".to_owned();
+    let moved = PromptBackend::ChatCompletions {
+        provider: moved,
         model: chat_model("model"),
     };
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -1076,6 +1327,56 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         backend_profile_identity(&new),
         backend_profile_identity(&responses),
         "backend-kind replacement changes inference identity"
+    );
+    assert_ne!(
+        backend_profile_identity(&old),
+        backend_profile_identity(&moved),
+        "generic Chat Completions base URL is material identity"
+    );
+
+    let router_old = tau_provider_chat_completions::openrouter::OpenRouterProfile {
+        api_key: "router-old".to_owned(),
+        models: vec![chat_model("route/model")],
+    };
+    let router_new = tau_provider_chat_completions::openrouter::OpenRouterProfile {
+        api_key: "router-new".to_owned(),
+        ..router_old.clone()
+    };
+    let router_backend =
+        |profile: &tau_provider_chat_completions::openrouter::OpenRouterProfile| {
+            PromptBackend::ChatCompletions {
+                provider: profile.to_chat_completions(),
+                model: chat_model("route/model"),
+            }
+        };
+    assert_ne!(
+        backend_profile_identity(&router_backend(&router_old)),
+        backend_profile_identity(&router_backend(&router_new)),
+        "OpenRouter route credential rotation changes identity"
+    );
+
+    let PromptBackend::Responses(responses_config) = responses else {
+        panic!("resolved ChatGPT profile must use Responses");
+    };
+    for mutate in [
+        |config: &mut responses::ResponsesConfig| config.api_key.push_str("-rotated"),
+        |config: &mut responses::ResponsesConfig| config.base_url.push_str("/replacement"),
+        |config: &mut responses::ResponsesConfig| {
+            config.account_id = Some("replacement-account".to_owned());
+        },
+    ] {
+        let mut rotated = responses_config.clone();
+        mutate(&mut rotated);
+        assert_ne!(
+            responses_profile_identity(&responses_config),
+            responses_profile_identity(&rotated),
+            "Responses URL, key, and account are material profile identity"
+        );
+    }
+    assert_eq!(
+        backend_profile_identity(&PromptBackend::Unavailable),
+        None,
+        "removed profiles carry no stale identity"
     );
 }
 
@@ -2233,10 +2534,6 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
         12,
         Event::AgentPromptCreated(peer),
     )]));
-    assert!(
-        attempt_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "quota telemetry must not admit a peer parked by inference policy"
-    );
     wait_for_runtime_frames(&output, |frames| {
         frames.iter().any(|frame| {
             matches!(
@@ -2702,8 +2999,8 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
 
 /// Verifies every due attempt re-resolves mutable profile state while retaining
 /// the startup-selected Responses mode: repaired credentials replace stale
-/// captures, an opposite on-disk mode edit is ignored, and later deletion
-/// becomes Unavailable.
+/// captures, an opposite on-disk mode edit is ignored, deletion becomes
+/// Unavailable, and a re-added profile is resolved as a fresh identity.
 #[test]
 fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
     let input = BlockingInput::default();
@@ -2756,6 +3053,12 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                     BuiltinProviderProfiles::default();
             }
             (2, PromptBackend::Unavailable) => {
+                *profiles_for_executor.lock().expect("mutable profiles") =
+                    profiles_with_chatgpt_auth(fresh.clone());
+            }
+            (3, PromptBackend::Responses(config)) => {
+                assert_eq!(config.api_key, "fresh-token");
+                assert_eq!(config.account_id.as_deref(), Some("fresh-account"));
                 let mut writer = execution.frame_writer();
                 writer
                     .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
@@ -2766,8 +3069,8 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                             "observed unavailable",
                         ),
                     )))
-                    .expect("finish after deletion");
-                writer.flush().expect("flush deletion finish");
+                    .expect("finish after re-addition");
+                writer.flush().expect("flush re-added finish");
                 finished_tx.send(()).expect("report finish");
                 return;
             }
@@ -2808,7 +3111,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
     )]));
     input.close();
     runtime.join().expect("runtime join");
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
     let frames = decode_frames(&output.bytes());
     assert_eq!(
         frames
@@ -3178,7 +3481,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     &execution.output_waker,
                     WorkerMessage::Retry {
                         job: execution.job,
-                        decision: RetryDecision::new(RetryClass::Transport)
+                        decision: RetryDecision::new(RetryClass::UsageWindow)
                             .with_retry_after(Some(Duration::from_secs(86_400))),
                     },
                 )
@@ -3196,10 +3499,15 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 );
                 active_tx.send(()).expect("report active state");
                 if matches!(shutdown, MixedStateShutdown::Eof) {
+                    let deadline = Instant::now() + Duration::from_secs(1);
                     while !execution
                         .cancellation
                         .is_canceled(&execution.job.agent_prompt_id)
                     {
+                        assert!(
+                            Instant::now() < deadline,
+                            "EOF did not cancel active provider attempt"
+                        );
                         thread::yield_now();
                     }
                 } else {
@@ -3230,21 +3538,58 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let writer = SharedWriter::default();
     let output = writer.clone();
     let runtime_input = input.clone();
+    let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(1);
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        let result = run_inner_with_prompt_executor(
             runtime_input,
             writer,
             profiles,
             move || prompt_profiles.clone(),
-            1,
+            2,
             executor,
-        )
-        .expect("run provider");
+        );
+        runtime_done_tx
+            .send(())
+            .expect("report mixed runtime completion");
+        result.expect("run provider");
     });
 
     delayed_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("delayed state");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "mixed-delayed"
+                        && update.status.as_ref().is_some_and(|status| {
+                            status.retry.as_ref().is_some_and(|retry| {
+                                retry.category
+                                    == tau_proto::ProviderRetryCategory::UsageWindow
+                            })
+                        })
+            )
+        })
+    });
+    let mut cooldown_peer = prompt();
+    cooldown_peer.agent_prompt_id = "mixed-cooldown-peer".into();
+    input.push(encode_frames(&[live_event(
+        14,
+        Event::AgentPromptCreated(cooldown_peer),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id.as_str() == "mixed-cooldown-peer"
+                        && update.status.as_ref().is_some_and(|status| {
+                            status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
+                        })
+            )
+        })
+    });
     active_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("active state");
@@ -3276,7 +3621,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     )
                 })
                 .count();
-            if canceled == 3 {
+            if canceled == 4 {
                 break;
             }
             assert!(
@@ -3292,10 +3637,18 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         )]));
         input.close();
     }
+    runtime_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("mixed runtime shuts down within bound");
     runtime.join().expect("mixed runtime join");
 
     let frames = decode_frames(&output.bytes());
-    for id in ["mixed-delayed", "mixed-active", "mixed-queued"] {
+    for id in [
+        "mixed-delayed",
+        "mixed-active",
+        "mixed-queued",
+        "mixed-cooldown-peer",
+    ] {
         assert_eq!(
             frames
                 .iter()
@@ -3321,8 +3674,13 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         );
     }
     assert_eq!(
-        *calls.lock().expect("mixed calls"),
-        vec!["mixed-delayed".to_owned(), "mixed-active".to_owned()],
+        calls
+            .lock()
+            .expect("mixed calls")
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["mixed-delayed".to_owned(), "mixed-active".to_owned()]),
         "queued work must close without provider execution"
     );
 }
@@ -3338,6 +3696,105 @@ fn global_cancel_closes_mixed_prompt_states_exactly_once() {
 #[test]
 fn eof_closes_mixed_prompt_states_exactly_once() {
     assert_mixed_state_shutdown(MixedStateShutdown::Eof);
+}
+
+/// Proves a cold provider restart neither replays ambiguous old work nor
+/// inherits its process-local cooldown before admitting fresh work.
+#[test]
+fn cold_restart_discards_old_work_and_cooldown() {
+    assert_mixed_state_shutdown(MixedStateShutdown::Eof);
+
+    let input = BlockingInput::default();
+    let mut fresh = prompt();
+    fresh.agent_prompt_id = "fresh-after-restart".into();
+    input.push(encode_frames(&[live_event(
+        40,
+        Event::AgentPromptCreated(fresh),
+    )]));
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        assert_eq!(
+            execution.job.agent_prompt_id.as_str(),
+            "fresh-after-restart",
+            "old process work must not replay into the fresh runtime"
+        );
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "fresh success",
+                ),
+            )))
+            .expect("write fresh terminal");
+        writer.flush().expect("flush fresh terminal");
+        finished_tx.send(()).expect("report fresh completion");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let (fresh_done_tx, fresh_done_rx) = mpsc::sync_channel(1);
+    let runtime = thread::spawn(move || {
+        let result = run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        );
+        fresh_done_tx.send(()).expect("report fresh runtime exit");
+        result.expect("run fresh provider process");
+    });
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("fresh work admitted without old cooldown");
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("fresh done".to_owned()),
+        },
+    )]));
+    input.close();
+    fresh_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("fresh runtime exits within bound");
+    runtime.join().expect("fresh runtime joins");
+
+    let frames = decode_frames(&output.bytes());
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmitted(submitted))
+                    if submitted.agent_prompt_id.as_str() == "fresh-after-restart"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "fresh-after-restart"
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        frames.iter().all(|frame| !matches!(
+            input_event(frame),
+            Some(Event::ProviderPromptSubmitted(submitted))
+                if submitted.agent_prompt_id.as_str().starts_with("mixed-")
+        )),
+        "old ambiguous APs must not be replayed after restart"
+    );
 }
 
 /// A real Chat Completions transport repetition reaches the production
