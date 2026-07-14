@@ -43,7 +43,7 @@
         suffix: ["component", "ext-slack"],
         role: "tool",
         enable: false,
-        config: {},
+        config: { prefix_agent_id: false },
     },
     {
         name: "std-telegram",

@@ -268,6 +268,7 @@ fn cfg() -> RuntimeConfig {
         thread_receives: HashMap::new(),
         proactive_aliases: BTreeSet::new(),
         dynamic_direct_messages: None,
+        prefix_agent_id: false,
         api_base: DEFAULT_API_BASE.to_owned(),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
     }
@@ -1197,7 +1198,7 @@ fn proactive_send_uses_exact_configured_route_without_registration() {
     assert!(event.is_none(), "completion is asynchronous");
     assert_eq!(
         client.sent_pairs(),
-        vec![("G789".to_owned(), "[agent-a] update".to_owned())]
+        vec![("G789".to_owned(), "update".to_owned())]
     );
     assert_eq!(
         client.sent_thread_ids(),
@@ -1213,6 +1214,68 @@ fn proactive_send_uses_exact_configured_route_without_registration() {
         tau_proto::TransportSendAuthorization::ConfiguredDestination { ref alias }
             if alias == "incident-thread"
     ));
+}
+
+/// Enabling `prefix_agent_id` retains the legacy prefix for both source replies
+/// and proactive sends while leaving byte-limit validation on the model text.
+#[test]
+fn enabled_agent_id_prefix_formats_reply_and_proactive_text() {
+    let (ext, rx, client) = extension();
+    let message = "first line\nsecond 🦀";
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    let config = tau_proto::json_to_cbor(&serde_json::json!({
+        "app_token_secret": "app",
+        "bot_token_secret": "bot",
+        "allowed_user_ids": ["U123"],
+        "prefix_agent_id": true,
+        "max_message_bytes": message.len(),
+        "conversations": [{
+            "alias": "team",
+            "conversation_id": "C123",
+            "kind": "channel",
+            "receive": "mentions_only"
+        }, {
+            "alias": "team-ops",
+            "conversation_id": "C456",
+            "kind": "channel",
+            "proactive_send": true
+        }]
+    }))
+    .deserialized::<ExtConfig>()
+    .expect("deserialize operator config")
+    .validate(&secrets)
+    .expect("validate operator config");
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> source"));
+    let prompt = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &prompt);
+
+    assert!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args(message)))
+            .is_none()
+    );
+    let mut proactive = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": message, "destination": "team-ops"}),
+        ),
+    );
+    proactive.call_id = "call-prefix-proactive".into();
+    assert!(ext.handle_send(proactive).is_none());
+
+    let expected = format!("[agent-a] {message}");
+    assert!(expected.len() > message.len());
+    assert_eq!(
+        client.sent_pairs(),
+        [
+            ("C123".to_owned(), expected.clone()),
+            ("C456".to_owned(), expected)
+        ]
+    );
 }
 
 /// A proactive send resolves a known alias from the latest pre-freeze
@@ -1243,7 +1306,7 @@ fn proactive_send_resolves_current_alias_after_reconfiguration() {
     );
     assert_eq!(
         client.sent_pairs(),
-        vec![("C999".to_owned(), "[agent-a] current".to_owned())]
+        vec![("C999".to_owned(), "current".to_owned())]
     );
 }
 
@@ -2460,7 +2523,7 @@ fn slack_send_uses_originating_conversation() {
     assert!(result.is_none());
     assert_eq!(
         client.sent_pairs(),
-        vec![("C456".to_owned(), "[agent-a] hello".to_owned())]
+        vec![("C456".to_owned(), "hello".to_owned())]
     );
 }
 
@@ -3258,6 +3321,28 @@ fn security_mode_config_is_strict_by_default_and_rejects_invalid_values() {
     assert!(format!("{error:?}").contains("unknown variant"));
 }
 
+/// The agent-id prefix is an opt-in compatibility presentation setting:
+/// omission and explicit false are equivalent, true is accepted, and
+/// non-booleans fail.
+#[test]
+fn agent_id_prefix_config_defaults_false_and_requires_a_boolean() {
+    for (value, expected) in [
+        (serde_json::json!({}), false),
+        (serde_json::json!({"prefix_agent_id": false}), false),
+        (serde_json::json!({"prefix_agent_id": true}), true),
+    ] {
+        let config = tau_proto::json_to_cbor(&value)
+            .deserialized::<ExtConfig>()
+            .expect("valid prefix config");
+        assert_eq!(config.prefix_agent_id, expected);
+    }
+    let error = tau_proto::json_to_cbor(&serde_json::json!({"prefix_agent_id": "true"}))
+        .deserialized::<ExtConfig>()
+        .map_err(|error| format!("{error:?}"))
+        .expect_err("string boolean must fail");
+    assert!(error.contains("bool"), "{error}");
+}
+
 /// Configured channel policy silently rejects other channels and DMs without
 /// even granting them a Slack reply side effect.
 #[test]
@@ -3517,7 +3602,7 @@ fn dm_send_uses_linked_prompt_origin() {
     );
     assert_eq!(
         client.sent_pairs().last(),
-        Some(&("D123".to_owned(), "[agent-a] answer".to_owned()))
+        Some(&("D123".to_owned(), "answer".to_owned()))
     );
     assert_eq!(
         client.sent_thread_ids().last(),

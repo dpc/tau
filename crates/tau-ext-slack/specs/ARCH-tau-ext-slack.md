@@ -35,6 +35,10 @@ It never accepts a native id or thread. The extension and
 harness independently revalidate agent, tool, session, capability, route,
 endpoint, kind, thread, and completion. MPIM metadata uses `ConversationKind::Group`.
 Thread sends use the immutable root and never broadcast replies.
+Agent-authored reply and proactive text is unchanged by default. The
+presentation-only `prefix_agent_id` setting may add the legacy `[agent-id] `
+prefix after message-size validation; it does not alter authorization, routing,
+thread selection, or send cardinality.
 See [DESIGN-tau-ext-slack-proactive-sends](DESIGN-tau-ext-slack-proactive-sends.md)
 and [DESIGN-tau-ext-slack-conversation-discovery](DESIGN-tau-ext-slack-conversation-discovery.md)
 and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-immutable-thread-destinations.md).

@@ -54,6 +54,11 @@ committed original; reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 harness capability and effective tool policy.
 
+Replies and proactive sends contain only the agent-supplied message by default.
+Set `prefix_agent_id: true` to opt into the legacy `[agent-id] message` format.
+This presentation setting does not change message limits, post count, opaque
+reply authority, routing, threads, authorization, or configuration freeze.
+
 `slack_conversations` is disabled by default and separately authorizable through
 its exact prefixed name or `slack:discover` tag. It returns all static routes,
 including receive-only records, in bounded sorted pages with alias, kind, scope,

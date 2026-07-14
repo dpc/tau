@@ -630,6 +630,22 @@ fn built_in_extensions_json5_contains_std_notifications_idle_all_config() {
     );
 }
 
+/// Ensures the real embedded Slack config keeps agent-id prefixes disabled
+/// rather than relying only on the extension's deserialization default.
+#[test]
+fn built_in_extensions_json5_disables_slack_agent_id_prefix() {
+    let defs = built_in_extension_defs();
+    let extension = defs
+        .iter()
+        .find(|def| def.name == "std-slack")
+        .expect("std-slack built-in extension");
+
+    assert_eq!(
+        extension.config,
+        serde_json::json!({"prefix_agent_id": false})
+    );
+}
+
 #[test]
 fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
     // Guard the real embedded JSON5, not the local test fixture, so the

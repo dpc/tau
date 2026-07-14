@@ -80,6 +80,10 @@
 #     enable: false
 #   test-dummy:
 #     enable: true
+#   std-slack:
+#     config:
+#       # Opt in to the legacy `[agent-id] ` prefix on agent-authored posts.
+#       prefix_agent_id: false
 #   std-telegram:
 #     enable: true
 #     secrets:

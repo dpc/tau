@@ -21,6 +21,7 @@ extensions:
       bot_token_secret: slack_bot_token
       allowed_user_ids: ["U12345678", "W23456789"]
       security_mode: strict
+      prefix_agent_id: false
       conversations:
         - alias: team-ops
           conversation_id: C12345678
@@ -71,6 +72,19 @@ kinds, and unknown fields fail closed. A description is trusted model-visible
 operator text, allowed on any active static route, and limited to 120 non-control
 Unicode scalars. The removed `channel_ids`, `listening_scope`, and
 `send_destinations` keys are hard errors with migration guidance.
+
+Agent replies and proactive sends contain only the supplied `message` text by
+default. Set `prefix_agent_id: true` to retain the earlier
+`[agent-id] message` presentation. This setting changes presentation only:
+authorization, opaque reply selection, destinations, threads, and the
+`max_message_bytes` check remain based on the original call. Tau submits one
+Slack post and, apart from the optional prefix, does not split or otherwise
+rewrite the supplied message.
+
+When upgrading from a release that always added the prefix, add
+`prefix_agent_id: true` before restarting if downstream readers or automations
+depend on that exact format. Otherwise, no migration is needed and the new
+unprefixed default takes effect.
 
 ### Migration from removed keys
 

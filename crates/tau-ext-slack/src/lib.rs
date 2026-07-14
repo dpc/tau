@@ -181,6 +181,8 @@ struct RuntimeConfig {
     proactive_aliases: BTreeSet<String>,
     /// Optional bounded dynamic-DM discovery policy.
     dynamic_direct_messages: Option<DynamicDirectMessages>,
+    /// Whether agent-authored posts include the originating agent id prefix.
+    prefix_agent_id: bool,
     /// Slack Web API base URL.
     api_base: String,
     /// Maximum accepted inbound or outbound text size in bytes.
@@ -204,6 +206,8 @@ struct ExtConfig {
     conversations: Vec<RawConversationPolicy>,
     /// Optional bounded dynamic one-to-one DM discovery policy.
     dynamic_direct_messages: Option<DynamicDirectMessages>,
+    /// Whether to prefix agent-authored posts with `[agent-id] `.
+    prefix_agent_id: bool,
     /// Removed key retained only to produce actionable migration errors.
     #[serde(deserialize_with = "removed_config_key")]
     channel_ids: bool,
@@ -490,6 +494,7 @@ impl ExtConfig {
             thread_receives,
             proactive_aliases,
             dynamic_direct_messages: self.dynamic_direct_messages,
+            prefix_agent_id: self.prefix_agent_id,
             api_base,
             max_message_bytes,
         })
@@ -1513,7 +1518,11 @@ impl Extension {
                 )
             }
         };
-        let text = format!("[{}] {message}", invoke.agent_id.as_ref());
+        let text = if cfg.prefix_agent_id {
+            format!("[{}] {message}", invoke.agent_id.as_ref())
+        } else {
+            message
+        };
         match self
             .client
             .post_message(&cfg, &route.channel_id, &text, route.thread_ts.as_deref())

@@ -24,6 +24,8 @@ extensions:
     enable: true
     require: false
     tool_prefix: work
+    config:
+      prefix_agent_id: false
   custom-tool:
     command: ["/usr/local/bin/custom-tau-extension"]
     cwd: /srv/project
@@ -40,6 +42,10 @@ the replacement command still needs those trailing component arguments.
 `slack_send` as `work_slack_send`. It applies to tool names, aliases, and groups,
 but not to actions, tags, schemas, or prose. Changing it requires restarting the
 extension. Exact role policy uses the final prefixed names.
+
+Extension-specific settings remain under `config`. For example, std-slack's
+`prefix_agent_id` defaults to `false`; set it to `true` only when Slack posts
+should retain the legacy `[agent-id] ` presentation.
 
 Configured extension processes are trusted local executables with the user's OS
 authority. Tau limits their protocol authority and injects only declared
