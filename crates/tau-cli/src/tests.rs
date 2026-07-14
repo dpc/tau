@@ -8261,6 +8261,86 @@ fn show_tools_compact_hides_payload_body() {
     assert!(!vt.screen_contains(80, "fn main()"));
 }
 
+/// A truncated one-line tool header keeps its compact form, status, and timing
+/// while full mode reveals the exact Unicode payload and compact mode hides it.
+#[test]
+fn show_tools_full_reveals_truncated_one_line_payload() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-tools", "full");
+    let payload = "αβγδεζηθικλμνξοπρστυφχψω一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
+    let args = "αβγδεζηθικλμνξοπρστυ┄一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
+
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("shell"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("command".into()),
+                    CborValue::Text(payload.into()),
+                )]),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "call-1",
+            "shell",
+            CborValue::Map(vec![(
+                CborValue::Text("command".into()),
+                CborValue::Text(payload.into()),
+            )]),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: args.into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                payload: Some(tau_proto::ToolUsePayload::Text {
+                    text: payload.into(),
+                }),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, &format!("shell {args} 1s ok")));
+    assert!(
+        vt.screen_text(100).iter().any(|row| row.trim() == payload),
+        "full Unicode payload should render beneath the compact header"
+    );
+
+    renderer.apply_setting("show-tools", "compact");
+    sync(&handle);
+    assert!(vt.screen_contains(100, &format!("shell {args} 1s ok")));
+    assert!(
+        !vt.screen_text(100).iter().any(|row| row.trim() == payload),
+        "compact mode should continue hiding payload bodies"
+    );
+}
+
 #[test]
 fn show_tools_off_hides_tool_blocks() {
     let (_term, handle, vt) = setup(80, 24);

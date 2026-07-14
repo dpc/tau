@@ -79,12 +79,13 @@ pub(crate) fn initial_display(
     command_mode: ShellCommandMode,
 ) -> ToolUseState {
     let command = argument_text(arguments, "command").unwrap_or_default();
+    let (args, payload) = command_display(&command);
     ToolUseState {
-        args: command_display_args(&command),
+        args,
         mode: command_mode.display_label().unwrap_or_default().to_owned(),
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-        payload: command_display_payload(&command),
+        payload,
         ..Default::default()
     }
 }
@@ -146,8 +147,7 @@ pub(crate) fn run_command_live(
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     let cwd = optional_argument_text(arguments, "cwd").map_err(ToolFailure::from)?;
     let display_mode = command_mode.display_label().unwrap_or_default();
-    let display_args = command_display_args(&command);
-    let display_payload = command_display_payload(&command);
+    let (display_args, display_payload) = command_display(&command);
     let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
         ToolFailure::from(message)
             .with_args(display_args.clone())
@@ -2240,8 +2240,14 @@ fn formatted_output_line_len(stream: OutputStream, content: &OutputContent) -> u
     .len()
 }
 
-fn command_display_args(command: &str) -> String {
-    shorten_command_line(command.lines().next().unwrap_or_default())
+fn command_display(command: &str) -> (String, Option<ToolUsePayload>) {
+    let mut lines = command.lines();
+    let first_line = lines.next().unwrap_or_default();
+    let args = shorten_command_line(first_line);
+    let payload = (lines.next().is_some() || args != first_line).then(|| ToolUsePayload::Text {
+        text: command.to_owned(),
+    });
+    (args, payload)
 }
 
 fn shorten_command_line(line: &str) -> String {
@@ -2258,15 +2264,6 @@ fn shorten_command_line(line: &str) -> String {
         .copied()
         .collect();
     format!("{head}┄{tail}")
-}
-
-fn command_display_payload(command: &str) -> Option<ToolUsePayload> {
-    if command.lines().count() < 2 {
-        return None;
-    }
-    Some(ToolUsePayload::Text {
-        text: command.to_owned(),
-    })
 }
 
 pub(crate) struct CommandDetails {

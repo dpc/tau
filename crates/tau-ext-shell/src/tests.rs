@@ -5904,18 +5904,32 @@ fn shell_tool_multiline_display_uses_short_args_and_text_payload() {
     );
 }
 
+/// A one-line shell command shortened in the display header remains available
+/// as a full Unicode text payload in both progress and terminal descriptors so
+/// `show-tools=full` can render the omitted middle.
 #[test]
-fn shell_tool_long_display_args_are_middle_shortened() {
+fn shell_tool_long_display_args_include_full_text_payload() {
+    let command = "αβγδεζηθικλμνξοπρστυφχψω一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
     let args = CborValue::Map(vec![
         (
             CborValue::Text("command".to_owned()),
-            CborValue::Text("printf 1234567890123456789012345678901234567890".to_owned()),
+            CborValue::Text(command.to_owned()),
         ),
         (
             CborValue::Text("timeout".to_owned()),
             CborValue::Integer(5.into()),
         ),
     ]);
+    let expected_args = "αβγδεζηθικλμνξοπρστυ┄一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
+    let expected_payload = Some(tau_proto::ToolUsePayload::Text {
+        text: command.to_owned(),
+    });
+    let initial = crate::tools::shell::initial_display(
+        &args,
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+    );
+    assert_eq!(initial.args, expected_args);
+    assert_eq!(initial.payload, expected_payload);
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
@@ -5929,10 +5943,31 @@ fn shell_tool_long_display_args_are_middle_shortened() {
     };
     let output = *output;
     assert_eq!(output.display.mode, "");
-    assert_eq!(
-        output.display.args,
-        "printf 1234567890123┄12345678901234567890"
-    );
+    assert_eq!(output.display.args, expected_args);
+    assert_eq!(output.display.payload, expected_payload);
+}
+
+/// A one-line shell command that fits the display header does not gain a
+/// redundant payload body.
+#[test]
+fn shell_tool_short_display_args_omit_redundant_text_payload() {
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf hello".to_owned()),
+    )]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
+    assert_eq!(output.display.args, "printf hello");
     assert_eq!(output.display.payload, None);
 }
 
