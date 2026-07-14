@@ -154,6 +154,14 @@ terminating the harness. Diagnostics must
 not leak secrets; mandatory/critical notices remain replayable and protected from
 interceptor rewrite/drop, and extension-authored notices cannot spoof them.
 
+Process spawn failures identify the configured extension instance and the
+resolved executable from its `command` field using bounded, escaped values. An
+explicitly configured cwd is included because either it or the executable may
+have caused the operating-system spawn failure; an inherited cwd is not
+invented. The underlying operating-system error remains in the error source
+chain. Spawn diagnostics never retain or render command arguments, full
+extension configuration, environment values, or resolved secret values.
+
 ## Extension availability startup data flow
 
 `tau-config` owns strict parsing of the supported names-only

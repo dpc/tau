@@ -13,7 +13,7 @@ use tau_config::settings::InvalidExtensionName;
 use tau_core::ConnectionOrigin;
 use tau_proto::ClientKind;
 
-use crate::error::HarnessError;
+use crate::error::{ExtensionSpawnError, HarnessError};
 use crate::event::{
     HarnessEvent, WriterCommand, WriterShutdown, spawn_reader_thread_after_initialized,
     spawn_writer_thread,
@@ -225,7 +225,14 @@ pub(crate) fn spawn_supervised(
     {
         command.env_remove(key);
     }
-    let mut child = command.spawn().map_err(HarnessError::Io)?;
+    let mut child = command.spawn().map_err(|source| {
+        HarnessError::ExtensionSpawn(ExtensionSpawnError::new(
+            &config.name,
+            &config.command,
+            config.cwd.as_deref(),
+            source,
+        ))
+    })?;
 
     let child_pid = child.id();
     let stdin = child

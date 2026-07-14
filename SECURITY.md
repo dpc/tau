@@ -25,6 +25,14 @@ stdio stream is a hostile availability boundary or process sandbox. Operation
 quotas do not promise to bound protocol deserialization; see
 [`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md#extension-data)
 and [`ARCH-tau-supervisor`](crates/tau-supervisor/specs/ARCH-tau-supervisor.md#child-environment).
+Generic configured-extension spawn diagnostics treat the configured instance
+name, resolved executable, and explicitly configured cwd as non-secret metadata;
+do not place credentials or tokens in those fields. Diagnostics bound and escape
+those fields, include cwd only when configured, and preserve the underlying
+operating-system error/source chain. They never retain or render command
+arguments, full extension configuration, environment values, or resolved secret
+values. Re-check this contract whenever extension spawn configuration or
+startup/respawn logging changes.
 Robust framing and cleanup improvements are welcome when scoped, but unrelated
 features must not be expanded into slowloris, connection-flood, or sandbox
 hardening without an approved threat-model design.

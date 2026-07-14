@@ -918,26 +918,30 @@ fn required_initial_config_error_emits_diagnostic_then_fails_startup() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures an optional spawn failure remains nonfatal while its mandatory
+/// replayable notice carries only bounded, secret-safe diagnostic context.
 #[test]
 fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
+    let extension_name = format!("optional-{}-trailing-secret", "x".repeat(300));
+    let command = format!("/definitely/not/a/{}-trailing-secret", "y".repeat(300));
     let config = crate::settings::Config {
         core: crate::settings::CoreConfig {
             mode: crate::settings::CoreMode::Embedded,
         },
         extensions: BTreeMap::from([(
-            "optional-spawn-bad".to_owned(),
+            extension_name.clone(),
             crate::settings::ExtensionConfig {
                 tool_prefix: None,
-                name: "optional-spawn-bad".to_owned(),
-                command: "/definitely/not/a/tau-extension".to_owned(),
-                args: Vec::new(),
+                name: extension_name.clone(),
+                command,
+                args: vec!["--token=argument-secret".to_owned()],
                 role: None,
                 require: false,
                 cwd: None,
-                config: serde_json::json!({}),
+                config: serde_json::json!({"token": "config-secret"}),
                 secrets: BTreeMap::new(),
             },
         )]),
@@ -955,7 +959,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     )
     .expect("optional spawn failure should not fail startup");
 
-    assert!(h.extension_connection_id("optional-spawn-bad").is_none());
+    assert!(h.extension_connection_id(&extension_name).is_none());
     assert!(event_log_contains_source_event(
         &h,
         "harness",
@@ -965,7 +969,14 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
                     && info.always_show
-                    && info.message == "optional extension optional-spawn-bad did not initialize"
+                    && info.message.contains("failed to spawn configured extension instance")
+                    && info.message.contains("`command` executable")
+                    && info.message.contains('…')
+                    && info.message.len() < 1_500
+                    && !info.message.contains("trailing-secret")
+                    && !info.message.contains("argument-secret")
+                    && !info.message.contains("config-secret")
+                    && !info.message.contains("cwd")
         )
     ));
 }

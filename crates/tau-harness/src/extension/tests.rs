@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::error::Error as _;
 
 use super::*;
 
@@ -49,4 +50,84 @@ fn supervised_command_uses_configured_cwd() {
     let command = supervised_command(&config, false);
 
     assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
+}
+
+/// Ensures a built-in instance's failed executable is actionable without
+/// exposing arguments, extension config, or an absent cwd.
+#[test]
+fn builtin_spawn_failure_is_contextual_and_secret_safe() {
+    let mut config = test_extension_config(None);
+    config.name = "provider-builtin".to_owned();
+    config.command = format!("/tau-test-missing-extension-{}", std::process::id());
+    config.args = vec!["--token=argument-secret".to_owned()];
+    config.config = serde_json::json!({"token": "config-secret"});
+
+    let (tx, _rx) = mpsc::channel();
+    let error = match spawn_supervised(&config, ClientKind::Provider, None, &tx) {
+        Ok(_) => panic!("missing built-in executable must fail"),
+        Err(error) => error,
+    };
+    let diagnostic = error.to_string();
+
+    assert!(diagnostic.contains("extension instance \"provider-builtin\""));
+    assert!(diagnostic.contains("`command` executable"));
+    assert!(diagnostic.contains(&config.command));
+    assert!(!diagnostic.contains("cwd"));
+    assert!(!diagnostic.contains("argument-secret"));
+    assert!(!diagnostic.contains("config-secret"));
+    assert!(
+        error.source().is_some(),
+        "harness error must retain spawn source"
+    );
+    let os_error = error
+        .source()
+        .and_then(|source| source.source())
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .expect("extension context must retain the underlying OS error");
+    assert_eq!(os_error.kind(), std::io::ErrorKind::NotFound);
+    assert!(diagnostic.ends_with(&os_error.to_string()));
+}
+
+/// Ensures a custom instance's invalid configured cwd is included while every
+/// unrelated or potentially secret field stays out and long fields are bounded.
+#[test]
+fn custom_spawn_failure_includes_only_relevant_bounded_context() {
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let long_name = format!("custom-{}-instance-secret", "x".repeat(300));
+    let cwd = PathBuf::from(format!(
+        "/tau-test-missing-cwd-{}-{}",
+        std::process::id(),
+        "y".repeat(300)
+    ));
+    let mut config = test_extension_config(Some(cwd));
+    config.name = long_name;
+    config.command = format!("{}{}", current_exe.to_string_lossy(), "z".repeat(300));
+    config.args = vec!["argument-secret".to_owned()];
+    config.config = serde_json::json!({"secret": "config-secret"});
+
+    let (tx, _rx) = mpsc::channel();
+    let error = match spawn_supervised(&config, ClientKind::Tool, None, &tx) {
+        Ok(_) => panic!("missing custom cwd must fail"),
+        Err(error) => error,
+    };
+    let diagnostic = error.to_string();
+
+    assert!(diagnostic.contains("configured cwd"));
+    assert!(diagnostic.contains("custom-"));
+    assert!(diagnostic.contains("tau-test-missing-cwd"));
+    assert!(diagnostic.contains('…'), "long context must be truncated");
+    assert!(
+        diagnostic.len() < 1_500,
+        "spawn diagnostic must remain bounded: {} bytes",
+        diagnostic.len()
+    );
+    assert!(!diagnostic.contains("instance-secret"));
+    assert!(!diagnostic.contains("argument-secret"));
+    assert!(!diagnostic.contains("config-secret"));
+    let os_error = error
+        .source()
+        .and_then(|source| source.source())
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .expect("custom spawn failure must retain its OS source");
+    assert!(diagnostic.ends_with(&os_error.to_string()));
 }

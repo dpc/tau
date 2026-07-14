@@ -3236,14 +3236,6 @@ impl Harness {
             if skipped_extensions.contains(&ext_config.name) {
                 continue;
             }
-            tracing::info!(
-                target: "tau_harness::startup",
-                extension = %ext_config.name,
-                command = %ext_config.command,
-                args = ?ext_config.args,
-                elapsed_ms = startup_started_at.elapsed().as_millis(),
-                "spawning extension",
-            );
             let kind = match ext_config.role.as_deref() {
                 Some("provider") => ClientKind::Provider,
                 _ => ClientKind::Tool,
@@ -3262,14 +3254,10 @@ impl Harness {
                 Err(error) if !ext_config.require => {
                     tracing::warn!(
                         target: "tau_harness::startup",
-                        extension = %ext_config.name,
                         error = %error,
                         "optional extension did not initialize during spawn"
                     );
-                    self.emit_optional_extension_skipped(&format!(
-                        "optional extension {} did not initialize",
-                        ext_config.name
-                    ));
+                    self.emit_optional_extension_skipped(&error.to_string());
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -10213,10 +10201,7 @@ impl Harness {
         if meta.origin == ConnectionOrigin::Supervised
             && let Err(error) = self.try_respawn_supervised_extension(connection_id)
         {
-            self.emit_info(&format!(
-                "failed to respawn extension {}: {error}",
-                meta.name
-            ));
+            self.emit_info(&error.to_string());
         }
     }
 
@@ -10654,14 +10639,6 @@ impl Harness {
                 .map_err(|error| HarnessError::Participant(error.to_string()))?,
             )
         };
-        tracing::info!(
-            target: "tau_harness::startup",
-            extension = %config.name,
-            command = %config.command,
-            args = ?config.args,
-            attempt,
-            "respawning extension",
-        );
         let spawned = spawn_supervised(&config, kind.clone(), log_path, &self.tx)?;
         let new_connection_id = spawned.connection_id.clone();
         tracing::info!(
