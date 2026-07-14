@@ -1,8 +1,8 @@
 # tau-ext-slack
 
 First-party, disabled-by-default Slack Socket Mode text bridge (`std-slack`). It
-exposes `slack_register` and `slack_send`; a per-instance `tool_prefix` scopes
-both tools and their group for multi-account deployments.
+exposes `slack_register`, `slack_conversations`, and `slack_send`; a per-instance
+`tool_prefix` scopes all three tools and their group for multi-account deployments.
 
 ## Configuration
 
@@ -68,7 +68,7 @@ Aliases match `^[a-z][a-z0-9_-]{0,63}$`; `direct-message` is reserved. At most
 64 records are accepted. IDs and timestamps are exact and unpadded, aliases and
 native routes are unique, one native conversation cannot have conflicting
 kinds, and unknown fields fail closed. A description is trusted model-visible
-operator text, allowed only on proactive routes, and limited to 120 non-control
+operator text, allowed on any active static route, and limited to 120 non-control
 Unicode scalars. The removed `channel_ids`, `listening_scope`, and
 `send_destinations` keys are hard errors with migration guidance.
 
@@ -80,6 +80,12 @@ with the same exact conversation/thread into that record; keep distinct fixed
 threads separate. Replace empty-channel implicit DM mode with
 `dynamic_direct_messages`. Convert proactive-only DM/MPIM destinations to static
 records without `receive`, then remove all three old keys.
+
+Roles that enabled the whole prefixed `slack` group automatically gain configured
+route inventory. Roles granting only exact `slack_send` retain replies and
+proactive sends by known current alias; add the matching prefixed
+`slack_conversations` tool or `slack:discover` tag when discovery is wanted.
+Use separate prefixed instances when roles must not share route inventory.
 
 ```yaml
 # old
@@ -97,7 +103,7 @@ conversations:
     proactive_send: true
 ```
 
-Omitting `dynamic_direct_messages` disables discovery. When enabled, an
+Omitting `dynamic_direct_messages` disables dynamic-DM discovery and linking. When enabled, an
 allowlisted verified human may send `start` in a one-to-one DM. Tau remembers at
 most 64 exact `D id -> U/W user` bindings until restart. Links coexist with
 static routes, never become proactive aliases, and grant receive-and-source-reply
@@ -150,11 +156,25 @@ An agent calls `slack_register(enabled: true)` to receive messages. Every
 accepted create, edit, or owned-post reaction gets its own opaque, source-bound
 reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
 alias-only `destination`; raw Slack ids and thread selectors are never accepted.
+Its fixed schema never enumerates configuration. Call `slack_conversations` for
+bounded pages (default 20, maximum 32) of all static routes, sorted by alias. Each
+record reports only alias, channel/MPIM/DM kind, conversation/fixed-thread scope,
+optional operator description, and factual configured receive/proactive policy.
+The structured result is
+`{"conversations":[{"alias":string,"kind":"channel"|"mpim"|"dm","scope":"conversation"|"fixed_thread","description"?:string,"policy":{"receive":"mentions_only"|"all_messages"|null,"proactive_send":boolean}}],"next_cursor"?:string}`.
+`next_cursor`, when present, is passed unchanged as the next request's `cursor`;
+cursor input is limited to 128 bytes and each serialized result to 24 KiB.
+Discovery is informational and separately
+authorizable: it starts no worker, grants no authority, and does not freeze config.
+It excludes native ids/roots, dynamic DM links, users/workspaces, registrations,
+selections, reply routes, runtime state, and Slack-fetched metadata.
 Proactive aliases do not require registration. Threads always use their immutable
 root, never a child timestamp, and Tau never sets `reply_broadcast`.
 
-Every role granted this extension instance's `slack_send` can use every
-advertised alias without registration. Prompt-injected receive content can
+Every role granted this extension instance's `slack_send` can use every current
+proactive alias without registration. The extension re-resolves the alias against
+current config at send time; no discovery snapshot is required, and same-alias
+reuse is operator responsibility. Prompt-injected receive content can
 therefore influence proactive sends available to that role. Keep destination
 sets and roles minimal; use separate roles or separately prefixed Slack instances
 when receive and proactive authority need isolation.

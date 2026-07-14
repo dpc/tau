@@ -515,6 +515,31 @@ fn generic_prefixes_scope_slack_instances() {
         }));
         assert!(registrations.iter().any(|registration| {
             registration.tool.name.as_str() == format!("{prefix}_{SEND_TOOL_NAME}")
+                && registration
+                    .tool
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| {
+                        description.contains(&format!("{prefix}_{CONVERSATIONS_TOOL_NAME}"))
+                    })
+        }));
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{CONVERSATIONS_TOOL_NAME}")
+                && registration.tool_group.as_ref().is_some_and(|group| {
+                    group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
+                })
+                && registration
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == CONVERSATIONS_TOOL_TAG)
+                && registration
+                    .tool
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| {
+                        description.contains(&format!("{prefix}_{SEND_TOOL_NAME}"))
+                    })
         }));
     }
 }
@@ -669,6 +694,31 @@ fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
     reindex_receive_routes(&mut config);
     ext.apply_config(config).expect("test config");
     ext.state.lock().expect("state").capability_active = true;
+}
+
+/// Return sorted text keys from one structured CBOR object.
+fn cbor_map_keys(value: &CborValue) -> Vec<&str> {
+    let CborValue::Map(fields) = value else {
+        panic!("expected object, got {value:?}");
+    };
+    let mut keys = fields
+        .iter()
+        .map(|(key, _)| match key {
+            CborValue::Text(key) => key.as_str(),
+            other => panic!("expected text key, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
+}
+
+/// Return aliases from one discovery result page.
+fn discovery_aliases(value: &CborValue) -> Vec<String> {
+    tau_proto::cbor_array_field(value, "conversations")
+        .expect("conversation array")
+        .iter()
+        .map(|record| tau_proto::cbor_text_field(record, "alias").expect("alias"))
+        .collect()
 }
 
 fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
@@ -1061,6 +1111,7 @@ fn slack_api_error_response_is_redacted_and_bounded() {
 #[test]
 fn slack_tools_are_role_opt_in() {
     assert!(!register_tool_spec().enabled_by_default);
+    assert!(!conversations_tool_spec().enabled_by_default);
     assert!(!send_tool_spec().enabled_by_default);
 }
 
@@ -1076,6 +1127,12 @@ fn slack_tools_have_group_and_tags() {
             .any(|tag| tag.as_str() == REGISTER_TOOL_TAG)
     );
     assert!(
+        conversations_tool_spec()
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == CONVERSATIONS_TOOL_TAG)
+    );
+    assert!(
         send_tool_spec()
             .tags
             .iter()
@@ -1087,7 +1144,11 @@ fn slack_tools_have_group_and_tags() {
 /// argument shapes evolve.
 #[test]
 fn slack_tool_examples_are_schema_valid() {
-    for spec in [register_tool_spec(), send_tool_spec()] {
+    for spec in [
+        register_tool_spec(),
+        conversations_tool_spec(),
+        send_tool_spec(),
+    ] {
         tau_core::validate_tool_examples(&spec)
             .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
     }
@@ -1152,6 +1213,38 @@ fn proactive_send_uses_exact_configured_route_without_registration() {
         tau_proto::TransportSendAuthorization::ConfiguredDestination { ref alias }
             if alias == "incident-thread"
     ));
+}
+
+/// A proactive send resolves a known alias from the latest pre-freeze
+/// configuration rather than retaining the route from an earlier configuration.
+#[test]
+fn proactive_send_resolves_current_alias_after_reconfiguration() {
+    let (ext, _rx, client) = extension();
+    ext.apply_config(proactive_cfg()).expect("initial config");
+    let mut current = proactive_cfg();
+    current
+        .conversations
+        .get_mut("team-ops")
+        .expect("team-ops")
+        .conversation_id = "C999".to_owned();
+    ext.apply_config(current)
+        .expect("pre-freeze reconfiguration");
+    ext.state.lock().expect("state").capability_active = true;
+
+    assert!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"current","destination":"team-ops"})
+            ),
+        ))
+        .is_none()
+    );
+    assert_eq!(
+        client.sent_pairs(),
+        vec![("C999".to_owned(), "[agent-a] current".to_owned())]
+    );
 }
 
 /// Proactive calls must not reach Slack until the harness accepts the current
@@ -1275,25 +1368,314 @@ fn proactive_send_rejects_ambiguous_unknown_and_native_arguments() {
     assert!(client.sent_pairs().is_empty());
 }
 
-/// Configured aliases are sorted and are the only destination identities
-/// advertised by the refreshed model schema.
+/// The send schema stays constant-sized and never embeds configured route data.
 #[test]
-fn proactive_schema_advertises_only_sorted_aliases() {
-    let config = proactive_cfg();
-    let spec = send_tool_spec_for_destinations(&config.conversations, &config.proactive_aliases);
+fn proactive_schema_is_config_independent() {
+    let spec = send_tool_spec();
     let parameters = spec.parameters.expect("parameters");
     let schema = parameters.as_object().expect("object schema");
     let destination = &schema["properties"]["destination"];
-    assert_eq!(
-        destination["enum"],
-        serde_json::json!(["alice-dm", "incident-thread", "team-ops"])
-    );
+    assert!(destination.get("enum").is_none());
+    assert_eq!(destination["pattern"], "^[a-z][a-z0-9_-]{0,63}$");
     let serialized = serde_json::to_string(&parameters).expect("schema json");
-    assert!(serialized.contains("team-ops: Trusted ops hint"));
-    assert!(!serialized.contains("\"team\""));
-    assert!(!serialized.contains(DYNAMIC_DM_LABEL));
-    for native in ["C456", "G789", "D123", "1720000000.123456"] {
-        assert!(!serialized.contains(native), "schema leaked {native}");
+    for private in [
+        "team-ops",
+        "Trusted ops hint",
+        DYNAMIC_DM_LABEL,
+        "C456",
+        "G789",
+        "D123",
+        "1720000000.123456",
+    ] {
+        assert!(!serialized.contains(private), "schema leaked {private}");
+    }
+}
+
+/// Discovery returns sorted static route metadata while excluding every native
+/// route, dynamic link, identity, and runtime-state field.
+#[test]
+fn conversation_discovery_exposes_only_configured_model_facing_policy() {
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    let mut config = proactive_cfg();
+    config.conversations.insert(
+        "receive-all".to_owned(),
+        ConversationPolicy {
+            alias: "receive-all".to_owned(),
+            conversation_id: "C888".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            receive: Some(ReceiveMode::AllMessages),
+            description: Some("Receive-only hint".to_owned()),
+            thread_ts: None,
+        },
+    );
+    apply_test_config(&ext, config);
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.linked_dms.insert(
+            "DSECRET".to_owned(),
+            LinkedConversation {
+                user_id: "USECRET".to_owned(),
+            },
+        );
+        state.registered_agents.insert(agent_id("agent-secret"));
+    }
+    let event = ext.handle_conversations(tool(
+        CONVERSATIONS_TOOL_NAME,
+        "agent-a",
+        CborValue::Map(Vec::new()),
+    ));
+    let Event::ToolResult(result) = event else {
+        panic!("discovery should succeed");
+    };
+    let root = result.result;
+    assert_eq!(cbor_map_keys(&root), ["conversations"]);
+    let conversations =
+        tau_proto::cbor_array_field(&root, "conversations").expect("conversation array");
+    let aliases = discovery_aliases(&root);
+    assert_eq!(
+        aliases,
+        [
+            "alice-dm",
+            "incident-thread",
+            "receive-all",
+            "team",
+            "team-ops"
+        ]
+    );
+    for record in conversations {
+        let alias = tau_proto::cbor_text_field(record, "alias").expect("alias");
+        let (expected_kind, expected_scope) = match alias.as_str() {
+            "alice-dm" => ("dm", "conversation"),
+            "incident-thread" => ("mpim", "fixed_thread"),
+            "receive-all" | "team" | "team-ops" => ("channel", "conversation"),
+            other => panic!("unexpected alias {other}"),
+        };
+        let expected_keys = if matches!(alias.as_str(), "receive-all" | "team-ops") {
+            vec!["alias", "description", "kind", "policy", "scope"]
+        } else {
+            vec!["alias", "kind", "policy", "scope"]
+        };
+        assert_eq!(cbor_map_keys(record), expected_keys);
+        assert_eq!(
+            tau_proto::cbor_text_field(record, "kind").as_deref(),
+            Some(expected_kind)
+        );
+        assert_eq!(
+            tau_proto::cbor_text_field(record, "scope").as_deref(),
+            Some(expected_scope)
+        );
+        let policy = tau_proto::cbor_field(record, "policy").expect("policy");
+        assert_eq!(cbor_map_keys(policy), ["proactive_send", "receive"]);
+        assert!(
+            matches!(
+                tau_proto::cbor_field(policy, "receive"),
+                Some(CborValue::Null)
+                    if matches!(alias.as_str(), "alice-dm" | "incident-thread" | "team-ops")
+            ) || matches!(
+                tau_proto::cbor_field(policy, "receive"),
+                Some(CborValue::Text(receive)) if alias == "team" && receive == "mentions_only"
+            ) || matches!(
+                tau_proto::cbor_field(policy, "receive"),
+                Some(CborValue::Text(receive))
+                    if alias == "receive-all" && receive == "all_messages"
+            )
+        );
+        assert_eq!(
+            tau_proto::cbor_bool_field(policy, "proactive_send"),
+            Some(!matches!(alias.as_str(), "receive-all" | "team"))
+        );
+    }
+    let team_ops = conversations
+        .iter()
+        .find(|record| tau_proto::cbor_text_field(record, "alias").as_deref() == Some("team-ops"))
+        .expect("team-ops");
+    assert_eq!(
+        tau_proto::cbor_text_field(team_ops, "description").as_deref(),
+        Some("Trusted ops hint")
+    );
+    let receive_all = conversations
+        .iter()
+        .find(|record| {
+            tau_proto::cbor_text_field(record, "alias").as_deref() == Some("receive-all")
+        })
+        .expect("receive-all");
+    assert_eq!(
+        tau_proto::cbor_text_field(receive_all, "description").as_deref(),
+        Some("Receive-only hint")
+    );
+    let encoded = serde_json::to_vec(&root).expect("serialize result");
+    assert!(encoded.len() <= MAX_DISCOVERY_RESULT_BYTES);
+    let text = format!("{root:?}");
+    for private in [
+        "C123",
+        "C456",
+        "C888",
+        "G789",
+        "D123",
+        "1720000000.123456",
+        "DSECRET",
+        "USECRET",
+        "agent-secret",
+        "conversation_id",
+        "thread_ts",
+    ] {
+        assert!(!text.contains(private), "discovery leaked {private}");
+    }
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.config_frozen);
+    assert!(!state.worker_started);
+}
+
+/// A configuration containing only private dynamic-DM policy has no static
+/// inventory and discovery remains a side-effect-free empty local read.
+#[test]
+fn conversation_discovery_excludes_dynamic_only_policy() {
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    let mut config = cfg();
+    config.conversations.clear();
+    config.parent_receives.clear();
+    config.proactive_aliases.clear();
+    config.dynamic_direct_messages = Some(DynamicDirectMessages {
+        receive: ReceiveMode::AllMessages,
+    });
+    apply_test_config(&ext, config);
+    let event = ext.handle_conversations(tool(
+        CONVERSATIONS_TOOL_NAME,
+        "agent-a",
+        CborValue::Map(Vec::new()),
+    ));
+    let Event::ToolResult(result) = event else {
+        panic!("discovery should succeed");
+    };
+    assert_eq!(cbor_map_keys(&result.result), ["conversations"]);
+    assert!(
+        tau_proto::cbor_array_field(&result.result, "conversations")
+            .expect("conversations")
+            .is_empty()
+    );
+    assert!(!format!("{:?}", result.result).contains(DYNAMIC_DM_LABEL));
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.worker_started);
+    assert!(!state.config_frozen);
+}
+
+/// Pagination enforces strict bounds, opaque current-config cursors, and exact
+/// continuation without duplicates.
+#[test]
+fn conversation_discovery_paginates_and_rejects_invalid_requests() {
+    let longest_alias = format!("a{}", "z".repeat(63));
+    let longest_cursor = encode_discovery_cursor(&longest_alias);
+    assert!(longest_cursor.len() <= MAX_DISCOVERY_CURSOR_BYTES);
+    assert_eq!(
+        decode_discovery_cursor(&longest_cursor).expect("maximum cursor"),
+        longest_alias
+    );
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    apply_test_config(&ext, proactive_cfg());
+    let first = ext.handle_conversations(tool(
+        CONVERSATIONS_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(&serde_json::json!({"limit": 2})),
+    ));
+    let Event::ToolResult(first) = first else {
+        panic!("first page");
+    };
+    let first = first.result;
+    let cursor = tau_proto::cbor_text_field(&first, "next_cursor").expect("continuation cursor");
+    assert!(!cursor.contains("incident-thread"));
+    let second = ext.handle_conversations(tool(
+        CONVERSATIONS_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(&serde_json::json!({"limit": 2, "cursor": cursor})),
+    ));
+    let Event::ToolResult(second) = second else {
+        panic!("second page");
+    };
+    let second = second.result;
+    assert!(tau_proto::cbor_field(&second, "next_cursor").is_none());
+    let first_aliases = discovery_aliases(&first);
+    let second_aliases = discovery_aliases(&second);
+    assert_eq!(first_aliases, ["alice-dm", "incident-thread"]);
+    assert_eq!(second_aliases, ["team", "team-ops"]);
+    let all_aliases = first_aliases
+        .iter()
+        .chain(&second_aliases)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(all_aliases.len(), 4, "pages must not duplicate aliases");
+
+    for arguments in [
+        serde_json::json!({"limit": 0}),
+        serde_json::json!({"limit": 33}),
+        serde_json::json!({"limit": "2"}),
+        serde_json::json!({"cursor": "not-a-cursor"}),
+        serde_json::json!({"cursor": "x".repeat(MAX_DISCOVERY_CURSOR_BYTES + 1)}),
+        serde_json::json!({"cursor": encode_discovery_cursor("missing")}),
+        serde_json::json!({"unknown": true}),
+    ] {
+        assert!(matches!(
+            ext.handle_conversations(tool(
+                CONVERSATIONS_TOOL_NAME,
+                "agent-a",
+                tau_proto::json_to_cbor(&arguments)
+            )),
+            Event::ToolError(_)
+        ));
+    }
+}
+
+/// Default and maximum page sizes remain bounded, and the largest valid static
+/// inventory with worst-case descriptions stays within the serialized cap.
+#[test]
+fn conversation_discovery_enforces_page_and_serialized_output_bounds() {
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    let mut config = cfg();
+    config.conversations.clear();
+    config.proactive_aliases.clear();
+    config.parent_receives.clear();
+    for index in 0..CONVERSATION_LIMIT {
+        let alias = format!("route-{index:02}");
+        config.conversations.insert(
+            alias.clone(),
+            ConversationPolicy {
+                alias: alias.clone(),
+                conversation_id: format!("C{index:08}"),
+                kind: ConversationPolicyKind::Channel,
+                receive: Some(ReceiveMode::AllMessages),
+                description: Some("🦀".repeat(120)),
+                thread_ts: None,
+            },
+        );
+        config.proactive_aliases.insert(alias);
+    }
+    apply_test_config(&ext, config);
+
+    for (arguments, expected_len) in [
+        (serde_json::json!({}), DEFAULT_DISCOVERY_PAGE_LIMIT),
+        (
+            serde_json::json!({"limit": MAX_DISCOVERY_PAGE_LIMIT}),
+            MAX_DISCOVERY_PAGE_LIMIT,
+        ),
+    ] {
+        let Event::ToolResult(result) = ext.handle_conversations(tool(
+            CONVERSATIONS_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(&arguments),
+        )) else {
+            panic!("discovery page");
+        };
+        assert_eq!(discovery_aliases(&result.result).len(), expected_len);
+        assert!(tau_proto::cbor_field(&result.result, "next_cursor").is_some());
+        assert!(
+            serde_json::to_vec(&result.result)
+                .expect("serialize result")
+                .len()
+                <= MAX_DISCOVERY_RESULT_BYTES
+        );
     }
 }
 
@@ -1782,11 +2164,9 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
     assert_eq!(*client.open_count.lock().expect("lock"), 0);
 }
 
-/// Real protocol handling must refresh the send schema for configured aliases
-/// and replace it with the reply-only schema after malformed reconfiguration,
-/// so a stale prompt can never retain a revoked proactive destination.
+/// Configuration changes never refresh or expand the fixed send schema.
 #[test]
-fn run_config_refreshes_and_bad_config_removes_proactive_schema() {
+fn run_config_does_not_refresh_send_schema() {
     let frames = run_protocol_messages(
         &[proactive_config_message(), malformed_config_message()],
         FakeClient::new(),
@@ -1803,28 +2183,15 @@ fn run_config_refreshes_and_bad_config_removes_proactive_schema() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(registrations.iter().any(|tool| {
-        tool.parameters
-            .as_ref()
-            .and_then(|schema| schema["properties"]["destination"]["enum"].as_array())
-            .is_some_and(|aliases| aliases.as_slice() == [serde_json::json!("team-ops")])
-    }));
-    let final_schema = registrations
-        .last()
-        .and_then(|tool| tool.parameters.as_ref())
-        .expect("reply-only schema refresh");
-    assert!(final_schema["properties"].get("destination").is_none());
-    assert_eq!(
-        final_schema["required"],
-        serde_json::json!(["message", "reply_to"])
-    );
+    assert_eq!(registrations.len(), 1);
+    let schema = registrations[0].parameters.as_ref().expect("fixed schema");
+    assert!(schema["properties"]["destination"].get("enum").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["message"]));
 }
 
-/// Initial configuration-derived tool refreshes are emitted after static
-/// declarations but before Ready, so the effective startup schema retains
-/// proactive destination aliases.
+/// The one static send declaration precedes readiness and has no alias enum.
 #[test]
-fn initial_proactive_schema_override_is_final_before_ready() {
+fn initial_send_schema_is_static_before_ready() {
     let frames = run_protocol_messages(&[proactive_config_message()], FakeClient::new());
     let registrations = frames
         .iter()
@@ -1839,19 +2206,19 @@ fn initial_proactive_schema_override_is_final_before_ready() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let (override_index, final_tool) = registrations.last().expect("send registration");
+    assert_eq!(registrations.len(), 1);
+    let (registration_index, final_tool) = registrations[0];
     assert!(
         final_tool
             .parameters
             .as_ref()
-            .and_then(|schema| schema["properties"]["destination"]["enum"].as_array())
-            .is_some_and(|aliases| aliases.as_slice() == [serde_json::json!("team-ops")])
+            .is_some_and(|schema| schema["properties"]["destination"].get("enum").is_none())
     );
     let ready_index = frames
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("Ready");
-    assert!(*override_index < ready_index);
+    assert!(registration_index < ready_index);
 }
 
 /// Protocol migration regression: once Socket Mode has started, even malformed
@@ -3577,6 +3944,9 @@ fn conversation_policy_receive_collision_matrix() {
         {"alias":"one","conversation_id":"C123","kind":"channel","thread_ts":"1.0","receive":"all_messages"},
         {"alias":"two","conversation_id":"C123","kind":"channel","thread_ts":"2.0","receive":"mentions_only"}
     ])).is_ok());
+    assert!(validate(serde_json::json!([
+        {"alias":"receive","conversation_id":"C123","kind":"channel","receive":"all_messages","description":"Receive-only route"}
+    ])).is_ok());
 
     for invalid in [
         serde_json::json!([
@@ -3591,7 +3961,6 @@ fn conversation_policy_receive_collision_matrix() {
             {"alias":"channel","conversation_id":"G123","kind":"channel","proactive_send":true},
             {"alias":"mpim","conversation_id":"G123","kind":"mpim","receive":"all_messages"}
         ]),
-        serde_json::json!([{"alias":"receive","conversation_id":"C123","kind":"channel","receive":"all_messages","description":"not proactive"}]),
     ] {
         assert!(validate(invalid).is_err());
     }

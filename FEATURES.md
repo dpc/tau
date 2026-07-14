@@ -742,6 +742,10 @@ destination.
 Disabled by default, `std-slack` lets policy-permitted verified Slack humans send text to
 explicitly registered Tau agents and lets tool-authorized agents reply or send to
 explicitly configured proactive aliases with `slack_send`.
+The separately authorized, disabled-by-default `slack_conversations` tool returns
+bounded sorted pages of all static model-facing aliases and factual configured
+kind/scope/receive/proactive policy. It excludes native routes, dynamic links,
+identities, runtime state, and Slack metadata.
 Incoming creates and owned-post reactions use typed message envelopes with
 durable native ids and gray semi-system provenance; no duplicate legacy prompt
 is created. Replies require the envelope's opaque `reply_to` id; proactive sends require a
@@ -751,7 +755,8 @@ It uses Slack Socket Mode with app/bot token secrets and a nonempty U/W
 channel/private/MPIM/DM/fixed-thread routes to stable aliases and independently
 enables per-route `receive: mentions_only|all_messages` and `proactive_send`.
 Optional bounded dynamic DMs are exact-user-bound, multi-link, runtime-only, and
-receive-and-source-reply only. Only proactive aliases are model-selectable; native ids and thread
+receive-and-source-reply only. `slack_send` uses a compact plain current alias
+rather than enumerating configuration; native ids and thread
 selectors remain private. Parent threads share selection, receive-enabled
 fixed-thread routes isolate it, and opaque replies preserve the exact source root automatically.
 The removed `channel_ids`, `listening_scope`, and `send_destinations` keys are

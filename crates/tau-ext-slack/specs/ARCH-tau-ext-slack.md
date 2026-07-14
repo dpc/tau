@@ -3,7 +3,7 @@
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md). Conversation policy follows [DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
 
 `std-slack` is a disabled-by-default Socket Mode text bridge exposing scoped
-`slack_register` and `slack_send` tools. Configuration validates one exact
+`slack_register`, `slack_conversations`, and `slack_send` tools. Configuration validates one exact
 conversation-route list into alias, parent-receive, thread-receive, and
 proactive-alias indexes. Routes carry explicit channel/MPIM/DM kind and optional
 fixed root. A bounded runtime map holds exact dynamic D-to-U/W links.
@@ -27,12 +27,16 @@ These ownership flows follow
 [DESIGN-tau-ext-slack-edit-ownership](DESIGN-tau-ext-slack-edit-ownership.md),
 and [DESIGN-tau-ext-slack-reaction-ownership](DESIGN-tau-ext-slack-reaction-ownership.md).
 
-`slack_send` accepts exactly one opaque reply id or currently advertised
-proactive alias. It never accepts a native id or thread. The extension and
+`slack_conversations` returns bounded pages of static aliases, operator
+descriptions, kinds, scopes, and configured receive/proactive policy; it excludes
+native routes, dynamic links, identities, and runtime state.
+`slack_send` accepts exactly one opaque reply id or a plain current proactive alias.
+It never accepts a native id or thread. The extension and
 harness independently revalidate agent, tool, session, capability, route,
 endpoint, kind, thread, and completion. MPIM metadata uses `ConversationKind::Group`.
 Thread sends use the immutable root and never broadcast replies.
 See [DESIGN-tau-ext-slack-proactive-sends](DESIGN-tau-ext-slack-proactive-sends.md)
+and [DESIGN-tau-ext-slack-conversation-discovery](DESIGN-tau-ext-slack-conversation-discovery.md)
 and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-immutable-thread-destinations.md).
 
 Runtime links, selections, registrations, reply routes, post ownership, and
@@ -51,7 +55,8 @@ Strict mode admits allowlisted verified humans. Lax additionally admits verified
 humans only on static routes; it never grants control or dynamic linking.
 Dynamic DMs always remain exact allowlisted-user-bound. External text remains
 `UntrustedExternal`. Native ids remain durable authorization/audit metadata;
-only stable aliases and trusted operator descriptions are model-visible.
+only stable aliases, trusted operator descriptions, and factual configured
+kind/scope/receive/proactive policy are discoverable.
 Admission authority follows
 [DESIGN-tau-ext-slack-sender-admission](DESIGN-tau-ext-slack-sender-admission.md).
 

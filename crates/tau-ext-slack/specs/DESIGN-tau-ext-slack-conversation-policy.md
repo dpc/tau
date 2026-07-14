@@ -7,6 +7,8 @@ record binds a stable alias to one exact native conversation and optional fixed
 thread, declares its explicit `channel`, `mpim`, or `dm` kind, and independently
 enables `receive` and `proactive_send`. Dynamic direct-message discovery is a
 separate explicit, bounded, exact-user-bound, receive-and-source-reply-only policy.
+An optional bounded operator-authored description may annotate any active static
+record.
 
 This replaces the asymmetric global `channel_ids`, `listening_scope`, and
 `send_destinations` concepts. Those keys are errors rather than compatibility
@@ -20,6 +22,9 @@ creates no receive, reply, linking, or control authority. Parent receive include
 all threads, while a fixed-thread receive route isolates state and normalizes its
 root create. Static receive DM policy takes precedence over dynamic discovery;
 proactive-only static DM policy remains compatible with a dynamic reply link.
+The separately authorized discovery tool may disclose every static record's alias,
+kind, scope, description, and factual configured policy, but never its native
+route, dynamic links, identities, or runtime state.
 
 The tradeoff is an intentionally breaking migration and more explicit records.
 It avoids preserving conceptual legacy whose global behavior cannot accurately

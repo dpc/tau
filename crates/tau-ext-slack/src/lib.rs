@@ -1,6 +1,7 @@
 //! Personal Slack Socket Mode bridge extension for Tau agents.
 //!
-//! The extension declares logical `slack_register` and `slack_send` tools,
+//! The extension declares logical `slack_register`, `slack_conversations`, and
+//! `slack_send` tools,
 //! which `ToolNameScope` maps to final per-instance wire names. Proactive
 //! destination authorization follows `DESIGN-tau-ext-slack-proactive-sends`. It
 //! is disabled by default, requires Slack token secrets plus a non-empty
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
@@ -65,6 +67,9 @@ fn finish_socket_ack(result: Result<(), String>, has_supported_event: bool) -> R
 /// Logical tool name for registering the current agent as a Slack listener.
 pub const REGISTER_TOOL_NAME: &str = "slack_register";
 
+/// Logical tool name for discovering configured Slack conversation aliases.
+pub const CONVERSATIONS_TOOL_NAME: &str = "slack_conversations";
+
 /// Logical tool name for sending a Slack message from a registered agent.
 pub const SEND_TOOL_NAME: &str = "slack_send";
 
@@ -73,6 +78,9 @@ pub const TOOL_GROUP_NAME: &str = "slack";
 
 /// Tag marking tools that register an agent with the Slack bridge.
 pub const REGISTER_TOOL_TAG: &str = "slack:register";
+
+/// Tag marking tools that disclose configured Slack conversation policy.
+pub const CONVERSATIONS_TOOL_TAG: &str = "slack:discover";
 
 /// Tag marking tools that send messages through the Slack bridge.
 pub const SEND_TOOL_TAG: &str = "slack:send";
@@ -88,6 +96,12 @@ const REPLY_ROUTE_LIMIT: usize = 1024;
 const PENDING_SEND_LIMIT: usize = 1024;
 const ACCEPTED_SEND_ATTEMPT_LIMIT: usize = 256;
 const CONVERSATION_LIMIT: usize = 64;
+const CONVERSATION_ALIAS_PATTERN: &str = "^[a-z][a-z0-9_-]{0,63}$";
+const MAX_CONVERSATION_ALIAS_BYTES: usize = 64;
+const DEFAULT_DISCOVERY_PAGE_LIMIT: usize = 20;
+const MAX_DISCOVERY_PAGE_LIMIT: usize = 32;
+const MAX_DISCOVERY_CURSOR_BYTES: usize = 128;
+const MAX_DISCOVERY_RESULT_BYTES: usize = 24 * 1024;
 const DYNAMIC_DM_LIMIT: usize = 64;
 const DYNAMIC_DM_LABEL: &str = "direct-message";
 const TRANSPORT_NAME: &str = "slack";
@@ -346,10 +360,10 @@ impl ExtConfig {
         let mut parent_receives = HashMap::new();
         let mut thread_receives = HashMap::new();
         for raw in self.conversations {
-            if !valid_destination_alias(&raw.alias) {
-                return Err(
-                    "slack conversation alias must match ^[a-z][a-z0-9_-]{0,63}$".to_owned(),
-                );
+            if !valid_conversation_alias(&raw.alias) {
+                return Err(format!(
+                    "slack conversation alias must match {CONVERSATION_ALIAS_PATTERN}"
+                ));
             }
             if raw.alias == DYNAMIC_DM_LABEL {
                 return Err(format!(
@@ -398,11 +412,6 @@ impl ExtConfig {
                         || value.chars().any(char::is_control)
                     {
                         Err("slack conversation has invalid `description`".to_owned())
-                    } else if !raw.proactive_send {
-                        Err(
-                            "slack conversation `description` requires `proactive_send: true`"
-                                .to_owned(),
-                        )
                     } else {
                         Ok(value)
                     }
@@ -487,10 +496,10 @@ impl ExtConfig {
     }
 }
 
-fn valid_destination_alias(value: &str) -> bool {
+fn valid_conversation_alias(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some('a'..='z'))
-        && value.len() <= 64
+        && value.len() <= MAX_CONVERSATION_ALIAS_BYTES
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
 }
 
@@ -1080,11 +1089,98 @@ impl Extension {
         }));
         let event = match local_tool_name.as_str() {
             REGISTER_TOOL_NAME => Some(self.handle_register(invoke)),
+            CONVERSATIONS_TOOL_NAME => Some(self.handle_conversations(invoke)),
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => Some(tool_error(invoke, "unknown slack tool".to_owned())),
         };
         if let Some(event) = event {
             self.output.emit(event);
+        }
+    }
+
+    /// Return one bounded page of static, operator-authored conversation
+    /// policy.
+    ///
+    /// This reads only validated configuration and deliberately does not start
+    /// the worker, register the caller, freeze configuration, or expose native
+    /// Slack routing data.
+    fn handle_conversations(&self, invoke: ToolStarted) -> Event {
+        if let Err(message) = validate_object_fields(&invoke.arguments, &["limit", "cursor"]) {
+            return tool_error(invoke, message);
+        }
+        let limit = match cbor_optional_usize_field(&invoke.arguments, "limit") {
+            Ok(None) => DEFAULT_DISCOVERY_PAGE_LIMIT,
+            Ok(Some(limit @ 1..=MAX_DISCOVERY_PAGE_LIMIT)) => limit,
+            Ok(Some(_)) => {
+                return tool_error(
+                    invoke,
+                    format!("`limit` must be between 1 and {MAX_DISCOVERY_PAGE_LIMIT}"),
+                );
+            }
+            Err(message) => return tool_error(invoke, message),
+        };
+        let cursor = match cbor_optional_string_field(&invoke.arguments, "cursor") {
+            Ok(None) => None,
+            Ok(Some(cursor)) if cursor.len() <= MAX_DISCOVERY_CURSOR_BYTES => {
+                match decode_discovery_cursor(&cursor) {
+                    Ok(alias) => Some(alias),
+                    Err(message) => return tool_error(invoke, message),
+                }
+            }
+            Ok(Some(_)) => {
+                return tool_error(
+                    invoke,
+                    format!("`cursor` exceeds {MAX_DISCOVERY_CURSOR_BYTES} bytes"),
+                );
+            }
+            Err(message) => return tool_error(invoke, message),
+        };
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(cfg) = state.config.as_ref() else {
+            return tool_error(invoke, "slack extension is not configured".to_owned());
+        };
+        if cursor
+            .as_ref()
+            .is_some_and(|alias| !cfg.conversations.contains_key(alias))
+        {
+            return tool_error(invoke, "`cursor` is malformed or stale".to_owned());
+        }
+        let mut policies = cfg
+            .conversations
+            .iter()
+            .filter(|(alias, _)| cursor.as_ref().is_none_or(|cursor| *alias > cursor));
+        let selected = policies.by_ref().take(limit).collect::<Vec<_>>();
+        let mut has_more = policies.next().is_some();
+        let mut page = selected
+            .into_iter()
+            .map(|(alias, policy)| {
+                (
+                    alias.as_str(),
+                    conversation_policy_value(policy, cfg.proactive_aliases.contains(alias)),
+                )
+            })
+            .collect::<Vec<_>>();
+        loop {
+            let next_cursor = has_more
+                .then(|| encode_discovery_cursor(page.last().expect("nonempty bounded page").0));
+            let mut result = vec![(
+                CborValue::Text("conversations".to_owned()),
+                CborValue::Array(page.iter().map(|(_, value)| value.clone()).collect()),
+            )];
+            if let Some(cursor) = next_cursor {
+                result.push((
+                    CborValue::Text("next_cursor".to_owned()),
+                    CborValue::Text(cursor),
+                ));
+            }
+            let value = CborValue::Map(result);
+            if serde_json::to_vec(&value)
+                .is_ok_and(|encoded| encoded.len() <= MAX_DISCOVERY_RESULT_BYTES)
+            {
+                return structured_tool_result(invoke, value);
+            }
+            page.pop();
+            has_more = true;
         }
     }
 
@@ -1381,6 +1477,12 @@ impl Extension {
                 )
             } else {
                 let alias = destination_alias.as_ref().expect("exclusive selector");
+                if !valid_conversation_alias(alias) {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} destination is unknown or unauthorized"),
+                    ));
+                }
                 let Some(destination) = cfg
                     .proactive_aliases
                     .contains(alias)
@@ -3117,8 +3219,9 @@ impl TauExtension for SlackExtension {
                 |scope| {
                     let mut tool = register_tool_spec();
                     let send = scope.wire_tool(SEND_TOOL_NAME)?;
+                    let conversations = scope.wire_tool(CONVERSATIONS_TOOL_NAME)?;
                     tool.description = Some(format!(
-                        "Register or unregister this agent for Slack receive routes. Policy-permitted verified humans may then send prompts; dynamic DMs remain exact-allowlisted-user-bound. Registration grants no proactive authority. When replying, use {send}."
+                        "Register or unregister this agent for Slack receive routes. Policy-permitted verified humans may then send prompts; dynamic DMs remain exact-allowlisted-user-bound. Registration grants no proactive authority. {conversations} reports configured receive and proactive-send policy. When replying, use {send}."
                     ));
                     Ok(tau_proto::ToolRegister {
                         tool,
@@ -3128,10 +3231,36 @@ impl TauExtension for SlackExtension {
                 },
                 handle_tool_invocation,
             )
-            .tool_with_group_and_prompt_fragment(
-                send_tool_spec(),
-                Some(slack_tool_group()),
-                None,
+            .scoped_tool(
+                tau_proto::ToolName::new(CONVERSATIONS_TOOL_NAME),
+                |scope| {
+                    let mut tool = conversations_tool_spec();
+                    let send = scope.wire_tool(SEND_TOOL_NAME)?;
+                    tool.description = Some(format!(
+                        "List bounded pages of operator-configured Slack conversations and route policy. Returns model-facing aliases only, never native Slack IDs. Use an alias with {send} only when policy.proactive_send is true."
+                    ));
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: Some(slack_tool_group()),
+                        prompt_fragment: None,
+                    })
+                },
+                handle_tool_invocation,
+            )
+            .scoped_tool(
+                tau_proto::ToolName::new(SEND_TOOL_NAME),
+                |scope| {
+                    let mut tool = send_tool_spec();
+                    let conversations = scope.wire_tool(CONVERSATIONS_TOOL_NAME)?;
+                    tool.description = Some(format!(
+                        "Reply through an opaque Slack reply_to, or send proactively to an operator-configured alias, optionally discoverable with {conversations}. Native Slack conversation and thread IDs are never accepted."
+                    ));
+                    Ok(tau_proto::ToolRegister {
+                        tool,
+                        tool_group: Some(slack_tool_group()),
+                        prompt_fragment: None,
+                    })
+                },
                 handle_tool_invocation,
             )
             .on_raw_live(
@@ -3171,7 +3300,6 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         Ok(cfg) => cfg,
         Err(error) => {
             cx.state.ext.clear_config_after_error();
-            refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
             return Err(error);
         }
     };
@@ -3179,7 +3307,6 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         Ok(cfg) => cfg,
         Err(message) => {
             cx.state.ext.clear_config_after_error();
-            refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
             return Err(ClientError::handler(message));
         }
     };
@@ -3188,26 +3315,10 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
             return Err(ClientError::handler(message));
         }
         cx.state.ext.clear_config_after_error();
-        refresh_send_tool(&cx.handle, &BTreeMap::new(), &BTreeSet::new())?;
         return Err(ClientError::handler(message));
     }
-    refresh_send_tool(&cx.handle, &cfg.conversations, &cfg.proactive_aliases)?;
     cx.state.ext.request_transport_capability();
     Ok(())
-}
-
-/// Refresh the model-visible send schema, including fail-closed removal of
-/// destination aliases after invalid configuration.
-fn refresh_send_tool(
-    handle: &ClientHandle,
-    conversations: &BTreeMap<String, ConversationPolicy>,
-    aliases: &BTreeSet<String>,
-) -> ClientResult<()> {
-    handle.register_local_tool(tau_proto::ToolRegister {
-        tool: send_tool_spec_for_destinations(conversations, aliases),
-        tool_group: Some(slack_tool_group()),
-        prompt_fragment: None,
-    })
 }
 
 /// Apply commit-gated ingress/send results and capability registration results.
@@ -3416,21 +3527,7 @@ fn register_tool_spec() -> ToolSpec {
 }
 
 fn send_tool_spec() -> ToolSpec {
-    send_tool_spec_for_destinations(&BTreeMap::new(), &BTreeSet::new())
-}
-
-fn send_tool_spec_for_destinations(
-    conversations: &BTreeMap<String, ConversationPolicy>,
-    aliases: &BTreeSet<String>,
-) -> ToolSpec {
-    let mut properties = serde_json::json!({
-        "message": { "type": "string" },
-        "reply_to": {
-            "type": "string",
-            "description": "Opaque canonical message id from the Tau message envelope; mutually exclusive with destination"
-        }
-    });
-    let mut examples = vec![ToolExample {
+    let examples = vec![ToolExample {
         id: "send-reply".to_owned(),
         title: Some("Send a Slack reply".to_owned()),
         arguments: CborValue::Map(vec![
@@ -3442,38 +3539,6 @@ fn send_tool_spec_for_destinations(
         ),
         subcommand: None,
     }];
-    if !aliases.is_empty() {
-        let destination_aliases = aliases.iter().cloned().collect::<Vec<_>>();
-        let hints = aliases
-            .iter()
-            .filter_map(|alias| conversations.get(alias))
-            .filter_map(|destination| {
-                destination
-                    .description
-                    .as_ref()
-                    .map(|description| format!("{}: {description}", destination.alias))
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        properties["destination"] = serde_json::json!({
-            "type": "string",
-            "enum": destination_aliases,
-            "description": format!("Configured Slack destination alias; mutually exclusive with reply_to. {hints}")
-        });
-        let first = aliases.iter().next().expect("nonempty destinations");
-        examples.push(ToolExample {
-            id: "send-proactive".to_owned(),
-            title: Some("Initiate a configured Slack message".to_owned()),
-            arguments: CborValue::Map(vec![
-                example_field("message", example_text("The report is ready.")),
-                example_field("destination", example_text(first)),
-            ]),
-            note: Some(
-                "destination is an operator-configured alias, never a native Slack id.".to_owned(),
-            ),
-            subcommand: None,
-        });
-    }
     ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
@@ -3484,8 +3549,20 @@ fn send_tool_spec_for_destinations(
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": properties,
-            "required": if aliases.is_empty() { serde_json::json!(["message", "reply_to"]) } else { serde_json::json!(["message"]) },
+            "properties": {
+                "message": { "type": "string" },
+                "reply_to": {
+                    "type": "string",
+                    "description": "Opaque canonical message id from the Tau message envelope; mutually exclusive with destination"
+                },
+                "destination": {
+                    "type": "string",
+                    "pattern": CONVERSATION_ALIAS_PATTERN,
+                    "maxLength": MAX_CONVERSATION_ALIAS_BYTES,
+                    "description": "Configured Slack destination alias; mutually exclusive with reply_to"
+                }
+            },
+            "required": ["message"],
             "additionalProperties": false
         })),
         format: None,
@@ -3493,6 +3570,48 @@ fn send_tool_spec_for_destinations(
         enabled_by_default: false,
         background_support: None,
         examples,
+    }
+}
+
+/// Fixed schema for bounded, on-demand configured-conversation discovery.
+fn conversations_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: tau_proto::ToolName::new(CONVERSATIONS_TOOL_NAME),
+        model_visible_name: Some(tau_proto::ToolName::new(CONVERSATIONS_TOOL_NAME)),
+        description: Some(
+            "List bounded pages of operator-configured Slack conversations and route policy. Returns model-facing aliases only, never native Slack IDs."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_DISCOVERY_PAGE_LIMIT
+                },
+                "cursor": {
+                    "type": "string",
+                    "maxLength": MAX_DISCOVERY_CURSOR_BYTES
+                }
+            },
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new(CONVERSATIONS_TOOL_TAG)],
+        enabled_by_default: false,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "list-conversations".to_owned(),
+            title: Some("List configured Slack conversations".to_owned()),
+            arguments: CborValue::Map(vec![example_field(
+                "limit",
+                CborValue::Integer(DEFAULT_DISCOVERY_PAGE_LIMIT.into()),
+            )]),
+            note: Some("Pass next_cursor as cursor to request the next page.".to_owned()),
+            subcommand: None,
+        }],
     }
 }
 
@@ -3511,6 +3630,90 @@ fn cbor_bool_field(arguments: &CborValue, field: &str) -> Result<bool, String> {
         }
     }
     Err(format!("missing required argument `{field}`"))
+}
+
+/// Read an optional non-negative integer argument representable as `usize`.
+fn cbor_optional_usize_field(arguments: &CborValue, field: &str) -> Result<Option<usize>, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    for (key, value) in entries {
+        if let CborValue::Text(name) = key
+            && name == field
+        {
+            return match value {
+                CborValue::Integer(value) => usize::try_from(*value)
+                    .map(Some)
+                    .map_err(|_| format!("`{field}` must be a non-negative integer")),
+                _ => Err(format!("`{field}` must be an integer")),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// Encode an alias as a bounded opaque pagination cursor without native data.
+fn encode_discovery_cursor(alias: &str) -> String {
+    format!(
+        "v1:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(alias)
+    )
+}
+
+/// Decode and strictly validate one extension-issued pagination cursor.
+fn decode_discovery_cursor(cursor: &str) -> Result<String, String> {
+    let encoded = cursor
+        .strip_prefix("v1:")
+        .filter(|encoded| !encoded.is_empty())
+        .ok_or_else(|| "`cursor` is malformed or stale".to_owned())?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "`cursor` is malformed or stale".to_owned())?;
+    let alias =
+        String::from_utf8(bytes).map_err(|_| "`cursor` is malformed or stale".to_owned())?;
+    valid_conversation_alias(&alias)
+        .then_some(alias)
+        .ok_or_else(|| "`cursor` is malformed or stale".to_owned())
+}
+
+/// Build the public, model-facing representation of one static route.
+fn conversation_policy_value(policy: &ConversationPolicy, proactive_send: bool) -> CborValue {
+    let kind = match policy.kind {
+        ConversationPolicyKind::Channel => "channel",
+        ConversationPolicyKind::Mpim => "mpim",
+        ConversationPolicyKind::Dm => "dm",
+    };
+    let receive = match policy.receive {
+        Some(ReceiveMode::MentionsOnly) => CborValue::Text("mentions_only".to_owned()),
+        Some(ReceiveMode::AllMessages) => CborValue::Text("all_messages".to_owned()),
+        None => CborValue::Null,
+    };
+    let mut fields = vec![
+        example_field("alias", example_text(&policy.alias)),
+        example_field("kind", example_text(kind)),
+        example_field(
+            "scope",
+            example_text(if policy.thread_ts.is_some() {
+                "fixed_thread"
+            } else {
+                "conversation"
+            }),
+        ),
+    ];
+    if let Some(description) = &policy.description {
+        fields.push(example_field("description", example_text(description)));
+    }
+    fields.push((
+        example_text("policy"),
+        CborValue::Map(vec![
+            (example_text("receive"), receive),
+            (
+                example_text("proactive_send"),
+                CborValue::Bool(proactive_send),
+            ),
+        ]),
+    ));
+    CborValue::Map(fields)
 }
 
 fn cbor_optional_string_field(
@@ -3565,6 +3768,13 @@ fn validate_object_fields(arguments: &CborValue, allowed_fields: &[&str]) -> Res
 
 fn tool_result(invoke: ToolStarted, text: &str) -> Event {
     Event::ToolResult(successful_tool_result(&invoke, text))
+}
+
+/// Construct a terminal success with a structured model-facing result.
+fn structured_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
+    let mut tool_result = successful_tool_result(&invoke, "");
+    tool_result.result = result;
+    Event::ToolResult(tool_result)
 }
 
 /// Construct the terminal success carried inside the durable send-completion

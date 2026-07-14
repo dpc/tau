@@ -5,8 +5,12 @@ Status: confirmed, 2026-07-14, dpc
 A `conversations` record grants proactive initiation only with
 `proactive_send: true`. This is independent from its optional receive permission
 and from dynamic DM links. `slack_send` accepts `message` plus exactly one opaque
-`reply_to` or configured `destination`; the schema exposes sorted aliases and
-verbatim trusted descriptions, never native ids or thread selectors. Agents do
+`reply_to` or configured `destination`; its compact fixed schema uses a validated
+plain alias and exposes no configured aliases or descriptions. The separately
+authorized `slack_conversations` tool discovers model-facing route policy, never
+native ids or thread selectors. The alias is resolved and revalidated against
+current configuration at send time; no configuration snapshot is required, and
+same-alias reuse is operator responsibility. Agents do
 not need `slack_register` for proactive sends; effective role/tool policy remains
 the agent authorization layer.
 

@@ -7,16 +7,18 @@ advertise: false
 # Tau std-slack extension self-knowledge
 
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
-`slack_register` and `slack_send`; `tool_prefix` scopes both tools and group for
-multiple accounts. Slack text is always untrusted external content.
+`slack_register`, `slack_conversations`, and `slack_send`; `tool_prefix` scopes
+all three tools and their group for multiple accounts. Slack text is always
+untrusted external content.
 
 Configuration requires app/bot token secrets, nonempty exact U/W
 `allowed_user_ids`, and an active `conversations` and/or
 `dynamic_direct_messages` policy. Each `conversations` item binds a stable alias
 to an exact C/G/D conversation, explicit `channel`/`mpim`/`dm` kind, optional
 fixed root `thread_ts`, optional `receive: mentions_only|all_messages`, and
-independent `proactive_send`. Only proactive aliases are advertised; native ids
-and raw thread selectors are never model inputs. `channel_ids`,
+independent `proactive_send`, plus an optional operator-authored description on
+any active static record. Native ids and raw thread selectors are never model
+inputs. `channel_ids`,
 `listening_scope`, and `send_destinations` were removed and are hard errors.
 Follow the [README migration procedure](../../tau-ext-slack/README.md#migration-from-removed-keys).
 
@@ -51,6 +53,17 @@ owned reactions each receive source-bound reply authority. Edits require a known
 committed original; reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 harness capability and effective tool policy.
+
+`slack_conversations` is disabled by default and separately authorizable through
+its exact prefixed name or `slack:discover` tag. It returns all static routes,
+including receive-only records, in bounded sorted pages with alias, kind, scope,
+optional description, and factual receive/proactive policy. It is a local
+informational read: no worker startup, registration, authority grant, or config
+freeze. It excludes native ids/roots, dynamic links, identities, registrations,
+selections, runtime state, and Slack-fetched metadata. Group-enabled roles gain
+this inventory surface; use exact policy or separate prefixed instances to isolate
+it. Send resolves the current alias without a snapshot token, so same-alias reuse
+is operator responsibility.
 
 Every role granted one instance's send tool can use all its proactive aliases.
 Untrusted receive content can influence such a role, so keep destination sets and
