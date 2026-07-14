@@ -475,13 +475,7 @@ fn send_compact_request(
             }
         })
         .map_err(LlmError::Io)?;
-    let wake_completion = std::sync::Arc::clone(&completion);
-    let _abort_waker = abort.register_waker(std::sync::Arc::new(move || {
-        if let Ok(mut state) = wake_completion.0.lock() {
-            state.canceled = true;
-            wake_completion.1.notify_all();
-        }
-    }));
+    let _abort_waker = register_compact_abort_waker(abort, &completion)?;
     let (result_slot, changed) = &*completion;
     let mut slot = result_slot
         .lock()
@@ -499,6 +493,23 @@ fn send_compact_request(
         .take()
         .expect("compact completion is present unless canceled")?;
     parse_compact_response(&response_body)
+}
+
+fn register_compact_abort_waker(
+    abort: &mut impl TurnAbort,
+    completion: &std::sync::Arc<(std::sync::Mutex<CompactCompletion>, std::sync::Condvar)>,
+) -> Result<Box<dyn crate::TurnAbortWaker>, LlmError> {
+    let wake_completion = std::sync::Arc::clone(completion);
+    let guard = abort.register_waker(std::sync::Arc::new(move || {
+        if let Ok(mut state) = wake_completion.0.lock() {
+            state.canceled = true;
+            wake_completion.1.notify_all();
+        }
+    }));
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    Ok(guard)
 }
 
 fn compact_http_request(

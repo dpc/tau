@@ -31,12 +31,14 @@
 //! marshals envelopes to the writer task and pulls events back from
 //! the reader.
 
+use std::future::Future;
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -80,6 +82,10 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 /// How long one WS turn may go without any provider event before Tau treats
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
 const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
+/// Maximum time allowed for DNS, TCP, TLS, and the WebSocket HTTP upgrade.
+///
+/// Provider-frame idle time is governed separately after the upgrade succeeds.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Applies the WebSocket-only rate-limit side channel before delegating
 /// ordinary Responses events to the transport-neutral event parser.
@@ -190,17 +196,39 @@ impl WsConn {
     /// as both `session-id` and `thread-id` on the upgrade.
     ///
     /// Errors:
+    /// - `LlmError::Canceled` — prompt cancellation or shutdown won the upgrade
+    ///   race.
+    /// - `LlmError::HttpStatus(0, "stream error: websocket connect timeout")` —
+    ///   the 30-second upgrade deadline elapsed; classified as retryable
+    ///   transport.
     /// - `LlmError::HttpStatus(426, _)` — server rejected the upgrade.
     /// - `LlmError::HttpStatus(0, "stream error: ...")` — transient transport
     ///   hiccup, retryable.
     /// - Other 4xx — surface as-is.
-    pub fn connect(config: &ResponsesConfig, thread_id: &str) -> Result<Self, LlmError> {
+    pub fn connect(
+        config: &ResponsesConfig,
+        thread_id: &str,
+        abort: &mut impl TurnAbort,
+    ) -> Result<Self, LlmError> {
+        Self::connect_with_timeout(config, thread_id, abort, CONNECT_TIMEOUT)
+    }
+
+    fn connect_with_timeout(
+        config: &ResponsesConfig,
+        thread_id: &str,
+        abort: &mut impl TurnAbort,
+        timeout: Duration,
+    ) -> Result<Self, LlmError> {
         let request = build_request(config, thread_id)?;
         let bearer = config.api_key.clone();
         let runtime = ws_runtime::handle();
-        let (ws, _response) = runtime
-            .block_on(async { tokio_tungstenite::connect_async(request).await })
-            .map_err(map_ws_connect_error)?;
+        let (ws, _response) = wait_for_connect(
+            &runtime,
+            abort,
+            timeout,
+            tokio_tungstenite::connect_async(request),
+        )
+        .map_err(map_connect_wait_error)?;
 
         let (sink, stream) = ws.split();
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
@@ -392,6 +420,58 @@ impl WsConn {
                 InboundEvent::AbortWake => continue,
             }
         }
+    }
+}
+
+enum ConnectWaitError<E> {
+    Canceled,
+    Timeout,
+    Connect(E),
+}
+
+fn map_connect_wait_error(error: ConnectWaitError<tungstenite::Error>) -> LlmError {
+    match error {
+        ConnectWaitError::Canceled => LlmError::Canceled,
+        ConnectWaitError::Timeout => {
+            LlmError::HttpStatus(0, "stream error: websocket connect timeout".to_owned())
+        }
+        ConnectWaitError::Connect(error) => map_ws_connect_error(error),
+    }
+}
+
+fn wait_for_connect<F, T, E>(
+    runtime: &tokio::runtime::Handle,
+    abort: &mut impl TurnAbort,
+    timeout: Duration,
+    connect: F,
+) -> Result<T, ConnectWaitError<E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    if abort.is_aborted() {
+        return Err(ConnectWaitError::Canceled);
+    }
+    let canceled = Arc::new(Notify::new());
+    let wake_canceled = Arc::clone(&canceled);
+    let _abort_waker = abort.register_waker(Arc::new(move || wake_canceled.notify_one()));
+    if abort.is_aborted() {
+        return Err(ConnectWaitError::Canceled);
+    }
+    let result = runtime.block_on(async {
+        tokio::select! {
+            biased;
+            () = canceled.notified() => Err(ConnectWaitError::Canceled),
+            result = tokio::time::timeout(timeout, connect) => match result {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(error)) => Err(ConnectWaitError::Connect(error)),
+                Err(_) => Err(ConnectWaitError::Timeout),
+            },
+        }
+    });
+    if abort.is_aborted() {
+        Err(ConnectWaitError::Canceled)
+    } else {
+        result
     }
 }
 impl Drop for WsConn {

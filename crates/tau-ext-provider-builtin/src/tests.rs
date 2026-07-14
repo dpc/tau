@@ -652,6 +652,42 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
     );
 }
 
+/// Fresh WebSocket work must expose only a fixed, content-free connecting
+/// status before any provider request or response bytes are available.
+#[test]
+fn chatgpt_connecting_update_is_sanitized() {
+    let prompt = minimal_prompt();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        emit_chatgpt_connecting_update(
+            prompt.agent_prompt_id.as_str(),
+            &prompt.agent_id,
+            &prompt.originator,
+            &mut writer,
+        );
+    }
+    let frames = decode_frames(&bytes);
+    assert_eq!(frames.len(), 1, "connecting emits exactly one frame");
+    let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
+        panic!("expected connecting status frame: {frames:?}");
+    };
+    let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+        panic!("expected provider response update: {:?}", emit.event);
+    };
+    assert!(update.deltas.is_empty());
+    assert!(update.compaction.is_none());
+    assert!(update.response_stats.is_none());
+    assert!(matches!(
+        &update.status,
+        Some(tau_proto::ProviderResponseStatusUpdate {
+            text,
+            clear_response: false,
+            retry: None,
+        }) if text == "Connecting to provider…"
+    ));
+}
+
 /// Ensures ChatGPT/Codex provider progress frames publish the first streamed
 /// chunk promptly, then follow provider-prompt cadence instead of emitting once
 /// per upstream chunk or byte change.

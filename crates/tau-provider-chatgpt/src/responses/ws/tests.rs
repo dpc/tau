@@ -118,6 +118,108 @@ fn unsupported_ws_scheme_is_reloadable() {
     build_request(&config, "thread-id").expect("repaired WS URL");
 }
 
+/// A fresh WebSocket upgrade that never resolves must return a retryable,
+/// content-free transport timeout instead of holding the prompt forever.
+#[test]
+fn ws_connect_wait_is_bounded() {
+    let mut abort = NeverAbort;
+    let result = wait_for_connect(
+        &ws_runtime::handle(),
+        &mut abort,
+        Duration::from_millis(20),
+        std::future::pending::<Result<(), ()>>(),
+    );
+    assert!(matches!(result, Err(ConnectWaitError::Timeout)));
+    let error = map_connect_wait_error(ConnectWaitError::Timeout);
+    assert!(matches!(
+        error,
+        LlmError::HttpStatus(0, ref body)
+            if body == "stream error: websocket connect timeout"
+    ));
+    assert_eq!(
+        error.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Transport)
+    );
+}
+
+/// Cancellation must wake a fresh WebSocket upgrade before its connection
+/// deadline, matching the cooperative wake contract used by active turns.
+#[test]
+fn ws_connect_wait_is_cancellation_aware() {
+    let aborted = Arc::new(AtomicBool::new(false));
+    let (registered_tx, registered_rx) = std_mpsc::channel();
+    let waker = Arc::new(Mutex::new(None));
+    let mut abort = CapturingAbort {
+        aborted: Arc::clone(&aborted),
+        registered_tx,
+        waker: Arc::clone(&waker),
+    };
+    let (result_tx, result_rx) = std_mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = wait_for_connect(
+                &ws_runtime::handle(),
+                &mut abort,
+                Duration::from_secs(30),
+                std::future::pending::<Result<(), ()>>(),
+            );
+            result_tx.send(result).expect("result receiver");
+        });
+        registered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("connect abort waker registration");
+
+        aborted.store(true, Ordering::SeqCst);
+        waker
+            .lock()
+            .expect("waker slot lock")
+            .as_ref()
+            .expect("registered connect waker")
+            .clone()();
+        assert!(matches!(
+            result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("connect cancellation result"),
+            Err(ConnectWaitError::Canceled)
+        ));
+    });
+}
+
+/// An abort source may become canceled while registering without invoking a
+/// late waker; the mandatory post-registration check must still win
+/// immediately.
+#[test]
+fn ws_connect_rechecks_cancellation_after_waker_registration() {
+    struct AbortDuringRegistration(bool);
+    impl TurnAbort for AbortDuringRegistration {
+        fn is_aborted(&mut self) -> bool {
+            self.0
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            self.0 = true;
+            Box::new(TestAbortWaker)
+        }
+    }
+
+    let mut abort = AbortDuringRegistration(false);
+    let result = wait_for_connect(
+        &ws_runtime::handle(),
+        &mut abort,
+        Duration::from_secs(30),
+        std::future::pending::<Result<(), ()>>(),
+    );
+    assert!(matches!(result, Err(ConnectWaitError::Canceled)));
+    assert!(matches!(
+        map_connect_wait_error(ConnectWaitError::Canceled),
+        LlmError::Canceled
+    ));
+}
+
 struct PromptFixture {
     context: tau_proto::PromptContext,
     session_id: tau_proto::SessionId,

@@ -63,7 +63,12 @@ one validated replacement-window transcript boundary.
 
 The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys are stable per target agent and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface instead of silently falling back to HTTP/SSE.
 
-ChatGPT/Codex live streams have a default five-minute idle watchdog on both HTTP/SSE and WebSocket. The timer resets on each SSE `data:` event or WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte trickles, and is not an absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt, clears tentative output, and parks the logical prompt for another attempt.
+Fresh WebSocket setup first emits a fixed secret-free connecting status, then races
+DNS/TCP/TLS/upgrade against the prompt cancellation registry and a 30-second
+deadline. Timeout is retryable transport work; all unsuccessful upgrades release
+their same-key reservation.
+
+After setup, ChatGPT/Codex live streams have a separate default five-minute idle watchdog on both HTTP/SSE and WebSocket. The timer resets on each SSE `data:` event or WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte trickles, and is not an absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt, clears tentative output, and parks the logical prompt for another attempt.
 
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures; trusted later `Retry-After` and reset hints remain lower bounds. Retry state exists only for the running process/session and is not replayed after cold restart.
 

@@ -67,10 +67,11 @@ Context-window rejection records may include sanitized, harness-owned
 provider-qualified model and operation. Projection is accepted only from a
 same-model usage baseline; missing, zero, stale/model-changed, or contradictory
 inputs produce absent values or `insufficient_evidence`. The exact serialized
-transcript delta remains separately attributable byte provenance. Its
-one-byte-to-one-projected-token upper bound may corroborate provider usage but
-never establishes a categorical observation without nonzero provider-token
-evidence. The record makes hidden overhead and advertised-limit drift observable
+transcript delta remains separately attributable byte provenance, not projection
+input. Projection independently counts byte-free JSON structure, canonical
+encoded-image bytes, and rounded-up 32-by-32 image patches. It may corroborate
+provider usage but never establishes a categorical observation without nonzero
+provider-token evidence. The record makes hidden overhead and advertised-limit drift observable
 but does not feed back into automatic calibration.
 Calibration is explicit only: operators may change normal persisted model/role
 configuration (including bounded thresholds), and resetting that configuration
@@ -93,10 +94,10 @@ to terminal responses. Provider-supplied values are discarded. The schema is
 content-free and bounded to one record per rejected prompt: model id, operation,
 optional token counts/window, optional exact serialized transcript-growth bytes,
 reserve, active threshold, closed policy/eligibility/action, and a closed
-observation enum. Exact growth and its projection are absent if a supported
-raw-CBOR transcript entry cannot be represented as JSON or the checked total
-overflows. A categorical observation requires a positive advertised limit and
-nonzero provider input usage; the byte-derived projection only corroborates or
+observation enum. Exact growth and projection are derived independently; each
+field is absent only when its own serialization or checked aggregation is
+unavailable. A categorical observation requires a positive advertised limit and
+nonzero provider input usage; the transcript projection only corroborates or
 makes contradictory evidence insufficient. Raw evidence remains present even
 when the bounded observation is insufficient. Raw prompts, errors, response
 bodies, headers, accounts, and endpoints are excluded.
@@ -187,3 +188,11 @@ windows; appends above the 128 MiB per-agent bound fail before persistence.
 Agent-record writes must also satisfy the loader's 64 MiB encoded-record bound.
 Provider request lowering independently enforces its raw-image and data-URL
 aggregate limits.
+
+Proactive context projection serializes byte-free transcript structure under
+the existing one-byte-per-token conservative bound, then adds each image's
+canonical encoded byte length and one token per rounded-up 32-by-32 patch.
+Exact serialized transcript-growth bytes remain separate telemetry and never
+substitute their JSON byte-array expansion for projected tokens. Threshold-fired
+standalone compaction persists `automatic_threshold`; only explicit UI
+compaction retains the legacy/default `manual` trigger.

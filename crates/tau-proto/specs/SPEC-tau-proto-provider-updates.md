@@ -10,6 +10,8 @@ visible assistant/reasoning progress. Providers must send newly appended text in
 in the separate `status` field because they are provider-authored, not
 assistant-authored. Live byte/duration stats are provider-owned content-free metadata carried in
 `response_stats`; UIs render them directly from `provider.response_updated`.
+Fresh transport setup may emit a fixed content-free status with no retry facts;
+it must not expose endpoints, credentials, accounts, or raw transport errors.
 `provider.response_finished.output_items` remains the complete durable response
 and replay source.
 
@@ -37,10 +39,12 @@ body. `action=reactive_compaction_planned` is valid only with the matching
 `recovery_disposition`; absent fields preserve legacy decoding.
 
 Raw provider input usage remains separate from the optional exact JSON byte
-length of transcript growth. The conservative byte-as-token projection is not
-provider-token evidence: categorical below/at-or-above observations require a
-positive advertised limit and nonzero provider usage, while projection-only or
-contradictory cases are `insufficient_evidence`. If exact transcript
-serialization or checked aggregation is unavailable, both the byte delta and
-its derived projection are absent. These diagnostics never calibrate limits or
+length of transcript growth. The conservative token projection uses byte-free
+JSON structure plus explicit canonical-image byte and patch accounting; neither
+projection nor exact serialized bytes are provider-token evidence. Categorical
+below/at-or-above observations require a positive advertised limit and nonzero
+provider usage, while projection-only or contradictory cases are
+`insufficient_evidence`. If exact transcript serialization or checked
+projection aggregation is unavailable, the corresponding field is absent.
+These diagnostics never calibrate limits or
 thresholds automatically.

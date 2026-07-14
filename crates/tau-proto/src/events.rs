@@ -3509,9 +3509,13 @@ pub struct AgentManualCompactionRequestFailed {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum StandaloneCompactionTrigger {
-    /// Explicit or proactive compaction without a failed inference claim.
+    /// Explicit manual compaction, and the legacy default when the trigger
+    /// field is absent.
     #[default]
     Manual,
+    /// Automatic compaction after the local context projection reached the
+    /// configured role/model threshold.
+    AutomaticThreshold,
     /// Explicit compaction requested by a model-callable harness tool.
     ManualAgentTool {
         /// Durable request uniquely claimed by this transaction.
@@ -4110,9 +4114,9 @@ pub struct ContextLimitTelemetry {
     /// Operation rejected by the provider.
     pub operation: PromptOperation,
     /// Conservative harness estimate immediately before dispatch, when a
-    /// same-model usage baseline was available. Serialized transcript growth is
-    /// treated as a one-byte-to-one-projected-token upper bound. This estimate
-    /// is not provider-token evidence.
+    /// same-model usage baseline was available. Transcript growth counts
+    /// byte-free JSON structure plus canonical image bytes and rounded-up
+    /// 32-by-32 patches. This estimate is not provider-token evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projected_input_tokens: Option<u64>,
     /// Serialized transcript growth since the usage baseline. This byte count
@@ -4177,7 +4181,7 @@ pub enum ContextLimitObservation {
     /// and any available conservative projection agreed.
     RejectedAtOrAboveAdvertisedLimit,
     /// Provider usage or model-limit evidence was absent, zero, or
-    /// contradictory. A byte-derived projection alone always has this category.
+    /// contradictory. A transcript projection alone always has this category.
     InsufficientEvidence,
 }
 

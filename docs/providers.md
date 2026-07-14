@@ -217,13 +217,17 @@ It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-cod
 WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
 WS failures return to the shared logical-prompt scheduler, and terminal WS errors are
 surfaced instead of silently falling back to HTTP/SSE.
+Fresh setup emits a fixed content-free connecting status, and the
+DNS/TCP/TLS/WebSocket upgrade is cancellation-aware and bounded to 30 seconds.
+Timeout is classified as retryable transport work; failure or cancellation
+releases the same-key pool reservation.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices. Normal
 inference stays on Responses Lite and never emits legacy inline context
 management. Manual and threshold-driven compaction use the separate unary
 `/codex/responses/compact` operation, with a provider default threshold of
 334,800 tokens; accepted output becomes one standalone transcript boundary.
-ChatGPT/Codex live streams use a five-minute idle watchdog on both HTTP/SSE and
+After setup, ChatGPT/Codex live streams use a separate five-minute idle watchdog on both HTTP/SSE and
 WebSocket transports. The watchdog resets on each SSE `data:` event or
 WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte
 trickles, and is not an absolute turn-duration cap. If upstream goes quiet, Tau

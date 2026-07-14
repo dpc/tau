@@ -45,7 +45,7 @@ use tau_provider_chat_completions::{
     models_for_provider as chat_models_for_provider, run_prompt_attempt_for_provider,
 };
 use tau_provider_chatgpt::{
-    ChatGptRuntime, ChatGptTurnState, TurnAbort, TurnAbortWaker, common, responses,
+    ChatGptRuntime, ChatGptTurnState, StreamUpdate, TurnAbort, TurnAbortWaker, common, responses,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -3308,17 +3308,22 @@ where
     };
     let mut ws_pool_delta = None;
     let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
-    let mut on_update = |state: &common::StreamState| {
-        if let Some(observation) = state.quota_observation.as_ref() {
-            on_quota(observation);
+    let mut on_update = |update: StreamUpdate<'_>| match update {
+        StreamUpdate::Connecting => {
+            emit_chatgpt_connecting_update(agent_prompt_id, &prompt.agent_id, &originator, writer);
         }
-        response_update_emitter.emit_if_due(
-            agent_prompt_id,
-            &prompt.agent_id,
-            &originator,
-            state,
-            writer,
-        );
+        StreamUpdate::Response(state) => {
+            if let Some(observation) = state.quota_observation.as_ref() {
+                on_quota(observation);
+            }
+            response_update_emitter.emit_if_due(
+                agent_prompt_id,
+                &prompt.agent_id,
+                &originator,
+                state,
+                writer,
+            );
+        }
     };
     let result = execution.runtime.stream(
         agent_prompt_id,
@@ -3401,6 +3406,31 @@ where
         }
     }
     Ok(None)
+}
+
+fn emit_chatgpt_connecting_update<W: Write>(
+    agent_prompt_id: &str,
+    agent_id: &tau_proto::AgentId,
+    originator: &tau_proto::PromptOriginator,
+    writer: &mut PeerOutputWriter<W>,
+) {
+    let update = ProviderResponseUpdated {
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: agent_id.clone(),
+        deltas: Vec::new(),
+        compaction: None,
+        status: Some(ProviderResponseStatusUpdate {
+            text: "Connecting to provider…".to_owned(),
+            clear_response: false,
+            retry: None,
+        }),
+        response_stats: None,
+        originator: originator.clone(),
+    };
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        update,
+    )));
+    let _ = writer.flush();
 }
 
 /// Samples ChatGPT streaming progress according to

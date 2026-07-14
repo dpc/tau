@@ -272,6 +272,125 @@ fn shared_pool_checkout_wait_aborts_when_canceled() {
     );
 }
 
+/// A failed fresh upgrade must abandon its same-key reservation so a later
+/// retry cannot remain parked behind work that no longer exists.
+#[test]
+fn failed_fresh_connect_releases_pool_reservation() {
+    let pool = SharedWsPool::new();
+    let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
+    let key = pool_key_for(
+        &config,
+        "agent-connect-failure",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    let mut abort = NeverAbort;
+    assert!(
+        pool.checkout_until(&key, &config.api_key, &mut abort)
+            .expect("reserve fresh key")
+            .is_none()
+    );
+
+    let result = pool.connect_reserved_fresh(&key, &config, &mut abort, |_, _, _| {
+        Err(LlmError::HttpStatus(
+            0,
+            "stream error: websocket connect timeout".to_owned(),
+        ))
+    });
+    assert!(matches!(result, Err(WsTurnError::Other(_))));
+    assert!(matches!(
+        pool.try_checkout(&key, &config.api_key)
+            .expect("reservation was released"),
+        TryCheckout::Reserved(None)
+    ));
+    pool.abandon(&key).expect("clean test reservation");
+}
+
+/// Every cancellation boundary around a fresh connector must release the key:
+/// before connect, from the connector, and after a socket was opened.
+#[test]
+fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
+    struct ToggleAbort(bool);
+    impl TurnAbort for ToggleAbort {
+        fn is_aborted(&mut self) -> bool {
+            self.0
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn TurnAbortWaker> {
+            Box::new(TestAbortWaker)
+        }
+    }
+
+    fn reserve(pool: &SharedWsPool, key: &PoolKey, config: &ResponsesConfig) {
+        let mut never = NeverAbort;
+        assert!(
+            pool.checkout_until(key, &config.api_key, &mut never)
+                .expect("reserve key")
+                .is_none()
+        );
+    }
+
+    fn assert_reusable(pool: &SharedWsPool, key: &PoolKey, config: &ResponsesConfig) {
+        assert!(matches!(
+            pool.try_checkout(key, &config.api_key)
+                .expect("reservation reusable"),
+            TryCheckout::Reserved(None)
+        ));
+        pool.abandon(key).expect("clean reusable reservation");
+    }
+
+    let pool = SharedWsPool::new();
+    let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
+    let key = pool_key_for(
+        &config,
+        "agent-connect-cancel",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+
+    reserve(&pool, &key, &config);
+    let mut abort = ToggleAbort(true);
+    let result = pool.connect_reserved_fresh(&key, &config, &mut abort, |_, _, _| {
+        unreachable!("pre-canceled connect must not invoke connector")
+    });
+    assert!(matches!(result, Err(WsTurnError::Canceled)));
+    assert_reusable(&pool, &key, &config);
+
+    reserve(&pool, &key, &config);
+    let mut abort = ToggleAbort(false);
+    let result =
+        pool.connect_reserved_fresh(&key, &config, &mut abort, |_, _, _| Err(LlmError::Canceled));
+    assert!(matches!(result, Err(WsTurnError::Canceled)));
+    assert_reusable(&pool, &key, &config);
+
+    let (addr, _server) = spawn_fake_codex_server();
+    let live_config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let live_key = pool_key_for(
+        &live_config,
+        "agent-post-connect-cancel",
+        tau_proto::PromptOriginator::User,
+        false,
+    );
+    reserve(&pool, &live_key, &live_config);
+    let mut abort = ToggleAbort(false);
+    let result = pool.connect_reserved_fresh(
+        &live_key,
+        &live_config,
+        &mut abort,
+        |config, thread, abort| {
+            let mut never = NeverAbort;
+            let conn = WsConn::connect(config, thread, &mut never)?;
+            abort.0 = true;
+            Ok(conn)
+        },
+    );
+    assert!(matches!(result, Err(WsTurnError::Canceled)));
+    assert_reusable(&pool, &live_key, &live_config);
+}
+
 /// Prewarm runs on the provider main loop, so it must never park behind an
 /// active same-key reservation. A busy key means a real turn is already
 /// doing the warming work; skip best-effort prewarm instead of delaying
@@ -826,7 +945,12 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     });
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new();
-    let mut on_update = |_: &crate::common::StreamState| {};
+    let mut connecting_count = 0;
+    let mut on_update = |update: crate::StreamUpdate<'_>| {
+        if matches!(update, crate::StreamUpdate::Connecting) {
+            connecting_count += 1;
+        }
+    };
 
     let session_id = tau_proto::SessionId::new("session-shared-die");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
@@ -884,6 +1008,10 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     assert_eq!(
         s.upgrade_count, 2,
         "shared reconnect should open exactly one replacement socket"
+    );
+    assert_eq!(
+        connecting_count, 2,
+        "initial and replacement fresh connections each report connecting"
     );
     assert_eq!(
         s.requests.len(),
@@ -1269,7 +1397,7 @@ fn run_shared_turn_for_agent(
         share_user_cache_key: false,
         debug_provider_requests: false,
     };
-    let mut on_update = |_: &crate::common::StreamState| {};
+    let mut on_update = |_: crate::StreamUpdate<'_>| {};
     let mut abort = NeverAbort;
     run_turn_through_shared_pool(
         pool,

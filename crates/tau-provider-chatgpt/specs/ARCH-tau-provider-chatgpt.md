@@ -45,6 +45,14 @@ over HTTP/SSE.
 HTTP/SSE remains the Responses transport for configs that do not advertise WebSocket
 support and for the HTTP/SSE-specific request/debug/replay paths.
 
+A fresh WebSocket path emits one fixed, content-free connecting status, then
+races DNS/TCP/TLS/HTTP upgrade against cooperative prompt cancellation and a
+30-second connection deadline. Failed, timed-out, and canceled upgrades release
+their same-key pool reservation. The provider-frame idle watchdog begins only
+after the upgrade and request send, so it is not the connection bound.
+Cancellation ownership and the deadline rationale are recorded in
+[DESIGN-tau-provider-chatgpt-cooperative-cancellation](DESIGN-tau-provider-chatgpt-cooperative-cancellation.md).
+
 ## GPT-5.6 Responses Lite
 
 The ChatGPT/Codex GPT-5.6 family uses the upstream Responses Lite request contract. HTTP

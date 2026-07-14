@@ -246,16 +246,17 @@ Emitted by the provider backend that owns the selected model.
   Such a rejection may also carry harness-authored `context_limit_telemetry`:
   provider-qualified model, operation, projected/provider input tokens,
   optional exact serialized transcript-growth bytes, advertised window, reserve,
-  and a closed observation category. The byte growth is retained as a separately
-  labeled conservative projection input and is not provider token usage. It is
-  absent, along with its derived projection, when exact JSON serialization or
-  checked aggregation is unavailable. The estimate conservatively counts each
-  serialized growth byte as one projected token. It contains no prompt/error/body
-  text. It is diagnostic evidence only and never changes model metadata or
-  thresholds automatically. The active explicit threshold and closed policy,
+  and a closed observation category. Exact serialized byte growth is independent
+  telemetry and is not provider token usage or projection input. Projection
+  counts byte-free JSON structure plus canonical encoded-image bytes and
+  rounded-up 32-by-32 image patches. Either value may be absent independently
+  when its own serialization or checked aggregation is unavailable. The
+  projection contains no prompt/error/body text. It is diagnostic evidence only
+  and never changes model metadata or thresholds automatically. The active
+  explicit threshold and closed policy,
   eligibility flag, and harness action distinguish terminal handling from one
   planned reactive compaction.
-  A byte-derived projection without nonzero `provider_input_tokens` is classified
+  A transcript projection without nonzero `provider_input_tokens` is classified
   as `insufficient_evidence`; it cannot by itself claim rejection below or above
   the advertised provider limit.
   Successful responses and retryable attempts omit it. Routed by the harness
@@ -579,7 +580,7 @@ the UI is the only consumer. Components without a terminal silently no-op.
 
 ### Reactive context recovery fields
 
-`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
+`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `automatic_threshold` identifies proactive role/model threshold work, while `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
 - **`agent.manual_compaction_requested`** — harness-owned durable acceptance of
   a model-callable `compact` or `agent_compact` request, including bounded
   request/caller/target/prompt/tool-call/model correlation.

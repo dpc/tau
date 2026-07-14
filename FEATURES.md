@@ -124,8 +124,10 @@ loaded agents; `events.jsonl` is the session-inspect/debug retrieval source for
 the complete harness-authored telemetry. Replace `sessions_dir` with Tau's
 configured sessions root when it differs from the Linux default. The record
 preserves exact serialized transcript-delta bytes separately from provider
-token usage, omitting the delta and derived projection if exact derivation is
-unavailable. A byte-derived projection alone is `insufficient_evidence`, and
+token usage. Projection instead counts byte-free JSON structure, canonical
+encoded-image bytes, and rounded-up 32-by-32 patches; exact bytes and projected
+tokens can be unavailable independently. A projection alone is
+`insufficient_evidence`, and
 neither inspection nor recording performs automatic limit or threshold
 calibration.
 
@@ -607,6 +609,10 @@ response cache stays warm across turns of the same conversation — including
 when sub-agent delegations are interleaved with the parent. Connections age out
 before the upstream's 60-minute hard cap, and refreshed OAuth tokens invalidate
 stale sockets on next use.
+Fresh setup emits a fixed secret-free connecting status and races
+DNS/TCP/TLS/WebSocket upgrade against cancellation and a 30-second deadline.
+Timeout is a retryable transport failure, and every failed or canceled upgrade
+releases its same-key reservation.
 WebSocket-capable ChatGPT/Codex models stay on the WebSocket transport:
 retryable WebSocket failures return to Tau's in-memory logical-prompt scheduler, and
 terminal WebSocket errors are surfaced instead of silently falling back to
@@ -617,7 +623,7 @@ provider scheduler remains authoritative: running, capacity-queued, completed,
 terminal, and historical prompts are not eligible; shared cooldown peers remain
 parked; and a later retryable failure resumes ordinary accounting and backoff.
 
-Live ChatGPT/Codex streams have a default five-minute idle watchdog for both
+After setup, live ChatGPT/Codex streams have a separate default five-minute idle watchdog for both
 HTTP/SSE and WebSocket transports. The timer resets on each SSE `data:` event or
 WebSocket provider frame, so long responses can continue while active; SSE
 comments, heartbeats, and partial-line byte trickles do not count as provider

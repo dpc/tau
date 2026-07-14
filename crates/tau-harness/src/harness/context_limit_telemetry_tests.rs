@@ -1,12 +1,15 @@
+use std::sync::Arc;
+
 use tau_core::AgentEntry;
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextLimitObservation, ContextRole, MessageItem,
-    ToolResultItem, ToolResultStatus, ToolType,
+    CborValue, ContentPart, ContextItem, ContextLimitObservation, ContextRole, ImageContent,
+    ImageDetail, ImageMediaType, MessageItem, ToolResultContentPart, ToolResultItem,
+    ToolResultStatus, ToolType,
 };
 
 use super::context_limit_telemetry::{
-    context_limit_observation, projected_input_tokens, serialized_transcript_delta_bytes,
-    serialized_transcript_entry_bytes,
+    context_limit_observation, projected_input_tokens, projected_transcript_entry_tokens,
+    serialized_transcript_delta_bytes, serialized_transcript_entry_bytes, transcript_growth,
 };
 
 fn user_entry(text: &str) -> AgentEntry {
@@ -90,8 +93,8 @@ fn transcript_delta_derivation_counts_multibyte_utf8() {
     assert_eq!(utf8 - ascii, 1);
 }
 
-/// The production transcript-growth derivation must include JSON escaping so
-/// operators can reproduce the exact conservative projection input.
+/// The exact serialized transcript-growth telemetry must include JSON escaping
+/// so operators can reproduce its durable byte provenance.
 #[test]
 fn transcript_delta_derivation_counts_json_escaping() {
     let plain = serialized_transcript_entry_bytes(&user_entry("a")).expect("JSON-representable");
@@ -126,6 +129,55 @@ fn transcript_delta_derivation_handles_raw_cbor_without_sentinel() {
     assert_eq!(
         serialized_transcript_delta_bytes([&valid, &entry]),
         Some(serialized_transcript_entry_bytes(&valid).expect("valid entry") + entry_bytes)
+    );
+}
+
+/// Typed image projection must count canonical bytes and 32-by-32 patches once,
+/// rather than treating serde's expanded JSON integer array as provider tokens.
+#[test]
+fn typed_image_projection_uses_canonical_bytes_and_patches() {
+    let image_bytes = vec![0x80; 116_573];
+    let entry = AgentEntry::ToolResults {
+        items: vec![ToolResultItem {
+            call_id: "call-image".into(),
+            tool_type: ToolType::Function,
+            status: ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(
+                "bounded image".to_owned(),
+            )),
+            provider_content: vec![ToolResultContentPart::Image(ImageContent {
+                media_type: ImageMediaType::Png,
+                data: Arc::from(image_bytes.clone()),
+                width: 1280,
+                height: 900,
+                detail: ImageDetail::High,
+            })],
+        }],
+    };
+    let mut metadata_only = entry.clone();
+    let AgentEntry::ToolResults { items } = &mut metadata_only else {
+        unreachable!("fixture is a tool result")
+    };
+    tau_proto::clear_tool_result_provider_image_bytes(&mut items[0]);
+    let metadata_tokens =
+        serialized_transcript_entry_bytes(&metadata_only).expect("metadata serializes");
+    let patch_tokens = 1280_u64.div_ceil(32) * 900_u64.div_ceil(32);
+    let projected = projected_transcript_entry_tokens(&entry).expect("projection");
+
+    assert_eq!(
+        projected,
+        metadata_tokens + image_bytes.len() as u64 + patch_tokens
+    );
+    assert!(
+        projected < serialized_transcript_entry_bytes(&entry).expect("full entry serializes"),
+        "canonical accounting must exclude JSON byte-array amplification"
+    );
+    assert_eq!(
+        transcript_growth([&entry, &metadata_only]).projected_tokens,
+        Some(
+            projected
+                + projected_transcript_entry_tokens(&metadata_only).expect("metadata projection")
+        )
     );
 }
 

@@ -3954,10 +3954,11 @@ fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
     );
 }
 
-/// Recovery fields must preserve legacy omission defaults and reactive
-/// correlation in their enclosing durable DTOs across JSON and CBOR replay.
+/// Standalone-compaction triggers and recovery fields must preserve literal
+/// wire tags, legacy omission defaults, and correlation across JSON and CBOR
+/// replay.
 #[test]
-fn reactive_context_recovery_wire_contract() {
+fn standalone_compaction_and_context_recovery_wire_contract() {
     fn cbor_event(event: &Event) -> ciborium::value::Value {
         let mut bytes = Vec::new();
         ciborium::into_writer(event, &mut bytes).expect("encode event CBOR");
@@ -3980,6 +3981,28 @@ fn reactive_context_recovery_wire_contract() {
             ciborium::value::Value::Array(values) => values
                 .iter_mut()
                 .any(|value| remove_cbor_field(value, field)),
+            _ => false,
+        }
+    }
+
+    fn has_cbor_text_field(value: &ciborium::value::Value, field: &str, expected: &str) -> bool {
+        match value {
+            ciborium::value::Value::Map(entries) => {
+                entries.iter().any(|(key, value)| {
+                    matches!(
+                        (key, value),
+                        (
+                            ciborium::value::Value::Text(key),
+                            ciborium::value::Value::Text(value)
+                        ) if key == field && value == expected
+                    )
+                }) || entries
+                    .iter()
+                    .any(|(_, value)| has_cbor_text_field(value, field, expected))
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter()
+                .any(|value| has_cbor_text_field(value, field, expected)),
             _ => false,
         }
     }
@@ -4013,10 +4036,9 @@ fn reactive_context_recovery_wire_contract() {
         started
     );
 
-    let trigger = StandaloneCompactionTrigger::ReactiveContextOverflow {
+    started.trigger = StandaloneCompactionTrigger::ReactiveContextOverflow {
         failed_agent_prompt_id: "ap-overflow".into(),
     };
-    started.trigger = trigger.clone();
     let encoded = serde_json::to_value(&started).expect("encode reactive start");
     assert_eq!(
         serde_json::from_value::<AgentStandaloneCompactionStarted>(encoded)
@@ -4030,6 +4052,17 @@ fn reactive_context_recovery_wire_contract() {
             .expect("decode reactive start CBOR"),
         started
     );
+    started.trigger = StandaloneCompactionTrigger::AutomaticThreshold;
+    let automatic_json = serde_json::to_value(&started).expect("encode automatic start");
+    assert_eq!(
+        automatic_json["trigger"]["kind"],
+        serde_json::json!("automatic_threshold")
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentStandaloneCompactionStarted>(automatic_json)
+            .expect("decode automatic start"),
+        started
+    );
     let manual_event = Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
         trigger: StandaloneCompactionTrigger::Manual,
         ..started.clone()
@@ -4037,10 +4070,15 @@ fn reactive_context_recovery_wire_contract() {
     let mut legacy_started_cbor = cbor_event(&manual_event);
     assert!(remove_cbor_field(&mut legacy_started_cbor, "trigger"));
     assert_eq!(decode_cbor_event(&legacy_started_cbor), manual_event);
-    let reactive_event = Event::AgentStandaloneCompactionStarted(started.clone());
+    let automatic_event = Event::AgentStandaloneCompactionStarted(started.clone());
+    assert!(has_cbor_text_field(
+        &cbor_event(&automatic_event),
+        "kind",
+        "automatic_threshold"
+    ));
     assert_eq!(
-        decode_cbor_event(&cbor_event(&reactive_event)),
-        reactive_event
+        decode_cbor_event(&cbor_event(&automatic_event)),
+        automatic_event
     );
 
     let checkpoint = AgentInferenceDispatchStarted {

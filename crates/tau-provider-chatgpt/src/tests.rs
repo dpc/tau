@@ -385,7 +385,7 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut turn_state = ChatGptTurnState::new(2);
     let mut abort = NeverAbort;
-    let mut on_update = |_: &common::StreamState| {};
+    let mut on_update = |_: StreamUpdate<'_>| {};
 
     let error = match runtime.stream(
         "ap-ws-426",
@@ -429,7 +429,7 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut turn_state = ChatGptTurnState::new(0);
     let mut abort = NeverAbort;
-    let mut on_update = |_: &common::StreamState| {};
+    let mut on_update = |_: StreamUpdate<'_>| {};
 
     let error = match runtime.stream(
         "ap-ws-retry",

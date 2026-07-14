@@ -205,7 +205,11 @@ fn classify_http_status(
             429 => RetryClass::Throttle,
             500..=599 => RetryClass::Overload,
             401 | 403 => RetryClass::Auth,
-            0 if is_provider_stream_idle_timeout_body(body) => RetryClass::Transport,
+            0 if is_provider_stream_idle_timeout_body(body)
+                || is_websocket_connect_timeout_body(body) =>
+            {
+                RetryClass::Transport
+            }
             _ => RetryClass::Unknown,
         });
     let body_hint = parse_json_reset_hint(body, SystemTime::now());
@@ -280,6 +284,10 @@ pub fn is_account_limit_body(body: &str) -> bool {
 /// error.
 pub fn is_provider_stream_idle_timeout_body(body: &str) -> bool {
     body.contains("provider stream idle timeout")
+}
+
+fn is_websocket_connect_timeout_body(body: &str) -> bool {
+    body == "stream error: websocket connect timeout"
 }
 
 /// One provider output item as it is incrementally assembled from a
@@ -498,6 +506,7 @@ impl Default for StreamState {
 }
 
 impl StreamState {
+    /// Construct an empty provider response accumulator.
     pub fn new() -> Self {
         Self {
             text: String::new(),

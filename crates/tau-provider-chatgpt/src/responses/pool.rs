@@ -30,10 +30,8 @@ use lru::LruCache;
 
 use super::ResponsesConfig;
 use super::ws::WsConn;
-#[cfg(test)]
-use crate::NeverAbort;
-use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload};
+use crate::{NeverAbort, TurnAbort};
 
 /// Default soft cap on simultaneously-cached WS connections.
 ///
@@ -324,6 +322,40 @@ impl SharedWsPool {
         Ok(())
     }
 
+    fn connect_reserved_fresh<A, C>(
+        &self,
+        key: &PoolKey,
+        config: &ResponsesConfig,
+        abort: &mut A,
+        connect: C,
+    ) -> Result<WsConn, WsTurnError>
+    where
+        A: TurnAbort,
+        C: FnOnce(&ResponsesConfig, &str, &mut A) -> Result<WsConn, LlmError>,
+    {
+        if abort.is_aborted() {
+            self.abandon(key)?;
+            return Err(WsTurnError::Canceled);
+        }
+        let conn = match connect(config, &key.thread_id, abort) {
+            Ok(conn) => conn,
+            Err(LlmError::Canceled) => {
+                self.abandon(key)?;
+                return Err(WsTurnError::Canceled);
+            }
+            Err(error) => {
+                self.abandon(key)?;
+                return Err(WsTurnError::Other(error));
+            }
+        };
+        if abort.is_aborted() {
+            drop(conn);
+            self.abandon(key)?;
+            return Err(WsTurnError::Canceled);
+        }
+        Ok(conn)
+    }
+
     fn bump_silent_reconnects(&self) -> Result<u64, WsTurnError> {
         let mut inner = self.lock_inner()?;
         inner.pool.stats.silent_reconnects += 1;
@@ -557,12 +589,13 @@ pub fn run_turn_through_pool(
     // Fresh socket path. The chain cache here is empty by definition, so pay
     // one cold full replay on WS. That is cheaper over the next turns than
     // switching to HTTP and staying cold.
-    let mut conn = WsConn::connect(config, &key.thread_id).map_err(WsTurnError::Other)?;
+    let mut abort = NeverAbort;
+    let mut conn =
+        WsConn::connect(config, &key.thread_id, &mut abort).map_err(WsTurnError::Other)?;
     pool.stats.upgrades += 1;
     let mut recording_stream = vcr_record_config
         .as_ref()
         .map(|_| super::ProviderRawEventStream::default());
-    let mut abort = NeverAbort;
     match conn.run_turn(
         config,
         agent_prompt_id,
@@ -603,9 +636,11 @@ pub fn run_turn_through_shared_pool(
     agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
     abort: &mut impl TurnAbort,
-    on_update: &mut impl FnMut(&crate::common::StreamState),
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
-    let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, on_update)? {
+    let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, &mut |state| {
+        on_update(crate::StreamUpdate::Response(state))
+    })? {
         VcrTurnSetup::Replayed(state) => return Ok(*state),
         VcrTurnSetup::Live { record_config } => record_config,
     };
@@ -645,7 +680,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         mut conn: WsConn,
         session_id: &str,
         abort: &mut impl TurnAbort,
-        on_update: &mut impl FnMut(&crate::common::StreamState),
+        on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
     ) -> Result<CachedSharedTurn, WsTurnError> {
         if abort.is_aborted() {
             self.pool.release(self.key, conn)?;
@@ -659,7 +694,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             self.request,
             stream.as_mut(),
             abort,
-            on_update,
+            &mut |state| on_update(crate::StreamUpdate::Response(state)),
         ) {
             Ok(turn) => self
                 .release_and_store_recording(conn, turn, stream)
@@ -696,24 +731,16 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
     fn run_fresh(
         self,
         abort: &mut impl TurnAbort,
-        on_update: &mut impl FnMut(&crate::common::StreamState),
+        on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
     ) -> Result<crate::common::StreamState, WsTurnError> {
         if abort.is_aborted() {
             self.pool.abandon(&self.key)?;
             return Err(WsTurnError::Canceled);
         }
-        let mut conn = match WsConn::connect(self.config, &self.key.thread_id) {
-            Ok(conn) => conn,
-            Err(error) => {
-                self.pool.abandon(&self.key)?;
-                return Err(WsTurnError::Other(error));
-            }
-        };
-        if abort.is_aborted() {
-            drop(conn);
-            self.pool.abandon(&self.key)?;
-            return Err(WsTurnError::Canceled);
-        }
+        on_update(crate::StreamUpdate::Connecting);
+        let mut conn =
+            self.pool
+                .connect_reserved_fresh(&self.key, self.config, abort, WsConn::connect)?;
         self.pool.record_fresh_open()?;
         let mut stream = recording_stream(self.record_config);
         match conn.run_turn(
@@ -722,7 +749,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             self.request,
             stream.as_mut(),
             abort,
-            on_update,
+            &mut |state| on_update(crate::StreamUpdate::Response(state)),
         ) {
             Ok(turn) => self.release_and_store_recording(conn, turn, stream),
             Err(err) => {
@@ -790,7 +817,8 @@ pub fn run_prewarm_through_pool(
         }
     }
 
-    let mut conn = WsConn::connect(config, &key.thread_id)?;
+    let mut abort = NeverAbort;
+    let mut conn = WsConn::connect(config, &key.thread_id, &mut abort)?;
     pool.stats.upgrades += 1;
     match conn.run_prewarm(config, request) {
         Ok(state) => {
@@ -854,7 +882,8 @@ pub fn run_prewarm_through_shared_pool(
         return Ok(crate::common::StreamState::new());
     }
 
-    let mut conn = match WsConn::connect(config, &key.thread_id) {
+    let mut abort = NeverAbort;
+    let mut conn = match WsConn::connect(config, &key.thread_id, &mut abort) {
         Ok(conn) => conn,
         Err(error) => {
             pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;

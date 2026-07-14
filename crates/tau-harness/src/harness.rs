@@ -14,8 +14,8 @@ use rand::SeedableRng as _;
 use rand::rngs::StdRng;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
-    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionStore, ToolRegistry,
-    ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
+    DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
+    ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
     validate_tool_arguments,
 };
 use tau_proto::{
@@ -50,8 +50,9 @@ struct ProviderQuotaTombstone {
 }
 
 use self::context_limit_telemetry::{
-    MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, context_limit_observation,
-    context_projection_reserve, projected_input_tokens, serialized_transcript_delta_bytes,
+    MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, TranscriptGrowth,
+    context_limit_observation, context_projection_reserve, projected_input_tokens,
+    transcript_growth,
 };
 use crate::agent::{
     Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
@@ -12597,25 +12598,14 @@ impl Harness {
         let Some(agent_id) = conv.agent_id.clone() else {
             return false;
         };
-        let delta_bytes = self.agent_store.agent(&agent_id).map_or(0, |tree| {
-            let branch_ids = tree.branch_node_ids_from(conv.head);
-            let first_new = conv
-                .context_usage_head
-                .and_then(|usage_head| branch_ids.iter().position(|node_id| *node_id == usage_head))
-                .map_or(0, |usage_index| usage_index.saturating_add(1));
-            branch_ids[first_new..]
-                .iter()
-                .filter_map(|node_id| tree.node(*node_id))
-                .map(|node| {
-                    serde_json::to_vec(&node.entry)
-                        .map_or(u64::MAX, |rendered| rendered.len() as u64)
-                })
-                .fold(0_u64, u64::saturating_add)
-        });
+        let delta_tokens = self
+            .transcript_growth_since(Some(agent_id.as_str()), conv.head, conv.context_usage_head)
+            .projected_tokens;
         let control_reserve = context_projection_reserve(info.context_window);
-        let projected_tokens = input_tokens
-            .saturating_add(delta_bytes)
-            .saturating_add(control_reserve);
+        let projected_tokens = delta_tokens
+            .and_then(|delta| input_tokens.checked_add(delta))
+            .and_then(|tokens| tokens.checked_add(control_reserve))
+            .unwrap_or(u64::MAX);
         if threshold.is_none_or(|threshold| projected_tokens < threshold) {
             return false;
         }
@@ -12680,7 +12670,7 @@ impl Harness {
                 model,
                 originator,
                 supersedes: None,
-                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
             }),
         );
         true
@@ -17376,29 +17366,19 @@ impl Harness {
             .filter(|window| *window > 0);
         let projection_reserve_tokens = advertised_context_window
             .map_or(MIN_CONTEXT_PROJECTION_RESERVE, context_projection_reserve);
-        let (baseline, transcript_delta_bytes) =
-            self.agents.get(cid).map_or((None, Some(0)), |agent| {
+        let (baseline, transcript_delta_bytes, transcript_delta_tokens) = self
+            .agents
+            .get(cid)
+            .map_or((None, Some(0), Some(0)), |agent| {
                 let baseline = (agent.context_usage_model.as_ref() == Some(model))
                     .then_some(agent.context_input_tokens)
                     .flatten();
-                let delta = agent
-                    .agent_id
-                    .as_deref()
-                    .and_then(|id| self.agent_store.agent(id))
-                    .map_or(Some(0), |tree| {
-                        let ids = tree.branch_node_ids_from(agent.head);
-                        let first = agent
-                            .context_usage_head
-                            .and_then(|head| ids.iter().position(|id| *id == head))
-                            .map_or(0, |index| index.saturating_add(1));
-                        serialized_transcript_delta_bytes(
-                            ids[first..]
-                                .iter()
-                                .filter_map(|id| tree.node(*id))
-                                .map(|node| &node.entry),
-                        )
-                    });
-                (baseline, delta)
+                let growth = self.transcript_growth_since(
+                    agent.agent_id.as_deref(),
+                    agent.head,
+                    agent.context_usage_head,
+                );
+                (baseline, growth.serialized_bytes, growth.projected_tokens)
             });
         let role_compaction = self
             .available_roles
@@ -17425,7 +17405,7 @@ impl Harness {
             operation,
             projected_input_tokens: projected_input_tokens(
                 baseline,
-                transcript_delta_bytes,
+                transcript_delta_tokens,
                 projection_reserve_tokens,
             ),
             transcript_delta_bytes,
@@ -17434,6 +17414,32 @@ impl Harness {
             compaction_threshold,
             compaction_policy,
         }
+    }
+
+    fn transcript_growth_since(
+        &self,
+        agent_id: Option<&str>,
+        head: Option<NodeId>,
+        usage_head: Option<NodeId>,
+    ) -> TranscriptGrowth {
+        agent_id.and_then(|id| self.agent_store.agent(id)).map_or(
+            TranscriptGrowth {
+                serialized_bytes: Some(0),
+                projected_tokens: Some(0),
+            },
+            |tree| {
+                let ids = tree.branch_node_ids_from(head);
+                let first = usage_head
+                    .and_then(|baseline| ids.iter().position(|id| *id == baseline))
+                    .map_or(0, |index| index.saturating_add(1));
+                transcript_growth(
+                    ids[first..]
+                        .iter()
+                        .filter_map(|id| tree.node(*id))
+                        .map(|node| &node.entry),
+                )
+            },
+        )
     }
 
     fn attach_context_limit_telemetry(&mut self, response: &mut ProviderResponseFinished) {

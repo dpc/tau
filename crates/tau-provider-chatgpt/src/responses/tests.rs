@@ -2076,6 +2076,36 @@ struct TestAbortWaker;
 
 impl crate::TurnAbortWaker for TestAbortWaker {}
 
+/// Standalone compaction must recheck cancellation after waker registration so
+/// a conforming source need not retroactively wake a late registration.
+#[test]
+fn compact_abort_rechecks_cancellation_after_waker_registration() {
+    struct AbortDuringRegistration(bool);
+    impl crate::TurnAbort for AbortDuringRegistration {
+        fn is_aborted(&mut self) -> bool {
+            self.0
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn crate::TurnAbortWaker> {
+            self.0 = true;
+            Box::new(TestAbortWaker)
+        }
+    }
+
+    let completion = std::sync::Arc::new((
+        std::sync::Mutex::new(CompactCompletion::default()),
+        std::sync::Condvar::new(),
+    ));
+    let mut abort = AbortDuringRegistration(false);
+    assert!(matches!(
+        register_compact_abort_waker(&mut abort, &completion),
+        Err(LlmError::Canceled)
+    ));
+}
+
 /// Cancellation must remain distinct from timeout on HTTP/SSE: even while a
 /// stream is stalled, a harness cancel should return typed local cancellation
 /// rather than waiting for the idle watchdog to report a provider error.

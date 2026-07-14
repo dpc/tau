@@ -10295,7 +10295,139 @@ fn standalone_auto_compaction_schedules_at_threshold() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentStandaloneCompactionStarted(started) if started.resume_through.is_some()
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.resume_through.is_some()
+                && started.trigger
+                    == tau_proto::StandaloneCompactionTrigger::AutomaticThreshold
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Typed image growth must use canonical encoded bytes plus image patches for
+/// threshold projection, then preserve the closed image result through the
+/// standalone-compaction continuation when the corrected threshold is reached.
+#[test]
+fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    seed_assistant_tool_round(&mut h, &cid, &[("call-image", "read_image")]);
+    let assistant_head = h.agents[&cid].head.expect("assistant head");
+
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode PNG fixture");
+    let image_bytes = encoded.into_inner();
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "call-image".into(),
+            tool_name: ToolName::new("read_image"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("image/png image, 2x2".to_owned()),
+            provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                tau_proto::ImageContent {
+                    media_type: tau_proto::ImageMediaType::Png,
+                    data: image_bytes.clone().into(),
+                    width: 2,
+                    height: 2,
+                    detail: tau_proto::ImageDetail::High,
+                },
+            )],
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    let result_head = h.agents[&cid].head.expect("image result head");
+    let image_entry = &h
+        .agent_store
+        .agent(&agent_id)
+        .expect("agent tree")
+        .node(result_head)
+        .expect("result node")
+        .entry;
+    let projected =
+        crate::harness::context_limit_telemetry::projected_transcript_entry_tokens(image_entry)
+            .expect("image projection");
+    let expanded = serde_json::to_vec(image_entry)
+        .expect("serialize image entry")
+        .len() as u64;
+    assert!(
+        projected < expanded,
+        "fixture must distinguish canonical from JSON-expanded image bytes"
+    );
+    let reserve = crate::harness::context_limit_telemetry::context_projection_reserve(128_000);
+    {
+        let info = h
+            .provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(projected + reserve + 1);
+    }
+    {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(0);
+        agent.context_usage_model = Some("test/model".into());
+        agent.context_usage_head = Some(assistant_head);
+    }
+    let snapshot = h.prompt_context_limit_snapshot(
+        &cid,
+        &"test/model".into(),
+        tau_proto::PromptOperation::Inference,
+    );
+    assert_eq!(
+        snapshot.transcript_delta_bytes,
+        Some(expanded),
+        "telemetry retains exact JSON-expanded bytes independently"
+    );
+    assert_eq!(
+        snapshot.projected_input_tokens,
+        Some(projected + reserve),
+        "telemetry uses the canonical image projection"
+    );
+    assert!(
+        !h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
+        "canonical image estimate remains below threshold"
+    );
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(projected + reserve);
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    let compact = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id,
+        "replacement",
+    ))
+    .expect("accept compaction");
+
+    let inference = read_nth_prompt_created(&h, 1);
+    let replayed_image = inference
+        .context
+        .flatten_iter()
+        .find_map(|item| match item {
+            ContextItem::ToolResult(result) if result.call_id.as_str() == "call-image" => {
+                result.provider_content.into_iter().next().map(|part| {
+                    let tau_proto::ToolResultContentPart::Image(image) = part;
+                    image.data
+                })
+            }
+            _ => None,
+        })
+        .expect("typed image suffix survives compaction");
+    assert_eq!(replayed_image.as_ref(), image_bytes.as_slice());
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.trigger
+                == tau_proto::StandaloneCompactionTrigger::AutomaticThreshold
     )));
     h.shutdown().expect("shutdown");
 }

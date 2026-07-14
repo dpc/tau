@@ -11,3 +11,16 @@ a route binding. The official WebSocket contract defines a valid nameless
 `codex.rate_limits` turn event as the canonical default `codex` pool; a present
 non-null malformed pool id in either optional field is rejected rather than
 ignored or reinterpreted as that default. JSON null is treated as absence.
+
+## WebSocket liveness and cancellation
+
+Fresh DNS/TCP/TLS/WebSocket upgrades race the prompt abort registry and a
+30-second deadline. Cancellation is rechecked after waker registration and after
+upgrade success. Canceled work returns the typed cancellation outcome; timeout is
+a fixed, provider-content-free status-zero error classified as retryable
+`Transport`. Failure, timeout, and cancellation all abandon the same-key pool
+reservation.
+
+The five-minute provider-frame idle watchdog begins only after a successful
+upgrade and request send; it is not the connection deadline. Revisit both bounds
+when upstream handshakes, proxy behavior, or cancellation ownership changes.

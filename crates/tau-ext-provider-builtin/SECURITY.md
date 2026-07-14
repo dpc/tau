@@ -24,5 +24,10 @@ that it is either included in a later broadcast snapshot or immediately observes
 an already-completed broadcast without a lost wakeup. Cancellation remains
 cooperative for transports that do not register an abort waker.
 
+Fresh ChatGPT WebSocket upgrades use this same linearized abort registry and a
+separate bounded provider connection deadline. Their transient connecting event
+contains only fixed status text: endpoints, account identifiers, credentials, and
+raw transport diagnostics remain inside the provider process.
+
 The worker and transport cancellation design is recorded by
 [DESIGN-tau-ext-provider-builtin-bounded-prompt-workers](specs/DESIGN-tau-ext-provider-builtin-bounded-prompt-workers.md).

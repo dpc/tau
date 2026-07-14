@@ -33,6 +33,11 @@ the same cancellation mutex: either cancellation snapshots an existing waker or
 a later old-generation registration observes the generation change and wakes
 immediately. Callbacks run after releasing the mutex.
 
+ChatGPT/Codex fresh WebSocket upgrades also register the prompt abort waker and
+are independently deadline-bounded. Before that work begins, the provider emits
+only the fixed `Connecting to provider…` status; endpoint, account, credential,
+and raw transport diagnostics remain provider-local.
+
 Built-in providers batch `provider.response_updated` output. They may emit the
 first non-empty streamed output sample promptly, then emit later non-terminal
 progress at most once per second per prompt. Worker/backend stream loops must not

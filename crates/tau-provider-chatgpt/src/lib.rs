@@ -40,10 +40,10 @@ pub mod responses;
 ///
 /// The synchronous provider loop needs a cancellation event that can wake a
 /// blocked WebSocket path. A turn may block while waiting for a same-key pool
-/// reservation or while waiting for provider events on an already-reserved
-/// socket. Implementors should register the supplied waker with their native
-/// cancellation primitive and call it when the current turn is canceled or the
-/// provider is shutting down.
+/// reservation, a fresh DNS/TCP/TLS/WebSocket upgrade, or provider events on an
+/// already-reserved socket. Implementors should register the supplied waker
+/// with their native cancellation primitive and call it when the current turn
+/// is canceled or the provider is shutting down.
 ///
 /// The cooperative wake contract is recorded in
 /// `DESIGN-tau-provider-chatgpt-cooperative-cancellation`.
@@ -54,7 +54,9 @@ pub trait TurnAbort {
     /// Register a waker for future cancellation notifications.
     ///
     /// The returned guard must unregister the waker on drop so completed turns
-    /// do not leave stale callbacks behind.
+    /// do not leave stale callbacks behind. Callers re-check
+    /// [`Self::is_aborted`] after registration, so implementations need not
+    /// notify registrations made after cancellation already became visible.
     fn register_waker(
         &mut self,
         waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
@@ -102,6 +104,16 @@ pub struct StreamDispatchResult {
     pub ws_pool_delta: Option<tau_proto::WsPoolDelta>,
 }
 
+/// Semantically disjoint live updates from one ChatGPT dispatch.
+pub enum StreamUpdate<'a> {
+    /// A fresh WebSocket upgrade is about to start. This is WebSocket-only and
+    /// may occur more than once when a logical turn replaces a failed socket.
+    Connecting,
+    /// A response-state observation for progress sampling. It may repeat
+    /// unchanged during quiet waits.
+    Response(&'a common::StreamState),
+}
+
 impl ChatGptRuntime {
     /// Create an empty ChatGPT runtime with no pooled WebSocket connections.
     #[must_use]
@@ -120,8 +132,10 @@ impl ChatGptRuntime {
     /// surfaced directly instead of silently falling back to HTTP/SSE. The
     /// `abort` source is checked before starting WS work and is also registered
     /// as a wake source while a WS turn is blocked waiting for a same-key pool
-    /// reservation or provider events; canceled turns return
-    /// [`common::LlmError::Canceled`].
+    /// reservation, a fresh DNS/TCP/TLS/WebSocket upgrade, or provider events.
+    /// Prompt cancellation and shutdown wake each wait; canceled turns return
+    /// [`common::LlmError::Canceled`]. Fresh upgrades are independently bounded
+    /// to 30 seconds.
     pub fn stream(
         &self,
         agent_prompt_id: &str,
@@ -129,7 +143,7 @@ impl ChatGptRuntime {
         request: &common::PromptPayload<'_>,
         turn_state: &mut ChatGptTurnState,
         abort: &mut impl TurnAbort,
-        on_update: &mut impl FnMut(&common::StreamState),
+        on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> Result<StreamDispatchResult, common::LlmError> {
         let ws_pool_before = self.ws_pool.stats();
         let mut transport = ProviderBackendTransport::HttpSse;
@@ -178,7 +192,9 @@ impl ChatGptRuntime {
                 }
             }
         } else {
-            responses::responses_stream(agent_prompt_id, config, request, abort, on_update)?
+            responses::responses_stream(agent_prompt_id, config, request, abort, &mut |state| {
+                on_update(StreamUpdate::Response(state))
+            })?
         };
         let ws_pool_delta = ws_pool_before.and_then(|before| {
             self.ws_pool

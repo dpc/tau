@@ -20,3 +20,10 @@ queued behind an active same-key reservation. Checkout waits on the pool
 condition variable until the busy key clears or a registered abort waker bumps
 the pool's abort-wake generation. A canceled waiter must return typed `LlmError::Canceled` instead of starting a stale network turn after the earlier same-key turn
 releases.
+
+Fresh DNS/TCP/TLS/WebSocket upgrade work uses that same abort source and a
+separate 30-second connection deadline. Cancellation races the upgrade through a
+registered wake notification; timeout is a sanitized retryable transport error.
+Either outcome abandons the same-key pool reservation before control returns to
+the prompt scheduler. This connection deadline is independent of the
+five-minute provider-frame idle watchdog.
