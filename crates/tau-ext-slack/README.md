@@ -1,8 +1,8 @@
 # tau-ext-slack
 
 First-party, disabled-by-default Slack Socket Mode text bridge (`std-slack`). It
-exposes `slack_register`, `slack_conversations`, and `slack_send`; a per-instance
-`tool_prefix` scopes all three tools and their group for multi-account deployments.
+exposes `slack_register`, `slack_conversations`, `slack_send`, and the separately
+authorized `slack_react`; a per-instance `tool_prefix` scopes all four tools and their group for multi-account deployments.
 
 ## Configuration
 
@@ -125,6 +125,23 @@ authority only. A
 static receive-enabled DM route blocks dynamic linkage for that D id; a
 proactive-only static DM does not.
 
+### Agent-invoked reactions
+
+`slack_react {message_ref, emoji, action}` is disabled by default and uses the
+separate `slack:react` policy tag. It accepts only exact Tau-issued refs from
+committed incoming create/edit envelopes or successful `slack_send` results; it
+never accepts Slack IDs, timestamps, aliases, Unicode emoji, toggle, list, or
+discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
+fail-closed across route/config/session changes. Add `reactions:write` and
+reinstall the Slack app before enabling it. Whole-group `slack` grants include
+this new externally visible mutation surface.
+
+Successful `slack_send` calls now return
+`{"status":"sent","message_ref":"slack-msg-v1-..."}` rather than the former
+plain `sent Slack message` text. The opaque ref becomes usable only after Tau
+accepts durable send completion; the short returned-before-activation window
+fails closed, and rejected/missing-ID completions never activate it.
+
 ## Slack events and scopes
 
 Every setup needs app-token scope `connections:write` and bot-token scopes
@@ -137,12 +154,13 @@ Every setup needs app-token scope `connections:write` and bot-token scopes
 | Private channel all messages and edits | `message.groups` | `groups:history` |
 | MPIM all messages and edits | `message.mpim` | `mpim:history` |
 | Static or dynamic one-to-one DM | `message.im` | `im:history` |
-| Owned-post reactions | `reaction_added`, `reaction_removed` | `reactions:read` |
+| Inbound human reactions on owned posts | `reaction_added`, `reaction_removed` | `reactions:read` |
+| Agent-invoked add/remove reactions (optional) | none | `reactions:write` |
 
-Reinstall after changing scopes/subscriptions and refresh the bot token if Slack
+Add `reactions:write` only when granting `slack_react`, then reinstall/refresh the app. Reinstall after changing scopes/subscriptions and refresh the bot token if Slack
 changes it. The app must be a member of configured conversations.
 `chat:write.public`, `channels:read`, `groups:read`, `users:read.email`,
-signing secrets, webhooks, slash commands, OAuth redirects, `reactions:write`,
+signing secrets, webhooks, slash commands, OAuth redirects,
 and file scopes are not required.
 One-to-one DMs never use `app_mention`.
 Slack `channel_id_changed` makes the exact configured id stale; Tau fails closed
@@ -194,7 +212,7 @@ sets and roles minimal; use separate roles or separately prefixed Slack instance
 when receive and proactive authority need isolation.
 
 Edits require a recent committed original with matching sender, route, and
-thread. Reactions require a recent post created through `slack_send`, matching
+thread. Inbound human reaction events require a recent post created through `slack_send`, matching
 owner, verified actor, and a covering receive route. Creates survive durable
 replay/restart dedup and can restore edit ownership when Slack retries them;
 runtime links, selections, reply routes, reaction ownership, and registrations
@@ -202,7 +220,7 @@ clear on restart. Tau prevents same-process accepted-send reposts but does not
 claim crash-safe exactly-once delivery.
 
 Configuration freezes after successful Socket Mode preflight or immediately
-before the first fully authorized Slack post attempt. Later configuration is a
+before the first fully authorized Slack post or reaction API attempt. Later configuration is a
 restart-required error, including if Slack's post result is ambiguous. Invalid
 or denied sends and failed synchronous preflight do not freeze configuration.
 

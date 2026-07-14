@@ -145,7 +145,8 @@ authorization explicit:
   [PIM README](crates/tau-ext-pim/README.md).
 - **Slack:** the disabled-by-default Socket Mode bridge accepts allowlisted
   senders and configured conversations, preserves typed message provenance, and
-  limits replies and proactive sends to authorized routes. See the
+  limits replies, proactive sends, and separately authorized exact-message
+  emoji reactions to authorized routes. See the
   [Slack README](crates/tau-ext-slack/README.md).
 - **Telegram:** the disabled-by-default bot bridge connects allowlisted users
   to explicitly registered agents. An experimental local gateway can own one

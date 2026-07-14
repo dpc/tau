@@ -44,10 +44,30 @@ struct SentMessage {
     thread_ts: Option<String>,
 }
 
+/// One exact outbound reaction call recorded by the fake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedReaction {
+    /// Explicit operation.
+    action: ReactionActionKind,
+    /// Native target conversation kept test-private.
+    channel_id: String,
+    /// Native exact item timestamp.
+    message_ts: String,
+    /// Strict emoji name.
+    emoji: String,
+}
+
 struct FakeClient {
+    /// Recorded outbound messages.
     sent: Mutex<Vec<SentMessage>>,
+    /// Socket-open call count.
     open_count: Mutex<usize>,
+    /// Authentication call count.
     auth_count: Mutex<usize>,
+    /// Recorded outbound reaction calls.
+    reactions: Mutex<Vec<RecordedReaction>>,
+    /// Scripted typed reaction outcomes.
+    reaction_results: Mutex<VecDeque<Result<(), ReactionApiError>>>,
 }
 
 impl FakeClient {
@@ -56,6 +76,8 @@ impl FakeClient {
             sent: Mutex::new(Vec::new()),
             open_count: Mutex::new(0),
             auth_count: Mutex::new(0),
+            reactions: Mutex::new(Vec::new()),
+            reaction_results: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -77,6 +99,14 @@ impl FakeClient {
             .iter()
             .map(|message| message.thread_ts.clone())
             .collect()
+    }
+
+    /// Script one reaction result in call order.
+    fn push_reaction_result(&self, result: Result<(), ReactionApiError>) {
+        self.reaction_results
+            .lock()
+            .expect("lock")
+            .push_back(result);
     }
 }
 
@@ -113,6 +143,133 @@ impl SlackClient for FakeClient {
             ts: format!("{}.0", sent.len()),
             thread_ts: None,
         })
+    }
+
+    fn react(
+        &self,
+        _cfg: &RuntimeConfig,
+        action: ReactionActionKind,
+        channel_id: &str,
+        message_ts: &str,
+        emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        self.reactions.lock().expect("lock").push(RecordedReaction {
+            action,
+            channel_id: channel_id.to_owned(),
+            message_ts: message_ts.to_owned(),
+            emoji: emoji.to_owned(),
+        });
+        self.reaction_results
+            .lock()
+            .expect("lock")
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+}
+
+/// Fake whose reaction call blocks until the test releases a lifecycle race.
+struct BlockingReactionClient {
+    /// Signals that Slack I/O has begun.
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    /// Release signal consumed by the blocked call.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+/// Fake whose post call blocks until the test releases a lifecycle race.
+struct BlockingSendClient {
+    /// Signals that Slack I/O has begun.
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    /// Release signal consumed by the blocked call.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl SlackClient for BlockingSendClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("not used")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("not used")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        unreachable!("not used")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        if let Some(started) = self.started.lock().expect("started lock").take() {
+            started.send(()).expect("signal started");
+        }
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("release send");
+        Ok(PostedMessage {
+            channel_id: channel_id.to_owned(),
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        })
+    }
+
+    fn react(
+        &self,
+        _cfg: &RuntimeConfig,
+        _action: ReactionActionKind,
+        _channel_id: &str,
+        _message_ts: &str,
+        _emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        unreachable!("not used")
+    }
+}
+
+impl SlackClient for BlockingReactionClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("not used")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("not used")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        unreachable!("not used")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        unreachable!("not used")
+    }
+
+    fn react(
+        &self,
+        _cfg: &RuntimeConfig,
+        _action: ReactionActionKind,
+        _channel_id: &str,
+        _message_ts: &str,
+        _emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        if let Some(started) = self.started.lock().expect("started lock").take() {
+            started.send(()).expect("signal started");
+        }
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("release reaction");
+        Ok(())
     }
 }
 
@@ -417,6 +574,22 @@ fn message_args(value: &str) -> CborValue {
     ])
 }
 
+/// Build strict outbound reaction arguments.
+fn reaction_args(message_ref: &str, emoji: &str, action: &str) -> CborValue {
+    CborValue::Map(vec![
+        example_field("message_ref", example_text(message_ref)),
+        example_field("emoji", example_text(emoji)),
+        example_field("action", example_text(action)),
+    ])
+}
+
+/// Create an invocation with an explicit call id for replay tests.
+fn tool_call(name: &str, agent: &str, call_id: &str, args: CborValue) -> ToolStarted {
+    let mut invoke = tool(name, agent, args);
+    invoke.call_id = call_id.into();
+    invoke
+}
+
 fn valid_config_message() -> HarnessOutputMessage {
     let mut secrets = BTreeMap::new();
     secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
@@ -513,6 +686,25 @@ fn generic_prefixes_scope_slack_instances() {
                     .tags
                     .iter()
                     .any(|tag| tag.as_str() == REGISTER_TOOL_TAG)
+        }));
+        assert!(registrations.iter().any(|registration| {
+            registration.tool.name.as_str() == format!("{prefix}_{REACT_TOOL_NAME}")
+                && !registration.tool.enabled_by_default
+                && registration.tool_group.as_ref().is_some_and(|group| {
+                    group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
+                })
+                && registration
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == REACT_TOOL_TAG)
+                && registration
+                    .tool
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| {
+                        description.contains(&format!("{prefix}_{SEND_TOOL_NAME}"))
+                    })
         }));
         assert!(registrations.iter().any(|registration| {
             registration.tool.name.as_str() == format!("{prefix}_{SEND_TOOL_NAME}")
@@ -1139,6 +1331,9 @@ fn slack_tools_have_group_and_tags() {
             .iter()
             .any(|tag| tag.as_str() == SEND_TOOL_TAG)
     );
+    let react = react_tool_spec();
+    assert!(!react.enabled_by_default);
+    assert!(react.tags.iter().any(|tag| tag.as_str() == REACT_TOOL_TAG));
 }
 
 /// Provider-owned repair examples must remain schema-valid as Slack tool
@@ -1149,10 +1344,337 @@ fn slack_tool_examples_are_schema_valid() {
         register_tool_spec(),
         conversations_tool_spec(),
         send_tool_spec(),
+        react_tool_spec(),
     ] {
         tau_core::validate_tool_examples(&spec)
             .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
     }
+}
+
+/// Outbound emoji parsing is strict and never normalizes model input.
+#[test]
+fn outbound_reaction_emoji_validation_is_strict() {
+    for valid in ["eyes", "thumbsup", "+1", "wave::skin-tone-3"] {
+        assert!(valid_outbound_emoji(valid), "{valid}");
+    }
+    for invalid in [
+        "",
+        ":eyes:",
+        "Eyes",
+        "👀",
+        "wave::skin-tone-1",
+        "wave::skin-tone-7",
+        "wave:skin-tone-3",
+        "a::skin-tone-3::skin-tone-4",
+    ] {
+        assert!(!valid_outbound_emoji(invalid), "{invalid}");
+    }
+    assert!(!valid_outbound_emoji(&"a".repeat(65)));
+}
+
+/// Committed incoming creates become exact targets; local ownership gates
+/// removal and same-call replay never repeats Slack I/O.
+#[test]
+fn reaction_target_ownership_and_replay_are_bounded() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let message = slack_message("C123", None, "<@UBOT123> react here");
+    let expected_ts = message.ts.clone().expect("timestamp");
+    ext.process_slack_message(message);
+    let prompt = recv_prompt_request(&rx);
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .reaction_targets
+            .contains_key("msg-react")
+    );
+    activate_ingress_route(&ext, &prompt, "msg-react");
+
+    let add = tool_call(
+        REACT_TOOL_NAME,
+        "agent-a",
+        "react-add",
+        reaction_args("msg-react", "eyes", "add"),
+    );
+    assert!(matches!(
+        ext.handle_react(add.clone()),
+        Event::ToolResult(_)
+    ));
+    assert!(matches!(ext.handle_react(add), Event::ToolResult(_)));
+    assert_eq!(
+        client.reactions.lock().expect("lock").as_slice(),
+        &[RecordedReaction {
+            action: ReactionActionKind::Add,
+            channel_id: "C123".to_owned(),
+            message_ts: expected_ts.clone(),
+            emoji: "eyes".to_owned(),
+        }]
+    );
+
+    let other_remove = tool_call(
+        REACT_TOOL_NAME,
+        "agent-b",
+        "react-other",
+        reaction_args("msg-react", "eyes", "remove"),
+    );
+    assert!(matches!(
+        ext.handle_react(other_remove),
+        Event::ToolError(_)
+    ));
+    assert_eq!(client.reactions.lock().expect("lock").len(), 1);
+
+    let remove = tool_call(
+        REACT_TOOL_NAME,
+        "agent-a",
+        "react-remove",
+        reaction_args("msg-react", "eyes", "remove"),
+    );
+    assert!(matches!(ext.handle_react(remove), Event::ToolResult(_)));
+    assert_eq!(client.reactions.lock().expect("lock").len(), 2);
+    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+}
+
+/// `already_reacted` never adopts an unowned shared-bot reaction, while an
+/// owned `no_reaction` remove clears stale local ownership.
+#[test]
+fn reaction_idempotency_errors_respect_local_ownership() {
+    let (ext, _rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.insert_reply_route(
+            MessageId::new("msg-react"),
+            ReplyRoute {
+                agent_id: agent_id("agent-a"),
+                conversation: SlackConversation {
+                    channel_id: "C123".to_owned(),
+                    thread_ts: None,
+                    kind: ConversationPolicyKind::Channel,
+                    alias: "team".to_owned(),
+                },
+                user_id: "U123".to_owned(),
+                policy_status: SenderPolicyStatus::Allowlisted,
+            },
+        );
+        let conversation = state
+            .reply_routes
+            .get(&MessageId::new("msg-react"))
+            .expect("route")
+            .conversation
+            .clone();
+        assert!(state.insert_reaction_target(
+            "msg-react".to_owned(),
+            ReactionTarget {
+                agent_id: agent_id("agent-a"),
+                conversation,
+                message_ts: "1.0".to_owned(),
+                authority: ReactionAuthority::Source {
+                    message_id: MessageId::new("msg-react"),
+                    user_id: "U123".to_owned(),
+                },
+            },
+        ));
+    }
+    client.push_reaction_result(Err(ReactionApiError::AlreadyReacted));
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "already",
+            reaction_args("msg-react", "eyes", "add"),
+        )),
+        Event::ToolError(_)
+    ));
+    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+
+    client.push_reaction_result(Ok(()));
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "add-ok",
+            reaction_args("msg-react", "eyes", "add"),
+        )),
+        Event::ToolResult(_)
+    ));
+    client.push_reaction_result(Err(ReactionApiError::NoReaction));
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "remove-missing",
+            reaction_args("msg-react", "eyes", "remove"),
+        )),
+        Event::ToolResult(_)
+    ));
+    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+    client.push_reaction_result(Err(ReactionApiError::OutcomeUnknown));
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "ambiguous-add",
+            reaction_args("msg-react", "wave", "add"),
+        )),
+        Event::ToolError(_)
+    ));
+    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+}
+
+/// Malformed fields, native selectors, unknown refs, and ambiguous failures
+/// fail closed without ownership adoption or automatic retry.
+#[test]
+fn reaction_validation_and_ambiguous_failure_are_fail_closed() {
+    let (ext, _rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    for (index, args) in [
+        reaction_args("C123", "eyes", "add"),
+        reaction_args("", "eyes", "add"),
+        reaction_args("msg", ":eyes:", "add"),
+        reaction_args("msg", "eyes", "toggle"),
+        CborValue::Map(vec![
+            example_field("message_ref", example_text("msg")),
+            example_field("emoji", example_text("eyes")),
+            example_field("action", example_text("add")),
+            example_field("timestamp", example_text("1.0")),
+        ]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(matches!(
+            ext.handle_react(tool_call(
+                REACT_TOOL_NAME,
+                "agent-a",
+                &format!("invalid-{index}"),
+                args,
+            )),
+            Event::ToolError(_)
+        ));
+    }
+    assert!(client.reactions.lock().expect("lock").is_empty());
+}
+
+/// A Slack success arriving after session teardown cannot recreate ownership or
+/// replay state, even though the remote effect may have happened.
+#[test]
+fn late_reaction_success_after_shutdown_cannot_restore_state() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingReactionClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output, _output_rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(client, output));
+    apply_test_config(&ext, cfg());
+    register_agent(&ext, "agent-a");
+    {
+        let mut state = ext.state.lock().expect("state");
+        let conversation = SlackConversation {
+            channel_id: "C123".to_owned(),
+            thread_ts: None,
+            kind: ConversationPolicyKind::Channel,
+            alias: "team".to_owned(),
+        };
+        state.insert_reply_route(
+            MessageId::new("msg-late"),
+            ReplyRoute {
+                agent_id: agent_id("agent-a"),
+                conversation: conversation.clone(),
+                user_id: "U123".to_owned(),
+                policy_status: SenderPolicyStatus::Allowlisted,
+            },
+        );
+        assert!(state.insert_reaction_target(
+            "msg-late".to_owned(),
+            ReactionTarget {
+                agent_id: agent_id("agent-a"),
+                conversation,
+                message_ts: "1.0".to_owned(),
+                authority: ReactionAuthority::Source {
+                    message_id: MessageId::new("msg-late"),
+                    user_id: "U123".to_owned(),
+                },
+            },
+        ));
+    }
+    let worker = {
+        let ext = ext.clone();
+        std::thread::spawn(move || {
+            ext.handle_react(tool_call(
+                REACT_TOOL_NAME,
+                "agent-a",
+                "late-reaction",
+                reaction_args("msg-late", "eyes", "add"),
+            ))
+        })
+    };
+    started_rx.recv().expect("reaction started");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.capability_active = false;
+        state.clear_reply_routes();
+        state.clear_reaction_state();
+    }
+    release_tx.send(()).expect("release reaction");
+    assert!(matches!(
+        worker.join().expect("worker"),
+        Event::ToolError(_)
+    ));
+    let state = ext.state.lock().expect("state");
+    assert!(state.reaction_owners.is_empty());
+    assert!(state.reaction_attempts.is_empty());
+    assert!(state.reaction_in_flight.is_empty());
+}
+
+/// A Slack post returning after shutdown cannot recreate a send attempt,
+/// pending completion, posted-message owner, or reaction target.
+#[test]
+fn late_send_success_after_shutdown_cannot_restore_state() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingSendClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output, _output_rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(client, output));
+    apply_test_config(&ext, proactive_cfg());
+    let worker = {
+        let ext = ext.clone();
+        std::thread::spawn(move || {
+            ext.handle_send(tool_call(
+                SEND_TOOL_NAME,
+                "agent-a",
+                "late-send",
+                tau_proto::json_to_cbor(&serde_json::json!({
+                    "message": "late",
+                    "destination": "team-ops"
+                })),
+            ))
+        })
+    };
+    started_rx.recv().expect("send started");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.capability_active = false;
+        state.sends_in_flight.clear();
+        state.pending_posts.clear();
+        state.clear_accepted_send_attempts();
+        state.clear_reaction_state();
+    }
+    release_tx.send(()).expect("release send");
+    assert!(matches!(
+        worker.join().expect("worker"),
+        Some(Event::ToolError(_))
+    ));
+    let state = ext.state.lock().expect("state");
+    assert!(state.sends_in_flight.is_empty());
+    assert!(state.pending_posts.is_empty());
+    assert!(state.accepted_send_attempts.is_empty());
+    assert!(state.reaction_targets.is_empty());
 }
 
 /// The send tool schema and runtime validation must not allow model-selected
@@ -1214,6 +1736,38 @@ fn proactive_send_uses_exact_configured_route_without_registration() {
         tau_proto::TransportSendAuthorization::ConfiguredDestination { ref alias }
             if alias == "incident-thread"
     ));
+    let message_ref = tau_proto::cbor_text_field(&request.tool_result.result, "message_ref")
+        .expect("structured send message_ref")
+        .to_owned();
+    assert!(message_ref.starts_with("slack-msg-v1-"));
+    assert!(!message_ref.contains("G789"));
+    assert!(!message_ref.contains("1720000000"));
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .reaction_targets
+            .contains_key(&message_ref),
+        "returned ref must fail closed before completion"
+    );
+    apply_output_message(
+        &HarnessOutputMessage::CompleteTransportSendResult(
+            tau_proto::CompleteTransportSendResult {
+                request_id: request.request_id,
+                message_id: Some(MessageId::new("msg-outgoing")),
+                accepted: true,
+                error: None,
+            },
+        ),
+        &ext,
+    );
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .reaction_targets
+            .contains_key(&message_ref)
+    );
 }
 
 /// Enabling `prefix_agent_id` retains the legacy prefix for both source replies
@@ -2988,6 +3542,130 @@ fn users_info_uses_form_encoding() {
             .expect("form-encoded users.info")
     );
     server.join().expect("users.info test server");
+}
+
+/// Reaction methods use only the exact JSON endpoint, bearer header, and three
+/// approved body fields; add/remove do not send text, thread, or file
+/// selectors.
+#[test]
+fn reactions_use_exact_json_wire_contract() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let address = listener.local_addr().expect("test API address");
+    let server = std::thread::spawn(move || {
+        for (method, emoji) in [("reactions.add", "eyes"), ("reactions.remove", "+1")] {
+            let (mut stream, _) = listener.accept().expect("accept reaction request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let length = stream.read(&mut chunk).expect("read reaction request");
+                request.extend_from_slice(&chunk[..length]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .expect("content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with(&format!("POST /api/{method} HTTP/1.1\r\n")));
+            assert!(request.contains("authorization: Bearer xoxb-test\r\n"));
+            assert!(request.contains("content-type: application/json\r\n"));
+            let body = request.split("\r\n\r\n").nth(1).expect("JSON body");
+            let value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+            assert_eq!(
+                value,
+                serde_json::json!({"channel":"C123","timestamp":"1.0","name":emoji})
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{{\"ok\":true}}"
+            )
+            .expect("write reaction response");
+        }
+    });
+    let cfg = RuntimeConfig {
+        api_base: format!("http://{address}/api"),
+        ..cfg()
+    };
+    let client = HttpSlackClient::default();
+    client
+        .react(&cfg, ReactionActionKind::Add, "C123", "1.0", "eyes")
+        .expect("add");
+    client
+        .react(&cfg, ReactionActionKind::Remove, "C123", "1.0", "+1")
+        .expect("remove");
+    server.join().expect("reaction test server");
+}
+
+/// Reaction failures expose only typed safe categories: rate limits are
+/// clamped, missing scope is actionable, and ambiguous bodies never leak.
+#[test]
+fn reaction_http_errors_are_typed_and_body_safe() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let address = listener.local_addr().expect("test API address");
+    let server = std::thread::spawn(move || {
+        for response in [
+            "HTTP/1.1 429 Too Many Requests\r\nretry-after: 999999\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\ncontent-length: 36\r\nconnection: close\r\n\r\n{\"ok\":false,\"error\":\"missing_scope\"}",
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 40\r\nconnection: close\r\n\r\nxoxb-secret CSECRET 123.456 raw body",
+        ] {
+            let (mut stream, _) = listener.accept().expect("accept reaction request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        }
+    });
+    let cfg = RuntimeConfig {
+        api_base: format!("http://{address}/api"),
+        ..cfg()
+    };
+    let client = HttpSlackClient::default();
+    assert_eq!(
+        client.react(&cfg, ReactionActionKind::Add, "C123", "1.0", "eyes"),
+        Err(ReactionApiError::RateLimited(3_600))
+    );
+    assert_eq!(
+        client.react(&cfg, ReactionActionKind::Add, "C123", "1.0", "eyes"),
+        Err(ReactionApiError::MissingScope)
+    );
+    assert_eq!(
+        client.react(&cfg, ReactionActionKind::Add, "C123", "1.0", "eyes"),
+        Err(ReactionApiError::OutcomeUnknown)
+    );
+    server.join().expect("reaction error server");
+    for error in [
+        reaction_error_message(
+            Some(ReactionApiError::RateLimited(3_600)),
+            ReactionActionKind::Add,
+            true,
+            false,
+        ),
+        reaction_error_message(
+            Some(ReactionApiError::MissingScope),
+            ReactionActionKind::Add,
+            true,
+            false,
+        ),
+        reaction_error_message(
+            Some(ReactionApiError::OutcomeUnknown),
+            ReactionActionKind::Add,
+            true,
+            false,
+        ),
+    ] {
+        assert!(!error.contains("xoxb-secret"));
+        assert!(!error.contains("CSECRET"));
+        assert!(!error.contains("123.456"));
+        assert!(!error.contains("raw body"));
+    }
 }
 
 /// Reactions from unauthorized users, unconfigured conversations, or messages

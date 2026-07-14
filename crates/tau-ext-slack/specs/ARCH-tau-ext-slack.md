@@ -3,7 +3,8 @@
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md). Conversation policy follows [DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
 
 `std-slack` is a disabled-by-default Socket Mode text bridge exposing scoped
-`slack_register`, `slack_conversations`, and `slack_send` tools. Configuration validates one exact
+`slack_register`, `slack_conversations`, `slack_send`, and separately authorized
+default-off `slack_react` tools. Configuration validates one exact
 conversation-route list into alias, parent-receive, thread-receive, and
 proactive-alias indexes. Routes carry explicit channel/MPIM/DM kind and optional
 fixed root. A bounded runtime map holds exact dynamic D-to-U/W links.
@@ -51,7 +52,7 @@ repost, without claiming crash-safe exactly-once delivery.
 
 Configuration has a monotonic freeze latch. Successful auth/socket preflight
 freezes the worker snapshot before activation; otherwise the first fully
-authorized post freezes under the state lock before Slack I/O. Invalid sends and
+authorized post or reaction freezes under the state lock before Slack I/O. Invalid calls and
 failed synchronous preflight do not freeze. Invalid pre-freeze replacement
 clears inactive authority and capability metadata.
 
@@ -67,3 +68,14 @@ Admission authority follows
 Socket lifecycle, rejection logging, diagnostics, token redaction, HTTPS/WSS
 requirements, and shutdown are fail-closed and identifier-free as described in
 the [README](../README.md).
+
+## Agent-invoked reactions
+
+The disabled-by-default `slack_react` (`slack:react`) tool mutates only exact,
+commit-accepted Tau-issued message references. Native Slack identifiers remain
+private. Targets, same-agent reaction ownership, in-flight reservations, and
+ToolCallId attempts are bounded runtime state and are revalidated against the
+current extension, capability, agent, session, route, dynamic link, and config
+on every call. `slack_send` returns a collision-resistant opaque `message_ref`
+that activates only after accepted durable completion. See
+[DESIGN-tau-ext-slack-agent-reactions](DESIGN-tau-ext-slack-agent-reactions.md).

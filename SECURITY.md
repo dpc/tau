@@ -50,6 +50,8 @@ The Slack bridge requires exact configured conversation/kind/thread policy and
 verified live-human admission. Receive permission creates only opaque
 source-bound reply authority; proactive permission is a separate alias-only
 grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
+The separately authorized, default-off Slack reaction tool accepts only commit-accepted opaque exact-message refs, requires current route and role authority, and permits removal only of same-agent runtime-owned reactions. It adds `reactions:write` without reaction listing; reactions are externally visible and can trigger notifications or workflows.
+
 The separately authorized Slack discovery tool reveals all static model-facing
 aliases and configured policy, including receive-only routes, but excludes native
 routes, dynamic links, identities, runtime state, and Slack-fetched metadata.

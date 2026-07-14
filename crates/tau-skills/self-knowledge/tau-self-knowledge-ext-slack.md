@@ -7,8 +7,8 @@ advertise: false
 # Tau std-slack extension self-knowledge
 
 `std-slack` is Tau's disabled-by-default Slack Socket Mode bridge. It exposes
-`slack_register`, `slack_conversations`, and `slack_send`; `tool_prefix` scopes
-all three tools and their group for multiple accounts. Slack text is always
+`slack_register`, `slack_conversations`, `slack_send`, and default-off `slack_react`; `tool_prefix` scopes
+all four tools and their group for multiple accounts. Slack text is always
 untrusted external content.
 
 Configuration requires app/bot token secrets, nonempty exact U/W
@@ -42,7 +42,8 @@ Every setup needs `connections:write`, `users:read`, and `chat:write`. Add:
 | Private all/edit | `message.groups` | `groups:history` |
 | MPIM all/edit | `message.mpim` | `mpim:history` |
 | DM | `message.im` | `im:history` |
-| Owned reactions | `reaction_added`, `reaction_removed` | `reactions:read` |
+| Inbound owned-post reactions | `reaction_added`, `reaction_removed` | `reactions:read` |
+| Optional agent add/remove reactions | none | `reactions:write` |
 
 Reinstall after scope/event changes and invite the app to every route.
 `chat:write.public` is unnecessary. DMs never use `app_mention`.
@@ -75,7 +76,7 @@ Untrusted receive content can influence such a role, so keep destination sets an
 roles minimal; use separate roles or prefixed extension instances for isolation.
 
 Configuration freezes after successful Socket Mode preflight or immediately
-before an authorized post; restart Tau to change it. Failed preflight and denied
+before an authorized post or reaction API attempt; restart Tau to change it. Failed preflight and denied
 sends remain reconfigurable. Runtime links/routes/selections clear on restart;
 durable native create dedup survives and Slack retries can restore edit
 ownership. Logs and notices omit payloads, ids, websocket URLs, and tokens.
@@ -86,3 +87,19 @@ and ensure app/bot tokens share one workspace installation. `missing_scope`
 identifies the required scope. `channel_id_changed` makes an exact route stale;
 update it and restart. Missing edits/reactions additionally require the broad
 message event or both reaction events plus `reactions:read`.
+
+## Agent reactions
+
+Grant `slack_react` or `slack:react` separately (it is disabled by default). It
+accepts `{message_ref, emoji, action: add|remove}` only for exact committed
+incoming create/edit refs or opaque refs returned by successful `slack_send`.
+It accepts no native IDs, aliases, Unicode emoji, list, toggle, or discovery.
+Removal is limited to same-agent reactions unambiguously added in the current
+runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
+target conversations. Whole Slack-group grants now include this surface.
+
+Successful `slack_send` results use
+`{"status":"sent","message_ref":"slack-msg-v1-..."}` (replacing the former
+plain-text success). The ref activates only after durable completion acceptance,
+so an immediate call can briefly fail closed and rejected completions remain
+permanently ineligible.
