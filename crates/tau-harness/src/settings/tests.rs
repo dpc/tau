@@ -427,6 +427,81 @@ fn resolve_extensions_adds_user_extension_keys() {
     assert!(mything.role.is_none());
 }
 
+/// Ensures a renamed bundled extension can omit `command` and piggyback on the
+/// running Tau executable while retaining its independent tool namespace.
+#[test]
+fn resolve_extensions_user_suffix_piggybacks_on_current_tau_executable() {
+    let mut settings = HarnessSettings::built_in();
+    let tool_prefix = tau_proto::ToolNamePrefix::parse("fedi").expect("tool prefix");
+    settings.extensions.insert(
+        "fedi-slack".into(),
+        ExtensionEntry {
+            suffix: Some(vec!["component".into(), "ext-slack".into()]),
+            role: Some("tool".into()),
+            tool_prefix: Some(Some(tool_prefix.clone())),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions(&settings, builtins()).expect("resolve");
+    let extension = resolved
+        .iter()
+        .find(|extension| extension.name == "fedi-slack")
+        .expect("renamed Slack extension");
+
+    assert_eq!(extension.command, current_tau_executable());
+    assert_eq!(extension.args, ["component", "ext-slack"]);
+    assert_eq!(extension.role.as_deref(), Some("tool"));
+    assert_eq!(extension.tool_prefix.as_ref(), Some(&tool_prefix));
+}
+
+/// Ensures wrappers cannot silently become the executable when the actual
+/// command and Tau-piggyback suffix are both absent.
+#[test]
+fn resolve_extensions_prefix_only_entry_has_empty_command_error() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "prefix-only".into(),
+        ExtensionEntry {
+            prefix: Some(vec!["ssh".into(), "host".into()]),
+            ..Default::default()
+        },
+    );
+
+    let error = resolve_extensions(&settings, builtins()).expect_err("must reject prefix only");
+
+    assert_eq!(
+        error,
+        ResolveExtensionsError::EmptyCommand("prefix-only".to_owned())
+    );
+    let message = error.to_string();
+    assert!(message.contains("extensions.prefix-only.command"));
+    assert!(message.contains("extensions.prefix-only.suffix"));
+}
+
+/// Ensures an explicitly empty command remains invalid rather than acquiring
+/// omitted-command piggyback semantics from a non-empty suffix.
+#[test]
+fn resolve_extensions_explicit_empty_command_does_not_piggyback() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "explicit-empty".into(),
+        ExtensionEntry {
+            command: Some(Vec::new()),
+            suffix: Some(vec!["component".into(), "ext-test-dummy".into()]),
+            ..Default::default()
+        },
+    );
+
+    let error =
+        resolve_extensions(&settings, builtins()).expect_err("explicit empty command must fail");
+
+    assert_eq!(
+        error,
+        ResolveExtensionsError::EmptyCommand("explicit-empty".to_owned())
+    );
+}
+
 #[test]
 fn resolve_extensions_empty_entry_does_not_re_enable_disabled_builtin() {
     // `extensions: { "test-dummy": {} }` MUST leave the

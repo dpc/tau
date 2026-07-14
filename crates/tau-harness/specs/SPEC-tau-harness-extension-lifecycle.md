@@ -127,6 +127,15 @@ failures, including failures reported before a terminal UI subscribes.
 
 ## Optional extension startup
 
+Extension command resolution validates the command slot before flattening the
+wrapper `prefix`, command, and `suffix` into process argv. A nonempty explicit
+command is preserved. For a user-added entry with omitted `command` and a
+nonempty `suffix`, the resolver uses the current Tau executable as the command
+so renamed bundled-component instances can piggyback on Tau. Explicit
+`command: []`, omitted command with an empty suffix, and prefix-only entries are
+invalid; a wrapper prefix cannot become the executable. Built-in command
+defaults and nonempty explicit custom commands retain their existing behavior.
+
 Extension startup availability is controlled by resolved `ExtensionConfig.require`.
 Required extensions preserve startup-fatal behavior for harness-owned init
 failures such as missing commands, missing required declared secrets, spawn

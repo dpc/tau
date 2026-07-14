@@ -109,9 +109,10 @@ pub struct BuiltinExtension {
 /// Error returned by [`resolve_extensions`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveExtensionsError {
-    /// A required enabled extension entry resolved to an empty argv, leaving no
-    /// executable to spawn. Optional empty-argv entries are omitted with
-    /// startup diagnostics instead.
+    /// A required enabled extension has no valid command-slot executable.
+    /// Optional entries with the same invalid command slot are omitted with
+    /// startup diagnostics instead. An argv wrapper prefix cannot satisfy this
+    /// requirement.
     EmptyCommand(String),
     /// A CLI override named an extension absent from built-ins and user config.
     UnknownCliOverride(String),
@@ -124,7 +125,7 @@ impl fmt::Display for ResolveExtensionsError {
         match self {
             Self::EmptyCommand(name) => write!(
                 f,
-                "required extension {name:?} resolved to an empty command; set `extensions.{name}.command` or disable the extension",
+                "required extension {name:?} has an empty `extensions.{name}.command`; set it to an executable, omit it and set a non-empty `extensions.{name}.suffix` to run a Tau subcommand, or disable the extension",
             ),
             Self::UnknownCliOverride(name) => {
                 write!(f, "unknown extension in CLI override: `{name}`")
@@ -143,7 +144,10 @@ impl std::error::Error for ResolveExtensionsError {}
 #[derive(Debug)]
 struct ResolvedExtension {
     prefix: Vec<String>,
-    command: Vec<String>,
+    /// Presence-aware command slot. `None` permits current-Tau piggybacking
+    /// when `suffix` is nonempty; `Some([])` is an explicitly invalid empty
+    /// command.
+    command: Option<Vec<String>>,
     suffix: Vec<String>,
     enable: bool,
     require: bool,
@@ -165,12 +169,18 @@ struct ResolvedExtension {
 ///   `require` fields both default to `true`.
 /// - Entries with a resolved `enable: false` are dropped before command
 ///   validation, secret resolution, and spawn.
-/// - Enabled required entries with empty argv are fatal. Enabled optional
-///   entries with empty argv are omitted and reported through diagnostics by
+/// - A nonempty explicit command is preserved. An omitted command with a
+///   nonempty suffix uses the current Tau executable; an explicit empty command
+///   or omitted command with an empty suffix is invalid. `prefix` wraps a valid
+///   command but cannot replace it.
+/// - Enabled required entries with invalid command slots are fatal. Enabled
+///   optional entries with invalid command slots are omitted and reported
+///   through diagnostics by
 ///   [`resolve_extensions_with_cli_overrides_and_diagnostics`].
 ///
-/// Returns `Err` for enabled required entries that end up with empty resolved
-/// argv after the merge. Disabled user-added entries are inert and are
+/// Returns `Err` for enabled required entries that end up without a valid
+/// command-slot executable after the merge. Disabled user-added entries are
+/// inert and are
 /// dropped before command validation. This wrapper discards diagnostics for
 /// optional skipped entries; startup code should call
 /// [`resolve_extensions_with_cli_overrides_and_diagnostics`] when those
@@ -254,7 +264,7 @@ impl ResolvedExtension {
     fn from_builtin(builtin: BuiltinExtension) -> Self {
         Self {
             prefix: builtin.prefix,
-            command: builtin.command,
+            command: Some(builtin.command),
             suffix: builtin.suffix,
             enable: builtin.enable,
             require: builtin.require,
@@ -269,7 +279,7 @@ impl ResolvedExtension {
     fn from_user_entry(user: &ExtensionEntry) -> Self {
         Self {
             prefix: user.prefix.clone().unwrap_or_default(),
-            command: user.command.clone().unwrap_or_default(),
+            command: user.command.clone(),
             suffix: user.suffix.clone().unwrap_or_default(),
             enable: user.enable.unwrap_or(true),
             require: user.require.unwrap_or(true),
@@ -289,7 +299,7 @@ impl ResolvedExtension {
             self.prefix = prefix.clone();
         }
         if let Some(command) = user.command.as_ref() {
-            self.command = command.clone();
+            self.command = Some(command.clone());
             // Setting `command` replaces the built-in's full argv tail.
             // `suffix` is cleared so users overriding only `command`
             // don't accidentally inherit the built-in's subcommand
@@ -327,15 +337,21 @@ impl ResolvedExtension {
         self,
         name: String,
     ) -> Result<Option<ExtensionConfig>, ResolveExtensionsError> {
-        let mut argv = self.prefix;
-        argv.extend(self.command);
-        argv.extend(self.suffix);
-        let Some((program, args)) = split_extension_argv(argv) else {
-            if self.require {
-                return Err(ResolveExtensionsError::EmptyCommand(name));
+        let command = match self.command {
+            Some(command) if !command.is_empty() => command,
+            None if !self.suffix.is_empty() => vec![current_tau_executable()],
+            Some(_) | None => {
+                if self.require {
+                    return Err(ResolveExtensionsError::EmptyCommand(name));
+                }
+                return Ok(None);
             }
-            return Ok(None);
         };
+        let mut argv = self.prefix;
+        argv.extend(command);
+        argv.extend(self.suffix);
+        let (program, args) =
+            split_extension_argv(argv).expect("validated command makes argv non-empty");
 
         Ok(Some(ExtensionConfig {
             name,
@@ -436,6 +452,12 @@ fn resolved_extension_entries(
 fn split_extension_argv(argv: Vec<String>) -> Option<(String, Vec<String>)> {
     let (program, args) = argv.split_first()?;
     Some((program.clone(), args.to_vec()))
+}
+
+fn current_tau_executable() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "tau".to_owned())
 }
 
 fn push_optional_empty_command_diagnostic(
@@ -560,9 +582,7 @@ pub(crate) fn parse_extension_cli_overrides_transport(
 /// performs the parse step.
 #[must_use]
 pub fn builtin_extensions() -> Vec<BuiltinExtension> {
-    let tau_binary = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "tau".to_owned());
+    let tau_binary = current_tau_executable();
 
     built_in_extension_defs()
         .iter()
@@ -630,7 +650,7 @@ pub(crate) fn built_in_extension_defs() -> &'static [BuiltInExtensionDef] {
 #[must_use]
 pub fn default_config() -> Config {
     // `resolve_extensions` is fallible only for enabled required entries with
-    // empty resolved argv. The built-in settings have no user entries or
+    // invalid command slots. The built-in settings have no user entries or
     // overrides, and the hard-coded `builtin_extensions()` list resolves to
     // non-empty commands, so the failure path is unreachable.
     let extensions = match resolve_extensions(&HarnessSettings::built_in(), builtin_extensions()) {

@@ -1399,9 +1399,10 @@ pub struct ExtensionEntry {
 
     /// argv of the extension itself. `command[0]` is the executable;
     /// the rest are arguments. For built-in extensions this defaults
-    /// to `[<current-exe>]`; for new entries this must be set
-    /// explicitly. Tau-piggybacking entries can omit `command` and
-    /// use `suffix` to pick the subcommand on the running tau binary.
+    /// to `[<current-exe>]`. A new entry may provide a nonempty command
+    /// explicitly, or omit `command` and provide a nonempty `suffix` to run
+    /// that suffix as a subcommand of the current Tau executable. An explicit
+    /// empty command is invalid and does not enable piggybacking.
     pub command: Option<Vec<String>>,
 
     /// Current working directory used when starting the extension process.
