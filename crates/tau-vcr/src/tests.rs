@@ -73,37 +73,100 @@ fn store_get_reports_read_errors_instead_of_treating_them_as_missing() {
         .get::<serde_json::Value>("loop")
         .expect_err("symlink loop should be a read error");
 
-    assert!(matches!(error, VcrError::Read { .. }));
+    assert!(matches!(error, VcrError::UnsafePath { .. }));
 }
 
-/// Request validation is caller-owned, but `tau-vcr` still provides a standard
-/// diagnostic error constructor so mismatches have consistent key and payload.
+/// A symlinked cassette root is outside the configured trust boundary and must
+/// not redirect either replay reads or private recordings.
+#[cfg(unix)]
 #[test]
-fn request_mismatch_error_carries_serialized_payloads() {
+fn store_rejects_symlinked_root_directory() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let actual = tempdir.path().join("actual");
+    std::fs::create_dir(&actual).expect("actual directory");
+    let linked = tempdir.path().join("linked");
+    std::os::unix::fs::symlink(&actual, &linked).expect("linked root");
+    let store = VcrStore::new(&linked);
+
+    assert!(matches!(
+        store.get::<serde_json::Value>("cassette"),
+        Err(VcrError::UnsafePath { .. })
+    ));
+    assert!(matches!(
+        store.put("cassette", &json!({"safe": true})),
+        Err(VcrError::UnsafePath { .. })
+    ));
+}
+
+/// Request mismatch diagnostics must help correlate a failure without exposing
+/// prompt or tool payloads that can appear in either request.
+#[test]
+fn request_mismatch_error_carries_only_redacted_payload_summaries() {
     let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
 
     match error {
         VcrError::RequestMismatch {
             expected, actual, ..
         } => {
-            assert!(expected.contains("old"));
-            assert!(actual.contains("new"));
+            assert!(expected.contains("redacted payload"));
+            assert!(actual.contains("redacted payload"));
+            assert!(!expected.contains("old"));
+            assert!(!actual.contains("new"));
         }
         other => panic!("unexpected error: {other:?}"),
     }
 }
 
-/// Most callers convert VCR errors directly to user-visible strings. Including
-/// serialized request payloads in `Display` prevents mismatch diagnostics from
-/// losing the very details needed to refresh or fix a cassette.
+/// Most callers convert VCR errors directly to user-visible strings. Display
+/// must remain bounded and must not disclose either mismatched request.
 #[test]
-fn request_mismatch_display_includes_serialized_payloads() {
+fn request_mismatch_display_redacts_serialized_payloads() {
     let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
     let display = error.to_string();
 
     assert!(display.contains("tc-main-0001"));
-    assert!(display.contains("old"));
-    assert!(display.contains("new"));
+    assert!(display.contains("redacted payload"));
+    assert!(!display.contains("old"));
+    assert!(!display.contains("new"));
+}
+
+/// Recording is deliberately create-only so concurrent refreshers and CI
+/// misconfiguration cannot overwrite reviewed evidence.
+#[test]
+fn store_put_is_exclusive_and_preserves_existing_cassette() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+    store
+        .put("evidence", &json!({"version": 1}))
+        .expect("first write");
+
+    let error = store
+        .put("evidence", &json!({"version": 2}))
+        .expect_err("overwrite must fail");
+    assert!(matches!(error, VcrError::Write { .. }));
+    let loaded: serde_json::Value = store
+        .get("evidence")
+        .expect("read")
+        .expect("cassette exists");
+    assert_eq!(loaded, json!({"version": 1}));
+}
+
+/// Oversized files are rejected from metadata before YAML parsing, bounding
+/// memory use for corrupted or malicious cassette directories.
+#[test]
+fn store_rejects_oversized_cassette() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("large.yaml"),
+        vec![b'x'; (MAX_CASSETTE_BYTES + 1) as usize],
+    )
+    .expect("write oversized fixture");
+    let store = VcrStore::new(tempdir.path());
+
+    let error = store
+        .get::<serde_json::Value>("large")
+        .expect_err("oversized cassette must fail");
+    assert!(matches!(error, VcrError::TooLarge { .. }));
 }
 
 /// Tau's safe automatic recording workflow is record-if-missing: existing

@@ -9,3 +9,5 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
   transport behavior, cancellation, retry/error mapping, diagnostics, cache
   identity, or model metadata.
 - Preserve the prompt-cache identity invariant documented in `specs/ARCH-tau-provider-chatgpt.md`: first-party ChatGPT/Codex cache keys are stable per provider base URL, startup-selected Responses mode, and target agent id, independent of prompt originator/provenance.
+Read `SECURITY.md` before changing VCR capture/replay or publishing public
+provider fixtures.

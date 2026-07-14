@@ -199,6 +199,28 @@
               nativeBuildInputs = [ pkgs.ripgrep ];
             };
 
+            # Public provider cassettes are a wire-compatibility gate, separate
+            # from scheduler correctness. Nix's build sandbox denies Internet
+            # access while the exact filter and no-tests policy prevent skips.
+            vcrTests = craneLib.mkCargoDerivation {
+              pname = "${projectName}-curated-provider-vcr";
+              cargoArtifacts = workspace;
+              buildPhaseCargoCommand = ''
+                export TAU_VCR=replay-only
+                export TAU_VCR_DIR="$PWD/crates/tau-provider-chatgpt/fixtures/provider-vcr"
+                export TAU_CURATED_VCR_LANE=1
+                cargo nextest run --locked \
+                  -p tau-provider-chatgpt \
+                  --cargo-profile $CARGO_PROFILE \
+                  --no-tests=fail \
+                  -E 'test(/curated_provider_vcr_replay_only_lane/)'
+                mkdir -p "$out"
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ pkgs.cargo-nextest ];
+              doCheck = false;
+            };
+
             clippy = craneLib.cargoClippy {
               cargoArtifacts = workspaceDeps;
               cargoClippyExtraArgs = "-- -D warnings";
@@ -458,6 +480,7 @@
             workspace
             clippy
             tests
+            vcrTests
             workspaceCcov
             testsCcov
             crapBaseline

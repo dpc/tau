@@ -5,6 +5,8 @@
 //! `get`/`put` operations. Callers own cassette schemas, request validation,
 //! live-vs-replay branching, timing, and response replay.
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -12,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const ENV_MODE: &str = "TAU_VCR";
 const ENV_DIR: &str = "TAU_VCR_DIR";
+const MAX_CASSETTE_BYTES: u64 = 1024 * 1024;
 
 /// VCR operating mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,43 +261,117 @@ impl VcrStore {
     /// Returns [`VcrError::InvalidKey`] for unsupported keys,
     /// [`VcrError::Read`] for non-`NotFound` read failures, and
     /// [`VcrError::Parse`] when an existing cassette cannot be deserialized
-    /// as `T`.
+    /// as `T`. Unsafe non-regular paths and cassettes over the byte limit
+    /// return [`VcrError::UnsafePath`] and [`VcrError::TooLarge`],
+    /// respectively.
     pub fn get<T>(&self, key: &str) -> Result<Option<T>, VcrError>
     where
         T: DeserializeOwned,
     {
         let path = self.path(key)?;
-        match std::fs::read(&path) {
-            Ok(bytes) => parse_yaml(&path, &bytes).map(Some),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(VcrError::Read { path, source }),
+        #[cfg(not(unix))]
+        return Err(VcrError::UnsafePath { path });
+        reject_symlink_components(&self.dir)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
         }
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            #[cfg(unix)]
+            Err(source) if source.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(VcrError::UnsafePath { path });
+            }
+            Err(source) => return Err(VcrError::Read { path, source }),
+        };
+        let metadata = file.metadata().map_err(|source| VcrError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(VcrError::UnsafePath { path });
+        }
+        if metadata.len() > MAX_CASSETTE_BYTES {
+            return Err(VcrError::TooLarge {
+                path,
+                bytes: metadata.len(),
+                limit: MAX_CASSETTE_BYTES,
+            });
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(MAX_CASSETTE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| VcrError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        parse_yaml(&path, &bytes).map(Some)
     }
 
-    /// Serializes and writes the cassette for `key`, replacing any existing
-    /// file.
+    /// Serializes and publishes a new cassette for `key`.
+    ///
+    /// Publishing is atomic and exclusive: an existing cassette is never
+    /// overwritten. The temporary file and final hard link are private to the
+    /// current user on Unix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid keys, directory creation, serialization,
+    /// size-limit, temporary write, sync, or exclusive publication failures.
+    /// In particular, publishing an existing key fails rather than overwriting.
     pub fn put<T>(&self, key: &str, value: &T) -> Result<(), VcrError>
     where
         T: Serialize,
     {
         let path = self.path(key)?;
+        #[cfg(not(unix))]
+        return Err(VcrError::UnsafePath { path });
         if let Some(parent) = path.parent() {
+            reject_symlink_components(parent)?;
+            let existed = parent.exists();
             std::fs::create_dir_all(parent).map_err(|source| VcrError::CreateDir {
                 path: parent.to_path_buf(),
                 source,
             })?;
+            reject_symlink_components(parent)?;
+            #[cfg(unix)]
+            if !existed {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |source| VcrError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    },
+                )?;
+            }
         }
-        write_yaml(&path, value)
+        write_yaml_exclusive(&path, value)
     }
 }
 
-/// Builds a request-mismatch error with serialized expected and actual request
-/// payloads for diagnostics.
+fn reject_symlink_components(path: &Path) -> Result<(), VcrError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(VcrError::UnsafePath {
+            path: path.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(VcrError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Builds a request-mismatch error with bounded, opaque expected and actual
+/// payload summaries for diagnostics.
 ///
-/// The serialized payloads are included in [`VcrError`]'s
-/// [`std::fmt::Display`] output because callers commonly surface VCR failures
-/// by converting the error directly to a string. If serialization fails, that
-/// side is replaced with a compact serialization-error marker.
+/// Raw requests can contain prompts, tool output, identifiers, or credentials,
+/// so mismatch diagnostics disclose no request-derived content.
 pub fn request_mismatch<T, U>(key: impl Into<String>, expected: &T, actual: &U) -> VcrError
 where
     T: Serialize,
@@ -354,6 +431,20 @@ pub enum VcrError {
         /// Underlying YAML error.
         source: serde_yaml_ng::Error,
     },
+    /// Cassette exceeds the storage resource limit.
+    TooLarge {
+        /// Cassette path.
+        path: PathBuf,
+        /// Observed serialized byte count.
+        bytes: u64,
+        /// Maximum permitted byte count.
+        limit: u64,
+    },
+    /// Cassette path is a symbolic link or otherwise unsafe to follow.
+    UnsafePath {
+        /// Unsafe cassette path.
+        path: PathBuf,
+    },
     /// Cassette schema version is not supported by the caller.
     UnsupportedVersion {
         /// Logical cassette key.
@@ -361,13 +452,20 @@ pub enum VcrError {
         /// Version found in the cassette.
         version: u32,
     },
+    /// Cassette violates a caller-owned schema or resource invariant.
+    InvalidCassette {
+        /// Logical cassette key.
+        key: String,
+        /// Bounded diagnostic that contains no captured payload.
+        reason: String,
+    },
     /// Replay cassette request did not match the actual request.
     RequestMismatch {
         /// Logical cassette key.
         key: String,
-        /// Request stored in the cassette, serialized for diagnostics.
+        /// Bounded redacted expected-request summary.
         expected: String,
-        /// Actual request supplied by the caller, serialized for diagnostics.
+        /// Bounded redacted actual-request summary.
         actual: String,
     },
 }
@@ -404,8 +502,19 @@ impl fmt::Display for VcrError {
                     path.display()
                 )
             }
+            Self::TooLarge { path, bytes, limit } => write!(
+                f,
+                "cassette {} is too large: {bytes} bytes exceeds {limit}",
+                path.display()
+            ),
+            Self::UnsafePath { path } => {
+                write!(f, "refusing unsafe cassette path {}", path.display())
+            }
             Self::UnsupportedVersion { key, version } => {
                 write!(f, "cassette `{key}` has unsupported version {version}")
+            }
+            Self::InvalidCassette { key, reason } => {
+                write!(f, "cassette `{key}` is invalid: {reason}")
             }
             Self::RequestMismatch {
                 key,
@@ -431,7 +540,10 @@ impl std::error::Error for VcrError {
             Self::InvalidMode(_)
             | Self::InvalidKey(_)
             | Self::Missing { .. }
+            | Self::TooLarge { .. }
+            | Self::UnsafePath { .. }
             | Self::UnsupportedVersion { .. }
+            | Self::InvalidCassette { .. }
             | Self::RequestMismatch { .. } => None,
         }
     }
@@ -441,13 +553,20 @@ fn parse_yaml<T>(path: &Path, bytes: &[u8]) -> Result<T, VcrError>
 where
     T: DeserializeOwned,
 {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CASSETTE_BYTES {
+        return Err(VcrError::TooLarge {
+            path: path.to_path_buf(),
+            bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            limit: MAX_CASSETTE_BYTES,
+        });
+    }
     serde_yaml_ng::from_slice(bytes).map_err(|source| VcrError::Parse {
         path: path.to_path_buf(),
         source,
     })
 }
 
-fn write_yaml<T>(path: &Path, cassette: &T) -> Result<(), VcrError>
+fn write_yaml_exclusive<T>(path: &Path, cassette: &T) -> Result<(), VcrError>
 where
     T: Serialize,
 {
@@ -455,7 +574,38 @@ where
         path: path.to_path_buf(),
         source,
     })?;
-    std::fs::write(path, text).map_err(|source| VcrError::Write {
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CASSETTE_BYTES {
+        return Err(VcrError::TooLarge {
+            path: path.to_path_buf(),
+            bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
+            limit: MAX_CASSETTE_BYTES,
+        });
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cassette");
+    let temporary = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        unique_write_nonce()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, path)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result.map_err(|source| VcrError::Write {
         path: path.to_path_buf(),
         source,
     })
@@ -465,7 +615,15 @@ fn mismatch_payload<T>(value: &T) -> String
 where
     T: Serialize,
 {
-    serde_yaml_ng::to_string(value).unwrap_or_else(|error| format!("<serialize error: {error}>"))
+    let _ = value;
+    "<redacted payload>".to_owned()
+}
+
+fn unique_write_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 #[cfg(test)]

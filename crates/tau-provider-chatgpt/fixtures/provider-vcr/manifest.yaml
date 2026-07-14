@@ -1,0 +1,23 @@
+version: 1
+redaction_version: 1
+cassettes:
+- key: curated-success-http-sse
+  provider: chatgpt
+  cassette_schema: provider-stream
+  cassette_version: 1
+  surface: responses
+  transport: http-sse
+  source: synthetic
+  intent: Responses SSE delta and completed terminal remain parser-compatible
+  public_safe: true
+  expected: success
+- key: curated-success-websocket
+  provider: chatgpt
+  cassette_schema: provider-stream
+  cassette_version: 1
+  surface: responses
+  transport: websocket
+  source: synthetic
+  intent: Responses WebSocket delta and completed terminal remain parser-compatible
+  public_safe: true
+  expected: success

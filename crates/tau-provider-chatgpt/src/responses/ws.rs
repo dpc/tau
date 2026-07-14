@@ -446,7 +446,7 @@ impl WsConn {
                     state.record_transport_response_bytes(text.len());
                     on_update(&state);
                     if let Some(stream) = recording_stream.as_deref_mut() {
-                        record_provider_raw_event_after(stream, delta, text.to_string());
+                        record_provider_raw_event_after(stream, delta, text.to_string())?;
                     }
                     if apply_ws_raw_json_event(&mut state, text.as_ref(), on_update)? {
                         return Ok(state);
@@ -586,21 +586,30 @@ fn latest_response_id<'a>(request: &'a PromptPayload<'_>) -> Option<&'a str> {
             tau_proto::ContextBlock::UserInput(_) | tau_proto::ContextBlock::ToolResults(_) => None,
         })
 }
-fn run_replay(
+pub(super) fn run_replay(
     stream: &ProviderRawEventStream,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let mut state = StreamState::new();
-    for event in &stream.raw_events {
-        std::thread::sleep(super::scale_delay(
-            std::time::Duration::from_micros(event.delta_micros),
-            100.0,
-        ));
+    for (index, event) in stream.raw_events.iter().enumerate() {
         if apply_ws_raw_json_event(&mut state, &event.raw, on_update)? {
-            break;
+            if index + 1 != stream.raw_events.len() {
+                return Err(super::replay_unconsumed_frames_error(
+                    tau_proto::ProviderBackendTransport::Websocket,
+                    stream.raw_events.len() - index - 1,
+                ));
+            }
+            return Ok(state);
         }
     }
-    Ok(state)
+    let now = std::time::Instant::now();
+    Err(super::stream_ended_without_terminal_error(
+        tau_proto::ProviderBackendTransport::Websocket,
+        "vcr-replay",
+        now,
+        now,
+        &state,
+    ))
 }
 
 /// Build the client `Request` for the WS upgrade — URL + bearer +

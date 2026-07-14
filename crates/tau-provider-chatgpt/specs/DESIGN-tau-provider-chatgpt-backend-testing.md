@@ -25,6 +25,8 @@ successful socket reuse.
 Parser and streaming changes should keep using focused event/delta/snapshot
 regression tests, with broader provider response streaming guidance in
 `../../docs/testing.md`.
+Curated public wire evidence is separately bounded by
+[DESIGN-tau-provider-chatgpt-curated-vcr](DESIGN-tau-provider-chatgpt-curated-vcr.md).
 
 Changes to a default route or protocol surface require a capability matrix
 covering direct function/custom calls, parallel generation, programmatic/code

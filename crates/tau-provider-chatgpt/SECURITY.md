@@ -29,3 +29,12 @@ Best-effort prewarm runs as provider-supervised work rather than on the event
 loop. It has at most a 30-second upgrade plus a 30-second absolute response
 wait, observes cancel/shutdown/profile invalidation through the transport abort
 waker, and cannot reinstall a socket after cancellation or invalidation.
+# Provider VCR boundary
+
+Raw provider captures are private sensitive test artifacts and may contain
+prompts, credentials, identifiers, reasoning, tool output, or host paths. They
+must never be copied directly into the public fixture corpus. Public cassettes
+are synthetic, structurally allowlisted, bounded, and require exact terminal
+and frame consumption through replay-only production loading with no live
+fallback. Fixture publication or replay/capture changes require independent
+privacy review.

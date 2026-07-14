@@ -1,0 +1,12 @@
+version: 1
+request:
+  input_shape: single-synthetic-text
+  model: synthetic-model
+stream:
+  raw_events:
+  - delta_micros: 0
+    raw: |
+      data: {"type":"response.output_text.delta","delta":"synthetic compatibility output"}
+  - delta_micros: 10
+    raw: |
+      data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}

@@ -26,6 +26,11 @@ function job_cargo() {
   if ! nix build -L .#ci.tests ; then
     selfci step fail
   fi
+
+  selfci step start "curated provider VCR replay"
+  if ! nix build -L .#ci.vcrTests ; then
+    selfci step fail
+  fi
 }
 
 function job_site() {

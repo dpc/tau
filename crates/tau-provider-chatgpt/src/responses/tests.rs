@@ -1563,10 +1563,17 @@ fn provider_cassette_validation_separates_responses_modes() {
     let standard_body =
         serde_json::to_value(build_request(&standard, &request, None)).expect("standard body");
     let lite_body = serde_json::to_value(build_request(&lite, &request, None)).expect("Lite body");
+    let mut stream = ProviderRawEventStream::default();
+    record_provider_raw_event_after(
+        &mut stream,
+        Duration::ZERO,
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    )
+    .expect("record terminal");
     let cassette = ProviderStreamCassette {
         version: PROVIDER_STREAM_CASSETTE_VERSION,
         request: standard_body.clone(),
-        stream: ProviderRawEventStream::default(),
+        stream,
     };
 
     validate_provider_stream_cassette("mode-test", &cassette, &standard_body)
@@ -1575,6 +1582,221 @@ fn provider_cassette_validation_separates_responses_modes() {
         validate_provider_stream_cassette("mode-test", &cassette, &lite_body),
         Err(LlmError::Vcr(tau_vcr::VcrError::RequestMismatch { .. }))
     ));
+}
+
+/// Provider cassette validation must enforce every resource bound before
+/// replay so malformed evidence cannot consume unbounded memory or time.
+#[test]
+fn provider_cassette_validation_rejects_resource_limit_violations() {
+    let request = serde_json::json!({"model": "synthetic"});
+    let cases = [
+        ProviderRawEventStream::default(),
+        ProviderRawEventStream {
+            raw_events: vec![ProviderRawEvent {
+                delta_micros: MAX_PROVIDER_CASSETTE_DELTA_MICROS + 1,
+                raw: "{}".to_owned(),
+            }],
+        },
+        ProviderRawEventStream {
+            raw_events: vec![ProviderRawEvent {
+                delta_micros: 0,
+                raw: "x".repeat(MAX_PROVIDER_CASSETTE_FRAME_BYTES + 1),
+            }],
+        },
+        ProviderRawEventStream {
+            raw_events: vec![
+                ProviderRawEvent {
+                    delta_micros: 0,
+                    raw: "{}".to_owned(),
+                };
+                MAX_PROVIDER_CASSETTE_EVENTS + 1
+            ],
+        },
+        ProviderRawEventStream {
+            raw_events: vec![
+                ProviderRawEvent {
+                    delta_micros: 0,
+                    raw: "x".repeat(MAX_PROVIDER_CASSETTE_RAW_BYTES / 4 + 1),
+                };
+                4
+            ],
+        },
+    ];
+    for stream in cases {
+        let cassette = ProviderStreamCassette {
+            version: PROVIDER_STREAM_CASSETTE_VERSION,
+            request: request.clone(),
+            stream,
+        };
+        assert!(matches!(
+            validate_provider_stream_cassette("limits", &cassette, &request),
+            Err(LlmError::Vcr(tau_vcr::VcrError::InvalidCassette { .. }))
+        ));
+    }
+}
+
+/// Online recording enforces the same bounds as replay validation so a live
+/// capture cannot publish evidence that this version later rejects.
+#[test]
+fn provider_cassette_recording_rejects_resource_limit_violations() {
+    let cases = [
+        (
+            ProviderRawEventStream::default(),
+            Duration::ZERO,
+            "x".repeat(MAX_PROVIDER_CASSETTE_FRAME_BYTES + 1),
+        ),
+        (
+            ProviderRawEventStream::default(),
+            Duration::from_micros(MAX_PROVIDER_CASSETTE_DELTA_MICROS + 1),
+            "{}".to_owned(),
+        ),
+        (
+            ProviderRawEventStream {
+                raw_events: vec![
+                    ProviderRawEvent {
+                        delta_micros: 0,
+                        raw: "{}".to_owned(),
+                    };
+                    MAX_PROVIDER_CASSETTE_EVENTS
+                ],
+            },
+            Duration::ZERO,
+            "{}".to_owned(),
+        ),
+        (
+            ProviderRawEventStream {
+                raw_events: vec![
+                    ProviderRawEvent {
+                        delta_micros: 0,
+                        raw: "x".repeat(MAX_PROVIDER_CASSETTE_RAW_BYTES / 4),
+                    };
+                    4
+                ],
+            },
+            Duration::ZERO,
+            "x".to_owned(),
+        ),
+    ];
+    for (mut stream, delta, raw) in cases {
+        let initial = stream.clone();
+        let error = record_provider_raw_event_after(&mut stream, delta, raw)
+            .expect_err("recording limit violation");
+        assert!(matches!(
+            error,
+            LlmError::Vcr(tau_vcr::VcrError::InvalidCassette { .. })
+        ));
+        assert_eq!(stream, initial);
+    }
+}
+
+/// Unknown persisted fields fail closed before public-fixture allowlisting so
+/// serde cannot silently discard an unreviewed sensitive side channel.
+#[test]
+fn provider_cassette_schema_rejects_unknown_fields() {
+    let yaml = r#"
+version: 1
+unexpected_private_value: short-secret
+request: {}
+stream:
+  raw_events: []
+"#;
+    assert!(serde_yaml_ng::from_str::<ProviderStreamCassette>(yaml).is_err());
+}
+
+/// A truncated SSE cassette must fail exactly as a live EOF instead of turning
+/// partial provider output into an authoritative successful response.
+#[test]
+fn provider_sse_replay_rejects_stream_without_terminal_event() {
+    let mut stream = ProviderRawEventStream::default();
+    record_provider_raw_event_after(
+        &mut stream,
+        Duration::ZERO,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    )
+    .expect("record test event");
+
+    let error = match responses_stream_replay(&stream, &mut |_| {}) {
+        Ok(_) => panic!("truncated replay must not succeed"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider stream ended without terminal event")
+    );
+}
+
+/// WebSocket replay has the same terminal requirement as its live transport;
+/// exhausting frames after partial output must remain a transport failure.
+#[test]
+fn provider_websocket_replay_rejects_stream_without_terminal_event() {
+    let mut stream = ProviderRawEventStream::default();
+    record_provider_raw_event_after(
+        &mut stream,
+        Duration::ZERO,
+        "{\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+    )
+    .expect("record test event");
+
+    let error = match ws::run_replay(&stream, &mut |_| {}) {
+        Ok(_) => panic!("truncated replay must not succeed"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider stream ended without terminal event")
+    );
+}
+
+/// Replays consume the complete curated stream. Frames after a semantic
+/// terminal are invalid evidence rather than silently ignored drift.
+#[test]
+fn provider_replay_rejects_frames_after_terminal_event() {
+    let mut stream = ProviderRawEventStream::default();
+    record_provider_raw_event_after(
+        &mut stream,
+        Duration::ZERO,
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    )
+    .expect("record terminal");
+    record_provider_raw_event_after(
+        &mut stream,
+        Duration::ZERO,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ignored\"}\n\n",
+    )
+    .expect("record trailing event");
+
+    let error = match responses_stream_replay(&stream, &mut |_| {}) {
+        Ok(_) => panic!("leftovers must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("unconsumed frames"));
+}
+
+/// A single SSE cassette frame cannot smuggle a second event after a terminal;
+/// replay requires the recorder's canonical one-data-event shape.
+#[test]
+fn provider_replay_rejects_multiple_sse_events_in_one_frame() {
+    let stream = ProviderRawEventStream {
+        raw_events: vec![ProviderRawEvent {
+            delta_micros: 0,
+            raw: concat!(
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hidden\"}\n\n"
+            )
+            .to_owned(),
+        }],
+    };
+
+    let error = match responses_stream_replay(&stream, &mut |_| {}) {
+        Ok(_) => panic!("multi-event frame must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("one exact data event"));
 }
 
 /// Ensures the WebSocket request carries the Responses Lite routing marker as

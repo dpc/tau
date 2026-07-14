@@ -33,6 +33,10 @@ pub mod ws;
 pub mod ws_runtime;
 
 const PROVIDER_STREAM_CASSETTE_VERSION: u32 = 1;
+const MAX_PROVIDER_CASSETTE_EVENTS: usize = 1024;
+const MAX_PROVIDER_CASSETTE_FRAME_BYTES: usize = 256 * 1024;
+const MAX_PROVIDER_CASSETTE_DELTA_MICROS: u64 = 300_000_000;
+const MAX_PROVIDER_CASSETTE_RAW_BYTES: usize = 768 * 1024;
 const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 /// Default idle watchdog for live provider streaming turns.
 ///
@@ -169,21 +173,34 @@ impl ResponsesSurface {
     }
 }
 
+/// Versioned successful Responses request and raw event stream evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ProviderStreamCassette {
+    /// Provider-owned cassette schema version.
     version: u32,
+    /// Redacted request projection matched before replay.
     request: serde_json::Value,
+    /// Ordered bounded provider frames.
     stream: ProviderRawEventStream,
 }
 
+/// Ordered raw provider frames retained for production-parser replay.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ProviderRawEventStream {
+    /// Frames in transport receive order.
     raw_events: Vec<ProviderRawEvent>,
 }
 
+/// One bounded raw provider frame and its observed relative delay.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProviderRawEvent {
+    /// Observed delay retained as evidence and bounded, but ignored for CI
+    /// timing.
     delta_micros: u64,
+    /// Original SSE event line or WebSocket JSON text frame.
     raw: String,
 }
 
@@ -191,11 +208,29 @@ pub(super) fn record_provider_raw_event_after(
     stream: &mut ProviderRawEventStream,
     delta: Duration,
     raw: impl Into<String>,
-) {
-    stream.raw_events.push(ProviderRawEvent {
+) -> Result<(), LlmError> {
+    let event = ProviderRawEvent {
         delta_micros: duration_micros_u64(delta),
         raw: raw.into(),
-    });
+    };
+    let within_limits = stream.raw_events.len() < MAX_PROVIDER_CASSETTE_EVENTS
+        && event.raw.len() <= MAX_PROVIDER_CASSETTE_FRAME_BYTES
+        && event.delta_micros <= MAX_PROVIDER_CASSETTE_DELTA_MICROS
+        && stream
+            .raw_events
+            .iter()
+            .map(|existing| existing.raw.len())
+            .sum::<usize>()
+            .saturating_add(event.raw.len())
+            <= MAX_PROVIDER_CASSETTE_RAW_BYTES;
+    if !within_limits {
+        return Err(invalid_provider_cassette(
+            "recording",
+            "provider stream exceeds recording limits",
+        ));
+    }
+    stream.raw_events.push(event);
+    Ok(())
 }
 
 /// Config for the ChatGPT/Codex Responses API.
@@ -858,7 +893,7 @@ fn process_sse_line(
         .strip_prefix("data: ")
         .expect("line starts with data prefix");
     if let Some(stream) = recording_stream.as_deref_mut() {
-        record_provider_raw_event_after(stream, event_delta, format!("{line}\n\n"));
+        record_provider_raw_event_after(stream, event_delta, format!("{line}\n\n"))?;
     }
     apply_sse_data(state, data, on_update)
 }
@@ -966,16 +1001,53 @@ fn responses_stream_replay(
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let mut state = StreamState::new();
-    for event in &stream.raw_events {
-        std::thread::sleep(scale_delay(
-            Duration::from_micros(event.delta_micros),
-            100.0,
-        ));
+    for (index, event) in stream.raw_events.iter().enumerate() {
+        let data_lines = event
+            .raw
+            .lines()
+            .filter(|line| line.starts_with("data: "))
+            .count();
+        if data_lines != 1
+            || event
+                .raw
+                .lines()
+                .any(|line| !line.is_empty() && !line.starts_with("data: "))
+        {
+            return Err(LlmError::HttpStatus(
+                0,
+                "stream error: provider SSE replay frame is not one exact data event".to_owned(),
+            ));
+        }
         if apply_raw_sse_event(&mut state, &event.raw, on_update)? {
-            break;
+            if index + 1 != stream.raw_events.len() {
+                return Err(replay_unconsumed_frames_error(
+                    tau_proto::ProviderBackendTransport::HttpSse,
+                    stream.raw_events.len() - index - 1,
+                ));
+            }
+            return Ok(state);
         }
     }
-    Ok(state)
+    let now = Instant::now();
+    Err(stream_ended_without_terminal_error(
+        tau_proto::ProviderBackendTransport::HttpSse,
+        "vcr-replay",
+        now,
+        now,
+        &state,
+    ))
+}
+
+fn replay_unconsumed_frames_error(
+    transport: tau_proto::ProviderBackendTransport,
+    remaining: usize,
+) -> LlmError {
+    LlmError::HttpStatus(
+        0,
+        format!(
+            "stream error: provider replay has unconsumed frames: transport={transport:?} remaining={remaining}"
+        ),
+    )
 }
 
 fn apply_raw_sse_event(
@@ -1061,7 +1133,51 @@ fn validate_provider_stream_cassette(
             request_body,
         )));
     }
+    validate_provider_stream_resources(key, &cassette.stream)?;
     Ok(())
+}
+
+fn validate_provider_stream_resources(
+    key: &str,
+    stream: &ProviderRawEventStream,
+) -> Result<(), LlmError> {
+    if stream.raw_events.is_empty() {
+        return Err(invalid_provider_cassette(key, "stream is empty"));
+    }
+    if stream.raw_events.len() > MAX_PROVIDER_CASSETTE_EVENTS {
+        return Err(invalid_provider_cassette(key, "too many stream events"));
+    }
+    for event in &stream.raw_events {
+        if event.raw.len() > MAX_PROVIDER_CASSETTE_FRAME_BYTES {
+            return Err(invalid_provider_cassette(key, "stream frame is too large"));
+        }
+        if event.delta_micros > MAX_PROVIDER_CASSETTE_DELTA_MICROS {
+            return Err(invalid_provider_cassette(
+                key,
+                "stream event delta exceeds the replay limit",
+            ));
+        }
+    }
+    if stream
+        .raw_events
+        .iter()
+        .map(|event| event.raw.len())
+        .sum::<usize>()
+        > MAX_PROVIDER_CASSETTE_RAW_BYTES
+    {
+        return Err(invalid_provider_cassette(
+            key,
+            "aggregate stream frames are too large",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_provider_cassette(key: &str, reason: &str) -> LlmError {
+    LlmError::Vcr(tau_vcr::VcrError::InvalidCassette {
+        key: key.to_owned(),
+        reason: reason.to_owned(),
+    })
 }
 
 fn provider_backend_transport_label(
@@ -2686,14 +2802,7 @@ fn duration_micros_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-pub(super) fn scale_delay(delay: Duration, speed: f64) -> Duration {
-    let speed = if speed.is_finite() && 0.0 < speed {
-        speed
-    } else {
-        1.0
-    };
-    Duration::from_secs_f64(delay.as_secs_f64() / speed)
-}
-
+#[cfg(test)]
+mod curated_vcr_tests;
 #[cfg(test)]
 mod tests;

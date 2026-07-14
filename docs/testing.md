@@ -96,6 +96,56 @@ embedded deterministic tool round, then feeds those exact committed events
 through renderer state to assert main, global, and watched
 activity become idle. These gates use loopback peers and explicit completion
 signals only—never provider auth, Internet access, model prose, tmux, or sleeps.
+
+## Curated provider VCR compatibility evidence
+
+The small corpus under
+`crates/tau-provider-chatgpt/fixtures/provider-vcr/` is synthetic,
+structurally sanitized evidence that representative Responses SSE and
+WebSocket wire frames still traverse the production parsers. It is not a
+scheduler, retry-timing, concurrency, or model-output oracle; deterministic
+runtime and local scripted-transport tests own those contracts.
+Its durable ownership and scope are recorded in
+[`DESIGN-tau-provider-chatgpt-curated-vcr`](../crates/tau-provider-chatgpt/specs/DESIGN-tau-provider-chatgpt-curated-vcr.md):
+the provider crate owns the corpus, manifest/audit, parser facts, and refresh
+review, while `tau-vcr` owns only generic storage.
+
+The dedicated `ci.vcrTests` Nix derivation forces `TAU_VCR=replay-only`, has no
+live fallback, fails when its exact test filter runs zero tests, and runs in the
+network-denied Nix build sandbox. Its strict manifest and fixture audit checks
+schema and redaction versions, unique keys, declared transport/outcome,
+cassette/event/frame/delta limits, complete terminal consumption, forbidden
+secret categories, suspicious long tokens, and host paths. Provider replay
+validates recorded deltas but intentionally ignores them during parser-only
+functional replay.
+
+The explicitly versioned multi-attempt/AP-lane schema proposed for quota
+testing is deliberately not implemented. Its status/header/disconnect model,
+sanitized request projection, and attempt orchestration would duplicate the
+production local-server and scheduler gates while creating a second evolving
+semantic format. Reconsider only when a concrete provider wire regression
+cannot be represented by the successful single-attempt corpus or the existing
+local transport fixtures. At that point use a new attempt-sequence schema in
+full—never incrementally turn this success-stream schema into scheduler
+authority.
+
+Refresh is deliberate and review-only:
+
+1. Create a new key; cassette writes are atomic, private, exclusive, and never
+   overwrite an existing file. Never enable recording in CI.
+2. Generate only synthetic requests and responses. Do not copy a raw live
+   capture into the repository. Request projections may contain only stable
+   shape facts, never prompts, credentials, IDs, reasoning, tool output, or
+   paths.
+3. Add the declaration to `manifest.yaml`, run `nix build -L .#ci.vcrTests`,
+   and inspect the full diff. Record synthetic provenance, pinned
+   surface/transport, and compatibility intent in `manifest.yaml`; explain in
+   the change description why the new evidence is valuable.
+4. A reviewer independently confirms structural sanitization, public-safe
+   classification, bounded data, and that the fixture adds wire-compatibility
+   value rather than duplicating scheduler tests. Unavoidable real-provider
+   captures remain private with separate access and retention controls.
+
 CLI coverage must separately prove static completion, exact argument-free
 parsing without prompt resubmission, and requester-visible result rendering.
 

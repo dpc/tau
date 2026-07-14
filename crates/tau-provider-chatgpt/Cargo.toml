@@ -34,4 +34,5 @@ ureq.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+serde_yaml_ng.workspace = true
 tungstenite.workspace = true
