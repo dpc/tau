@@ -42,3 +42,9 @@ driven by the operation under test. Frame waits must be bounded and must not
 request a post-operation `redraw_sync`, because that extra redraw can hide an
 incoherent first frame. Race regressions may use a deterministic test-only
 midpoint hook to request the premature redraw whose suppression is under test.
+
+Production event-wiring regressions must lock exact subscription selectors,
+historical/live selector parity, lightweight payload dependencies, and both
+catch-up-before-lifecycle and lifecycle-before-live-event orderings. When a
+boundary spans crates, pair the harness subscription/catch-up test with a CLI
+renderer ordering test using the same protocol event shapes.

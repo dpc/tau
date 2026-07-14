@@ -121,8 +121,8 @@ fn three_point_hysteresis_prevents_boundary_flicker() {
     assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Over));
 }
 
-/// Missing explicit applicability suppresses the chip even when the account has
-/// exactly one plausible weekly pool.
+/// Missing explicit applicability remains neutral when provider quota
+/// current-state exists, without inferring a colored claim from a sole pool.
 #[test]
 fn sole_pool_never_implies_model_binding() {
     let (mut state, model) = make_state(window(5_000, 5_000));
@@ -132,19 +132,22 @@ fn sole_pool_never_implies_model_binding() {
         .expect("valid quota test value")
         .bindings
         .clear();
-    assert_eq!(state.classify(&model, NOW), None);
+    assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Unknown));
 }
 
-/// Soft staleness becomes neutral and hard staleness removes sensitive account
-/// state rather than retaining a misleading color forever.
+/// Soft and hard staleness remain neutral while provider quota capability is
+/// known rather than retaining a misleading color or hiding the status.
 #[test]
-fn binding_and_window_staleness_neutralize_then_hide() {
+fn binding_and_window_staleness_remain_neutral() {
     let (mut state, model) = make_state(window(5_000, 5_000));
     assert_eq!(
         state.classify(&model, NOW + SOFT_STALE_MS + 1),
         Some(QuotaPacing::Unknown)
     );
-    assert_eq!(state.classify(&model, NOW + HARD_STALE_MS + 1), None);
+    assert_eq!(
+        state.classify(&model, NOW + HARD_STALE_MS + 1),
+        Some(QuotaPacing::Unknown)
+    );
 }
 
 /// A passed reset is unknown until an authoritative provider observation
@@ -183,7 +186,10 @@ fn all_of_bindings_are_conservative() {
         .windows
         .pop();
     assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Unknown));
-    assert_eq!(state.classify(&model, NOW + HARD_STALE_MS + 1), None);
+    assert_eq!(
+        state.classify(&model, NOW + HARD_STALE_MS + 1),
+        Some(QuotaPacing::Unknown)
+    );
 }
 
 /// Weekly selection follows the accepted ±5 percent duration tolerance and
@@ -193,17 +199,22 @@ fn only_weekly_windows_participate() {
     let mut short = window(9_900, 5_000);
     short.window_seconds = 5 * 60 * 60;
     let (mut state, model) = make_state(short);
-    assert_eq!(state.classify(&model, NOW), None);
-    assert_eq!(state.classify(&model, NOW + SOFT_STALE_MS + 1), None);
-    assert_eq!(state.classify(&model, NOW + HARD_STALE_MS + 1), None);
+    assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Unknown));
+    assert_eq!(
+        state.classify(&model, NOW + SOFT_STALE_MS + 1),
+        Some(QuotaPacing::Unknown)
+    );
+    assert_eq!(
+        state.classify(&model, NOW + HARD_STALE_MS + 1),
+        Some(QuotaPacing::Unknown)
+    );
     let mut edge = window(5_000, 5_000);
     edge.window_seconds = WEEK_SECONDS + WEEK_TOLERANCE_SECONDS;
     let (mut state, model) = make_state(edge);
     assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Aligned));
 }
 
-/// Fresh usage cannot keep an account status alive after every trustworthy
-/// timing anchor has passed hard expiry.
+/// Hard-expired timing evidence neutralizes an otherwise fresh usage sample.
 #[test]
 fn hard_expiry_includes_independent_timing_evidence() {
     let (mut state, model) = make_state(window(5_000, 5_000));
@@ -214,22 +225,26 @@ fn hard_expiry_includes_independent_timing_evidence() {
     current.windows[0].usage_observed_at_unix_ms = NOW;
     current.windows[0].timing_anchor_observed_at_unix_ms = Some(NOW - HARD_STALE_MS - 1);
     current.windows[0].server_offset_observed_at_unix_ms = Some(NOW - HARD_STALE_MS - 1);
-    assert_eq!(state.classify(&model, NOW), None);
+    assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Unknown));
 }
 
-/// A merely soft-stale binding cannot mask hard-expired timing evidence behind
-/// an indefinite unknown state.
+/// Empty quota current-state is provider capability evidence and renders
+/// unknown, while a provider that has published no state remains inapplicable.
 #[test]
-fn window_hard_expiry_precedes_binding_soft_unknown() {
-    let (mut state, model) = make_state(window(5_000, 5_000));
-    let current = state
-        .current
-        .get_mut(&model.provider)
-        .expect("provider quota state");
-    current.bindings[0].observed_at_unix_ms = NOW - SOFT_STALE_MS - 1;
-    current.windows[0].timing_anchor_observed_at_unix_ms = Some(NOW - HARD_STALE_MS - 1);
-    current.windows[0].server_offset_observed_at_unix_ms = Some(NOW - HARD_STALE_MS - 1);
+fn provider_capability_controls_unknown_visibility() {
+    let model = ModelId::from("chatgpt/gpt-5.6-sol");
+    let mut state = QuotaPacingState::default();
     assert_eq!(state.classify(&model, NOW), None);
+
+    state.update(&HarnessProviderQuotaChanged {
+        provider: model.provider.clone(),
+        profile_epoch: ProviderQuotaEpoch::parse("epoch-empty").expect("quota epoch"),
+        sequence: 1,
+        windows: Vec::new(),
+        route_bindings: Vec::new(),
+    });
+    assert_eq!(state.classify(&model, NOW), Some(QuotaPacing::Unknown));
+    assert_eq!(state.classify(&ModelId::from("other/model"), NOW), None);
 }
 
 /// Provider reset-anchor corrections within one minute retain hysteresis, while

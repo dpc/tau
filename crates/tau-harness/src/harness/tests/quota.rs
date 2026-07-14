@@ -250,8 +250,9 @@ fn model_change_preserves_provider_sequence_space() {
     );
 }
 
-/// Withdrawing the last effective model clears sensitive account state, and a
-/// late subscriber receives original observation clocks only while state lives.
+/// Withdrawing the last effective model clears sensitive account state while
+/// retaining an empty running-harness capability for late subscribers; a later
+/// accepted replacement restores current state and supersedes that capability.
 #[test]
 fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     let temp = TempDir::new().expect("temp dir");
@@ -269,12 +270,12 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         },
     );
     let events = connect_test_client(&mut harness, "late-quota-ui", tau_proto::ClientKind::Ui);
-    harness.replay_harness_notice(
-        "late-quota-ui",
-        &[EventSelector::Exact(
-            tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
-        )],
-    );
+    let selectors = vec![EventSelector::Exact(
+        tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
+    )];
+    harness
+        .complete_subscription("late-quota-ui", selectors.clone(), selectors)
+        .expect("subscribe to quota current state");
     let observed = events
         .lock()
         .expect("events")
@@ -291,6 +292,37 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     assert_eq!(observed, Some(123_000));
     harness.apply_provider_models_snapshot("owner", Vec::new());
     assert!(harness.provider_quota.is_empty());
+    let cleared_events = connect_test_client(
+        &mut harness,
+        "post-clear-quota-ui",
+        tau_proto::ClientKind::Ui,
+    );
+    let selectors = vec![EventSelector::Exact(
+        tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
+    )];
+    harness
+        .complete_subscription("post-clear-quota-ui", selectors.clone(), selectors)
+        .expect("subscribe after quota clear");
+    let cleared = cleared_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
+                Event::HarnessProviderQuotaChanged(changed) => Some((
+                    changed.provider.clone(),
+                    changed.windows.len(),
+                    changed.route_bindings.len(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        });
+    assert_eq!(
+        cleared,
+        Some((tau_proto::ProviderName::new("chatgpt"), 0, 0)),
+        "late subscribers must retain the same running-harness capability as live clients"
+    );
     harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
     harness.handle_provider_quota_replace(
         "owner",
@@ -308,6 +340,10 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
             .snapshot
             .sequence,
         2
+    );
+    assert!(
+        harness.provider_quota_capabilities.is_empty(),
+        "new current state supersedes the cleared capability snapshot"
     );
 }
 

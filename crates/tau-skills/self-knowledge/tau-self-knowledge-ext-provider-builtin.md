@@ -43,10 +43,14 @@ ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-te
 
 ChatGPT account quota is acquired best-effort from `/wham/usage` and reconciled
 with supported response-header/WebSocket observations without delaying model
-work. Tau shows `Q-`, `Q=`, `Q+`, `Q!`, or neutral `Q?` only when the exact
-selected model has a fresh explicit in-band pool binding. It does not infer
-applicability from a default/sole pool, does not treat credits as weekly usage,
-and does not fabricate a reset when a cached boundary passes.
+work. Tau shows neutral `Q?` for a selected model when provider quota
+current-state exists but weekly data is absent, unbound, stale, expired, or
+timing-untrusted. `Q-`, `Q=`, `Q+`, and `Q!` require a fresh explicit in-band
+pool binding for the exact model. Tau does not infer colored applicability from
+a default/sole pool, treat credits as weekly usage, or fabricate a reset when a
+cached boundary passes. Quota capability remains available for the running
+harness after account state is cleared, keeping live and late clients on the
+same neutral unknown state.
 
 
 ## Runtime behavior

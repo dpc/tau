@@ -1970,6 +1970,10 @@ pub struct Harness {
     pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
     /// Ephemeral validated account-quota snapshots keyed by provider namespace.
     pub(crate) provider_quota: HashMap<tau_proto::ProviderName, CurrentProviderQuota>,
+    /// Empty latest snapshots retained after a clear so live and late clients
+    /// share running-harness evidence that the provider supports quota state.
+    provider_quota_capabilities:
+        HashMap<tau_proto::ProviderName, tau_proto::HarnessProviderQuotaChanged>,
     /// Last cleared upstream position, allowing a later authoritative full
     /// replacement to recover after temporary route ownership loss.
     provider_quota_tombstones: HashMap<tau_proto::ProviderName, ProviderQuotaTombstone>,
@@ -2618,6 +2622,7 @@ impl Harness {
             available_models: Vec::new(),
             provider_models_by_extension: HashMap::new(),
             provider_quota: HashMap::new(),
+            provider_quota_capabilities: HashMap::new(),
             provider_quota_tombstones: HashMap::new(),
             provider_quota_retired_epochs: HashMap::new(),
             provider_model_info: HashMap::new(),
@@ -13157,6 +13162,7 @@ impl Harness {
             route_bindings: replace.route_bindings,
         };
         self.provider_quota_tombstones.remove(&replace.provider);
+        self.provider_quota_capabilities.remove(&replace.provider);
         self.provider_quota.insert(
             replace.provider,
             CurrentProviderQuota {
@@ -13315,16 +13321,16 @@ impl Harness {
         } else {
             self.provider_quota_tombstones.remove(provider);
         }
-        self.publish_event(
-            None,
-            Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
-                provider: provider.clone(),
-                profile_epoch: current.snapshot.profile_epoch,
-                sequence,
-                windows: Vec::new(),
-                route_bindings: Vec::new(),
-            }),
-        );
+        let changed = tau_proto::HarnessProviderQuotaChanged {
+            provider: provider.clone(),
+            profile_epoch: current.snapshot.profile_epoch,
+            sequence,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
+        };
+        self.provider_quota_capabilities
+            .insert(provider.clone(), changed.clone());
+        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
     }
 
     fn retire_provider_quota_epoch(

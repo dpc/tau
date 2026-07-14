@@ -348,12 +348,13 @@ level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
 that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rather
 than silently dropping the field.
 
-The status bar renders the current session id and selected agent role,
-falling back to the model id when no role is selected. For an exact fresh
-ChatGPT model-to-weekly-pool binding it also renders an accessible quota pacing
-chip: `Q-` far under schedule, `Q=` aligned, `Q+` over, `Q!` danger, or neutral
-`Q?` when applicability exists but freshness/timing is untrusted. The text is
-meaningful without color and no pool is inferred from account snapshots alone.
+The status bar renders the current session id and selected agent role, falling
+back to the model id when no role is selected. When that model's provider
+publishes quota current-state, it also renders an accessible quota pacing chip:
+`Q-` far under schedule, `Q=` aligned, `Q+` over, `Q!` danger, or neutral `Q?`
+when weekly data is absent, unbound, stale, expired, or timing-untrusted. The
+text is meaningful without color and no colored pool applicability is inferred
+from account snapshots alone.
 
 ### Prompt input caching
 

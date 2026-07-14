@@ -147,6 +147,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::HARNESS_ROLE_SELECTED),
         EventSelector::Exact(E::HARNESS_CONTEXT_USAGE_CHANGED),
         EventSelector::Exact(E::HARNESS_AGENT_CONTEXT_USAGE_CHANGED),
+        EventSelector::Exact(E::HARNESS_PROVIDER_QUOTA_CHANGED),
         EventSelector::Exact(E::HARNESS_EFFORTS_AVAILABLE),
         EventSelector::Exact(E::HARNESS_VERBOSITIES_AVAILABLE),
         EventSelector::Exact(E::HARNESS_THINKING_SUMMARIES_AVAILABLE),

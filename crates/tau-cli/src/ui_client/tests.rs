@@ -79,6 +79,7 @@ fn chat_subscription_uses_no_prefix_selectors() {
         EventName::HARNESS_ROLE_SELECTED,
         EventName::HARNESS_CONTEXT_USAGE_CHANGED,
         EventName::HARNESS_AGENT_CONTEXT_USAGE_CHANGED,
+        EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
         EventName::HARNESS_EFFORTS_AVAILABLE,
         EventName::HARNESS_VERBOSITIES_AVAILABLE,
         EventName::HARNESS_THINKING_SUMMARIES_AVAILABLE,
@@ -90,4 +91,9 @@ fn chat_subscription_uses_no_prefix_selectors() {
     .collect::<Vec<_>>();
 
     assert_eq!(selectors, expected);
+    let HarnessInputMessage::Subscribe(subscription) = subscribe_message(selectors.clone()) else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    assert_eq!(subscription.historical_selectors, selectors);
+    assert_eq!(subscription.live_selectors, selectors);
 }

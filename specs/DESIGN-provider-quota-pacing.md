@@ -1,6 +1,6 @@
 # DESIGN-provider-quota-pacing: Correctness-first weekly quota pacing
 
-Status: confirmed, 2026-07-14, dpc (tau-agent-c79j, amended by tau-agent-9idt)
+Status: confirmed, 2026-07-14, dpc (tau-agent-c79j, amended by tau-agent-9idt and tau-agent-hfn6)
 
 Tau presents provider account quota as ephemeral, bounded current state. ChatGPT
 acquires a full account snapshot from authenticated `/wham/usage` and reconciles
@@ -32,8 +32,14 @@ an explicitly reported set means all listed pools apply.
 Every bound pool must be present. Only windows within five percent of 604,800
 seconds participate. When several applicable weekly constraints exist, the
 worst state wins and far-under is possible only when all are far-under. Missing,
-stale, or timing-untrusted members make the result unknown. If the complete
-bound set has no weekly window, the chip is hidden.
+stale, or timing-untrusted members make the result unknown. Once the selected
+model's provider has published quota current state, an absent binding or bound
+weekly window is likewise neutral unknown; it never becomes a colored claim.
+Providers with no quota current-state capability do not gain a quota chip.
+Once observed, provider quota capability lasts for the running harness.
+Clearing an account snapshot removes its windows and bindings but retains and
+replays an empty capability snapshot, so live and late-selected clients both
+show neutral unknown rather than disagreeing about applicability.
 
 ## Pacing
 
@@ -52,9 +58,9 @@ either `d > +22` or `u >= 87%`. A verified new reset cycle clears hysteresis.
 Relative server remaining time is preferred. Absolute reset time requires a
 fresh server-offset calibration; absolute/relative disagreement beyond five
 minutes is untrusted. Usage, timing, and applicability are colored only through
-15 minutes. After that the chip is neutral `Q?`; after 60 minutes it is hidden.
-At or past reset, Tau expires the observation and requests reconciliation; it
-never fabricates a local zero-use rollover.
+15 minutes. After that the chip is neutral `Q?`, including after hard staleness.
+At or past reset, Tau shows neutral unknown and requests reconciliation; it never
+fabricates a local zero-use rollover.
 
 ## Presentation
 

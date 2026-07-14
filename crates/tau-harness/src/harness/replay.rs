@@ -550,6 +550,7 @@ impl Harness {
             .provider_quota
             .values()
             .map(|current| current.snapshot.clone())
+            .chain(self.provider_quota_capabilities.values().cloned())
             .collect::<Vec<_>>();
         quota_snapshots.sort_by(|left, right| left.provider.cmp(&right.provider));
         for snapshot in quota_snapshots {

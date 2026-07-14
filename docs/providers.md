@@ -221,11 +221,14 @@ It owns execution for those namespaces and preserves the existing provider execu
 ChatGPT profiles also fetch bounded account quota from `/wham/usage` and merge
 supported HTTP/WebSocket rolling observations. Quota telemetry is best-effort
 and never delays inference or consumes prompt retry budget. The compact status
-chip is shown only after an in-band observation explicitly binds the exact
-selected `ModelId` to a weekly pool; Tau never guesses from a default or sole
-account pool. Colored state is fresh for 15 minutes, becomes neutral `Q?` while
-stale/untrusted, disappears after 60 minutes, and expires rather than locally
-resetting when the server reset boundary passes.
+chip is shown for a selected model when its provider publishes quota current
+state. Tau uses neutral `Q?` when weekly state is absent, unbound, stale, expired,
+or timing-untrusted. It never guesses a colored claim from a default or sole
+account pool: colored state requires a fresh in-band binding of the exact
+`ModelId` and trustworthy weekly timing, and expires rather than locally resetting
+when the server reset boundary passes. After quota state is cleared, an empty
+capability snapshot remains replayable for the running harness so both live and
+late clients show neutral unknown.
 
 Required LLM work has no attempt-count or elapsed-time retry limit during the
 running session. Transport/server failures, throttling, usage windows,

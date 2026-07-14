@@ -27,7 +27,8 @@ pub(crate) enum QuotaPacing {
     Over,
     /// Usage is far ahead or at least 90 percent exhausted.
     Danger,
-    /// Applicability exists but freshness or timing is not trustworthy.
+    /// Provider quota capability exists but applicability, freshness, or timing
+    /// is not trustworthy.
     Unknown,
 }
 
@@ -92,20 +93,24 @@ impl QuotaPacingState {
 
     /// Returns the current compact state for an exact selected model.
     ///
-    /// `None` means there is no explicit binding, every explicitly bound pool
-    /// has no weekly window, or the applicability/sample passed hard expiry.
+    /// `None` means the selected model's provider has published no quota
+    /// current-state capability. Once that capability is known, incomplete,
+    /// unbound, stale, expired, or timing-untrusted state is neutral unknown.
     pub(crate) fn classify(&mut self, model: &ModelId, now_unix_ms: u64) -> Option<QuotaPacing> {
         let current = self.current.get(&model.provider)?.clone();
-        let binding = current
+        let Some(binding) = current
             .bindings
             .iter()
-            .find(|binding| binding.model == *model)?;
+            .find(|binding| binding.model == *model)
+        else {
+            return Some(QuotaPacing::Unknown);
+        };
         let binding_age = match age_ms(binding.observed_at_unix_ms, now_unix_ms) {
             Some(age) => age,
             None => return Some(QuotaPacing::Unknown),
         };
         if binding_age > HARD_STALE_MS {
-            return None;
+            return Some(QuotaPacing::Unknown);
         }
 
         let bound: HashSet<_> = binding.limit_ids.iter().collect();
@@ -125,13 +130,13 @@ impl QuotaPacingState {
             .cloned()
             .collect::<Vec<_>>();
         if weekly.is_empty() && !missing_pool {
-            return None;
+            return Some(QuotaPacing::Unknown);
         }
         if weekly
             .iter()
             .any(|window| window_hard_expired(window, now_unix_ms))
         {
-            return None;
+            return Some(QuotaPacing::Unknown);
         }
         if missing_pool || binding_age > SOFT_STALE_MS {
             return Some(QuotaPacing::Unknown);

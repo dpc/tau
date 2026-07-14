@@ -6,6 +6,11 @@ the fixed weekly pacing classifier from
 It selects only an exact current/viewed `ModelId` binding, preserves provider
 timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
 accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.
+The lightweight `agent.prompt_started` event supplies the selected agent's
+model. Provider quota current-state is capability evidence for neutral `Q?`;
+only a fresh exact binding and trustworthy weekly timing permit colored pacing.
+Capability lasts for the running harness: a replayed empty snapshot after
+provider clear keeps live and late clients converged on neutral unknown.
 
 The terminal UI executes trusted local configuration and environment-derived
 commands, including key-binding shell snippets, completion commands, `$EDITOR`,

@@ -953,6 +953,38 @@ fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::A
     }
 }
 
+/// Builds a fresh bound danger snapshot for selected-agent quota wiring tests.
+fn danger_quota_event(model: &tau_proto::ModelId) -> Event {
+    let now = super::event_renderer::unix_time_millis();
+    let remaining = 604_800_u64 / 2;
+    Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
+        provider: model.provider.clone(),
+        profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-danger").expect("quota epoch"),
+        sequence: 1,
+        windows: vec![tau_proto::ProviderQuotaWindow {
+            key: tau_proto::ProviderQuotaWindowKey {
+                limit_id: tau_proto::ProviderQuotaLimitId::parse("codex").expect("quota pool"),
+                window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
+                    .expect("quota window"),
+            },
+            used_basis_points: 9_400,
+            usage_observed_at_unix_ms: now,
+            window_seconds: 604_800,
+            reset_at_unix_seconds: Some(now / 1_000 + remaining),
+            remaining_seconds_at_timing_anchor: Some(remaining as i64),
+            timing_anchor_observed_at_unix_ms: Some(now),
+            server_offset_ms: Some(0),
+            server_offset_observed_at_unix_ms: Some(now),
+        }],
+        route_bindings: vec![tau_proto::ProviderQuotaRouteBinding {
+            model: model.clone(),
+            limit_ids: vec![tau_proto::ProviderQuotaLimitId::parse("codex").expect("quota pool")],
+            observed_at_unix_ms: now,
+            provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
+        }],
+    })
+}
+
 fn provider_response_stats_update(
     agent_prompt_id: &str,
     agent_id: tau_proto::AgentId,
@@ -4311,6 +4343,92 @@ fn quota_status_renders_all_accessible_compact_chips() {
         sync(&handle);
         assert!(vt.screen_contains(80, expected), "missing {expected}");
     }
+}
+
+/// The production lightweight prompt lifecycle supplies the selected agent's
+/// model and repaints pacing whether quota catch-up arrives before or after it.
+#[test]
+fn selected_agent_quota_repaints_for_both_event_orderings() {
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
+    for quota_first in [true, false] {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+            model: Some("other/model".into()),
+            context_window: None,
+            role: "engineer".into(),
+            baseline_params: None,
+            model_params: tau_proto::ModelParams::default(),
+        }));
+        renderer.handle(&Event::SessionStarted(SessionStarted {
+            session_id: "quota-order".into(),
+            reason: SessionStartReason::Initial,
+        }));
+        let started = Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model: model.clone(),
+            ..agent_prompt_started("quota-sp", "quota-order")
+        });
+        let quota = danger_quota_event(&model);
+
+        if quota_first {
+            renderer.handle(&quota);
+            sync(&handle);
+            assert!(!vt.screen_contains(80, "Q!"));
+            renderer.handle(&started);
+        } else {
+            renderer.handle(&started);
+            sync(&handle);
+            assert!(!vt.screen_contains(80, "Q!"));
+            renderer.handle(&quota);
+        }
+        sync(&handle);
+
+        assert!(
+            vt.screen_contains(80, "Q!"),
+            "selected-agent quota was not repainted when quota_first={quota_first}"
+        );
+    }
+}
+
+/// A selected model keeps a neutral quota chip once its provider has advertised
+/// quota capability, even when the initial current-state snapshot is empty.
+#[test]
+fn selected_agent_empty_quota_state_renders_unknown() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let model = tau_proto::ModelId::from("chatgpt/gpt-5.6-sol");
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some("other/model".into()),
+        context_window: None,
+        role: "engineer".into(),
+        baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
+    }));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model: model.clone(),
+        ..agent_prompt_started("quota-empty-sp", "quota-empty")
+    }));
+    renderer.handle(&Event::HarnessProviderQuotaChanged(
+        tau_proto::HarnessProviderQuotaChanged {
+            provider: model.provider.clone(),
+            profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-empty")
+                .expect("quota epoch"),
+            sequence: 1,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
+        },
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "Q?"));
 }
 
 /// A narrow status line with the real default-plus-Bengalfox account shape

@@ -3805,26 +3805,18 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptCreated(prompt) => {
-                let agent_id = prompt.agent_id.to_string();
-                self.agent_models
-                    .insert(agent_id.clone(), prompt.model.clone());
-                self.mark_agent_live(agent_id.clone());
-                self.prompt_agents
-                    .insert(prompt.agent_prompt_id.to_string(), agent_id);
-                self.mark_agent_prompt_active(
-                    prompt.agent_id.as_str(),
-                    prompt.agent_prompt_id.as_str(),
+                self.learn_agent_prompt_start(
+                    &prompt.agent_id,
+                    &prompt.agent_prompt_id,
+                    &prompt.model,
                 );
                 true
             }
             Event::AgentPromptStarted(prompt) => {
-                let agent_id = prompt.agent_id.to_string();
-                self.mark_agent_live(agent_id.clone());
-                self.prompt_agents
-                    .insert(prompt.agent_prompt_id.to_string(), agent_id);
-                self.mark_agent_prompt_active(
-                    prompt.agent_id.as_str(),
-                    prompt.agent_prompt_id.as_str(),
+                self.learn_agent_prompt_start(
+                    &prompt.agent_id,
+                    &prompt.agent_prompt_id,
+                    &prompt.model,
                 );
                 true
             }
@@ -3862,6 +3854,23 @@ impl EventRenderer {
             }
             _ => false,
         }
+    }
+
+    /// Folds the prompt-start metadata shared by direct/replay prompt creation
+    /// and the lightweight production UI lifecycle event.
+    fn learn_agent_prompt_start(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+        model: &tau_proto::ModelId,
+    ) {
+        let agent_id_string = agent_id.to_string();
+        self.agent_models
+            .insert(agent_id_string.clone(), model.clone());
+        self.mark_agent_live(agent_id_string.clone());
+        self.prompt_agents
+            .insert(agent_prompt_id.to_string(), agent_id_string);
+        self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id.as_str());
     }
 
     fn learn_provider_tool_metadata(&mut self, event: &Event) -> bool {
