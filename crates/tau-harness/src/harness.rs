@@ -5013,6 +5013,9 @@ impl Harness {
 
     /// Classify whether a non-user message recipient can receive a hidden
     /// prompt.
+    ///
+    /// Historical membership restored on cold resume distinguishes an unloaded
+    /// stopped recipient from an id that was never known to the session.
     pub(crate) fn agent_message_recipient_status(
         &self,
         recipient_id: &str,
@@ -5027,7 +5030,9 @@ impl Harness {
                 .any(|pending| pending.agent_id == recipient_id)
         {
             AgentMessageRecipientStatus::Live
-        } else if self.stopped_agent_ids.contains(recipient_id) {
+        } else if self.stopped_agent_ids.contains(recipient_id)
+            || self.session_ever_loaded_agents.contains(recipient_id)
+        {
             AgentMessageRecipientStatus::Stopped
         } else {
             AgentMessageRecipientStatus::Unknown

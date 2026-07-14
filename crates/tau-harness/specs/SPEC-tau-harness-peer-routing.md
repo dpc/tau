@@ -16,10 +16,15 @@ misrouting and unintended spend; it is not an ACL against malicious same-user
 processes. Peer text remains escaped agent-authored model input, never a
 harness/system instruction.
 
-Runtime lookup visits at most 128 entries, reads at most 16 KiB of regular
-metadata per candidate, and fails closed when its scan/deadline cannot prove a
-unique live claimant. Outbound and inbound socket jobs use bounded global
-admission and absolute deadlines. Potentially blocking runtime lookup is
+Runtime lookup's initial scan visits at most 128 raw entries and reads at most
+16 KiB of regular metadata per candidate. An exhausted scan may ignore only conventional
+records whose numeric stem, metadata pid, dead-process result, Unix-socket
+shape, and lifecycle-file identities agree, then non-destructively ignore those
+revalidated records during one retry. That retry admits at most 128 candidates
+while traversing at most 256 raw entries (384 raw visits total) under the same
+deadline. Live, liveness-unknown, malformed, mismatched, replaced, ambiguous,
+and still-truncated catalogs fail closed. Outbound and inbound socket jobs use
+bounded global admission and absolute deadlines. Potentially blocking runtime lookup is
 isolated behind a separate 16-job non-queued lease; a stalled storage worker
 retains that lease after caller timeout so repeated stalls remain bounded. A
 64 KiB message limit bounds accepted peer text. Disconnect and session rollover

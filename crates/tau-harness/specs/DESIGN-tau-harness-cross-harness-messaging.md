@@ -1,6 +1,6 @@
 # DESIGN-tau-harness-cross-harness-messaging: Cross-harness agent messages use a dedicated asynchronous RPC
 
-Status: confirmed, 2026-07-12, tau-agent-44tt user approval
+Status: confirmed, 2026-07-12 tau-agent-44tt and 2026-07-14 tau-agent-nkz2 user approval
 
 The harness-owned `message` tool accepts bare `&<session-id>`, explicit
 `&<session-id>/@<agent-id>`, and the legacy exact
@@ -17,9 +17,14 @@ successful send projection.
 
 Runtime-dir stale cleanup is conservative: failed socket probes must not remove
 discovery files while the advertised daemon pid is still live. Dead-pid entries
-remain eligible for cleanup where Tau has a safe pid-liveness backend, but a
-transient connection failure must not make a running daemon permanently
-undiscoverable to external-message lookup or CLI attach.
+remain eligible for the existing post-probe cleanup where Tau has a definitive
+pid-liveness backend. Separately, an exhausted session lookup may
+non-destructively ignore an entry during its sole retry only when the numeric
+stem, bounded metadata pid, dead-process result, Unix-socket shape, and
+lifecycle-file identities agree twice. Mismatched, replaced, malformed, live,
+or liveness-unknown records remain fail-closed; a transient connection failure
+must not make a running daemon permanently undiscoverable to external-message
+lookup or CLI attach.
 
 Receiver-side sender authentication must not block the central harness event
 loop. The target performs bounded syntax/size and claimed-session checks, and
@@ -53,9 +58,14 @@ two-harness socket tests cover callback correlation and auto-start acknowledgeme
 parity.
 
 Outbound lookup and socket work likewise uses 16 non-queued process-wide slots
-and one absolute deadline. Runtime lookup counts at most 128 visited entries and
-reads at most 16 KiB per candidate before connect/send/response work. A success
-projection is impossible until the target's exact receive projection commits.
+and one absolute deadline. Runtime lookup's initial scan visits at most 128 raw
+entries and reads at most 16 KiB per candidate before connect/send/response work.
+An exhausted scan that identifies identity-revalidated definitely-dead PID
+records may retry once. The retry admits at most 128 non-ignored candidates and
+traverses at most 256 raw entries, for at most 384 raw visits total under the
+same deadline. This bounded filtering exception was confirmed for tau-agent-nkz2
+on 2026-07-14.
+A success projection is impossible until the target's exact receive projection commits.
 The acknowledgement continuation is bounded, in-memory, and generation-bound.
 Delivery is best-effort at-least-once: a crash after receive commit but before
 acknowledgement can lead to a duplicate prompt on retry. The same crash ambiguity

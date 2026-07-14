@@ -20129,6 +20129,64 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
+/// A cold resume restores historical session membership even though an
+/// unloaded agent has no live route. Exact local classification and external
+/// target validation must continue to report that known id as stopped.
+#[test]
+fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let recipient_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        let stopped_cid: AgentId = crate::parse_agent_id("cold-stopped-recipient");
+        h.agents.insert(
+            stopped_cid.clone(),
+            Agent::new(
+                stopped_cid.clone(),
+                "s1".into(),
+                tau_proto::PromptOriginator::User,
+                None,
+                None,
+            ),
+        );
+        let recipient_id = h.ensure_agent_id_for_agent(&stopped_cid).expect("agent id");
+        h.remove_agent(&stopped_cid);
+        h.shutdown().expect("shutdown");
+        recipient_id
+    };
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("cold resume");
+    assert_eq!(
+        resumed.agent_message_recipient_status(&recipient_id),
+        crate::harness::AgentMessageRecipientStatus::Stopped
+    );
+    let result = resumed.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "external-cold-stopped".to_owned(),
+            message_id: "msg-external-cold-stopped".into(),
+            capability: "cap-cold-stopped".to_owned(),
+            sender_session_id: "other-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "s1".into(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello".to_owned(),
+        },
+    );
+    assert!(
+        result
+            .error
+            .expect("stopped recipient error")
+            .contains("stopped message recipient")
+    );
+    assert!(session_agent_message_received_events(&resumed).is_empty());
+    resumed.shutdown().expect("shutdown resumed");
+}
+
 /// Terminal teardown keeps routes until unload commits but must reject every
 /// direct message and prompt entry point during that interval.
 #[test]

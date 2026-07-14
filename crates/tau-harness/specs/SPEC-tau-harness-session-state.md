@@ -23,7 +23,9 @@ same guidance in its restore notice because runtime can stop before the
 agent-specific notice is folded into a durable prompt. The harness caches
 ever-loaded membership for the bound session, including memory-only ephemeral
 membership, so repeated prompt routing does not rescan journals and same-session
-unload/reload does not produce a false warning.
+unload/reload does not produce a false warning. After cold resume, a historically
+loaded id without a current live or pending route is classified as stopped for
+local and external exact-message errors rather than as an unknown id.
 
 Ephemeral session mode (`tau --ephemeral`) replaces the session membership store
 with an in-memory store for the current harness process and suppresses
