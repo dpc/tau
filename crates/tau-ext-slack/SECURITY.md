@@ -15,6 +15,37 @@ orphaned, or mismatched results install nothing.
 - Fixed threads use their configured root for creates, local replies, edits, reactions, and sends. Parent receive covers children; overlapping parent/child receive is rejected.
 - Harness capability/session/tool/agent checks and extension route checks are both required. Configuration freezes before an authorized post or reaction API attempt, or after successful worker preflight.
 - Runtime caches, routes, ownership, selections, and links are bounded. Committed creates are durably deduplicated/restorable by native conversation+timestamp when Slack retries; edits require restored create ownership and inbound human reactions require same-process post ownership. Crashes/API ambiguity do not provide exactly-once delivery.
+- `slack_send` owns a 1,024-entry non-evicting session/process ledger. It
+  reserves before I/O and admits at most 64 active delivery workers. Initial
+  HTTP and the sole event-driven retry remain off the protocol reader; each
+  attempt has a 30-second HTTP timeout, responses are capped at 64 KiB, and the
+  retry must begin within the 60-second logical-call horizon. Exact
+  lifecycle/config/route authority is revalidated before each attempt and
+  completion; disconnect/EOF retires authority before workers are woken.
+  Completion output is written and flushed through an acknowledged background
+  path; writer failure retires outbound authority, wakes workers, and requests
+  shutdown. Replay output shares the 64-worker cap, coalesces per call id, and
+  waits in a bounded FIFO when saturated; agent unload retains correlation but
+  cannot restore private reaction authority.
+  Awaiting-Tau, durably completed, definitive, cumulative
+  ambiguity/copy range, and cancellation states are retained. Full capacity
+  rejects before freeze/I/O. One
+  initial-plus-one byte-identical retry is deliberately at-least-once: an
+  ambiguous first attempt can leave one or two Slack copies; two ambiguous
+  attempts can leave zero, one, or two. Restart clears this
+  boundary; there is no durable outbox, `client_msg_id`, reconciliation, or
+  exactly-once guarantee. Already-started synchronous HTTP is process-owned and
+  may outlive the protocol `run` return for at most its 30-second request timeout;
+  retired workers cannot retry or restore local authority.
+- Slack HTTP/identity/post diagnostics are closed typed categories. Raw provider
+  bodies/codes/headers/errors, tokens, native ids, mention text, and message text
+  do not enter displays, model errors, notices, or logs. Agent mrkdwn rejects raw
+  native controls; bridge-owned reflected output is escaped, disables mrkdwn and
+  link expansion, and is component/final bounded.
+- Mandatory workspace/team installation evidence is intentionally deferred to
+  canonical Slack integration; optional bot preflight observation is not
+  installation proof. Protocol-v11 `ToolStarted` is the scoped-tool lease for
+  one logical call, and the harness revalidates tool authority on completion.
 - Identity/API outages fail closed. Slack, workspace administrators, members, and Slack Connect participants may read transported text; this is not end-to-end encrypted.
 - Supported ingress uses one persistent serial in-memory FIFO bounded at 64 queued/in-flight occurrences. Capacity is reserved before ACK, retained through terminal processing, and released on ACK failure or terminal rejection/application. Saturation, actor failure, and harness-writer closure stop later ACK admission. Reconnect preserves accepted order; session/config/process teardown invalidates late authority. Process death after ACK can still lose work.
 - Latency observability is TRACE-only and non-durable. It permits process-local volume/order correlation but never native IDs, payloads, tokens, URLs, response bodies, agent IDs, or stable hashes. Keep retention bounded and never promote occurrence/request ordinals to metric labels.

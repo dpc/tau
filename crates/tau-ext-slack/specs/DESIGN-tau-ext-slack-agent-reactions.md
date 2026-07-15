@@ -83,7 +83,7 @@ Do not echo native routing data. Errors are terminal `ToolError`s with bounded s
 A successful send must make its posted message targetable. Change its committed tool result from the text `sent Slack message` to:
 
 ```json
-{"status":"sent","message_ref":"slack-msg-v1-<opaque random token>"}
+{"status":"sent","message_ref":"slack-msg-v1-<opaque random token>","delivery_copies":"one"|"one_or_two_possible"}
 ```
 
 Mint a collision-resistant, bounded extension-local reference after Slack returns a valid posted identity. It must not encode the conversation, timestamp, thread, alias, token, or agent ID. Store that same ref in `PendingPostedMessage` and in the accepted-send replay record so identical same-process send completion returns the same ref without reposting.

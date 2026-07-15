@@ -2,12 +2,22 @@
 //! `DESIGN-tau-ext-slack-lifecycle-testing`; route/security matrices follow
 //! `DESIGN-tau-ext-slack-conversation-policy`.
 
+mod send_delivery_tests;
+
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
+use super::send_delivery::ImmediateSendScheduler;
 use super::*;
+
+impl Extension {
+    /// Create a test extension whose logical waits advance without real sleeps.
+    fn new(client: Arc<dyn SlackClient>, output: impl Into<Output>) -> Self {
+        Self::new_with_scheduler(client, output, Arc::new(ImmediateSendScheduler))
+    }
+}
 
 #[derive(Clone, Default)]
 struct SharedWriter {
@@ -33,6 +43,82 @@ impl Write for SharedWriter {
     }
 }
 
+/// Writer that lets concurrency tests wait on emitted protocol bytes without
+/// polling or sleeping.
+#[derive(Clone, Default)]
+struct NotifyingWriter {
+    /// Shared bytes and write notification.
+    shared: Arc<(Mutex<Vec<u8>>, std::sync::Condvar)>,
+}
+
+impl NotifyingWriter {
+    /// Wait until a stable text fragment appears in encoded output.
+    fn wait_for(&self, needle: &[u8]) {
+        let (bytes, changed) = &*self.shared;
+        let bytes = bytes.lock().expect("writer bytes");
+        let (bytes, timeout) = changed
+            .wait_timeout_while(bytes, Duration::from_secs(2), |bytes| {
+                !bytes.windows(needle.len()).any(|window| window == needle)
+            })
+            .expect("writer wait");
+        assert!(!timeout.timed_out(), "output marker was not emitted");
+        assert!(bytes.windows(needle.len()).any(|window| window == needle));
+    }
+}
+
+impl Write for NotifyingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (bytes, changed) = &*self.shared;
+        bytes.lock().expect("writer bytes").extend(buf);
+        changed.notify_all();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Reader fed with complete framed chunks so tests can stop the serialized
+/// reader between lifecycle steps.
+struct StagedReader {
+    /// Ordered input chunks; channel close means EOF.
+    chunks: mpsc::Receiver<Vec<u8>>,
+    /// Current chunk.
+    current: Vec<u8>,
+    /// Next unread byte.
+    offset: usize,
+}
+
+impl Read for StagedReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        while self.offset == self.current.len() {
+            match self.chunks.recv() {
+                Ok(chunk) => {
+                    self.current = chunk;
+                    self.offset = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let count = output.len().min(self.current.len() - self.offset);
+        output[..count].copy_from_slice(&self.current[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
+}
+
+/// Encode complete harness-output frames for a staged reader.
+fn encode_output_frames(messages: &[HarnessOutputMessage]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut bytes);
+    for message in messages {
+        writer.write_message(message).expect("encode output frame");
+    }
+    writer.flush().expect("flush output frames");
+    bytes
+}
+
 /// One complete fake Slack post recorded atomically for assertions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SentMessage {
@@ -42,6 +128,27 @@ struct SentMessage {
     text: String,
     /// Optional originating thread root.
     thread_ts: Option<String>,
+}
+
+/// Decode one frozen test body without giving production code a reverse parser.
+fn sent_message(body: &FrozenPostBody) -> SentMessage {
+    let value: serde_json::Value =
+        serde_json::from_str(body.wire_json()).expect("valid frozen post JSON");
+    SentMessage {
+        channel_id: value["channel"]
+            .as_str()
+            .expect("frozen channel")
+            .to_owned(),
+        text: value["text"].as_str().expect("frozen text").to_owned(),
+        thread_ts: value["thread_ts"].as_str().map(str::to_owned),
+    }
+}
+
+/// Build one agent-mode post body for wire-shape assertions.
+fn post_message_body(channel_id: &str, text: &str, thread_ts: Option<&str>) -> serde_json::Value {
+    let mode = SlackPostMode::agent(text.to_owned(), None).expect("test fixture is safe");
+    serde_json::from_str(FrozenPostBody::new(channel_id, thread_ts, &mode).wire_json())
+        .expect("frozen body is JSON")
 }
 
 /// One exact outbound reaction call recorded by the fake.
@@ -111,37 +218,31 @@ impl FakeClient {
 }
 
 impl SlackClient for FakeClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         *self.open_count.lock().expect("lock") += 1;
         Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         *self.auth_count.lock().expect("lock") += 1;
         Ok("UBOT123".to_owned())
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError> {
         Ok(user_id != "UBOT999")
     }
 
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        channel_id: &str,
-        text: &str,
-        thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
+        body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
         let mut sent = self.sent.lock().expect("lock");
-        sent.push(SentMessage {
-            channel_id: channel_id.to_owned(),
-            text: text.to_owned(),
-            thread_ts: thread_ts.map(str::to_owned),
-        });
-        Ok(PostedMessage {
-            channel_id: channel_id.to_owned(),
+        sent.push(sent_message(body));
+        PostAttemptOutcome::Accepted(PostedMessage {
+            channel_id: body.channel_id().to_owned(),
             ts: format!("{}.0", sent.len()),
-            thread_ts: None,
+            thread_ts: body.thread_ts().map(str::to_owned),
         })
     }
 
@@ -174,82 +275,24 @@ struct BlockingReactionClient {
     /// Release signal consumed by the blocked call.
     release: Mutex<mpsc::Receiver<()>>,
 }
-
-/// Fake whose post call blocks until the test releases a lifecycle race.
-struct BlockingSendClient {
-    /// Signals that Slack I/O has begun.
-    started: Mutex<Option<mpsc::Sender<()>>>,
-    /// Release signal consumed by the blocked call.
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-impl SlackClient for BlockingSendClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
-        unreachable!("not used")
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
-        unreachable!("not used")
-    }
-
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
-        unreachable!("not used")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
-        if let Some(started) = self.started.lock().expect("started lock").take() {
-            started.send(()).expect("signal started");
-        }
-        self.release
-            .lock()
-            .expect("release lock")
-            .recv()
-            .expect("release send");
-        Ok(PostedMessage {
-            channel_id: channel_id.to_owned(),
-            ts: "1.0".to_owned(),
-            thread_ts: None,
-        })
-    }
-
-    fn react(
-        &self,
-        _cfg: &RuntimeConfig,
-        _action: ReactionActionKind,
-        _channel_id: &str,
-        _message_ts: &str,
-        _emoji: &str,
-    ) -> Result<(), ReactionApiError> {
-        unreachable!("not used")
-    }
-}
-
 impl SlackClient for BlockingReactionClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("not used")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("not used")
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
         unreachable!("not used")
     }
 
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
         unreachable!("not used")
     }
 
@@ -276,29 +319,27 @@ impl SlackClient for BlockingReactionClient {
 struct FailingAuthClient;
 
 impl SlackClient for FailingAuthClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
-        Err("Slack API auth.test failed: invalid_auth".to_owned())
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+        Err(SlackApiError::Authentication)
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
         Ok(true)
     }
 
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
-        Ok(PostedMessage {
-            channel_id: _channel_id.to_owned(),
+        body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        PostAttemptOutcome::Accepted(PostedMessage {
+            channel_id: body.channel_id().to_owned(),
             ts: "1.0".to_owned(),
-            thread_ts: None,
+            thread_ts: body.thread_ts().map(str::to_owned),
         })
     }
 }
@@ -306,76 +347,32 @@ impl SlackClient for FailingAuthClient {
 struct FailingPostClient;
 
 impl SlackClient for FailingPostClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("post-only client")
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
         unreachable!("post-only client")
     }
 
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
-        Err("ambiguous Slack post failure".to_owned())
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Transport)
     }
 }
-
-/// Scripted post client used to verify that Slack-accepted response metadata is
-/// checked once and then retained as an idempotent failure.
-struct MismatchedPostClient {
-    /// Number of Slack post attempts.
-    posts: Mutex<usize>,
-    /// Returned conversation id.
-    returned_channel: String,
-    /// Returned thread root.
-    returned_thread: Option<String>,
-}
-
-impl SlackClient for MismatchedPostClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
-        unreachable!("post-only test client")
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
-        unreachable!("post-only test client")
-    }
-
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
-        unreachable!("post-only test client")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
-        *self.posts.lock().expect("posts") += 1;
-        Ok(PostedMessage {
-            channel_id: self.returned_channel.clone(),
-            ts: "1.0".to_owned(),
-            thread_ts: self.returned_thread.clone(),
-        })
-    }
-}
-
 /// Scripted identity client used to verify fail-closed outage and recovery
 /// behavior.
 struct IdentitySequenceClient {
     /// Ordered users.info results consumed by calls.
-    results: Mutex<VecDeque<Result<bool, String>>>,
+    results: Mutex<VecDeque<Result<bool, SlackApiError>>>,
 }
-
 /// Identity fake whose first lookup blocks behind a deterministic barrier.
 struct BlockingIdentityClient {
     /// Signals when the first users.info call begins.
@@ -385,15 +382,15 @@ struct BlockingIdentityClient {
 }
 
 impl SlackClient for BlockingIdentityClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("socket URL supplied by test")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("startup supplied by test")
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
         if let Some(started) = self.started.lock().expect("started lock").take() {
             started.send(()).expect("signal identity start");
             self.release
@@ -408,24 +405,22 @@ impl SlackClient for BlockingIdentityClient {
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
         unreachable!("routed fixtures do not post locally")
     }
 }
 
 impl SlackClient for IdentitySequenceClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("identity-only test client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         unreachable!("identity-only test client")
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
         self.results
             .lock()
             .expect("lock identity sequence")
@@ -436,10 +431,8 @@ impl SlackClient for IdentitySequenceClient {
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
-        _channel_id: &str,
-        _text: &str,
-        _thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
         unreachable!("identity-only test client")
     }
 }
@@ -1649,7 +1642,6 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
 /// can be reported as false JSON errors.
 #[test]
 fn long_successful_slack_api_response_still_parses() {
-    let cfg = cfg();
     let long_text = "x".repeat(MAX_DIAGNOSTIC_BYTES + 200);
     let body = serde_json::json!({
         "ok": true,
@@ -1657,16 +1649,14 @@ fn long_successful_slack_api_response_still_parses() {
         "message": { "text": long_text }
     })
     .to_string();
-    let value = parse_slack_api_response(&cfg, "chat.postMessage", 200, None, &body)
-        .expect("long ok response parses");
+    let value = parse_slack_api_response(200, &body).expect("long ok response parses");
     assert_eq!(
         value.get("ok").and_then(|value| value.as_bool()),
         Some(true)
     );
 }
 
-/// Slack API diagnostic responses are token-redacted and bounded without
-/// affecting parsing of successful response bodies.
+/// Slack API failures collapse hostile remote diagnostics to a typed allowlist.
 #[test]
 fn slack_api_error_response_is_redacted_and_bounded() {
     let cfg = cfg();
@@ -1680,11 +1670,12 @@ fn slack_api_error_response_is_redacted_and_bounded() {
         )
     })
     .to_string();
-    let err =
-        parse_slack_api_response(&cfg, "auth.test", 200, None, &body).expect_err("slack error");
-    assert!(!err.contains(&cfg.app_token));
-    assert!(!err.contains(&cfg.bot_token));
-    assert!(err.len() <= MAX_DIAGNOSTIC_BYTES + 64, "{err}");
+    let err = parse_slack_api_response(200, &body).expect_err("slack error");
+    assert_eq!(err, SlackApiError::RemoteFailure);
+    let display = err.to_string();
+    assert!(!display.contains(&cfg.app_token));
+    assert!(!display.contains(&cfg.bot_token));
+    assert!(display.len() < 128);
 }
 
 /// Slack bridge tools are disabled by default because roles must explicitly opt
@@ -2016,386 +2007,6 @@ fn late_reaction_success_after_shutdown_cannot_restore_state() {
     assert!(state.reaction_attempts.is_empty());
     assert!(state.reaction_in_flight.is_empty());
 }
-
-/// A Slack post returning after shutdown cannot recreate a send attempt,
-/// pending completion, posted-message owner, or reaction target.
-#[test]
-fn late_send_success_after_shutdown_cannot_restore_state() {
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let client = Arc::new(BlockingSendClient {
-        started: Mutex::new(Some(started_tx)),
-        release: Mutex::new(release_rx),
-    });
-    let (output, _output_rx) = mpsc::channel();
-    let ext = Arc::new(Extension::new(client, output));
-    apply_test_config(&ext, proactive_cfg());
-    let worker = {
-        let ext = ext.clone();
-        std::thread::spawn(move || {
-            ext.handle_send(tool_call(
-                SEND_TOOL_NAME,
-                "agent-a",
-                "late-send",
-                tau_proto::json_to_cbor(&serde_json::json!({
-                    "message": "late",
-                    "destination": "team-ops"
-                })),
-            ))
-        })
-    };
-    started_rx.recv().expect("send started");
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.capability_active = false;
-        state.sends_in_flight.clear();
-        state.pending_posts.clear();
-        state.clear_accepted_send_attempts();
-        state.clear_reaction_state();
-    }
-    release_tx.send(()).expect("release send");
-    assert!(matches!(
-        worker.join().expect("worker"),
-        Some(Event::ToolError(_))
-    ));
-    let state = ext.state.lock().expect("state");
-    assert!(state.sends_in_flight.is_empty());
-    assert!(state.pending_posts.is_empty());
-    assert!(state.accepted_send_attempts.is_empty());
-    assert!(state.reaction_targets.is_empty());
-}
-
-/// The send tool schema and runtime validation must not allow model-selected
-/// Slack destinations such as channel ids.
-#[test]
-fn slack_send_rejects_destination_arguments() {
-    let (ext, _rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    let event = ext.handle_send(tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        CborValue::Map(vec![
-            (
-                CborValue::Text("message".to_owned()),
-                CborValue::Text("hi".to_owned()),
-            ),
-            (
-                CborValue::Text("channel_id".to_owned()),
-                CborValue::Text("C999".to_owned()),
-            ),
-        ]),
-    ));
-    let Some(Event::ToolError(err)) = event else {
-        panic!("expected error");
-    };
-    assert!(err.message.contains("unknown argument `channel_id`"));
-}
-
-/// Proactive aliases work without agent registration, preserve a configured
-/// fixed thread, and expose no native destination in the model arguments.
-#[test]
-fn proactive_send_uses_exact_configured_route_without_registration() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    let event = ext.handle_send(tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(&serde_json::json!({
-            "message": "update",
-            "destination": "incident-thread"
-        })),
-    ));
-    assert!(event.is_none(), "completion is asynchronous");
-    assert_eq!(
-        client.sent_pairs(),
-        vec![("G789".to_owned(), "update".to_owned())]
-    );
-    assert_eq!(
-        client.sent_thread_ids(),
-        vec![Some("1720000000.123456".to_owned())]
-    );
-    let request = match rx.try_recv().expect("completion request") {
-        HarnessInputMessage::CompleteTransportSend(request) => request,
-        other => panic!("unexpected frame: {other:?}"),
-    };
-    assert!(request.in_reply_to.is_none());
-    assert!(matches!(
-        request.authorization,
-        tau_proto::TransportSendAuthorization::ConfiguredDestination { ref alias }
-            if alias == "incident-thread"
-    ));
-    let message_ref = tau_proto::cbor_text_field(&request.tool_result.result, "message_ref")
-        .expect("structured send message_ref")
-        .to_owned();
-    assert!(message_ref.starts_with("slack-msg-v1-"));
-    assert!(!message_ref.contains("G789"));
-    assert!(!message_ref.contains("1720000000"));
-    assert!(
-        !ext.state
-            .lock()
-            .expect("state")
-            .reaction_targets
-            .contains_key(&message_ref),
-        "returned ref must fail closed before completion"
-    );
-    apply_output_message(
-        &HarnessOutputMessage::CompleteTransportSendResult(
-            tau_proto::CompleteTransportSendResult {
-                request_id: request.request_id,
-                message_id: Some(MessageId::new("msg-outgoing")),
-                accepted: true,
-                error: None,
-            },
-        ),
-        &ext,
-    );
-    assert!(
-        ext.state
-            .lock()
-            .expect("state")
-            .reaction_targets
-            .contains_key(&message_ref)
-    );
-}
-
-/// Enabling `prefix_agent_id` retains the legacy prefix for both source replies
-/// and proactive sends while leaving byte-limit validation on the model text.
-#[test]
-fn enabled_agent_id_prefix_formats_reply_and_proactive_text() {
-    let (ext, rx, client) = extension();
-    let message = "first line\nsecond 🦀";
-    let mut secrets = BTreeMap::new();
-    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
-    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
-    let config = tau_proto::json_to_cbor(&serde_json::json!({
-        "app_token_secret": "app",
-        "bot_token_secret": "bot",
-        "allowed_user_ids": ["U123"],
-        "prefix_agent_id": true,
-        "max_message_bytes": message.len(),
-        "conversations": [{
-            "alias": "team",
-            "conversation_id": "C123",
-            "kind": "channel",
-            "receive": "mentions_only"
-        }, {
-            "alias": "team-ops",
-            "conversation_id": "C456",
-            "kind": "channel",
-            "proactive_send": true
-        }]
-    }))
-    .deserialized::<ExtConfig>()
-    .expect("deserialize operator config")
-    .validate(&secrets)
-    .expect("validate operator config");
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> source"));
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args(message)))
-            .is_none()
-    );
-    let mut proactive = tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message": message, "destination": "team-ops"}),
-        ),
-    );
-    proactive.call_id = "call-prefix-proactive".into();
-    assert!(ext.handle_send(proactive).is_none());
-
-    let expected = format!("[agent-a] {message}");
-    assert!(expected.len() > message.len());
-    assert_eq!(
-        client.sent_pairs(),
-        [
-            ("C123".to_owned(), expected.clone()),
-            ("C456".to_owned(), expected)
-        ]
-    );
-}
-
-/// A proactive send resolves a known alias from the latest pre-freeze
-/// configuration rather than retaining the route from an earlier configuration.
-#[test]
-fn proactive_send_resolves_current_alias_after_reconfiguration() {
-    let (ext, _rx, client) = extension();
-    ext.apply_config(proactive_cfg()).expect("initial config");
-    let mut current = proactive_cfg();
-    current
-        .conversations
-        .get_mut("team-ops")
-        .expect("team-ops")
-        .conversation_id = "C999".to_owned();
-    ext.apply_config(current)
-        .expect("pre-freeze reconfiguration");
-    ext.state.lock().expect("state").capability_active = true;
-
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"current","destination":"team-ops"})
-            ),
-        ))
-        .is_none()
-    );
-    assert_eq!(
-        client.sent_pairs(),
-        vec![("C999".to_owned(), "current".to_owned())]
-    );
-}
-
-/// Proactive calls must not reach Slack until the harness accepts the current
-/// session's exact transport capability.
-#[test]
-fn proactive_send_requires_active_capability_before_posting() {
-    let (ext, _rx, client) = extension();
-    ext.apply_config(proactive_cfg())
-        .expect("configure aliases");
-    let event = ext.handle_send(tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message": "update", "destination": "team-ops"}),
-        ),
-    ));
-    assert!(matches!(event, Some(Event::ToolError(_))));
-    assert!(client.sent_pairs().is_empty());
-}
-
-/// A fully authorized proactive attempt freezes configuration immediately
-/// before Slack I/O even when the API result is an ambiguous failure.
-#[test]
-fn proactive_api_failure_still_freezes_configuration() {
-    let (tx, _rx) = mpsc::channel();
-    let ext = Extension::new(Arc::new(FailingPostClient), tx);
-    ext.apply_config(proactive_cfg()).expect("config");
-    ext.state.lock().expect("state").capability_active = true;
-    let result = ext.handle_send(tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(&serde_json::json!({"message":"update","destination":"team-ops"})),
-    ));
-    assert!(matches!(result, Some(Event::ToolError(_))));
-    assert!(ext.state.lock().expect("state").config_frozen);
-    assert!(ext.apply_config(proactive_cfg()).is_err());
-}
-
-/// Restart-required Configure after an accepted proactive post preserves the
-/// pending completion, capability, late correlation, and no-repost disposition.
-#[test]
-fn frozen_proactive_pending_state_survives_reconfigure_and_late_completion() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    let invoke = tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(&serde_json::json!({"message":"update","destination":"team-ops"})),
-    );
-    assert!(ext.handle_send(invoke.clone()).is_none());
-    assert!(ext.apply_config(cfg()).is_err());
-    {
-        let state = ext.state.lock().expect("state");
-        assert!(state.capability_active);
-        assert_eq!(state.pending_posts.len(), 1);
-        assert_eq!(state.accepted_send_attempts.len(), 1);
-        assert!(
-            state
-                .config
-                .as_ref()
-                .expect("config")
-                .proactive_aliases
-                .contains("team-ops")
-        );
-    }
-    complete_pending_send(&ext, &rx, true);
-    assert!(ext.state.lock().expect("state").pending_posts.is_empty());
-    assert!(ext.handle_send(invoke).is_none());
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(HarnessInputMessage::CompleteTransportSend(_))
-    ));
-    assert_eq!(client.sent_pairs().len(), 1);
-}
-
-/// Identical delivery after Slack acceptance resubmits the typed completion
-/// without posting again or fabricating a terminal tool result.
-#[test]
-fn accepted_proactive_replay_resubmits_completion_without_reposting() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    let invoke = tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message": "update", "destination": "team-ops"}),
-        ),
-    );
-    assert!(ext.handle_send(invoke.clone()).is_none());
-    let first = rx.try_recv().expect("first completion");
-    assert!(ext.handle_send(invoke).is_none());
-    let replay = rx.try_recv().expect("replayed completion");
-    assert_eq!(format!("{first:?}"), format!("{replay:?}"));
-    assert_eq!(client.sent_pairs().len(), 1);
-}
-
-/// Exactly-one selector validation and the closed argument set prevent
-/// reply/proactive confusion and native destination or thread injection.
-#[test]
-fn proactive_send_rejects_ambiguous_unknown_and_native_arguments() {
-    let (ext, _rx, client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    for arguments in [
-        serde_json::json!({"message": "x"}),
-        serde_json::json!({"message": "x", "reply_to": "msg-x", "destination": "team-ops"}),
-        serde_json::json!({"message": "x", "destination": "TEAM-OPS"}),
-        serde_json::json!({"message": "x", "destination": " team-ops"}),
-        serde_json::json!({"message": "x", "destination": "C456"}),
-        serde_json::json!({"message": "x", "destination": "team-ops", "thread_ts": "1.0"}),
-        serde_json::json!({"message": "x", "destination": "team-ops", "channel_id": "C999"}),
-    ] {
-        assert!(matches!(
-            ext.handle_send(tool(
-                SEND_TOOL_NAME,
-                "agent-a",
-                tau_proto::json_to_cbor(&arguments)
-            )),
-            Some(Event::ToolError(_))
-        ));
-    }
-    assert!(client.sent_pairs().is_empty());
-}
-
-/// The send schema stays constant-sized and never embeds configured route data.
-#[test]
-fn proactive_schema_is_config_independent() {
-    let spec = send_tool_spec();
-    let parameters = spec.parameters.expect("parameters");
-    let schema = parameters.as_object().expect("object schema");
-    let destination = &schema["properties"]["destination"];
-    assert!(destination.get("enum").is_none());
-    assert_eq!(destination["pattern"], "^[a-z][a-z0-9_-]{0,63}$");
-    let serialized = serde_json::to_string(&parameters).expect("schema json");
-    for private in [
-        "team-ops",
-        "Trusted ops hint",
-        DYNAMIC_DM_LABEL,
-        "C456",
-        "G789",
-        "D123",
-        "1720000000.123456",
-    ] {
-        assert!(!serialized.contains(private), "schema leaked {private}");
-    }
-}
-
 /// Discovery returns sorted static route metadata while excluding every native
 /// route, dynamic link, identity, and runtime-state field.
 #[test]
@@ -2683,97 +2294,6 @@ fn conversation_discovery_enforces_page_and_serialized_output_bounds() {
         );
     }
 }
-
-/// Slack-accepted channel and fixed-thread mismatches become stable failures;
-/// replaying the same call id must neither repost nor leak native identifiers.
-#[test]
-fn accepted_response_route_mismatches_replay_without_reposting() {
-    for (channel, thread, expected) in [
-        ("C999", None, "conflicting destination conversation"),
-        ("G789", Some("9.9"), "conflicting thread metadata"),
-    ] {
-        let client = Arc::new(MismatchedPostClient {
-            posts: Mutex::new(0),
-            returned_channel: channel.to_owned(),
-            returned_thread: thread.map(str::to_owned),
-        });
-        let (tx, _rx) = mpsc::channel();
-        let ext = Extension::new(client.clone(), tx);
-        apply_test_config(&ext, proactive_cfg());
-        ext.state.lock().expect("state").capability_active = true;
-        let invoke = tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message": "update", "destination": "incident-thread"}),
-            ),
-        );
-        for attempt in [invoke.clone(), invoke] {
-            let Some(Event::ToolError(error)) = ext.handle_send(attempt) else {
-                panic!("expected stable mismatch error");
-            };
-            assert!(error.message.contains(expected));
-            assert!(!error.message.contains(channel));
-            assert!(!error.message.contains("9.9"));
-        }
-        assert_eq!(*client.posts.lock().expect("posts"), 1);
-    }
-}
-
-/// Accepted-attempt retention rejects conflicting replay, remains bounded, and
-/// survives restart-required reconfiguration after an authorized post freezes
-/// policy.
-#[test]
-fn accepted_send_attempts_conflict_bound_and_freeze() {
-    let (ext, _rx, client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    let first = tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message": "first", "destination": "team-ops"}),
-        ),
-    );
-    assert!(ext.handle_send(first.clone()).is_none());
-    let mut conflict = first;
-    conflict.arguments = tau_proto::json_to_cbor(
-        &serde_json::json!({"message": "changed", "destination": "team-ops"}),
-    );
-    assert!(matches!(
-        ext.handle_send(conflict),
-        Some(Event::ToolError(_))
-    ));
-    assert_eq!(client.sent_pairs().len(), 1);
-
-    let mut state = ext.state.lock().expect("state");
-    state.clear_accepted_send_attempts();
-    for index in 0..=ACCEPTED_SEND_ATTEMPT_LIMIT {
-        let invoke = ToolStarted {
-            call_id: format!("bounded-{index}").into(),
-            ..tool(SEND_TOOL_NAME, "agent-a", CborValue::Null)
-        };
-        state.remember_accepted_send(
-            &invoke,
-            AcceptedSendDisposition::Rejected("accepted".to_owned()),
-        );
-    }
-    assert_eq!(
-        state.accepted_send_attempts.len(),
-        ACCEPTED_SEND_ATTEMPT_LIMIT
-    );
-    assert!(
-        !state
-            .accepted_send_attempts
-            .contains_key(&tau_proto::ToolCallId::from("bounded-0"))
-    );
-    drop(state);
-    let mut reconfigured = proactive_cfg();
-    reconfigured.max_message_bytes -= 1;
-    assert!(ext.apply_config(reconfigured).is_err());
-    let state = ext.state.lock().expect("state");
-    assert!(!state.accepted_send_attempts.is_empty());
-}
-
 /// Unified proactive conversation policy rejects ambiguous or unsafe shapes
 /// while accepting channel, MPIM, DM, and fixed-thread forms.
 #[test]
@@ -3442,7 +2962,7 @@ fn slack_register_reports_initial_auth_failure() {
     let Event::ToolError(err) = event else {
         panic!("expected tool error");
     };
-    assert!(err.message.contains("invalid_auth"));
+    assert!(err.message.contains("authentication failed"));
     assert!(!ext.state.lock().expect("lock").config_frozen);
     let mut replacement = cfg();
     replacement.max_message_bytes -= 1;
@@ -3463,6 +2983,7 @@ fn slack_send_uses_originating_conversation() {
     activate_prompt_origin(&ext, &prompt);
     let result = ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello")));
     assert!(result.is_none());
+    rx.recv().expect("background completion");
     assert_eq!(
         client.sent_pairs(),
         vec![("C456".to_owned(), "hello".to_owned())]
@@ -3483,6 +3004,7 @@ fn slack_send_preserves_root_and_thread_context() {
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("root reply")))
             .is_none()
     );
+    rx.recv().expect("root completion");
 
     let mut threaded = slack_message("C123", None, "<@UBOT123> threaded");
     threaded.thread_ts = Some("42.0".to_owned());
@@ -3492,6 +3014,7 @@ fn slack_send_preserves_root_and_thread_context() {
     let mut thread_send = tool(SEND_TOOL_NAME, "agent-a", message_args("thread reply"));
     thread_send.call_id = tau_proto::ToolCallId::new("call-thread");
     assert!(ext.handle_send(thread_send).is_none());
+    rx.recv().expect("thread completion");
 
     assert_eq!(
         client.sent_thread_ids(),
@@ -3706,6 +3229,7 @@ fn committed_mutations_install_independent_reply_authority() {
     );
     reaction_reply.call_id = "call-reaction-reply".into();
     assert!(ext.handle_send(reaction_reply).is_none());
+    rx.recv().expect("reaction reply completion");
     assert!(
         client
             .sent_pairs()
@@ -3779,10 +3303,17 @@ fn posted_message_response_validates_identity_metadata() {
         posted_message_from_response(&serde_json::json!({ "channel": "C123", "ts": "bad" }))
             .is_err()
     );
+    assert!(
+        posted_message_from_response(&serde_json::json!({
+            "channel": "C123",
+            "ts": "12.34",
+            "message": { "thread_ts": "not-a-ts" }
+        }))
+        .is_err()
+    );
     let post = posted_message_from_response(&serde_json::json!({
         "channel": "C123",
-        "ts": "12.34",
-        "message": { "thread_ts": "not-a-ts" }
+        "ts": "12.34"
     }))
     .expect("valid message ts");
     assert_eq!(post.channel_id, "C123");
@@ -3796,14 +3327,21 @@ fn posted_message_response_validates_identity_metadata() {
 fn post_message_body_serializes_optional_thread_context() {
     assert_eq!(
         post_message_body("C123", "root", None),
-        serde_json::json!({ "channel": "C123", "text": "root" })
+        serde_json::json!({
+            "channel": "C123",
+            "text": "root",
+            "mrkdwn": true,
+            "link_names": false
+        })
     );
     assert_eq!(
         post_message_body("C123", "reply", Some("42.0")),
         serde_json::json!({
             "channel": "C123",
             "text": "reply",
-            "thread_ts": "42.0"
+            "thread_ts": "42.0",
+            "mrkdwn": true,
+            "link_names": false
         })
     );
 }
@@ -3930,6 +3468,113 @@ fn users_info_uses_form_encoding() {
             .expect("form-encoded users.info")
     );
     server.join().expect("users.info test server");
+}
+
+/// Production chat.postMessage parsing classifies rate limits, hostile
+/// transient/unknown bodies, and route-integrity mismatches without leaking raw
+/// provider text or granting unsafe retry.
+#[test]
+fn post_http_outcomes_are_typed_bounded_and_body_safe() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let address = listener.local_addr().expect("test API address");
+    let responses = [
+        (429, Some("999999999999999999999999999999"), r#"{}"#),
+        (
+            500,
+            None,
+            r#"xoxb-secret <@U123> <!channel> <#C123> payload"#,
+        ),
+        (200, None, r#"{"ok":false,"error":"xoxb-secret-unknown"}"#),
+        (200, None, r#"{"ok":true,"channel":"C999","ts":"1.0"}"#),
+        (200, None, r#"{"ok":true,"channel":"C123","ts":"2.0"}"#),
+    ];
+    let server = std::thread::spawn(move || {
+        for (status, retry_after, body) in responses {
+            let (mut stream, _) = listener.accept().expect("accept post request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let length = stream.read(&mut chunk).expect("read post request");
+                request.extend_from_slice(&chunk[..length]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .expect("post content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("POST /api/chat.postMessage HTTP/1.1\r\n"));
+            assert!(request.contains("\"link_names\":false"));
+            let reason = match status {
+                200 => "OK",
+                429 => "Too Many Requests",
+                500 => "Internal Server Error",
+                _ => "Error",
+            };
+            let retry = retry_after
+                .map(|value| format!("retry-after: {value}\r\n"))
+                .unwrap_or_default();
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\n{retry}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write post response");
+        }
+    });
+    let cfg = RuntimeConfig {
+        api_base: format!("http://{address}/api"),
+        ..cfg()
+    };
+    let client = HttpSlackClient::default();
+    let root = FrozenPostBody::new(
+        "C123",
+        None,
+        &SlackPostMode::agent("safe".to_owned(), None).expect("safe mode"),
+    );
+    let thread = FrozenPostBody::new(
+        "C123",
+        Some("9.0"),
+        &SlackPostMode::agent("safe".to_owned(), None).expect("safe mode"),
+    );
+    assert_eq!(
+        client.post_message(&cfg, &root),
+        PostAttemptOutcome::RateLimited(send_delivery::MAX_RETRY_AFTER)
+    );
+    assert_eq!(
+        client.post_message(&cfg, &root),
+        PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::ServiceUnavailable)
+    );
+    assert_eq!(
+        client.post_message(&cfg, &root),
+        PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::MalformedResponse)
+    );
+    assert_eq!(
+        client.post_message(&cfg, &root),
+        PostAttemptOutcome::DefinitiveFailure(SendFailureCategory::ConflictingRoute)
+    );
+    assert_eq!(
+        client.post_message(&cfg, &thread),
+        PostAttemptOutcome::DefinitiveFailure(SendFailureCategory::ConflictingRoute)
+    );
+    server.join().expect("post error server");
+    for category in [
+        SendFailureCategory::ServiceUnavailable,
+        SendFailureCategory::MalformedResponse,
+        SendFailureCategory::ConflictingRoute,
+    ] {
+        let display = category.to_string();
+        assert!(!display.contains("xoxb-secret"));
+        assert!(!display.contains("<@U123>"));
+        assert!(!display.contains("C999"));
+    }
 }
 
 /// Reaction methods use only the exact JSON endpoint, bearer header, and three
@@ -4220,6 +3865,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
         ))
         .is_none()
     );
+    rx.recv().expect("thread reply completion");
     assert_eq!(
         client.sent_thread_ids().last(),
         Some(&Some("10.0".to_owned()))
@@ -4666,6 +4312,7 @@ fn dm_send_uses_linked_prompt_origin() {
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
             .is_none()
     );
+    rx.recv().expect("DM reply completion");
     assert_eq!(
         client.sent_pairs().last(),
         Some(&("D123".to_owned(), "answer".to_owned()))
@@ -5677,29 +5324,10 @@ fn bot_self_and_subtype_messages_are_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
-/// Slack app/bot tokens and Socket Mode URLs are redacted or rejected in
-/// diagnostics that may become log-visible or model-visible tool errors.
+/// Socket Mode URL validation rejects remote plaintext while preserving
+/// loopback-only test transport.
 #[test]
-fn token_and_socket_diagnostics_are_sanitized() {
-    let cfg = cfg();
-    let text = sanitize_diagnostic(
-        "xapp-test xoxb-test wss://wss-primary.slack.com/link?ticket=secret",
-        &cfg,
-    );
-    assert!(!text.contains("xapp-test"));
-    assert!(!text.contains("xoxb-test"));
-    let socket_url = format!(
-        "wss://wss-primary.slack.com/link?ticket={}",
-        "secret-ticket".repeat(80)
-    );
-    let socket_error = sanitize_socket_diagnostic(
-        &format!("connect failed for {socket_url}"),
-        &cfg,
-        &socket_url,
-    );
-    assert!(!socket_error.contains("wss://wss-primary.slack.com"));
-    assert!(!socket_error.contains("secret-ticket"));
-    assert!(socket_error.len() <= MAX_DIAGNOSTIC_BYTES + 3);
+fn socket_url_transport_validation_is_fail_closed() {
     assert!(validate_socket_url("ws://example.com/socket?ticket=secret").is_err());
     assert!(validate_socket_url("ws://127.0.0.1:9000/socket?ticket=secret").is_ok());
 }
@@ -5709,14 +5337,13 @@ fn token_and_socket_diagnostics_are_sanitized() {
 /// after a successful verification establishes recovery.
 #[test]
 fn identity_failure_notice_is_bounded_redacted_and_resets_after_recovery() {
-    let secret_error = format!("users.info xoxb-test {}", "detail".repeat(200));
     let client = Arc::new(IdentitySequenceClient {
         results: Mutex::new(
             [
-                Err(secret_error.clone()),
-                Err(secret_error.clone()),
+                Err(SlackApiError::Transport),
+                Err(SlackApiError::Transport),
                 Ok(true),
-                Err(secret_error),
+                Err(SlackApiError::Transport),
             ]
             .into_iter()
             .collect(),
@@ -5875,7 +5502,7 @@ fn latency_markers_are_payload_free() {
 fn message_identity_failure_is_fail_closed_then_recovers() {
     let client = Arc::new(IdentitySequenceClient {
         results: Mutex::new(
-            [Err("users.info unavailable".to_owned()), Ok(true)]
+            [Err(SlackApiError::Transport), Ok(true)]
                 .into_iter()
                 .collect(),
         ),

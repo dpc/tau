@@ -78,8 +78,23 @@ default. Set `prefix_agent_id: true` to retain the earlier
 `[agent-id] message` presentation. This setting changes presentation only:
 authorization, opaque reply selection, destinations, threads, and the
 `max_message_bytes` check remain based on the original call. Tau submits one
-Slack post and, apart from the optional prefix, does not split or otherwise
-rewrite the supplied message.
+initial Slack post attempt and may retry that exact frozen route/body once after
+a bounded rate-limit or ambiguous transport/provider outcome. The initial call
+and retry wait run outside the serialized protocol reader. This is
+process/session at-least-once delivery: if the first outcome was ambiguous, one
+or two Slack copies may exist; two ambiguous outcomes can leave zero, one, or
+two. Successful retry results include `delivery_copies: one_or_two_possible`.
+A live per-channel FIFO holds each logical call through provider I/O and its
+possible retry; unrelated channels remain independent. Tau completions use a
+background acknowledged write-and-flush path, and writer failure retires all
+later send authority. Same-`ToolCallId` replay within the retained session
+resubmits an awaiting completion or returns its durably completed result/error;
+a new call id is new intent.
+There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
+claim. Apart from the optional prefix, Tau does not split the supplied message.
+Agent text containing raw Slack `<@`, `<!`, or `<#` controls is rejected; the
+bridge's own reflected help/control/error text is escaped, bounded, and posted
+with mrkdwn and link expansion disabled.
 
 When upgrading from a release that always added the prefix, add
 `prefix_agent_id: true` before restarting if downstream readers or automations
@@ -137,7 +152,8 @@ reinstall the Slack app before enabling it. Whole-group `slack` grants include
 this new externally visible mutation surface.
 
 Successful `slack_send` calls now return
-`{"status":"sent","message_ref":"slack-msg-v1-..."}` rather than the former
+`{"status":"sent","message_ref":"slack-msg-v1-...","delivery_copies":"one"|"one_or_two_possible"}`
+rather than the former
 plain `sent Slack message` text. The opaque ref becomes usable only after Tau
 accepts durable send completion; the short returned-before-activation window
 fails closed, and rejected/missing-ID completions never activate it.
@@ -216,9 +232,15 @@ Edits require a recent Active canonical original with matching sender, route, an
 thread. Inbound human reaction events require a recent post created through `slack_send`, matching
 owner, verified actor, and a covering receive route. Creates survive durable
 replay/restart dedup, but historical Inactive duplicates restore no private ownership;
-runtime links, selections, reply routes, reaction ownership, and registrations
-clear on restart. Tau prevents same-process accepted-send reposts but does not
-claim crash-safe exactly-once delivery.
+runtime links, selections, reply routes, reaction ownership, registrations, and
+the outbound call ledger clear on restart. The ledger is bounded at 1,024
+non-evicting entries through the live session and rejects new calls before
+freeze/I/O when full. At most 64 calls own active delivery workers; additional
+calls fail before freeze/I/O until capacity returns. Each HTTP response is capped
+at 64 KiB and the retry must begin within the 60-second logical-call horizon.
+Disconnect/EOF retires authority before protocol cleanup. Already-started
+synchronous HTTP is process-owned and may outlive `run` through its 30-second
+timeout, but cannot retry or restore local authority after retirement.
 
 Configuration freezes after successful Socket Mode preflight or immediately
 before the first fully authorized Slack post or reaction API attempt. Later configuration is a
@@ -226,9 +248,13 @@ restart-required error, including if Slack's post result is ambiguous. Invalid
 or denied sends and failed synchronous preflight do not freeze configuration.
 
 Production API/socket endpoints require HTTPS/WSS (plaintext is loopback-test
-only). Shutdown and reconnect waits are event-driven. Logs expose bounded,
-identifier-free connect/hello/ACK/degraded/reconnect states and redact tokens,
-websocket URLs, payloads, envelope ids, and native identifiers. A `users.info`
+only). Shutdown, reconnect, and send-retry waits are event-driven. Slow
+`chat.postMessage`, rate-limit waits, and retry backoff do not block later
+protocol tools, capability/session changes, pings, reconnect, or shutdown. Logs
+expose bounded, identifier-free connect/hello/ACK/degraded/reconnect states;
+Slack HTTP/identity/post failures expose only closed categories, never raw
+bodies, error strings, headers, tokens, websocket URLs, payloads, envelope ids,
+native identifiers, or mention text. A `users.info`
 outage rejects ingress and emits at most one warning per failure episode.
 
 Supported events reserve a bounded slot before ACK and then enter one persistent

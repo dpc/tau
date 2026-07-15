@@ -58,8 +58,11 @@ harness capability and effective tool policy.
 
 Replies and proactive sends contain only the agent-supplied message by default.
 Set `prefix_agent_id: true` to opt into the legacy `[agent-id] message` format.
-This presentation setting does not change message limits, post count, opaque
+This presentation setting does not change message limits, retry budget, opaque
 reply authority, routing, threads, authorization, or configuration freeze.
+Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
+native controls are rejected. Bridge help/control/error output is escaped,
+bounded, and sent with mrkdwn/link expansion disabled.
 
 `slack_conversations` is disabled by default and separately authorizable through
 its exact prefixed name or `slack:discover` tag. It returns all static routes,
@@ -81,6 +84,24 @@ before an authorized post or reaction API attempt; restart Tau to change it. Fai
 sends remain reconfigurable. Runtime links/routes/selections clear on restart;
 durable native create dedup survives and Slack retries can restore edit
 ownership. Logs and notices omit payloads, ids, websocket URLs, and tokens.
+
+`slack_send` reserves each accepted `ToolCallId` in a non-evicting 1,024-entry
+process/session ledger and moves initial HTTP plus retry waiting off the
+serialized protocol reader. It makes one initial attempt and at most one
+byte-identical retry after bounded Retry-After or an ambiguous outcome. This is
+at-least-once notification delivery: an ambiguous first attempt followed by
+success may leave one or two Slack copies; two ambiguous outcomes can leave
+zero, one, or two. Successful retry results report
+`delivery_copies: one_or_two_possible`. Same-id/same-argument replay
+resubmits only the stable result; conflicting reuse errors and a new call id is
+new intent. Unregister, unload, capability/route/config/session change, and
+shutdown cancel retry and stale completion authority. The ledger clears on
+session/process retirement, so there is no durable outbox, `client_msg_id`,
+restart guarantee, or exactly-once claim. Provider diagnostics are closed
+categories; raw bodies, Slack error text/headers, native ids, mentions, tokens,
+and message content never appear in model errors, notices, or logs.
+At most 64 calls own active delivery workers, each response is capped at
+64 KiB, and retry must begin within the 60-second logical-call horizon.
 
 Supported events reserve one of 64 process-local queued/in-flight admission slots
 before ACK. Slow live-human verification and bridge-local replies run on one serial
@@ -110,7 +131,8 @@ runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
 target conversations. Whole Slack-group grants now include this surface.
 
 Successful `slack_send` results use
-`{"status":"sent","message_ref":"slack-msg-v1-..."}` (replacing the former
+`{"status":"sent","message_ref":"slack-msg-v1-...","delivery_copies":"one"|"one_or_two_possible"}`
+(replacing the former
 plain-text success). The ref activates only after durable completion acceptance,
 so an immediate call can briefly fail closed and rejected completions remain
 permanently ineligible.

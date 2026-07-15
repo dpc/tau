@@ -8,6 +8,8 @@
 //! allowlist, and treats Slack text as external untrusted prompt input.
 //! Reply routing follows
 //! `DESIGN-tau-ext-slack-canonical-reply-selectors`.
+//! Outbound retry and replay follow
+//! `DESIGN-tau-ext-slack-send-delivery`.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -36,9 +38,16 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 mod admission;
 mod posted_message_cache;
+mod send_delivery;
 
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
+use send_delivery::{
+    CompletionOutput, FrozenPostBody, FrozenSendAuthority, ObservedSlackBotId, PostAttemptFailure,
+    PostAttemptOutcome, RemoteCopyPossibility, SendFailureCategory, SendLedgerDisposition,
+    SendLedgerEntry, SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
+    SystemSendScheduler, classify_api_error, classify_post_api_error, parse_retry_after,
+};
 
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "slack";
@@ -97,12 +106,15 @@ const DEFAULT_API_BASE: &str = "https://slack.com/api";
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 128 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const SEND_ATTEMPT_HORIZON: Duration = Duration::from_secs(60);
+const MAX_SLACK_API_RESPONSE_BYTES: u64 = 64 * 1024;
 const DUPLICATE_CACHE_SIZE: usize = 1024;
 const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
 const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
 const PENDING_SEND_LIMIT: usize = 1024;
-const ACCEPTED_SEND_ATTEMPT_LIMIT: usize = PENDING_SEND_LIMIT;
+const SEND_LEDGER_LIMIT: usize = PENDING_SEND_LIMIT;
+const ACTIVE_SEND_WORKER_LIMIT: usize = 64;
 // Ownership can pin at most `REACTION_OWNERSHIP_LIMIT` entries; the additional
 // pending-send headroom guarantees every accepted send completion can activate
 // without evicting a pinned target.
@@ -185,36 +197,6 @@ fn elapsed_us(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Map identity API diagnostics to bounded outcome classes without logging
-/// them.
-fn identity_error_outcome(error: &str) -> &'static str {
-    if error.contains("429") || error.contains("rate") {
-        "rate_limited"
-    } else if error.contains("timed out") || error.contains("timeout") {
-        "timeout"
-    } else if error.contains("malformed") || error.contains("missing") {
-        "malformed"
-    } else {
-        "api_error"
-    }
-}
-
-/// Map a post result to bounded outcome classes without exposing its
-/// diagnostic.
-fn post_error_outcome(error: Option<&String>) -> &'static str {
-    error.map_or("ok", |error| {
-        if error.contains("429") || error.contains("rate") {
-            "rate_limited"
-        } else if error.contains("timed out") || error.contains("timeout") {
-            "timeout"
-        } else if error.contains("malformed") || error.contains("missing") {
-            "malformed"
-        } else {
-            "api_error"
-        }
-    })
-}
-
 /// Run the Slack extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for(LOG_TARGET);
@@ -233,23 +215,20 @@ where
 /// Small Slack Web API surface used by the extension and faked by unit tests.
 trait SlackClient: Send + Sync + 'static {
     /// Open a Socket Mode websocket URL with the configured app token.
-    fn open_socket(&self, cfg: &RuntimeConfig) -> Result<String, String>;
+    fn open_socket(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError>;
 
     /// Return the bot user id from `auth.test` using the configured bot token.
-    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, String>;
+    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError>;
 
     /// Return whether an allowlisted Slack user is a live human account.
-    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String>;
+    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError>;
 
-    /// Send a plain text message to one configured or linked Slack
-    /// conversation.
+    /// Execute one exact frozen `chat.postMessage` body.
     fn post_message(
         &self,
         cfg: &RuntimeConfig,
-        channel_id: &str,
-        text: &str,
-        thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String>;
+        body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage>;
 
     /// Add or remove the bot's reaction on one exact cached Slack item.
     fn react(
@@ -310,7 +289,7 @@ enum ReactionApiError {
 }
 
 /// Stable identity returned by Slack for one successfully posted message.
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PostedMessage {
     /// Conversation id returned by Slack for the accepted post.
     channel_id: String,
@@ -459,38 +438,6 @@ enum ReceiveMode {
 struct DynamicDirectMessages {
     /// DMs always receive ordinary `message.im` events.
     receive: ReceiveMode,
-}
-
-/// Stable disposition of a Slack-accepted send, retained to prevent reposting.
-#[derive(Clone)]
-enum AcceptedSendDisposition {
-    /// Slack I/O is currently in progress.
-    InFlight,
-    /// Completion that must be resubmitted to preserve durable ordering.
-    Completion(Box<CompleteTransportSendRequest>),
-    /// Stable post-acceptance validation failure.
-    Rejected(String),
-}
-
-/// Fingerprint and disposition for one Slack-accepted tool call.
-#[derive(Clone)]
-struct AcceptedSendAttempt {
-    /// Agent that owned the accepted call.
-    agent_id: AgentId,
-    /// Exact arguments used by the accepted call.
-    arguments: CborValue,
-    /// Replay behavior after Slack has accepted the post.
-    disposition: AcceptedSendDisposition,
-}
-
-/// One pre-I/O send reservation used by lifecycle and capacity checks.
-struct SendReservation {
-    /// Exact authoring agent.
-    agent_id: AgentId,
-    /// Whether unregistering receive authority revokes this send.
-    source_bound: bool,
-    /// Monotonic token preventing stale completion from stealing a new call id.
-    token: u64,
 }
 
 impl ExtConfig {
@@ -1020,8 +967,8 @@ struct PendingPostedMessage {
     message_ref: String,
     /// Authority that must remain current for later reactions.
     authority: ReactionAuthority,
-    /// Lifecycle generation captured before Slack I/O.
-    generation: u64,
+    /// Exact lifecycle/configuration authority captured before Slack I/O.
+    send_authority: FrozenSendAuthority,
 }
 
 /// Live authority retained for one reaction target.
@@ -1160,15 +1107,37 @@ struct State {
     reply_route_order: VecDeque<MessageId>,
     /// Remote posts waiting for outgoing fact plus terminal result commit.
     pending_posts: HashMap<String, PendingPostedMessage>,
-    /// Bounded same-process record preventing a repeated call id from
-    /// reposting.
-    accepted_send_attempts: HashMap<tau_proto::ToolCallId, AcceptedSendAttempt>,
-    /// Oldest-first bound for accepted send attempts.
-    accepted_send_attempt_order: VecDeque<tau_proto::ToolCallId>,
-    /// Sends currently performing Slack I/O, bound to their exact agent.
-    sends_in_flight: HashMap<tau_proto::ToolCallId, SendReservation>,
+    /// Exact send reservations whose acknowledged completion output is either
+    /// queued behind the shared cap or owned by one active worker.
+    ///
+    /// An owner remains here continuously while moving from the pending FIFO to
+    /// an active slot, so every replay coalesces until that exact owner
+    /// releases.
+    completion_resubmitting: HashSet<SendQueueReservation>,
+    /// Oldest-first acknowledged completion outputs queued behind the shared
+    /// worker cap. Moving the front item to an active slot is one locked state
+    /// transition performed by `reserve_pending_completion_output`.
+    pending_completion_outputs: VecDeque<CompletionOutput>,
+    /// Bounded, non-evicting process/session ledger preventing replay reposts.
+    send_ledger: HashMap<tau_proto::ToolCallId, SendLedgerEntry>,
     /// Monotonic send reservation token source.
     next_send_reservation: u64,
+    /// Per-agent send lifecycle generations preventing unrelated churn from
+    /// cancelling other agents.
+    send_agent_generations: HashMap<AgentId, u64>,
+    /// Shared slots reserved by delivery/retry workers and queued-to-running
+    /// completion-output workers. Every release decrements exactly its own slot
+    /// and reserves at most one FIFO successor while holding the state lock.
+    active_send_workers: usize,
+    /// Harness session generation captured by accepted sends.
+    session_generation: u64,
+    /// Typed transport capability generation captured by accepted sends.
+    capability_generation: u64,
+    /// Live per-channel pacing barrier consulted immediately before attempts.
+    channel_attempt_deadlines: HashMap<String, Instant>,
+    /// Logical-call FIFO per native channel. The front call retains its turn
+    /// through its sole retry and provider backoff.
+    channel_send_queues: HashMap<String, VecDeque<SendQueueReservation>>,
     /// Recent commit-confirmed incoming creates by native Slack identity.
     incoming_messages: HashMap<PostedMessageKey, IncomingMessageOwner>,
     /// Oldest-first bound for incoming create identities.
@@ -1445,85 +1414,39 @@ impl State {
         self.incoming_message_order.clear();
     }
 
-    /// Remember a Slack-accepted call so identical delivery cannot repost it.
-    fn remember_accepted_send(
-        &mut self,
-        invoke: &ToolStarted,
-        disposition: AcceptedSendDisposition,
-    ) {
-        self.accepted_send_attempt_order
-            .retain(|call_id| call_id != &invoke.call_id);
-        self.accepted_send_attempt_order
-            .push_back(invoke.call_id.clone());
-        self.accepted_send_attempts.insert(
-            invoke.call_id.clone(),
-            AcceptedSendAttempt {
-                agent_id: invoke.agent_id.clone(),
-                arguments: invoke.arguments.clone(),
-                disposition,
-            },
-        );
-        while self.accepted_send_attempts.len() > ACCEPTED_SEND_ATTEMPT_LIMIT {
-            let Some(index) = self.accepted_send_attempt_order.iter().position(|call_id| {
-                call_id != &invoke.call_id
-                    && self
-                        .accepted_send_attempts
-                        .get(call_id)
-                        .is_some_and(|attempt| {
-                            !matches!(attempt.disposition, AcceptedSendDisposition::InFlight)
-                        })
-                    && !self
-                        .pending_posts
-                        .values()
-                        .any(|pending| &pending.invoke.call_id == call_id)
-            }) else {
-                break;
-            };
-            if let Some(oldest) = self.accepted_send_attempt_order.remove(index) {
-                self.accepted_send_attempts.remove(&oldest);
-            }
+    /// Clear the process/session send horizon after the harness retires it.
+    fn clear_send_ledger(&mut self) {
+        self.send_ledger.clear();
+        self.completion_resubmitting.clear();
+        self.pending_completion_outputs.clear();
+        self.channel_attempt_deadlines.clear();
+        self.channel_send_queues.clear();
+    }
+
+    /// Atomically move at most one oldest queued completion output into a
+    /// reserved shared worker slot.
+    fn reserve_pending_completion_output(&mut self) -> Option<CompletionOutput> {
+        if self.active_send_workers >= ACTIVE_SEND_WORKER_LIMIT {
+            return None;
         }
+        let output = self.pending_completion_outputs.pop_front()?;
+        self.active_send_workers += 1;
+        Some(output)
     }
 
-    /// Clear all same-process outbound idempotency state.
-    fn clear_accepted_send_attempts(&mut self) {
-        self.accepted_send_attempts.clear();
-        self.accepted_send_attempt_order.clear();
+    /// Return one agent's current send lifecycle generation.
+    fn send_agent_generation(&self, agent_id: &AgentId) -> u64 {
+        self.send_agent_generations
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0)
     }
 
-    /// Forget one pre-acceptance send attempt so an explicit later call may
-    /// retry.
-    fn forget_send_attempt(&mut self, call_id: &tau_proto::ToolCallId) {
-        self.accepted_send_attempts.remove(call_id);
-        self.accepted_send_attempt_order
-            .retain(|existing| existing != call_id);
-    }
-
-    /// Forget every send attempt owned by an unloaded agent.
-    fn remove_agent_send_attempts(&mut self, agent_id: &AgentId) {
-        self.accepted_send_attempts
-            .retain(|_, attempt| &attempt.agent_id != agent_id);
-        self.accepted_send_attempt_order
-            .retain(|call_id| self.accepted_send_attempts.contains_key(call_id));
-    }
-
-    /// Consume only the exact send reservation admitted before Slack I/O.
-    fn consume_send_reservation(
-        &mut self,
-        call_id: &tau_proto::ToolCallId,
-        agent_id: &AgentId,
-        token: u64,
-    ) -> bool {
-        let matches = self
-            .sends_in_flight
-            .get(call_id)
-            .is_some_and(|reservation| {
-                &reservation.agent_id == agent_id && reservation.token == token
-            });
-        if matches {
-            self.sends_in_flight.remove(call_id);
-        }
-        matches
+    /// Advance only the affected agent's send lifecycle generation.
+    fn bump_send_agent_generation(&mut self, agent_id: &AgentId) {
+        let generation = self.send_agent_generation(agent_id).wrapping_add(1);
+        self.send_agent_generations
+            .insert(agent_id.clone(), generation);
     }
 }
 
@@ -1570,30 +1493,114 @@ impl Output {
         }
     }
 
+    /// Write and flush one protocol frame before reporting success.
+    fn send_confirmed(&self, message: HarnessInputMessage) -> bool {
+        match self {
+            Self::Channel(tx) => tx.send(message).is_ok(),
+            Self::Client(handle) => handle.send(message).is_ok(),
+        }
+    }
+
     /// Emits one event through the harness output channel.
     fn emit(&self, event: Event) {
         let _ = self.send(HarnessInputMessage::emit(event));
     }
 }
 
+/// Injectable OS-thread boundary for acknowledged completion output.
+trait CompletionOutputSpawner: Send + Sync {
+    fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+}
+
+struct SystemCompletionOutputSpawner;
+
+impl CompletionOutputSpawner for SystemCompletionOutputSpawner {
+    fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+        std::thread::Builder::new()
+            .name("tau-slack-send-completion".to_owned())
+            .spawn(task)
+            .map(|_| ())
+    }
+}
+
 struct Extension {
     state: Arc<Mutex<State>>,
+    /// Serializes completion-publication admission with session retirement.
+    completion_publication_gate: Arc<Mutex<()>>,
     client: Arc<dyn SlackClient>,
     output: Output,
     shutdown: Arc<ShutdownSignal>,
+    /// Event-driven cancellation for delivery retry waits.
+    send_wake: Arc<SendWake>,
+    /// Injectable delivery scheduler used by deterministic tests.
+    send_scheduler: Arc<dyn SendScheduler>,
+    /// Injectable completion thread boundary used by deterministic tests.
+    completion_output_spawner: Arc<dyn CompletionOutputSpawner>,
+    /// Fail-closed latch set before known completion-output retirement.
+    output_failed: Arc<AtomicBool>,
     /// Process-local ordinal for private TRACE correlation.
     trace_seq: AtomicU64,
 }
 
 impl Extension {
-    /// Create a Slack extension instance using a supplied client
-    /// implementation.
-    fn new(client: Arc<dyn SlackClient>, output: impl Into<Output>) -> Self {
+    /// Create an extension with an injected event-driven send scheduler.
+    fn new_with_scheduler(
+        client: Arc<dyn SlackClient>,
+        output: impl Into<Output>,
+        send_scheduler: Arc<dyn SendScheduler>,
+    ) -> Self {
+        Self::new_with_scheduler_and_completion_spawner(
+            client,
+            output,
+            send_scheduler,
+            Arc::new(SystemCompletionOutputSpawner),
+        )
+    }
+
+    /// Create an extension with both background execution boundaries injected.
+    fn new_with_scheduler_and_completion_spawner(
+        client: Arc<dyn SlackClient>,
+        output: impl Into<Output>,
+        send_scheduler: Arc<dyn SendScheduler>,
+        completion_output_spawner: Arc<dyn CompletionOutputSpawner>,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
+            completion_publication_gate: Arc::new(Mutex::new(())),
             client,
             output: output.into(),
             shutdown: Arc::new(ShutdownSignal::new()),
+            send_wake: Arc::new(SendWake::default()),
+            send_scheduler,
+            completion_output_spawner,
+            output_failed: Arc::new(AtomicBool::new(false)),
+            trace_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// Build the Socket Mode worker view over the primary extension's shared
+    /// lifecycle state, completion-publication gate, and cancellation wake.
+    fn new_socket_worker_view(
+        send_retirement: SendRetirement,
+        client: Arc<dyn SlackClient>,
+        output: Output,
+        shutdown: Arc<ShutdownSignal>,
+    ) -> Self {
+        let SendRetirement {
+            state,
+            completion_publication_gate,
+            wake,
+        } = send_retirement;
+        Self {
+            state,
+            completion_publication_gate,
+            client,
+            output,
+            shutdown,
+            send_wake: wake,
+            send_scheduler: Arc::new(SystemSendScheduler),
+            completion_output_spawner: Arc::new(SystemCompletionOutputSpawner),
+            output_failed: Arc::new(AtomicBool::new(false)),
             trace_seq: AtomicU64::new(0),
         }
     }
@@ -1609,9 +1616,9 @@ impl Extension {
         state.config = Some(cfg);
         state.config_generation = state.config_generation.wrapping_add(1);
         state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-        state.clear_accepted_send_attempts();
-        state.sends_in_flight.clear();
+        state.clear_send_ledger();
         state.registered_agents.clear();
+        state.send_agent_generations.clear();
         state.selected_agent_by_route.clear();
         state.pending_ingress.clear();
         state.clear_reply_routes();
@@ -1620,8 +1627,10 @@ impl Extension {
         state.posted_messages.clear();
         state.clear_reaction_state();
         state.capability_active = false;
+        state.capability_generation = state.capability_generation.wrapping_add(1);
         state.pending_capability_request = None;
         state.duplicate_events = DuplicateCache::default();
+        self.send_wake.notify_lifecycle_change();
         Ok(())
     }
 
@@ -1636,20 +1645,54 @@ impl Extension {
         state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
         state.config = None;
         state.registered_agents.clear();
+        state.send_agent_generations.clear();
         state.selected_agent_by_route.clear();
         state.pending_ingress.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
         state.pending_posts.clear();
-        state.clear_accepted_send_attempts();
-        state.sends_in_flight.clear();
+        state.clear_send_ledger();
         state.capability_active = false;
+        state.capability_generation = state.capability_generation.wrapping_add(1);
         state.pending_capability_request = None;
         state.posted_messages.clear();
         state.linked_dms.clear();
         state.bot_user_id = None;
         state.duplicate_events = DuplicateCache::default();
         state.clear_reaction_state();
+        self.send_wake.notify_lifecycle_change();
+    }
+
+    /// Retire all outbound send authority at the process/session transport
+    /// boundary before waking background workers.
+    fn retire_send_authority(&self) {
+        retire_send_state(
+            &self.state,
+            &self.completion_publication_gate,
+            &self.send_wake,
+        );
+    }
+
+    /// Remove one unloaded agent's private receive/reaction authority while
+    /// retaining any Tau completion correlation for already-accepted sends.
+    fn unload_agent(&self, agent_id: &AgentId) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.registered_agents.remove(agent_id);
+        state.agent_generation = state.agent_generation.wrapping_add(1);
+        state.bump_send_agent_generation(agent_id);
+        state.agent_labels.remove(agent_id);
+        state
+            .selected_agent_by_route
+            .retain(|_, selected| selected != agent_id);
+        state.remove_agent_reply_routes(agent_id);
+        state.remove_agent_incoming_messages(agent_id);
+        state
+            .pending_ingress
+            .retain(|_, pending| &pending.agent_id != agent_id);
+        state.posted_messages.remove_agent(agent_id);
+        state.remove_agent_reaction_state(agent_id);
+        drop(state);
+        self.send_wake.notify_lifecycle_change();
     }
 
     /// Report whether remote activation or an authorized post froze
@@ -1666,6 +1709,7 @@ impl Extension {
         let (request_id, proactive_destinations) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.capability_active = false;
+            state.capability_generation = state.capability_generation.wrapping_add(1);
             state.next_capability_request = state.next_capability_request.wrapping_add(1);
             let request_id = format!(
                 "{CAPABILITY_REQUEST_PREFIX}{}",
@@ -1690,6 +1734,7 @@ impl Extension {
                     send_destinations: proactive_destinations,
                 },
             ));
+        self.send_wake.notify_lifecycle_change();
     }
 
     /// Dispatch a Tau tool invocation owned by this extension.
@@ -1871,8 +1916,10 @@ impl Extension {
                         .to_owned(),
                 );
             }
-            state.registered_agents.insert(invoke.agent_id.clone());
-            state.agent_generation = state.agent_generation.wrapping_add(1);
+            if state.registered_agents.insert(invoke.agent_id.clone()) {
+                state.agent_generation = state.agent_generation.wrapping_add(1);
+                state.bump_send_agent_generation(&invoke.agent_id);
+            }
             state
                 .agent_labels
                 .entry(invoke.agent_id.clone())
@@ -1880,10 +1927,13 @@ impl Extension {
             if let Some((cfg, startup, _)) = startup {
                 self.start_worker_locked(&mut state, cfg, Some(startup));
             }
+            self.send_wake.notify_lifecycle_change();
         } else {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.registered_agents.remove(&invoke.agent_id);
-            state.agent_generation = state.agent_generation.wrapping_add(1);
+            if state.registered_agents.remove(&invoke.agent_id) {
+                state.agent_generation = state.agent_generation.wrapping_add(1);
+                state.bump_send_agent_generation(&invoke.agent_id);
+            }
             state
                 .selected_agent_by_route
                 .retain(|_, agent| agent != &invoke.agent_id);
@@ -1893,28 +1943,8 @@ impl Extension {
             state
                 .pending_ingress
                 .retain(|_, pending| pending.agent_id != invoke.agent_id);
-            state.pending_posts.retain(|_, post| {
-                post.agent_id != invoke.agent_id
-                    || matches!(
-                        post.authority,
-                        ReactionAuthority::ConfiguredDestination { .. }
-                    )
-            });
-            let revoked_send_calls = state
-                .sends_in_flight
-                .iter()
-                .filter(|(_, reservation)| {
-                    reservation.agent_id == invoke.agent_id && reservation.source_bound
-                })
-                .map(|(call_id, _)| call_id.clone())
-                .collect::<Vec<_>>();
-            state
-                .sends_in_flight
-                .retain(|call_id, _| !revoked_send_calls.iter().any(|revoked| revoked == call_id));
-            for call_id in revoked_send_calls {
-                state.forget_send_attempt(&call_id);
-            }
             state.posted_messages.remove_agent(&invoke.agent_id);
+            self.send_wake.notify_lifecycle_change();
         }
         tool_result(
             invoke,
@@ -1927,9 +1957,15 @@ impl Extension {
     }
 
     fn prepare_worker_start(&self, cfg: &RuntimeConfig) -> Result<WorkerStartup, String> {
-        let bot_user_id = self.client.auth_test(cfg)?;
+        let bot_user_id = self
+            .client
+            .auth_test(cfg)
+            .map_err(|error| error.to_string())?;
         let bot_user_id = validate_slack_id("auth.test user_id", &bot_user_id)?;
-        let socket_url = self.client.open_socket(cfg)?;
+        let socket_url = self
+            .client
+            .open_socket(cfg)
+            .map_err(|error| error.to_string())?;
         validate_socket_url(&socket_url)?;
         Ok(WorkerStartup {
             bot_user_id,
@@ -1952,16 +1988,20 @@ impl Extension {
         }
         state.worker_started = true;
         state.worker_startup_failure_reported = false;
-        let state_arc = Arc::clone(&self.state);
+        let send_retirement = SendRetirement {
+            state: Arc::clone(&self.state),
+            completion_publication_gate: Arc::clone(&self.completion_publication_gate),
+            wake: Arc::clone(&self.send_wake),
+        };
         let output = self.output.clone();
         let client = Arc::clone(&self.client);
         let shutdown = Arc::clone(&self.shutdown);
         std::thread::spawn(move || {
-            socket_worker_loop(state_arc, client, output, cfg, startup, shutdown)
+            socket_worker_loop(send_retirement, client, output, cfg, startup, shutdown)
         });
     }
 
-    fn report_worker_startup_failure_once(&self, cfg: &RuntimeConfig, message: &str) {
+    fn report_worker_startup_failure_once(&self, _cfg: &RuntimeConfig, message: &str) {
         let should_report = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.worker_online || state.worker_startup_failure_reported {
@@ -1974,7 +2014,7 @@ impl Extension {
         if should_report {
             let message = format!(
                 "Slack Socket Mode startup failed; check std-slack tokens, Socket Mode settings, and network access: {}",
-                sanitize_diagnostic(message, cfg)
+                bounded_text(message, 128)
             );
             self.output.emit(Event::HarnessNotice(HarnessNotice {
                 kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
@@ -2021,7 +2061,20 @@ impl Extension {
             let outcome = match &result {
                 Ok(true) => "human",
                 Ok(false) => "not_human",
-                Err(error) => identity_error_outcome(error),
+                Err(error) => match error {
+                    SlackApiError::RateLimited => "rate_limited",
+                    SlackApiError::TransportTimeout => "timeout",
+                    SlackApiError::TransportConnect => "connect",
+                    SlackApiError::TransportTls => "tls",
+                    SlackApiError::Transport => "transport",
+                    SlackApiError::MalformedResponse => "malformed",
+                    SlackApiError::Authentication
+                    | SlackApiError::MissingScope
+                    | SlackApiError::TargetUnavailable
+                    | SlackApiError::PermissionDenied
+                    | SlackApiError::InvalidRequest
+                    | SlackApiError::RemoteFailure => "api_error",
+                },
             };
             tracing::trace!(
                 target: LOG_TARGET,
@@ -2065,13 +2118,13 @@ impl Extension {
                     !std::mem::replace(&mut state.identity_failure_reported, true)
                 };
                 if should_report {
-                    tracing::warn!(target: LOG_TARGET, rejection = "identity_api_failure", error = %sanitize_diagnostic(&error, cfg), "Slack ingress occurrence rejected; users.info verification degraded");
+                    tracing::warn!(target: LOG_TARGET, rejection = "identity_api_failure", error = %error, "Slack ingress occurrence rejected; users.info verification degraded");
                     self.output.emit(Event::HarnessNotice(HarnessNotice {
                         kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                         message: bounded_text(
                             &format!(
                                 "Slack rejected one ingress occurrence because users.info verification failed (check users:read scope and app reinstall): {}",
-                                sanitize_diagnostic(&error, cfg)
+                                error
                             ),
                             MAX_DIAGNOSTIC_BYTES,
                         ),
@@ -2080,365 +2133,6 @@ impl Extension {
                     }));
                 }
                 false
-            }
-        }
-    }
-
-    fn handle_send(&self, invoke: ToolStarted) -> Option<Event> {
-        let send_tool = self.output.wire_tool_name(SEND_TOOL_NAME);
-        {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(attempt) = state.accepted_send_attempts.get(&invoke.call_id) {
-                if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} call id was replayed with conflicting arguments"),
-                    ));
-                }
-                match &attempt.disposition {
-                    AcceptedSendDisposition::InFlight => return None,
-                    AcceptedSendDisposition::Completion(request) => {
-                        self.output
-                            .send(HarnessInputMessage::CompleteTransportSend(request.clone()));
-                        return None;
-                    }
-                    AcceptedSendDisposition::Rejected(message) => {
-                        return Some(tool_error(invoke, message.clone()));
-                    }
-                }
-            }
-        }
-        if let Err(message) =
-            validate_object_fields(&invoke.arguments, &["message", "reply_to", "destination"])
-        {
-            return Some(tool_error(invoke, message));
-        }
-        let message = match cbor_string_field(&invoke.arguments, "message") {
-            Ok(message) => message,
-            Err(message) => return Some(tool_error(invoke, message)),
-        };
-        let reply_to = cbor_optional_string_field(&invoke.arguments, "reply_to");
-        let destination_alias = cbor_optional_string_field(&invoke.arguments, "destination");
-        let (reply_to, destination_alias) = match (reply_to, destination_alias) {
-            (Ok(Some(reply)), Ok(None)) => (Some(MessageId::new(reply)), None),
-            (Ok(None), Ok(Some(alias))) => (None, Some(alias)),
-            (Ok(Some(_)), Ok(Some(_))) | (Ok(None), Ok(None)) => {
-                return Some(tool_error(
-                    invoke,
-                    format!("{send_tool} requires exactly one of `reply_to` or `destination`"),
-                ));
-            }
-            (Err(message), _) | (_, Err(message)) => return Some(tool_error(invoke, message)),
-        };
-        if message.trim().is_empty() {
-            return Some(tool_error(invoke, "`message` must not be empty".to_owned()));
-        }
-        let (
-            cfg,
-            route,
-            authorization,
-            endpoint,
-            conversation,
-            policy_status,
-            reaction_authority,
-            send_token,
-        ) = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(cfg) = state.config.clone() else {
-                return Some(tool_error(
-                    invoke,
-                    "slack extension is not configured".to_owned(),
-                ));
-            };
-            if let Some(attempt) = state.accepted_send_attempts.get(&invoke.call_id) {
-                if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} call id was replayed with conflicting arguments"),
-                    ));
-                }
-                return None;
-            }
-            if message.len() > cfg.max_message_bytes {
-                return Some(tool_error(
-                    invoke,
-                    "`message` exceeds slack max_message_bytes".to_owned(),
-                ));
-            }
-            if state.pending_posts.len() + state.sends_in_flight.len() >= PENDING_SEND_LIMIT {
-                return Some(tool_error(
-                    invoke,
-                    format!("{send_tool} has too many completions awaiting Tau; try again later"),
-                ));
-            }
-            if !state.capability_active {
-                return Some(tool_error(
-                    invoke,
-                    format!("{send_tool} transport capability is not active"),
-                ));
-            }
-            if let Some(reply_to) = &reply_to {
-                if !state.registered_agents.contains(&invoke.agent_id) {
-                    let register = self.output.wire_tool_name(REGISTER_TOOL_NAME);
-                    return Some(tool_error(
-                        invoke,
-                        format!("Slack reply requires {register}(enabled: true) first"),
-                    ));
-                }
-                let Some(route) = state.reply_routes.get(reply_to).cloned() else {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} reply_to is unknown or stale"),
-                    ));
-                };
-                if route.agent_id != invoke.agent_id {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} reply_to belongs to another agent"),
-                    ));
-                }
-                if !is_route_authorized(&state, &cfg, &route.conversation, &route.user_id) {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} originating conversation is no longer authorized"),
-                    ));
-                }
-                let endpoint = external_endpoint_for_route(&route);
-                let conversation = message_conversation(&route.conversation);
-                let policy = route.policy_status;
-                state.config_frozen = true;
-                state.next_send_reservation = state.next_send_reservation.wrapping_add(1);
-                let send_token = state.next_send_reservation;
-                state.sends_in_flight.insert(
-                    invoke.call_id.clone(),
-                    SendReservation {
-                        agent_id: invoke.agent_id.clone(),
-                        source_bound: true,
-                        token: send_token,
-                    },
-                );
-                state.remember_accepted_send(&invoke, AcceptedSendDisposition::InFlight);
-                (
-                    cfg,
-                    route.conversation.clone(),
-                    tau_proto::TransportSendAuthorization::Reply {
-                        message_id: reply_to.clone(),
-                    },
-                    endpoint,
-                    conversation,
-                    policy,
-                    ReactionAuthority::Source {
-                        message_id: reply_to.clone(),
-                        user_id: route.user_id.clone(),
-                    },
-                    send_token,
-                )
-            } else {
-                let alias = destination_alias.as_ref().expect("exclusive selector");
-                if !valid_conversation_alias(alias) {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} destination is unknown or unauthorized"),
-                    ));
-                }
-                let Some(destination) = cfg
-                    .proactive_aliases
-                    .contains(alias)
-                    .then(|| cfg.conversations.get(alias))
-                    .flatten()
-                else {
-                    return Some(tool_error(
-                        invoke,
-                        format!("{send_tool} destination is unknown or unauthorized"),
-                    ));
-                };
-                let route = SlackConversation {
-                    channel_id: destination.conversation_id.clone(),
-                    thread_ts: destination.thread_ts.clone(),
-                    kind: destination.kind,
-                    alias: destination.alias.clone(),
-                };
-                state.config_frozen = true;
-                state.next_send_reservation = state.next_send_reservation.wrapping_add(1);
-                let send_token = state.next_send_reservation;
-                state.sends_in_flight.insert(
-                    invoke.call_id.clone(),
-                    SendReservation {
-                        agent_id: invoke.agent_id.clone(),
-                        source_bound: false,
-                        token: send_token,
-                    },
-                );
-                state.remember_accepted_send(&invoke, AcceptedSendDisposition::InFlight);
-                (
-                    cfg.clone(),
-                    route,
-                    tau_proto::TransportSendAuthorization::ConfiguredDestination {
-                        alias: alias.clone(),
-                    },
-                    send_destination_endpoint(destination),
-                    send_destination_conversation(destination),
-                    SenderPolicyStatus::Internal,
-                    ReactionAuthority::ConfiguredDestination {
-                        alias: alias.clone(),
-                    },
-                    send_token,
-                )
-            }
-        };
-        let text = if cfg.prefix_agent_id {
-            format!("[{}] {message}", invoke.agent_id.as_ref())
-        } else {
-            message
-        };
-        let post_class = if matches!(
-            &authorization,
-            tau_proto::TransportSendAuthorization::ConfiguredDestination { .. }
-        ) {
-            "proactive"
-        } else {
-            "agent_reply"
-        };
-        tracing::trace!(
-            target: LOG_TARGET,
-            schema = LATENCY_SCHEMA,
-            post_class,
-            "slack.api.post_message_started"
-        );
-        let post_started = Instant::now();
-        let post_outcome =
-            self.client
-                .post_message(&cfg, &route.channel_id, &text, route.thread_ts.as_deref());
-        tracing::trace!(
-            target: LOG_TARGET,
-            schema = LATENCY_SCHEMA,
-            post_class,
-            duration_us = elapsed_us(post_started),
-            outcome = post_error_outcome(post_outcome.as_ref().err()),
-            "slack.api.post_message_finished"
-        );
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let still_current = state
-            .sends_in_flight
-            .get(&invoke.call_id)
-            .is_some_and(|reservation| {
-                reservation.agent_id == invoke.agent_id && reservation.token == send_token
-            });
-        drop(state);
-        if !still_current {
-            return Some(tool_error(
-                invoke,
-                "Slack send completed after its agent or session became inactive".to_owned(),
-            ));
-        }
-        match post_outcome {
-            Ok(posted) => {
-                if posted.channel_id != route.channel_id {
-                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                    if state.consume_send_reservation(&invoke.call_id, &invoke.agent_id, send_token)
-                    {
-                        state.remember_accepted_send(
-                            &invoke,
-                            AcceptedSendDisposition::Rejected(
-                                "Slack returned a conflicting destination conversation".to_owned(),
-                            ),
-                        );
-                    }
-                    return Some(tool_error(
-                        invoke,
-                        "Slack returned a conflicting destination conversation".to_owned(),
-                    ));
-                }
-                if posted.thread_ts.is_some() && posted.thread_ts != route.thread_ts {
-                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                    if state.consume_send_reservation(&invoke.call_id, &invoke.agent_id, send_token)
-                    {
-                        state.remember_accepted_send(
-                            &invoke,
-                            AcceptedSendDisposition::Rejected(
-                                "Slack returned conflicting thread metadata".to_owned(),
-                            ),
-                        );
-                    }
-                    return Some(tool_error(
-                        invoke,
-                        "Slack returned conflicting thread metadata".to_owned(),
-                    ));
-                }
-                let request_id = format!("slack-send-{}", invoke.call_id.as_str());
-                let operation = MessageOperation::Create {
-                    payload: MessagePayload::Text {
-                        text: text.clone(),
-                        format: TextFormat::Plain,
-                    },
-                };
-                let draft = transport_draft(
-                    endpoint,
-                    &route,
-                    operation,
-                    ExternalMessageIdentity {
-                        event_id: None,
-                        message_id: Some(posted.ts.clone()),
-                        revision_id: None,
-                        dedup_key: Some(format!("send:{}:{}", route.channel_id, posted.ts)),
-                    },
-                    policy_status,
-                    self.output.wire_tool_name(SEND_TOOL_NAME),
-                );
-                let mut draft = draft;
-                draft.conversation = Some(conversation);
-                let message_ref = mint_message_ref();
-                let authority = reaction_authority;
-                let mut tool_result = successful_tool_result(&invoke, "");
-                tool_result.result = CborValue::Map(vec![
-                    example_field("status", example_text("sent")),
-                    example_field("message_ref", example_text(&message_ref)),
-                ]);
-                let completion = Box::new(CompleteTransportSendRequest {
-                    request_id: request_id.clone(),
-                    call_id: invoke.call_id.clone(),
-                    agent_id: invoke.agent_id.clone(),
-                    in_reply_to: reply_to,
-                    authorization,
-                    draft,
-                    acceptance: MessageTransportAcceptance::SubmittedToTransport,
-                    tool_result,
-                });
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if !state.consume_send_reservation(&invoke.call_id, &invoke.agent_id, send_token) {
-                    return Some(tool_error(
-                        invoke,
-                        "Slack send completed after its agent or session became inactive"
-                            .to_owned(),
-                    ));
-                }
-                state.remember_accepted_send(
-                    &invoke,
-                    AcceptedSendDisposition::Completion(completion.clone()),
-                );
-                let generation = state.config_generation;
-                state.pending_posts.insert(
-                    request_id.clone(),
-                    PendingPostedMessage {
-                        conversation: route.clone(),
-                        posted: posted.clone(),
-                        agent_id: invoke.agent_id.clone(),
-                        invoke: invoke.clone(),
-                        message_ref,
-                        authority,
-                        generation,
-                    },
-                );
-                self.output
-                    .send(HarnessInputMessage::CompleteTransportSend(completion));
-                None
-            }
-            Err(message) => {
-                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                if state.consume_send_reservation(&invoke.call_id, &invoke.agent_id, send_token) {
-                    state.forget_send_attempt(&invoke.call_id);
-                }
-                Some(tool_error(invoke, message))
             }
         }
     }
@@ -3636,7 +3330,9 @@ impl Extension {
             );
         }
         let started_at = Instant::now();
-        let result = self.client.post_message(cfg, channel_id, text, thread_ts);
+        let mode = SlackPostMode::bridge_literal(text);
+        let body = FrozenPostBody::new(channel_id, thread_ts, &mode);
+        let result = self.client.post_message(cfg, &body);
         if let Some(trace) = trace {
             tracing::trace!(
                 target: LOG_TARGET,
@@ -3646,7 +3342,7 @@ impl Extension {
                 event_class = trace.event_class,
                 post_class = "local_reply",
                 duration_us = elapsed_us(started_at),
-                outcome = post_error_outcome(result.as_ref().err()),
+                outcome = result.trace_label(),
                 "slack.api.post_message_finished"
             );
         }
@@ -4159,9 +3855,7 @@ fn external_endpoint_for_route(route: &ReplyRoute) -> MessageEndpoint {
 
 impl Drop for Extension {
     fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-        drop(state);
+        self.retire_send_authority();
         self.shutdown.request();
     }
 }
@@ -4224,7 +3918,7 @@ impl ShutdownSignal {
 }
 
 fn socket_worker_loop(
-    state: Arc<Mutex<State>>,
+    send_retirement: SendRetirement,
     client: Arc<dyn SlackClient>,
     output: Output,
     cfg: RuntimeConfig,
@@ -4236,18 +3930,17 @@ fn socket_worker_loop(
         .build()
     {
         Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::warn!(target: LOG_TARGET, error = %error, "failed to create Slack worker runtime");
+        Err(_error) => {
+            tracing::warn!(target: LOG_TARGET, failure = "runtime_unavailable", "failed to create Slack worker runtime");
             return;
         }
     };
-    let ext = Arc::new(Extension {
-        state,
+    let ext = Arc::new(Extension::new_socket_worker_view(
+        send_retirement,
         client,
         output,
-        shutdown: Arc::clone(&shutdown),
-        trace_seq: AtomicU64::new(0),
-    });
+        Arc::clone(&shutdown),
+    ));
     let admission = AdmissionQueue::new();
     let admission_worker = Arc::clone(&admission);
     let admission_failure = Arc::clone(&admission);
@@ -4282,7 +3975,7 @@ fn socket_worker_loop(
             Ok(WorkerOutcome::Shutdown) => break,
             Err(message) => {
                 ext.report_worker_startup_failure_once(&cfg, &message);
-                tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", error = %sanitize_diagnostic(&message, &cfg), "Slack Socket Mode worker failed; reconnecting");
+                tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", failure = "socket_worker", "Slack Socket Mode worker failed; reconnecting");
                 if runtime.block_on(shutdown.wait_timeout(backoff)) {
                     break;
                 }
@@ -4392,9 +4085,15 @@ async fn socket_worker_once(
             startup.socket_url
         }
         None => {
-            let bot_user_id = ext.client.auth_test(cfg)?;
+            let bot_user_id = ext
+                .client
+                .auth_test(cfg)
+                .map_err(|error| error.to_string())?;
             let bot_user_id = validate_slack_id("auth.test user_id", &bot_user_id)?;
-            let ws_url = ext.client.open_socket(cfg)?;
+            let ws_url = ext
+                .client
+                .open_socket(cfg)
+                .map_err(|error| error.to_string())?;
             validate_socket_url(&ws_url)?;
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
             state.bot_user_id = Some(bot_user_id);
@@ -4403,13 +4102,7 @@ async fn socket_worker_once(
     };
     let (mut ws, _response) = tokio_tungstenite::connect_async(&ws_url)
         .await
-        .map_err(|error| {
-            sanitize_socket_diagnostic(
-                &format!("Slack websocket connect failed: {error}"),
-                cfg,
-                &ws_url,
-            )
-        })?;
+        .map_err(|_| "Slack websocket connection failed".to_owned())?;
     tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;
@@ -4425,9 +4118,7 @@ async fn socket_worker_once(
         let Some(frame) = frame else {
             return Ok(WorkerOutcome::ReconnectNow);
         };
-        let frame = frame.map_err(|error| {
-            sanitize_diagnostic(&format!("Slack websocket frame failed: {error}"), cfg)
-        })?;
+        let frame = frame.map_err(|_| "Slack websocket frame failed".to_owned())?;
         let received_at = Instant::now();
         let trace_seq = ext.trace_seq.fetch_add(1, Ordering::Relaxed);
         let timing = SocketFrameTiming {
@@ -4468,9 +4159,9 @@ async fn handle_socket_frame(
         }
         Message::Close(_) => Ok(Some(WorkerOutcome::ReconnectNow)),
         Message::Ping(payload) => {
-            ws.send(Message::Pong(payload)).await.map_err(|error| {
-                sanitize_diagnostic(&format!("Slack websocket pong failed: {error}"), cfg)
-            })?;
+            ws.send(Message::Pong(payload))
+                .await
+                .map_err(|_| "Slack websocket pong failed".to_owned())?;
             Ok(None)
         }
         Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => Ok(None),
@@ -4655,14 +4346,14 @@ async fn handle_socket_text_frame(
 }
 
 async fn send_socket_ack(
-    cfg: &RuntimeConfig,
+    _cfg: &RuntimeConfig,
     ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     envelope_id: &str,
 ) -> Result<(), String> {
     let ack = serde_json::json!({ "envelope_id": envelope_id }).to_string();
     ws.send(Message::Text(ack.into()))
         .await
-        .map_err(|error| sanitize_diagnostic(&format!("Slack websocket ack failed: {error}"), cfg))
+        .map_err(|_| "Slack websocket acknowledgement failed".to_owned())
 }
 
 #[derive(Default)]
@@ -4849,12 +4540,113 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
+    run_with_client_and_scheduler(reader, writer, client, Arc::new(SystemSendScheduler))
+}
+
+/// Run the protocol client with an injected delivery scheduler.
+fn run_with_client_and_scheduler<R, W>(
+    reader: R,
+    writer: W,
+    client: Arc<dyn SlackClient>,
+    scheduler: Arc<dyn SendScheduler>,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read,
+    W: Write + Send + 'static,
+{
+    let boundary = Arc::new(SendReaderBoundary::default());
+    let reader = RetiringReader {
+        inner: reader,
+        boundary: Arc::clone(&boundary),
+    };
+    let install_boundary = Arc::clone(&boundary);
     let state = tau_client::TauExtensionRunner::new(SlackExtension)
-        .run_detached_writer_with_state(reader, writer, move |handle| SlackRuntime {
-            ext: Extension::new(client, handle),
+        .run_detached_writer_with_state(reader, writer, move |handle| {
+            let ext = Extension::new_with_scheduler(client, handle, scheduler);
+            install_boundary.install(&ext);
+            SlackRuntime { ext }
         })?;
+    state.ext.retire_send_authority();
     state.ext.shutdown.request();
     Ok(())
+}
+
+/// Exact send-state handles installed after initial Configure.
+#[derive(Clone)]
+struct SendRetirement {
+    state: Arc<Mutex<State>>,
+    completion_publication_gate: Arc<Mutex<()>>,
+    wake: Arc<SendWake>,
+}
+
+/// Reader boundary that can synchronously revoke sends before tau-client
+/// performs EOF writer cleanup.
+#[derive(Default)]
+struct SendReaderBoundary {
+    retirement: Mutex<Option<SendRetirement>>,
+}
+
+impl SendReaderBoundary {
+    fn install(&self, extension: &Extension) {
+        *self
+            .retirement
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(SendRetirement {
+            state: Arc::clone(&extension.state),
+            completion_publication_gate: Arc::clone(&extension.completion_publication_gate),
+            wake: Arc::clone(&extension.send_wake),
+        });
+    }
+
+    fn retire(&self) {
+        let retirement = self
+            .retirement
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(retirement) = retirement {
+            retire_send_state(
+                &retirement.state,
+                &retirement.completion_publication_gate,
+                &retirement.wake,
+            );
+        }
+    }
+}
+
+/// Read adapter that turns EOF into a synchronous outbound-authority barrier.
+struct RetiringReader<R> {
+    inner: R,
+    boundary: Arc<SendReaderBoundary>,
+}
+
+impl<R: Read> Read for RetiringReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read == 0 {
+            self.boundary.retire();
+        }
+        Ok(read)
+    }
+}
+
+fn retire_send_state(
+    state: &Arc<Mutex<State>>,
+    completion_publication_gate: &Mutex<()>,
+    wake: &SendWake,
+) {
+    let _publication = completion_publication_gate
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+        state.capability_active = false;
+        state.capability_generation = state.capability_generation.wrapping_add(1);
+        state.pending_posts.clear();
+        state.clear_send_ledger();
+    }
+    wake.notify_lifecycle_change();
 }
 
 struct SlackExtension;
@@ -5030,11 +4822,17 @@ fn handle_output_message(
 /// Apply one correlated transport RPC result to private bridge state.
 fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extension) {
     match message {
+        tau_proto::HarnessOutputMessage::Disconnect(_) => {
+            ext.retire_send_authority();
+            ext.shutdown.request();
+        }
         tau_proto::HarnessOutputMessage::RegisterTransportCapabilityResult(result) => {
             let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.pending_capability_request.as_deref() == Some(result.request_id.as_str()) {
                 state.pending_capability_request = None;
                 state.capability_active = result.accepted;
+                state.capability_generation = state.capability_generation.wrapping_add(1);
+                ext.send_wake.notify_lifecycle_change();
             }
         }
         tau_proto::HarnessOutputMessage::TransportMessageIngressResult(result) => {
@@ -5128,33 +4926,87 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
             let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
             let pending = state.pending_posts.remove(&result.request_id);
             if let Some(pending) = pending {
-                if result.accepted
-                    && result.message_id.is_some()
-                    && state.config_generation == pending.generation
-                {
-                    let _ = state.insert_reaction_target(
-                        pending.message_ref,
-                        ReactionTarget {
-                            agent_id: pending.agent_id.clone(),
-                            conversation: pending.conversation.clone(),
-                            message_ts: pending.posted.ts.clone(),
-                            authority: pending.authority,
-                        },
-                    );
-                    state.posted_messages.insert(
-                        PostedMessageKey::new(&pending.conversation.channel_id, &pending.posted.ts),
-                        PostedMessageOwner {
-                            agent_id: pending.agent_id,
-                            thread_ts: pending.conversation.thread_ts,
-                        },
-                    );
+                let completion = state
+                    .send_ledger
+                    .get(&pending.invoke.call_id)
+                    .and_then(|entry| {
+                        (entry.prepared.authority.token == pending.send_authority.token)
+                            .then_some(&entry.disposition)
+                    })
+                    .and_then(|disposition| match disposition {
+                        SendLedgerDisposition::AwaitingCompletion { request, copies } => {
+                            Some((request.tool_result.clone(), *copies))
+                        }
+                        _ => None,
+                    });
+                let (durable_result, copies) = completion.unwrap_or_else(|| {
+                    (
+                        successful_tool_result(&pending.invoke, ""),
+                        RemoteCopyPossibility::One,
+                    )
+                });
+                let reaction_authority_current = result.message_id.is_some()
+                    && state.capability_active
+                    && state.session_generation == pending.send_authority.session_generation
+                    && state.ingress_epoch == pending.send_authority.ingress_epoch
+                    && state.config_generation == pending.send_authority.config_generation
+                    && state.send_agent_generation(&pending.agent_id)
+                        == pending.send_authority.agent_generation
+                    && state.capability_generation == pending.send_authority.capability_generation
+                    && state.instance_name.as_ref()
+                        == pending.send_authority.instance_name.as_ref()
+                    && state.bot_user_id.as_deref()
+                        == pending
+                            .send_authority
+                            .observed_bot_user_id
+                            .as_ref()
+                            .map(ObservedSlackBotId::as_str);
+                if result.accepted {
+                    if reaction_authority_current {
+                        let _ = state.insert_reaction_target(
+                            pending.message_ref,
+                            ReactionTarget {
+                                agent_id: pending.agent_id.clone(),
+                                conversation: pending.conversation.clone(),
+                                message_ts: pending.posted.ts.clone(),
+                                authority: pending.authority,
+                            },
+                        );
+                        state.posted_messages.insert(
+                            PostedMessageKey::new(
+                                &pending.conversation.channel_id,
+                                &pending.posted.ts,
+                            ),
+                            PostedMessageOwner {
+                                agent_id: pending.agent_id,
+                                thread_ts: pending.conversation.thread_ts,
+                            },
+                        );
+                    }
+                    if let Some(entry) = state.send_ledger.get_mut(&pending.invoke.call_id)
+                        && entry.prepared.authority.token == pending.send_authority.token
+                    {
+                        entry.disposition = SendLedgerDisposition::Completed {
+                            result: Box::new(durable_result),
+                            copies,
+                        };
+                    }
                 } else {
-                    drop(state);
+                    if let Some(entry) = state.send_ledger.get_mut(&pending.invoke.call_id)
+                        && entry.prepared.authority.token == pending.send_authority.token
+                    {
+                        entry.disposition = SendLedgerDisposition::DefinitiveFailure {
+                            category: SendFailureCategory::CompletionRejected,
+                            copies,
+                        };
+                    }
                     ext.output.emit(tool_error(
                         pending.invoke,
-                        format!(
-                            "Slack accepted the post, but Tau rejected durable completion: {}",
-                            result.error.as_deref().unwrap_or("completion_rejected")
+                        copies.caveat().map_or_else(
+                            || SendFailureCategory::CompletionRejected.to_string(),
+                            |caveat| {
+                                format!("{}; {caveat}", SendFailureCategory::CompletionRejected)
+                            },
                         ),
                     ));
                 }
@@ -5308,51 +5160,42 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+                state.session_generation = state.session_generation.wrapping_add(1);
                 state.session_active = true;
             }
+            cx.state.ext.send_wake.notify_lifecycle_change();
             cx.state.ext.request_transport_capability();
         }
         Event::SessionAgentUnloaded(unloaded) => {
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.registered_agents.remove(&unloaded.agent_id);
-            state.agent_generation = state.agent_generation.wrapping_add(1);
-            state.agent_labels.remove(&unloaded.agent_id);
-            state
-                .selected_agent_by_route
-                .retain(|_, agent_id| agent_id != &unloaded.agent_id);
-            state.remove_agent_reply_routes(&unloaded.agent_id);
-            state.remove_agent_incoming_messages(&unloaded.agent_id);
-            state
-                .pending_ingress
-                .retain(|_, pending| pending.agent_id != unloaded.agent_id);
-            state
-                .pending_posts
-                .retain(|_, pending| pending.agent_id != unloaded.agent_id);
-            state
-                .sends_in_flight
-                .retain(|_, reservation| reservation.agent_id != unloaded.agent_id);
-            state.remove_agent_send_attempts(&unloaded.agent_id);
-            state.posted_messages.remove_agent(&unloaded.agent_id);
-            state.remove_agent_reaction_state(&unloaded.agent_id);
+            cx.state.ext.unload_agent(&unloaded.agent_id);
         }
         Event::SessionShutdown(_) => {
+            let _publication = cx
+                .state
+                .ext
+                .completion_publication_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
             state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
             state.agent_generation = state.agent_generation.wrapping_add(1);
+            state.session_generation = state.session_generation.wrapping_add(1);
             state.session_active = false;
             state.registered_agents.clear();
+            state.send_agent_generations.clear();
             state.agent_labels.clear();
             state.selected_agent_by_route.clear();
             state.pending_ingress.clear();
             state.clear_reply_routes();
             state.clear_incoming_messages();
             state.pending_posts.clear();
-            state.sends_in_flight.clear();
-            state.clear_accepted_send_attempts();
+            state.clear_send_ledger();
             state.capability_active = false;
+            state.capability_generation = state.capability_generation.wrapping_add(1);
             state.pending_capability_request = None;
             state.posted_messages.clear();
             state.clear_reaction_state();
+            cx.state.ext.send_wake.notify_lifecycle_change();
         }
         _ => {}
     }
@@ -5846,7 +5689,9 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
             ..Default::default()
         }),
         message,
-        details: Some(invoke.arguments),
+        // Slack arguments can contain externally influenced message text and
+        // native-control sentinels; errors expose only the closed message.
+        details: None,
         originator: invoke.originator,
     })
 }
@@ -6055,6 +5900,28 @@ struct HttpSlackClient {
     agent: ureq::Agent,
 }
 
+/// Collapse ureq failures into non-secret identity/lifecycle categories.
+fn slack_api_transport_error(error: &ureq::Error) -> SlackApiError {
+    match error {
+        ureq::Error::Timeout(_) => SlackApiError::TransportTimeout,
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => {
+            SlackApiError::TransportConnect
+        }
+        ureq::Error::Tls(_) => SlackApiError::TransportTls,
+        _ => SlackApiError::Transport,
+    }
+}
+
+/// Collapse ureq failures into non-secret post ambiguity categories.
+fn slack_post_transport_error(error: &ureq::Error) -> SendFailureCategory {
+    match error {
+        ureq::Error::Timeout(_) => SendFailureCategory::Timeout,
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => SendFailureCategory::Connect,
+        ureq::Error::Tls(_) => SendFailureCategory::Tls,
+        _ => SendFailureCategory::Transport,
+    }
+}
+
 impl HttpSlackClient {
     fn agent() -> ureq::Agent {
         let tls_config = ureq::tls::TlsConfig::builder()
@@ -6074,7 +5941,7 @@ impl HttpSlackClient {
         method: &str,
         token: &str,
         body: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, SlackApiError> {
         let url = format!("{}/{method}", cfg.api_base);
         let mut response = self
             .agent
@@ -6082,42 +5949,41 @@ impl HttpSlackClient {
             .header("Authorization", &format!("Bearer {token}"))
             .content_type("application/json")
             .send(body.to_string())
-            .map_err(|error| {
-                sanitize_diagnostic(&format!("Slack transport error: {error}"), cfg)
-            })?;
+            .map_err(|error| slack_api_transport_error(&error))?;
         let status = response.status();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
         let text = response
             .body_mut()
+            .with_config()
+            .limit(MAX_SLACK_API_RESPONSE_BYTES)
             .read_to_string()
-            .map_err(|e| sanitize_diagnostic(&format!("reading Slack response: {e}"), cfg))?;
-        parse_slack_api_response(cfg, method, status.as_u16(), retry_after.as_deref(), &text)
+            .map_err(|_| SlackApiError::Transport)?;
+        parse_slack_api_response(status.as_u16(), &text)
     }
 
     /// Call `users.info` with a form-encoded parameter.
     ///
     /// Slack accepts this method via GET/form encoding but treats a JSON POST
     /// body as if the required `user` argument were absent.
-    fn get_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<serde_json::Value, String> {
+    fn get_user(
+        &self,
+        cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<serde_json::Value, SlackApiError> {
         let url = format!("{}/users.info", cfg.api_base);
         let mut response = self
             .agent
             .post(&url)
             .header("Authorization", &format!("Bearer {}", cfg.bot_token))
             .send_form([("user", user_id)])
-            .map_err(|error| {
-                sanitize_diagnostic(&format!("Slack transport error: {error}"), cfg)
-            })?;
+            .map_err(|error| slack_api_transport_error(&error))?;
         let status = response.status();
         let text = response
             .body_mut()
+            .with_config()
+            .limit(MAX_SLACK_API_RESPONSE_BYTES)
             .read_to_string()
-            .map_err(|e| sanitize_diagnostic(&format!("reading Slack response: {e}"), cfg))?;
-        parse_slack_api_response(cfg, "users.info", status.as_u16(), None, &text)
+            .map_err(|_| SlackApiError::Transport)?;
+        parse_slack_api_response(status.as_u16(), &text)
     }
 
     /// Call one reaction method with typed, body-safe failure handling.
@@ -6163,6 +6029,8 @@ impl HttpSlackClient {
         }
         let text = response
             .body_mut()
+            .with_config()
+            .limit(MAX_SLACK_API_RESPONSE_BYTES)
             .read_to_string()
             .map_err(|_| ReactionApiError::OutcomeUnknown)?;
         let value: serde_json::Value =
@@ -6212,43 +6080,39 @@ impl Default for HttpSlackClient {
 }
 
 fn parse_slack_api_response(
-    cfg: &RuntimeConfig,
-    method: &str,
     status_code: u16,
-    retry_after: Option<&str>,
     text: &str,
-) -> Result<serde_json::Value, String> {
-    if status_code == 429
-        && method == "chat.postMessage"
-        && let Some(retry_after) = retry_after
-    {
-        return Err(format!(
-            "Slack rate limited chat.postMessage; retry after {retry_after}s"
-        ));
+) -> Result<serde_json::Value, SlackApiError> {
+    if status_code == 429 {
+        return Err(SlackApiError::RateLimited);
     }
-    if !(200..300).contains(&status_code) {
-        return Err(format!(
-            "Slack returned HTTP {status_code}: {}",
-            sanitize_diagnostic(text, cfg)
-        ));
+    if status_code >= 500 {
+        return Err(SlackApiError::RemoteFailure);
     }
     let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("invalid Slack JSON response: {e}"))?;
+        serde_json::from_str(text).map_err(|_| SlackApiError::MalformedResponse)?;
+    if !(200..300).contains(&status_code) {
+        let classified = classify_api_error(value.get("error").and_then(serde_json::Value::as_str));
+        return Err(match (status_code, classified) {
+            (_, SlackApiError::RemoteFailure) => match status_code {
+                401 => SlackApiError::Authentication,
+                403 => SlackApiError::PermissionDenied,
+                404 => SlackApiError::TargetUnavailable,
+                _ => SlackApiError::InvalidRequest,
+            },
+            (_, classified) => classified,
+        });
+    }
     if value.get("ok").and_then(|value| value.as_bool()) != Some(true) {
-        let error = value
-            .get("error")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown_error");
-        return Err(format!(
-            "Slack API {method} failed: {}",
-            sanitize_diagnostic(error, cfg)
+        return Err(classify_api_error(
+            value.get("error").and_then(serde_json::Value::as_str),
         ));
     }
     Ok(value)
 }
 
 impl SlackClient for HttpSlackClient {
-    fn open_socket(&self, cfg: &RuntimeConfig) -> Result<String, String> {
+    fn open_socket(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         let value = self.post(
             cfg,
             "apps.connections.open",
@@ -6259,19 +6123,19 @@ impl SlackClient for HttpSlackClient {
             .get("url")
             .and_then(|value| value.as_str())
             .map(str::to_owned)
-            .ok_or_else(|| "Slack apps.connections.open response missing url".to_owned())
+            .ok_or(SlackApiError::MalformedResponse)
     }
 
-    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, String> {
+    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         let value = self.post(cfg, "auth.test", &cfg.bot_token, serde_json::json!({}))?;
         value
             .get("user_id")
             .and_then(|value| value.as_str())
             .map(str::to_owned)
-            .ok_or_else(|| "Slack auth.test response missing user_id".to_owned())
+            .ok_or(SlackApiError::MalformedResponse)
     }
 
-    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String> {
+    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError> {
         let value = self.get_user(cfg, user_id)?;
         human_user_from_response(&value, user_id)
     }
@@ -6279,16 +6143,85 @@ impl SlackClient for HttpSlackClient {
     fn post_message(
         &self,
         cfg: &RuntimeConfig,
-        channel_id: &str,
-        text: &str,
-        thread_ts: Option<&str>,
-    ) -> Result<PostedMessage, String> {
-        let body = post_message_body(channel_id, text, thread_ts);
-        let value = self.post(cfg, "chat.postMessage", &cfg.bot_token, body)?;
-        if value.get("channel").and_then(|value| value.as_str()) != Some(channel_id) {
-            return Err("Slack returned a conflicting conversation".to_owned());
+        body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        let url = format!("{}/chat.postMessage", cfg.api_base);
+        let response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
+            .content_type("application/json")
+            .send(body.wire_json());
+        let mut response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                return PostAttemptOutcome::OutcomeUnknown(slack_post_transport_error(&error));
+            }
+        };
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok());
+        if status == 429 {
+            return PostAttemptOutcome::RateLimited(parse_retry_after(retry_after));
         }
-        posted_message_from_response(&value)
+        if status == 408 {
+            return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Timeout);
+        }
+        if status >= 500 {
+            return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::ServiceUnavailable);
+        }
+        if !(200..300).contains(&status) {
+            return PostAttemptOutcome::DefinitiveFailure(SendFailureCategory::InvalidRequest);
+        }
+        let text = match response
+            .body_mut()
+            .with_config()
+            .limit(MAX_SLACK_API_RESPONSE_BYTES)
+            .read_to_string()
+        {
+            Ok(text) => text,
+            Err(_) => {
+                return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Transport);
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::MalformedResponse);
+            }
+        };
+        if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return match classify_post_api_error(
+                value.get("error").and_then(serde_json::Value::as_str),
+            ) {
+                PostAttemptFailure::Definitive(category) => {
+                    PostAttemptOutcome::DefinitiveFailure(category)
+                }
+                PostAttemptFailure::OutcomeUnknown(category) => {
+                    PostAttemptOutcome::OutcomeUnknown(category)
+                }
+                PostAttemptFailure::RateLimited(delay) => PostAttemptOutcome::RateLimited(delay),
+            };
+        }
+        let posted = match posted_message_from_response(&value) {
+            Ok(posted) => posted,
+            Err(PostAttemptFailure::Definitive(category)) => {
+                return PostAttemptOutcome::DefinitiveFailure(category);
+            }
+            Err(PostAttemptFailure::OutcomeUnknown(category)) => {
+                return PostAttemptOutcome::OutcomeUnknown(category);
+            }
+            Err(PostAttemptFailure::RateLimited(delay)) => {
+                return PostAttemptOutcome::RateLimited(delay);
+            }
+        };
+        if posted.channel_id != body.channel_id() || posted.thread_ts.as_deref() != body.thread_ts()
+        {
+            return PostAttemptOutcome::DefinitiveFailure(SendFailureCategory::ConflictingRoute);
+        }
+        PostAttemptOutcome::Accepted(posted)
     }
 
     fn react(
@@ -6303,21 +6236,11 @@ impl SlackClient for HttpSlackClient {
     }
 }
 
-fn post_message_body(channel_id: &str, text: &str, thread_ts: Option<&str>) -> serde_json::Value {
-    let mut body = serde_json::json!({ "channel": channel_id, "text": text });
-    if let Some(thread_ts) = thread_ts {
-        body["thread_ts"] = serde_json::Value::String(thread_ts.to_owned());
-    }
-    body
-}
-
 fn human_user_from_response(
     value: &serde_json::Value,
     expected_user_id: &str,
-) -> Result<bool, String> {
-    let user = value
-        .get("user")
-        .ok_or_else(|| "Slack users.info response missing user".to_owned())?;
+) -> Result<bool, SlackApiError> {
+    let user = value.get("user").ok_or(SlackApiError::MalformedResponse)?;
     Ok(expected_user_id != "USLACKBOT"
         && user.get("id").and_then(|value| value.as_str()) == Some(expected_user_id)
         && user.get("deleted").and_then(|value| value.as_bool()) == Some(false)
@@ -6325,45 +6248,49 @@ fn human_user_from_response(
         && user.get("is_app_user").and_then(|value| value.as_bool()) == Some(false))
 }
 
-fn posted_message_from_response(value: &serde_json::Value) -> Result<PostedMessage, String> {
+fn posted_message_from_response(
+    value: &serde_json::Value,
+) -> Result<PostedMessage, PostAttemptFailure> {
     let channel_id = value
         .get("channel")
         .and_then(|value| value.as_str())
         .filter(|channel| validate_slack_id("channel", channel).is_ok())
-        .ok_or_else(|| "Slack chat.postMessage response missing channel".to_owned())?
+        .ok_or(PostAttemptFailure::OutcomeUnknown(
+            SendFailureCategory::MalformedResponse,
+        ))?
         .to_owned();
     let ts = value
         .get("ts")
         .and_then(|value| value.as_str())
         .filter(|ts| validate_slack_ts(ts).is_ok())
-        .ok_or_else(|| "Slack chat.postMessage response missing ts".to_owned())?
+        .ok_or(PostAttemptFailure::OutcomeUnknown(
+            SendFailureCategory::MalformedResponse,
+        ))?
         .to_owned();
-    let thread_ts = value
+    let thread_ts = match value
         .get("message")
         .and_then(|message| message.get("thread_ts"))
-        .and_then(|value| value.as_str())
-        .filter(|ts| validate_slack_ts(ts).is_ok())
-        .map(str::to_owned);
+    {
+        None => None,
+        Some(value) => {
+            let Some(thread_ts) = value.as_str() else {
+                return Err(PostAttemptFailure::OutcomeUnknown(
+                    SendFailureCategory::MalformedResponse,
+                ));
+            };
+            if validate_slack_ts(thread_ts).is_err() {
+                return Err(PostAttemptFailure::OutcomeUnknown(
+                    SendFailureCategory::MalformedResponse,
+                ));
+            }
+            Some(thread_ts.to_owned())
+        }
+    };
     Ok(PostedMessage {
         channel_id,
         ts,
         thread_ts,
     })
-}
-
-fn sanitize_diagnostic(text: &str, cfg: &RuntimeConfig) -> String {
-    let text = text
-        .replace(&cfg.app_token, "<redacted>")
-        .replace(&cfg.bot_token, "<redacted>");
-    bounded_text(&text, MAX_DIAGNOSTIC_BYTES)
-}
-
-fn sanitize_socket_diagnostic(text: &str, cfg: &RuntimeConfig, socket_url: &str) -> String {
-    let text = text
-        .replace(socket_url, "<redacted-socket-url>")
-        .replace(&cfg.app_token, "<redacted>")
-        .replace(&cfg.bot_token, "<redacted>");
-    bounded_text(&text, MAX_DIAGNOSTIC_BYTES)
 }
 
 fn bounded_text(text: &str, max_bytes: usize) -> String {

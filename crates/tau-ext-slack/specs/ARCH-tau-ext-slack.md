@@ -47,6 +47,27 @@ It never accepts a native id or thread. The extension and
 harness independently revalidate agent, tool, session, capability, route,
 endpoint, kind, thread, and completion. MPIM metadata uses `ConversationKind::Group`.
 Thread sends use the immutable root and never broadcast replies.
+Accepted calls freeze their exact canonical route, lifecycle/config authority,
+optional preflight bot observation, and final wire body in a non-evicting
+1,024-entry process/session ledger before I/O. At most 64 active delivery workers
+run initial HTTP, acknowledged completion output, and notification-driven retry
+waits, never on tau-client's serialized reader. A live per-channel logical-call
+FIFO owns provider/backoff turns and advances pacing at actual attempt starts.
+One initial attempt
+plus at most one byte-identical retry provides process/session at-least-once
+delivery: an ambiguous first attempt followed by success can leave one or two
+Slack copies. Same-call replay resubmits only its stable completion/error;
+conflicting reuse fails, and a new call id is new intent. Lifecycle, capability,
+route, config, disconnect, or session changes cancel retry and stale completion
+authority. A Tau-accepted completion remains a stable result while current
+authority separately gates reaction ownership; completion-writer failure retires
+outbound authority and shuts down the extension. Synchronous HTTP workers are
+process-owned and may outlive `run` only through their 30-second request timeout;
+retired workers cannot retry or restore local state. Typed workspace/team
+installation evidence remains later integration.
+There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
+claim. See
+[DESIGN-tau-ext-slack-send-delivery](DESIGN-tau-ext-slack-send-delivery.md).
 Agent-authored reply and proactive text is unchanged by default. The
 presentation-only `prefix_agent_id` setting may add the legacy `[agent-id] `
 prefix after message-size validation; it does not alter authorization, routing,
@@ -58,8 +79,8 @@ and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-im
 Runtime links, selections, registrations, reply routes, post ownership, and
 worker state clear on restart. Durable create identity permits Slack retry after
 restart to deduplicate, but historical duplicates are Inactive and restore no
-private authority. Same-process accepted sends do not
-repost, without claiming crash-safe exactly-once delivery.
+private authority. Session/process retirement clears the outbound replay ledger
+and ends its at-least-once boundary.
 
 Configuration has a monotonic freeze latch. Successful auth/socket preflight
 freezes the worker snapshot before activation; otherwise the first fully
