@@ -1121,6 +1121,7 @@ fn incoming_message(agent_id: AgentId) -> Event {
             source: tau_proto::MessageEndpoint::External {
                 stable_id: Some("U1".to_owned()),
                 display_name: None,
+                identity_alias: None,
                 actor_kind: tau_proto::ExternalActorKind::Human,
             },
             destination: tau_proto::MessageEndpoint::Agent {
@@ -1148,8 +1149,8 @@ fn incoming_message(agent_id: AgentId) -> Event {
     })
 }
 
-/// Sender labels must preserve stable verified identity and visibly qualify
-/// weaker assurance classes instead of presenting display names as authority.
+/// Slack sender labels preserve stable verified identity without changing the
+/// established display behavior of unrelated external transports.
 #[test]
 fn message_envelope_sender_labels_reflect_identity_assurance() {
     let Event::AgentMessageIncoming(incoming) = incoming_message(agent_id()) else {
@@ -1161,7 +1162,7 @@ fn message_envelope_sender_labels_reflect_identity_assurance() {
             tau_proto::SenderIdentityAssurance::VerifiedAccount,
             Some("U1"),
             Some("Alice"),
-            "Alice (U1)",
+            "U1",
         ),
         (
             tau_proto::SenderIdentityAssurance::VerifiedAccount,
@@ -1173,7 +1174,7 @@ fn message_envelope_sender_labels_reflect_identity_assurance() {
             tau_proto::SenderIdentityAssurance::VerifiedAccount,
             None,
             Some("Alice"),
-            "unverified Alice",
+            "unverified external sender",
         ),
         (
             tau_proto::SenderIdentityAssurance::RoomMembership,
@@ -1205,11 +1206,47 @@ fn message_envelope_sender_labels_reflect_identity_assurance() {
         envelope.source = tau_proto::MessageEndpoint::External {
             stable_id: stable_id.map(str::to_owned),
             display_name: display_name.map(str::to_owned),
+            identity_alias: None,
             actor_kind: tau_proto::ExternalActorKind::Human,
         };
         let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
         assert_eq!(item.model_presentation.source_label, expected);
     }
+    envelope.trust.identity = tau_proto::SenderIdentityAssurance::VerifiedAccount;
+    envelope.source = tau_proto::MessageEndpoint::External {
+        stable_id: Some("U1".to_owned()),
+        display_name: Some("Mutable Alice".to_owned()),
+        identity_alias: Some(tau_proto::ExternalIdentityAlias {
+            value: "dpc".to_owned(),
+            authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+        }),
+        actor_kind: tau_proto::ExternalActorKind::Human,
+    };
+    let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
+    assert_eq!(item.model_presentation.source_label, "U1");
+    assert_eq!(
+        item.model_presentation
+            .source_alias
+            .as_ref()
+            .map(|alias| alias.value.as_str()),
+        Some("dpc")
+    );
+    assert_eq!(
+        item.model_presentation.transport_instance_label.as_deref(),
+        Some("std-slack")
+    );
+    envelope.transport.name = "xmpp".to_owned();
+    envelope.source = tau_proto::MessageEndpoint::External {
+        stable_id: Some("acct@example.test".to_owned()),
+        display_name: Some("Alice".to_owned()),
+        identity_alias: None,
+        actor_kind: tau_proto::ExternalActorKind::Human,
+    };
+    let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
+    assert_eq!(
+        item.model_presentation.source_label,
+        "Alice (acct@example.test)"
+    );
 }
 
 /// Ensures metadata set/unset facts fold into side state without creating

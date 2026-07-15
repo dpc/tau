@@ -33,6 +33,12 @@ Inactive reply disposition; adapters may install private reply authority only
 from Active. Presentation-only endpoint and conversation labels do not change
 dedup authority, while stable identity, destination, conversation/thread,
 operation, trust/policy, native identity, ordering/time, and send tool do.
+External endpoints may also carry an explicitly sourced operator identity alias.
+It is presentation-only, requires a stable verified account, and remains outside
+dedup authority; the first durable label/alias snapshot is nevertheless the only
+canonical presentation returned for every duplicate. Model projection keeps the
+stable id primary and separately exposes alias authority plus the
+harness-authenticated transport instance.
 Retained-history uncertainty fails closed as specified by
 [DESIGN-canonical-transport-ingress](DESIGN-canonical-transport-ingress.md).
 

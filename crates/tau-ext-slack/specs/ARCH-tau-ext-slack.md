@@ -16,13 +16,29 @@ saturation/worker closure does not ACK so Slack may retry after reconnect. The F
 owns capacity through the terminal admission outcome and keeps identity checks,
 local replies, and ingress submission off the websocket reader while preserving
 global successful-ACK order. It is not durable: process death after ACK retains the
-existing loss window. Socket events are authorized only after ACK. The bridge rejects malformed,
+existing loss window. Startup/reconnect first binds the exact `auth.test` bot U/W
+and installing T workspace. Socket events are authorized only after ACK and only
+when the wrapper carries exact `context_team_id` or one unambiguous matching
+authorization; top-level team data and actor home team are not installation
+authority. Reconnect must exactly match both halves of the established pair; a
+changed, incomplete, or malformed reconnect observation disables capability,
+retires all installation-scoped ingress, dynamic-link, reply/edit,
+post-ownership, and reaction authority, and permanently rejects later
+capability registration until restart rather than
+admitting events for the new pair. The bridge rejects malformed,
 bot/self, subtype, kind, route, thread, and sender metadata; verifies humans via
 `users.info`; applies strict/lax and allowlist-only control; then submits a typed
 native route to a route-selected registered agent. `message` and `app_mention`
 wrappers normalize leading-mention commands and `(conversation, ts)` create
 identity identically. Parent routes share selection across actual threads;
 receive-enabled fixed-thread routes and dynamic DMs isolate it.
+The same `users.info` response may contribute only a bounded
+`profile.display_name` UI snapshot. Exact U/W identity remains authoritative and
+model-primary. Optional one-to-one operator aliases are presentation-only,
+extension-instance scoped, and excluded from dedup authority. Duplicate retries
+return the first durable display/alias snapshot rather than rewriting history.
+See
+[DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md).
 
 The harness stamps trust, durably deduplicates, and commits ingress. Only a
 protocol-v11 Committed+Active result whose exact first canonical instance,
@@ -48,7 +64,7 @@ harness independently revalidate agent, tool, session, capability, route,
 endpoint, kind, thread, and completion. MPIM metadata uses `ConversationKind::Group`.
 Thread sends use the immutable root and never broadcast replies.
 Accepted calls freeze their exact canonical route, lifecycle/config authority,
-optional preflight bot observation, and final wire body in a non-evicting
+mandatory authenticated bot/workspace pair, and final wire body in a non-evicting
 1,024-entry process/session ledger before I/O. At most 64 active delivery workers
 run initial HTTP, acknowledged completion output, and notification-driven retry
 waits, never on tau-client's serialized reader. A live per-channel logical-call
@@ -63,8 +79,8 @@ authority. A Tau-accepted completion remains a stable result while current
 authority separately gates reaction ownership; completion-writer failure retires
 outbound authority and shuts down the extension. Synchronous HTTP workers are
 process-owned and may outlive `run` only through their 30-second request timeout;
-retired workers cannot retry or restore local state. Typed workspace/team
-installation evidence remains later integration.
+retired workers cannot retry or restore local state. Every source-bound route and
+frozen send retains the exact typed workspace/team installation evidence.
 There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
 claim. See
 [DESIGN-tau-ext-slack-send-delivery](DESIGN-tau-ext-slack-send-delivery.md).
@@ -72,6 +88,12 @@ Agent-authored reply and proactive text is unchanged by default. The
 presentation-only `prefix_agent_id` setting may add the legacy `[agent-id] `
 prefix after message-size validation; it does not alter authorization, routing,
 thread selection, or send cardinality.
+Raw `<@`, `<!`, and `<#` controls are rejected. The default-false,
+reply-only `mention_source_user` option can prepend only the exact verified human
+bound to the live canonical route; it is invalid for configured destinations and
+is part of the exact frozen retry body.
+See
+[DESIGN-tau-ext-slack-safe-source-mentions](DESIGN-tau-ext-slack-safe-source-mentions.md).
 See [DESIGN-tau-ext-slack-proactive-sends](DESIGN-tau-ext-slack-proactive-sends.md)
 and [DESIGN-tau-ext-slack-conversation-discovery](DESIGN-tau-ext-slack-conversation-discovery.md)
 and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-immutable-thread-destinations.md).

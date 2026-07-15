@@ -73,6 +73,13 @@ routes, dynamic links, identities, runtime state, and Slack-fetched metadata.
 routes and must not be treated as control authority. Slack, workspace
 administrators, Slack Connect participants, and conversation members may read
 transported text; this is not an end-to-end encrypted channel.
+Slack additionally binds `auth.test` bot/workspace identity to each supported
+Events API wrapper and fails closed on missing, ambiguous, or mismatched
+installation evidence. Native U/W ids remain authoritative; fetched display
+names and operator aliases are presentation only. Agent sends reject raw Slack
+mention/control markup; the optional source-mention field can name only the
+verified human already bound to a live reply selector and is frozen with the
+bounded retry body.
 Slack-specific review triggers and failure/replay invariants are recorded in
 [`crates/tau-ext-slack/SECURITY.md`](crates/tau-ext-slack/SECURITY.md).
 

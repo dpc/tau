@@ -200,13 +200,6 @@ pub(crate) enum PostCompositionError {
     /// Text exceeded Slack's final scalar limit.
     TooLong,
     /// An internal source mention was not an exact U/W user id.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "stage-2 compile seam required before source-mention integration"
-        )
-    )]
     InvalidSourceMention,
 }
 
@@ -216,13 +209,6 @@ pub(crate) struct InternalSourceMention(String);
 
 impl InternalSourceMention {
     /// Validate one exact U/W Slack user id for generated markup.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "stage-2 compile seam required before source-mention integration"
-        )
-    )]
     pub(crate) fn new(user_id: &str) -> Result<Self, PostCompositionError> {
         valid_source_user_id(user_id)
             .then(|| Self(user_id.to_owned()))
@@ -260,9 +246,8 @@ impl SlackPostMode {
     /// Compose agent text and optionally prepend one internally generated
     /// source mention.
     ///
-    /// `source_user_id` is a private future integration seam. Agent text is
-    /// always checked before the generated mention is added, so model text
-    /// can never smuggle another `<@`, `<!`, or `<#` control.
+    /// Agent text is always checked before the generated mention is added, so
+    /// model text can never smuggle another `<@`, `<!`, or `<#` control.
     pub(crate) fn agent(
         text: String,
         source_mention: Option<&InternalSourceMention>,
@@ -446,13 +431,6 @@ fn contains_native_control(text: &str) -> bool {
     text.contains("<@") || text.contains("<!") || text.contains("<#")
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "stage-2 compile seam required before source-mention integration"
-    )
-)]
 fn valid_source_user_id(user_id: &str) -> bool {
     matches!(user_id.as_bytes().first(), Some(b'U' | b'W'))
         && (2..=32).contains(&user_id.len())

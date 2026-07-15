@@ -5,7 +5,7 @@ Status: confirmed, 2026-07-15, dpc
 `slack_send` uses process/session-scoped at-least-once delivery. After validating
 one exact tool intent, the extension freezes its agent, arguments, canonical
 reply or configured destination, session/config/capability generations, frozen
-credential-bearing configuration, optional preflight bot observation, scoped
+credential-bearing configuration, mandatory authenticated bot/workspace pair, scoped
 tool lease name, final logical text, and exact serialized `chat.postMessage`
 body. It reserves the `ToolCallId` before I/O and runs both
 initial HTTP work and retry waiting outside tau-client's serialized reader.
@@ -87,9 +87,11 @@ permission, target, or request rejection is not retried.
 This is neither exactly-once nor durable restart-spanning idempotency. Process
 loss clears the ledger, so replay after restart may post again. Tau does not send
 `client_msg_id`, maintain a durable outbox, or reconcile remote Slack history.
-Mandatory typed workspace/team installation evidence remains the subsequent
-canonical Slack integration stage; an optional preflight bot observation is not
-installation proof.
+Every accepted send freezes the exact bot U/W and installing T workspace pair
+established by `auth.test`. A proactive send without a live worker observation
+performs that read-only preflight before reservation; replacement configuration
+discards the observation. Reconnect must match the pair exactly; mismatch
+disables capability, retires private authority, and requires restart.
 
 ## Content and diagnostic boundary
 

@@ -30,6 +30,8 @@ pub(super) struct PostedMessageOwner {
     pub(super) agent_id: AgentId,
     /// Optional authenticated outbound-request thread root.
     pub(super) thread_ts: Option<String>,
+    /// Exact installation team that authored the post.
+    pub(super) installation_team_id: String,
 }
 
 /// Bounded insertion-ordered map of bridge-authored Slack post identities.

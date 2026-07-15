@@ -7,12 +7,12 @@ mod wire;
 pub(super) use scheduler::ImmediateSendScheduler;
 pub(super) use scheduler::{SendScheduler, SendWake, SystemSendScheduler};
 pub(super) use wire::{
-    FrozenPostBody, MIN_RETRY_DELAY, PostAttemptFailure, PostAttemptOutcome, SendFailureCategory,
-    SlackApiError, SlackPostMode, classify_api_error, classify_post_api_error, parse_retry_after,
-    retry_delay,
+    FrozenPostBody, InternalSourceMention, MIN_RETRY_DELAY, PostAttemptFailure, PostAttemptOutcome,
+    SendFailureCategory, SlackApiError, SlackPostMode, classify_api_error, classify_post_api_error,
+    parse_retry_after, retry_delay,
 };
 #[cfg(test)]
-pub(super) use wire::{InternalSourceMention, MAX_RETRY_AFTER, PostCompositionError, retry_jitter};
+pub(super) use wire::{MAX_RETRY_AFTER, PostCompositionError, retry_jitter};
 
 use super::*;
 
@@ -36,9 +36,10 @@ pub(super) struct FrozenSendAuthority {
     pub(super) instance_name: Option<tau_proto::ExtensionName>,
     /// Exact scoped tool lease name from the authorized ToolStarted.
     pub(super) send_tool: tau_proto::ToolName,
-    /// Optional preflight bot observation. Typed mandatory installation
-    /// evidence belongs to the later canonical Slack integration stage.
-    pub(super) observed_bot_user_id: Option<ObservedSlackBotId>,
+    /// Exact bot identity paired with the installation team.
+    pub(super) bot_user_id: ObservedSlackBotId,
+    /// Exact installation team paired with the bot observation.
+    pub(super) installation_team_id: String,
 }
 
 /// Validated bot identity observed during optional Slack preflight.
@@ -274,7 +275,8 @@ impl State {
             capability_generation,
             instance_name,
             send_tool: _,
-            observed_bot_user_id,
+            bot_user_id,
+            installation_team_id,
         } = &prepared.authority;
         if !self.capability_active
             || self.session_generation != *session_generation
@@ -283,10 +285,8 @@ impl State {
             || self.send_agent_generation(&prepared.invoke.agent_id) != *agent_generation
             || self.capability_generation != *capability_generation
             || self.instance_name.as_ref() != instance_name.as_ref()
-            || self.bot_user_id.as_deref()
-                != observed_bot_user_id
-                    .as_ref()
-                    .map(ObservedSlackBotId::as_str)
+            || self.bot_user_id.as_deref() != Some(bot_user_id.as_str())
+            || self.installation_team_id.as_deref() != Some(installation_team_id.as_str())
             || self
                 .send_ledger
                 .get(&prepared.invoke.call_id)
@@ -320,13 +320,50 @@ impl State {
 }
 
 impl Extension {
+    /// Establish the mandatory bot/workspace pair before any send reservation.
+    ///
+    /// `auth.test` is read-only. The generation check prevents a late preflight
+    /// from binding replacement credentials or configuration.
+    fn ensure_send_installation(&self) -> Result<(), String> {
+        let (cfg, generation) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.installation_mismatch {
+                return Err(
+                    "Slack installation identity changed; restart Tau before sending".to_owned(),
+                );
+            }
+            if state.bot_user_id.is_some() && state.installation_team_id.is_some() {
+                return Ok(());
+            }
+            if state.bot_user_id.is_some() || state.installation_team_id.is_some() {
+                return Err("Slack installation identity is incomplete".to_owned());
+            }
+            (
+                state
+                    .config
+                    .clone()
+                    .ok_or_else(|| "slack extension is not configured".to_owned())?,
+                state.config_generation,
+            )
+        };
+        let installation = self.authenticated_installation(&cfg)?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.config_generation != generation || state.config.is_none() {
+            return Err("Slack installation preflight became stale".to_owned());
+        }
+        state
+            .install_or_match_installation(installation.bot_user_id, installation.team_id)
+            .map(|_| ())
+    }
+
     /// Reserve one exact send intent and move all remote I/O off tau-client's
     /// serialized reader.
     pub(super) fn handle_send(&self, invoke: ToolStarted) -> Option<Event> {
         let send_tool = self.output.wire_tool_name(SEND_TOOL_NAME);
-        if let Err(message) =
-            validate_object_fields(&invoke.arguments, &["message", "reply_to", "destination"])
-        {
+        if let Err(message) = validate_object_fields(
+            &invoke.arguments,
+            &["message", "reply_to", "destination", "mention_source_user"],
+        ) {
             return Some(tool_error(invoke, message));
         }
         let message = match cbor_string_field(&invoke.arguments, "message") {
@@ -335,6 +372,11 @@ impl Extension {
         };
         let reply_to = cbor_optional_string_field(&invoke.arguments, "reply_to");
         let destination_alias = cbor_optional_string_field(&invoke.arguments, "destination");
+        let mention_source_user =
+            match cbor_optional_bool_field(&invoke.arguments, "mention_source_user") {
+                Ok(value) => value.unwrap_or(false),
+                Err(message) => return Some(tool_error(invoke, message)),
+            };
         let (reply_to, destination_alias) = match (reply_to, destination_alias) {
             (Ok(Some(reply)), Ok(None)) => (Some(MessageId::new(reply)), None),
             (Ok(None), Ok(Some(alias))) => (None, Some(alias)),
@@ -349,8 +391,15 @@ impl Extension {
         if message.trim().is_empty() {
             return Some(tool_error(invoke, "`message` must not be empty".to_owned()));
         }
-
-        let prepared = {
+        if mention_source_user && reply_to.is_none() {
+            return Some(tool_error(
+                invoke,
+                "mention_source_user=true requires reply_to and is not supported with destination"
+                    .to_owned(),
+            ));
+        }
+        let mut installation_preflight_attempted = false;
+        let prepared = loop {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             match self.replay_send_locked(&mut state, &invoke, &send_tool) {
                 SendReplay::New => {}
@@ -407,93 +456,149 @@ impl Extension {
                 ));
             }
 
-            let (route, authorization, endpoint, conversation, policy_status, reaction_authority) =
-                if let Some(reply_to) = &reply_to {
-                    if !state.registered_agents.contains(&invoke.agent_id) {
-                        let register = self.output.wire_tool_name(REGISTER_TOOL_NAME);
-                        return Some(tool_error(
-                            invoke,
-                            format!("Slack reply requires {register}(enabled: true) first"),
-                        ));
-                    }
-                    let Some(route) = state.reply_routes.get(reply_to).cloned() else {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} reply_to is unknown or stale"),
-                        ));
-                    };
-                    if route.agent_id != invoke.agent_id {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} reply_to belongs to another agent"),
-                        ));
-                    }
-                    if !is_route_authorized(&state, &cfg, &route.conversation, &route.user_id) {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} originating conversation is no longer authorized"),
-                        ));
-                    }
-                    (
-                        route.conversation.clone(),
-                        tau_proto::TransportSendAuthorization::Reply {
-                            message_id: reply_to.clone(),
-                        },
-                        external_endpoint_for_route(&route),
-                        message_conversation(&route.conversation),
-                        route.policy_status,
-                        ReactionAuthority::Source {
-                            message_id: reply_to.clone(),
-                            user_id: route.user_id,
-                        },
-                    )
-                } else {
-                    let alias = destination_alias.as_ref().expect("exclusive selector");
-                    if !valid_conversation_alias(alias) {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} destination is unknown or unauthorized"),
-                        ));
-                    }
-                    let Some(destination) = cfg
-                        .proactive_aliases
-                        .contains(alias)
-                        .then(|| cfg.conversations.get(alias))
-                        .flatten()
-                    else {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} destination is unknown or unauthorized"),
-                        ));
-                    };
-                    (
-                        SlackConversation {
-                            channel_id: destination.conversation_id.clone(),
-                            thread_ts: destination.thread_ts.clone(),
-                            kind: destination.kind,
-                            alias: destination.alias.clone(),
-                        },
-                        tau_proto::TransportSendAuthorization::ConfiguredDestination {
-                            alias: alias.clone(),
-                        },
-                        send_destination_endpoint(destination),
-                        send_destination_conversation(destination),
-                        SenderPolicyStatus::Internal,
-                        ReactionAuthority::ConfiguredDestination {
-                            alias: alias.clone(),
-                        },
-                    )
+            let (
+                route,
+                authorization,
+                endpoint,
+                conversation,
+                policy_status,
+                reaction_authority,
+                source_mention,
+            ) = if let Some(reply_to) = &reply_to {
+                if !state.registered_agents.contains(&invoke.agent_id) {
+                    let register = self.output.wire_tool_name(REGISTER_TOOL_NAME);
+                    return Some(tool_error(
+                        invoke,
+                        format!("Slack reply requires {register}(enabled: true) first"),
+                    ));
+                }
+                let Some(route) = state.reply_routes.get(reply_to).cloned() else {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} reply_to is unknown or stale"),
+                    ));
                 };
+                if route.agent_id != invoke.agent_id {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} reply_to belongs to another agent"),
+                    ));
+                }
+                if !is_route_authorized(&state, &cfg, &route.conversation, &route.user_id) {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} originating conversation is no longer authorized"),
+                    ));
+                }
+                if state.installation_team_id.as_deref()
+                    != Some(route.installation_team_id.as_str())
+                {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} originating installation is no longer active"),
+                    ));
+                }
+                let source_mention = if mention_source_user {
+                    if route.user_id == "USLACKBOT"
+                        || state.bot_user_id.as_deref() == Some(route.user_id.as_str())
+                    {
+                        return Some(tool_error(
+                            invoke,
+                            "Slack source mention is unavailable or unauthorized".to_owned(),
+                        ));
+                    }
+                    match InternalSourceMention::new(&route.user_id) {
+                        Ok(mention) => Some(mention),
+                        Err(error) => {
+                            return Some(tool_error(invoke, error.to_string()));
+                        }
+                    }
+                } else {
+                    None
+                };
+                (
+                    route.conversation.clone(),
+                    tau_proto::TransportSendAuthorization::Reply {
+                        message_id: reply_to.clone(),
+                    },
+                    external_endpoint_for_route(&route),
+                    message_conversation(&route.conversation),
+                    route.policy_status,
+                    ReactionAuthority::Source {
+                        message_id: reply_to.clone(),
+                        user_id: route.user_id.clone(),
+                    },
+                    source_mention,
+                )
+            } else {
+                let alias = destination_alias.as_ref().expect("exclusive selector");
+                if !valid_conversation_alias(alias) {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} destination is unknown or unauthorized"),
+                    ));
+                }
+                let Some(destination) = cfg
+                    .proactive_aliases
+                    .contains(alias)
+                    .then(|| cfg.conversations.get(alias))
+                    .flatten()
+                else {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} destination is unknown or unauthorized"),
+                    ));
+                };
+                (
+                    SlackConversation {
+                        channel_id: destination.conversation_id.clone(),
+                        thread_ts: destination.thread_ts.clone(),
+                        kind: destination.kind,
+                        alias: destination.alias.clone(),
+                    },
+                    tau_proto::TransportSendAuthorization::ConfiguredDestination {
+                        alias: alias.clone(),
+                    },
+                    send_destination_endpoint(destination),
+                    send_destination_conversation(destination),
+                    SenderPolicyStatus::Internal,
+                    ReactionAuthority::ConfiguredDestination {
+                        alias: alias.clone(),
+                    },
+                    None,
+                )
+            };
             let text = if cfg.prefix_agent_id {
                 format!("[{}] {message}", invoke.agent_id.as_ref())
             } else {
-                message
+                message.clone()
             };
-            let mode = match SlackPostMode::agent(text.clone(), None) {
+            let mode = match SlackPostMode::agent(text.clone(), source_mention.as_ref()) {
                 Ok(mode) => mode,
                 Err(error) => return Some(tool_error(invoke, error.to_string())),
             };
             let body = FrozenPostBody::new(&route.channel_id, route.thread_ts.as_deref(), &mode);
+            let (bot_user_id, installation_team_id) =
+                match (&state.bot_user_id, &state.installation_team_id) {
+                    (Some(bot_user_id), Some(installation_team_id)) => (
+                        ObservedSlackBotId::from_validated(bot_user_id),
+                        installation_team_id.clone(),
+                    ),
+                    (None, None) if !installation_preflight_attempted => {
+                        drop(state);
+                        if let Err(error) = self.ensure_send_installation() {
+                            return Some(tool_error(invoke, error));
+                        }
+                        installation_preflight_attempted = true;
+                        continue;
+                    }
+                    (None, None) | (Some(_), None) | (None, Some(_)) => {
+                        return Some(tool_error(
+                            invoke,
+                            format!("{send_tool} installation identity is unavailable"),
+                        ));
+                    }
+                };
             state.config_frozen = true;
             state.next_send_reservation = state.next_send_reservation.wrapping_add(1);
             let authority = FrozenSendAuthority {
@@ -505,10 +610,8 @@ impl Extension {
                 capability_generation: state.capability_generation,
                 instance_name: state.instance_name.clone(),
                 send_tool: send_tool.clone(),
-                observed_bot_user_id: state
-                    .bot_user_id
-                    .as_deref()
-                    .map(ObservedSlackBotId::from_validated),
+                bot_user_id,
+                installation_team_id,
             };
             let prepared_at = Instant::now();
             state
@@ -544,7 +647,7 @@ impl Extension {
                     disposition: SendLedgerDisposition::Reserved,
                 },
             );
-            prepared
+            break prepared;
         };
         self.spawn_send_worker(prepared);
         None

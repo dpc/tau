@@ -9,7 +9,11 @@ guarantees. Canonical external content remains internally typed as untrusted eve
 account identity is verified and allowlisted. Provider adapters lower the typed
 context item once to compact XML such as `<tau_message transport="slack"
 message_id="…" sender="U123" origin="external" sender_allowlisted="true">…</tau_message>`; harness routing and UI
-code never infer authority from rendered text.
+code never infer authority from rendered text. When configured, the projection
+keeps the native sender primary and adds `transport_instance`, `sender_alias`,
+and `sender_alias_authority="operator_configured"` attributes. Mutable
+transport-fetched display labels stay UI-only. Presentation changes are excluded
+from durable dedup authority, and duplicates return the first committed snapshot.
 
 Reply tools select an extension-private live destination with an opaque
 canonical `reply_to` id. Replayed messages do not restore reply authority.

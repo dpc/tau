@@ -217,19 +217,34 @@ impl FakeClient {
     }
 }
 
+/// Build one presentation-free test identity from a single typed lookup result.
+fn test_verified_human(user_id: &str, human: bool) -> Option<VerifiedSlackHuman> {
+    human.then(|| VerifiedSlackHuman {
+        user_id: user_id.to_owned(),
+        display_name: None,
+    })
+}
+
 impl SlackClient for FakeClient {
     fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
         *self.open_count.lock().expect("lock") += 1;
         Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
         *self.auth_count.lock().expect("lock") += 1;
-        Ok("UBOT123".to_owned())
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError> {
-        Ok(user_id != "UBOT999")
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        Ok(test_verified_human(user_id, user_id != "UBOT999"))
     }
 
     fn post_message(
@@ -280,11 +295,18 @@ impl SlackClient for BlockingReactionClient {
         unreachable!("not used")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("not used")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("not used")
     }
 
@@ -323,12 +345,16 @@ impl SlackClient for FailingAuthClient {
         Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
         Err(SlackApiError::Authentication)
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
-        Ok(true)
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        Ok(test_verified_human(user_id, true))
     }
 
     fn post_message(
@@ -344,6 +370,73 @@ impl SlackClient for FailingAuthClient {
     }
 }
 
+/// Auth-only fake for malformed or incomplete reconnect evidence.
+struct InvalidInstallationClient {
+    result: Result<SlackInstallationIdentity, SlackApiError>,
+}
+
+/// Reconnect fake proving pair comparison precedes socket-ticket acquisition.
+struct ChangedInstallationClient {
+    open_count: Mutex<usize>,
+    open_result: Result<String, SlackApiError>,
+}
+
+impl SlackClient for ChangedInstallationClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+        *self.open_count.lock().expect("open count") += 1;
+        self.open_result.clone()
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT999".to_owned(),
+            team_id: "T999".to_owned(),
+        })
+    }
+
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        unreachable!("installation-only client")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        unreachable!("installation-only client")
+    }
+}
+
+impl SlackClient for InvalidInstallationClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+        unreachable!("identity validation stops before socket open")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        self.result.clone()
+    }
+
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        unreachable!("installation-only client")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _body: &FrozenPostBody,
+    ) -> PostAttemptOutcome<PostedMessage> {
+        unreachable!("installation-only client")
+    }
+}
+
 struct FailingPostClient;
 
 impl SlackClient for FailingPostClient {
@@ -351,11 +444,18 @@ impl SlackClient for FailingPostClient {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only client")
     }
 
@@ -386,11 +486,18 @@ impl SlackClient for BlockingIdentityClient {
         unreachable!("socket URL supplied by test")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("startup supplied by test")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         if let Some(started) = self.started.lock().expect("started lock").take() {
             started.send(()).expect("signal identity start");
             self.release
@@ -399,7 +506,7 @@ impl SlackClient for BlockingIdentityClient {
                 .recv()
                 .expect("release identity");
         }
-        Ok(true)
+        Ok(test_verified_human(user_id, true))
     }
 
     fn post_message(
@@ -416,16 +523,24 @@ impl SlackClient for IdentitySequenceClient {
         unreachable!("identity-only test client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("identity-only test client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         self.results
             .lock()
             .expect("lock identity sequence")
             .pop_front()
             .expect("scripted identity result")
+            .map(|human| test_verified_human(user_id, human))
     }
 
     fn post_message(
@@ -450,6 +565,7 @@ fn cfg() -> RuntimeConfig {
         app_token: "xapp-test".to_owned(),
         bot_token: "xoxb-test".to_owned(),
         allowed_user_ids: ["U123".to_owned()].into_iter().collect(),
+        sender_aliases: HashMap::new(),
         security_mode: SecurityMode::Strict,
         conversations: [("team".to_owned(), policy.clone())].into_iter().collect(),
         parent_receives: [("C123".to_owned(), policy.alias.clone())]
@@ -819,6 +935,7 @@ fn extension() -> (
     {
         let mut state = ext.state.lock().expect("lock");
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.instance_name = Some("std-slack".into());
         state.capability_active = true;
     }
@@ -920,7 +1037,13 @@ fn register_agent(ext: &Extension, agent: &str) {
 fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
     reindex_receive_routes(&mut config);
     ext.apply_config(config).expect("test config");
-    ext.state.lock().expect("state").capability_active = true;
+    let mut state = ext.state.lock().expect("state");
+    state.capability_active = true;
+    state.bot_user_id = Some("UBOT123".to_owned());
+    state.installation_team_id = Some("T123".to_owned());
+    state
+        .instance_name
+        .get_or_insert_with(|| "std-slack".into());
 }
 
 /// Return sorted text keys from one structured CBOR object.
@@ -1307,6 +1430,9 @@ fn typed_reply_route_state_is_bounded() {
                 agent_id: agent_id("agent-a"),
                 conversation: slack_conversation("C123", None),
                 user_id: "U123".to_owned(),
+                display_name: None,
+                identity_alias: None,
+                installation_team_id: "T123".to_owned(),
                 policy_status: SenderPolicyStatus::Allowlisted,
             },
         );
@@ -1424,6 +1550,7 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
             &worker_cfg,
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
+                installation_team_id: "T123".to_owned(),
                 socket_url,
             }),
             &AdmissionQueue::new(),
@@ -1462,6 +1589,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
                 "envelope_id": envelope,
                 "payload": {
                     "type": "event_callback",
+                    "context_team_id": "T123",
                     "event_id": format!("Ev-{ts}"),
                     "event": {
                         "type": "app_mention",
@@ -1520,6 +1648,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
         let mut state = ext.state.lock().expect("state lock");
         state.config = Some(cfg());
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.registered_agents.insert(agent_id("agent-a"));
         state.capability_active = true;
         state.session_active = true;
@@ -1537,6 +1666,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
             &worker_cfg,
             Some(WorkerStartup {
                 bot_user_id: "UBOT123".to_owned(),
+                installation_team_id: "T123".to_owned(),
                 socket_url,
             }),
             &worker_queue,
@@ -1588,6 +1718,7 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
                 "envelope_id": "env-overflow",
                 "payload": {
                     "type": "event_callback",
+                    "context_team_id": "T123",
                     "event": {
                         "type": "app_mention",
                         "channel": "C123",
@@ -1621,6 +1752,7 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
         &cfg(),
         Some(WorkerStartup {
             bot_user_id: "UBOT123".to_owned(),
+            installation_team_id: "T123".to_owned(),
             socket_url,
         }),
         &queue,
@@ -1833,6 +1965,9 @@ fn reaction_idempotency_errors_respect_local_ownership() {
                     alias: "team".to_owned(),
                 },
                 user_id: "U123".to_owned(),
+                display_name: None,
+                identity_alias: None,
+                installation_team_id: "T123".to_owned(),
                 policy_status: SenderPolicyStatus::Allowlisted,
             },
         );
@@ -1848,6 +1983,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
                 agent_id: agent_id("agent-a"),
                 conversation,
                 message_ts: "1.0".to_owned(),
+                installation_team_id: "T123".to_owned(),
                 authority: ReactionAuthority::Source {
                     message_id: MessageId::new("msg-react"),
                     user_id: "U123".to_owned(),
@@ -1963,6 +2099,9 @@ fn late_reaction_success_after_shutdown_cannot_restore_state() {
                 agent_id: agent_id("agent-a"),
                 conversation: conversation.clone(),
                 user_id: "U123".to_owned(),
+                display_name: None,
+                identity_alias: None,
+                installation_team_id: "T123".to_owned(),
                 policy_status: SenderPolicyStatus::Allowlisted,
             },
         );
@@ -1972,6 +2111,7 @@ fn late_reaction_success_after_shutdown_cannot_restore_state() {
                 agent_id: agent_id("agent-a"),
                 conversation,
                 message_ts: "1.0".to_owned(),
+                installation_team_id: "T123".to_owned(),
                 authority: ReactionAuthority::Source {
                     message_id: MessageId::new("msg-late"),
                     user_id: "U123".to_owned(),
@@ -2388,6 +2528,80 @@ fn proactive_conversation_config_validation_matrix() {
         .collect();
     assert!(validate(serde_json::Value::Array(too_many)).is_err());
     assert!(validate(serde_json::json!([])).is_err());
+}
+
+/// Sender aliases are bounded one-to-one operator presentation, not admission.
+#[test]
+fn sender_alias_config_is_bounded_unique_and_strict() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    let validate = |aliases: serde_json::Value| {
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "app_token_secret": "app",
+            "bot_token_secret": "bot",
+            "allowed_user_ids": ["U123"],
+            "sender_aliases": aliases,
+            "conversations": [{
+                "alias":"team",
+                "conversation_id":"C123",
+                "kind":"channel",
+                "receive":"all_messages"
+            }]
+        }))
+        .deserialized::<ExtConfig>()
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|config| config.validate(&secrets))
+    };
+    let config = validate(serde_json::json!([
+        {"user_id":"U123","alias":"dpc"},
+        {"user_id":"W456","alias":"alice-2"}
+    ]))
+    .expect("valid aliases");
+    assert_eq!(
+        config.sender_aliases.get("U123").map(String::as_str),
+        Some("dpc")
+    );
+    for aliases in [
+        serde_json::json!([{"user_id":"U123","alias":"Bad"}]),
+        serde_json::json!([
+            {"user_id":"U123","alias":"dpc"},
+            {"user_id":"U123","alias":"alice"}
+        ]),
+        serde_json::json!([
+            {"user_id":"U123","alias":"dpc"},
+            {"user_id":"W456","alias":"dpc"}
+        ]),
+        serde_json::json!([{"user_id":"U123","alias":"dpc","extra":true}]),
+    ] {
+        assert!(validate(aliases).is_err());
+    }
+    let over_limit = (0..65)
+        .map(|index| {
+            serde_json::json!({
+                "user_id": format!("U{index:03}"),
+                "alias": format!("user-{index}")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(validate(serde_json::Value::Array(over_limit)).is_err());
+}
+
+/// Replacing still-mutable configuration discards any preflight installation
+/// observation so new credentials cannot inherit the old bot/workspace pair.
+#[test]
+fn mutable_config_replacement_clears_installation_preflight() {
+    let (ext, _rx, _client) = extension();
+    {
+        let state = ext.state.lock().expect("state");
+        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
+        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
+        assert!(!state.config_frozen);
+    }
+    ext.apply_config(cfg()).expect("replace mutable config");
+    let state = ext.state.lock().expect("state");
+    assert_eq!(state.bot_user_id, None);
+    assert_eq!(state.installation_team_id, None);
 }
 
 /// Config validation requires both token secret names, non-empty resolved
@@ -2990,6 +3204,99 @@ fn slack_send_uses_originating_conversation() {
     );
 }
 
+/// The only generated native mention is the exact verified source selected by a
+/// live reply route; omission remains byte-for-byte unmentioned.
+#[test]
+fn slack_send_source_mention_is_reply_only_and_internal() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> hello"));
+    let prompt = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &prompt);
+    let mentioned = tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "mention",
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "message": "hello",
+            "reply_to": "msg-test",
+            "mention_source_user": true
+        })),
+    );
+    assert!(ext.handle_send(mentioned).is_none());
+    rx.recv().expect("background completion");
+    assert_eq!(
+        client.sent_pairs(),
+        vec![("C123".to_owned(), "<@U123> hello".to_owned())]
+    );
+    for (call_id, mention_field) in [
+        ("mention-false", Some(serde_json::Value::Bool(false))),
+        ("mention-omitted", None),
+    ] {
+        let mut arguments = serde_json::json!({
+            "message": call_id,
+            "reply_to": "msg-test"
+        });
+        if let Some(value) = mention_field {
+            arguments["mention_source_user"] = value;
+        }
+        assert!(
+            ext.handle_send(tool_call(
+                SEND_TOOL_NAME,
+                "agent-a",
+                call_id,
+                tau_proto::json_to_cbor(&arguments),
+            ))
+            .is_none()
+        );
+        rx.recv().expect("background completion");
+    }
+    assert_eq!(
+        client.sent_pairs(),
+        vec![
+            ("C123".to_owned(), "<@U123> hello".to_owned()),
+            ("C123".to_owned(), "mention-false".to_owned()),
+            ("C123".to_owned(), "mention-omitted".to_owned()),
+        ]
+    );
+
+    let invalid = ext.handle_send(tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "mention-destination",
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "message": "hello",
+            "destination": "team",
+            "mention_source_user": true
+        })),
+    ));
+    assert!(matches!(invalid, Some(Event::ToolError(_))));
+    for raw in ["text <@U999>", "text <!channel>", "text <#C999>"] {
+        let rejected = ext.handle_send(tool_call(
+            SEND_TOOL_NAME,
+            "agent-a",
+            raw,
+            tau_proto::json_to_cbor(&serde_json::json!({
+                "message": raw,
+                "reply_to": "msg-test"
+            })),
+        ));
+        assert!(matches!(rejected, Some(Event::ToolError(_))));
+    }
+    ext.state.lock().expect("state").installation_team_id = Some("T999".to_owned());
+    let stale_install = ext.handle_send(tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "stale-install",
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "message": "hello",
+            "reply_to": "msg-test",
+            "mention_source_user": false
+        })),
+    ));
+    assert!(matches!(stale_install, Some(Event::ToolError(_))));
+}
+
 /// Root messages keep replies top-level while thread messages automatically
 /// carry their originating root without any model-supplied destination.
 #[test]
@@ -3048,6 +3355,7 @@ fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
         MessageEndpoint::External {
             stable_id: Some("U123".to_owned()),
             display_name: None,
+            identity_alias: None,
             actor_kind: ExternalActorKind::Human,
         }
     );
@@ -3363,6 +3671,7 @@ fn posted_message_cache_eviction_and_cleanup_are_synchronized() {
             PostedMessageOwner {
                 agent_id,
                 thread_ts: None,
+                installation_team_id: "T123".to_owned(),
             },
         );
     }
@@ -3412,6 +3721,332 @@ fn users_info_response_requires_explicit_live_human_facts() {
         )
         .expect("slackbot")
     );
+}
+
+/// A successful human lookup retains only a bounded, structurally safe,
+/// presentation-only `profile.display_name` snapshot.
+#[test]
+fn users_info_identity_retains_only_safe_bounded_display_name() {
+    let response = serde_json::json!({
+        "user": {
+            "id": "U123",
+            "deleted": false,
+            "is_bot": false,
+            "is_app_user": false,
+            "profile": {"display_name": " Alice "}
+        }
+    });
+    let identity = verified_human_from_response(&response, "U123")
+        .expect("valid response")
+        .expect("human");
+    assert_eq!(identity.user_id, "U123");
+    assert_eq!(identity.display_name.as_deref(), Some("Alice"));
+    for display_name in [
+        "Alice\nadmin".to_owned(),
+        "x".repeat(81),
+        "🦀".repeat(65),
+        "Alice\u{180e}admin".to_owned(),
+        "Alice\u{fe0f}".to_owned(),
+        "Alice\u{fff0}".to_owned(),
+        "Alice\u{e0100}".to_owned(),
+        "Alice\u{3164}".to_owned(),
+    ] {
+        let mut value = response.clone();
+        value["user"]["profile"]["display_name"] = serde_json::Value::String(display_name);
+        assert_eq!(
+            verified_human_from_response(&value, "U123")
+                .expect("shape")
+                .expect("human")
+                .display_name,
+            None
+        );
+    }
+}
+
+/// Event wrappers bind to the authenticated installation via exact context
+/// team or one unambiguous fallback authorization.
+#[test]
+fn event_installation_binding_is_exact_and_connect_safe() {
+    let with_context = serde_json::json!({
+        "payload": {"context_team_id":"T123", "authorizations":[]}
+    });
+    assert!(event_matches_installation(&with_context, "T123", "UBOT123"));
+    assert!(!event_matches_installation(
+        &with_context,
+        "T999",
+        "UBOT123"
+    ));
+
+    let authorization = serde_json::json!({
+        "payload": {"authorizations":[{
+            "team_id":"T123",
+            "user_id":"UBOT123",
+            "is_bot":true
+        }]}
+    });
+    assert!(event_matches_installation(
+        &authorization,
+        "T123",
+        "UBOT123"
+    ));
+    for invalid in [
+        serde_json::json!({"payload": {}}),
+        serde_json::json!({"payload": {"authorizations":[]}}),
+        serde_json::json!({"payload": {"authorizations":[
+            {"team_id":"T123","user_id":"UBOT123"},
+            {"team_id":"T123","user_id":"UBOT123"}
+        ]}}),
+        serde_json::json!({"payload": {"authorizations":[
+            {"team_id":"T999","user_id":"UBOT123"}
+        ]}}),
+        serde_json::json!({"payload": {"authorizations":[
+            {"team_id":"T123","user_id":"UOTHER"}
+        ]}}),
+    ] {
+        assert!(!event_matches_installation(&invalid, "T123", "UBOT123"));
+    }
+}
+
+/// A reconnect reporting a different authenticated installation fails closed,
+/// retains the original pair for audit, and retires its private authority.
+#[test]
+fn installation_mismatch_requires_restart_and_retires_private_authority() {
+    let (ext, rx, client) = extension();
+    let mut state = ext.state.lock().expect("state");
+    state.pending_capability_request = Some("late-capability".to_owned());
+    state.worker_online = true;
+    state.worker_startup_failure_reported = true;
+    state.insert_reply_route(
+        MessageId::new("msg-old"),
+        ReplyRoute {
+            agent_id: agent_id("agent-a"),
+            conversation: slack_conversation("C123", None),
+            user_id: "U123".to_owned(),
+            display_name: None,
+            identity_alias: None,
+            installation_team_id: "T123".to_owned(),
+            policy_status: SenderPolicyStatus::Allowlisted,
+        },
+    );
+    state.posted_messages.insert(
+        PostedMessageKey::new("C123", "1.0"),
+        PostedMessageOwner {
+            agent_id: agent_id("agent-a"),
+            thread_ts: None,
+            installation_team_id: "T123".to_owned(),
+        },
+    );
+    assert!(state.insert_reaction_target(
+        "ref-old".to_owned(),
+        ReactionTarget {
+            agent_id: agent_id("agent-a"),
+            conversation: slack_conversation("C123", None),
+            message_ts: "1.0".to_owned(),
+            installation_team_id: "T123".to_owned(),
+            authority: ReactionAuthority::ConfiguredDestination {
+                alias: "team".to_owned(),
+            },
+        },
+    ));
+    assert_eq!(
+        state.install_or_match_installation("UBOT123".to_owned(), "T123".to_owned()),
+        Ok(false)
+    );
+    assert!(state.reaction_targets.contains_key("ref-old"));
+
+    assert!(
+        state
+            .install_or_match_installation("UBOT999".to_owned(), "T999".to_owned())
+            .is_err()
+    );
+    assert!(state.reply_routes.is_empty());
+    assert!(
+        state
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none()
+    );
+    assert!(state.reaction_targets.is_empty());
+    assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
+    assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
+    assert!(!state.capability_active);
+    assert!(state.installation_mismatch);
+    assert_eq!(state.pending_capability_request, None);
+    assert!(
+        state
+            .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
+            .is_err()
+    );
+    drop(state);
+
+    ext.report_installation_restart_once();
+    ext.report_installation_restart_once();
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("restart notice") else {
+        panic!("expected restart notice")
+    };
+    let Event::HarnessNotice(notice) = *emit.event else {
+        panic!("expected harness notice")
+    };
+    assert!(notice.always_show);
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
+    assert!(!notice.message.contains("UBOT123"));
+    assert!(!notice.message.contains("T123"));
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(!state.worker_online);
+        assert!(state.installation_restart_notice_reported);
+    }
+
+    apply_output_message(
+        &HarnessOutputMessage::RegisterTransportCapabilityResult(
+            tau_proto::RegisterTransportCapabilityResult {
+                request_id: "late-capability".to_owned(),
+                accepted: true,
+                error: None,
+            },
+        ),
+        &ext,
+    );
+    ext.request_transport_capability();
+    assert!(rx.try_recv().is_err());
+    let state = ext.state.lock().expect("state");
+    assert!(!state.capability_active);
+    assert_eq!(state.pending_capability_request, None);
+    drop(state);
+    assert!(matches!(
+        ext.handle_send(tool_call(
+            SEND_TOOL_NAME,
+            "agent-a",
+            "poisoned-send",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"must not post","destination":"team"})
+            ),
+        )),
+        Some(Event::ToolError(_))
+    ));
+    assert!(client.sent_pairs().is_empty());
+
+    for (bot, team) in [("UBOT999", "T123"), ("UBOT123", "T999")] {
+        let mut state = State {
+            bot_user_id: Some("UBOT123".to_owned()),
+            installation_team_id: Some("T123".to_owned()),
+            capability_active: true,
+            ..State::default()
+        };
+        assert!(
+            state
+                .install_or_match_installation(bot.to_owned(), team.to_owned())
+                .is_err()
+        );
+        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
+        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
+        assert!(!state.capability_active);
+    }
+    let mut partial = State {
+        bot_user_id: Some("UBOT123".to_owned()),
+        capability_active: true,
+        ..State::default()
+    };
+    assert!(
+        partial
+            .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
+            .is_err()
+    );
+    assert!(!partial.capability_active);
+}
+
+/// Malformed or incomplete reconnect identity evidence poisons an established
+/// installation exactly like an explicit pair mismatch.
+#[test]
+fn invalid_reconnect_installation_latches_restart_requirement() {
+    for result in [
+        Err(SlackApiError::MalformedResponse),
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: String::new(),
+        }),
+    ] {
+        let (tx, _rx) = mpsc::channel();
+        let ext = Extension::new(Arc::new(InvalidInstallationClient { result }), tx);
+        {
+            let mut state = ext.state.lock().expect("state");
+            state.bot_user_id = Some("UBOT123".to_owned());
+            state.installation_team_id = Some("T123".to_owned());
+            state.capability_active = true;
+        }
+
+        assert!(ext.authenticated_installation(&cfg()).is_err());
+        let mut state = ext.state.lock().expect("state");
+        assert!(state.installation_mismatch);
+        assert!(!state.capability_active);
+        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
+        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
+        assert!(
+            state
+                .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
+                .is_err()
+        );
+    }
+}
+
+/// A valid changed pair is latched before socket-ticket acquisition, even when
+/// that later call would fail or return an invalid URL.
+#[test]
+fn changed_reconnect_pair_precedes_socket_open_failure() {
+    for open_result in [
+        Err(SlackApiError::TransportConnect),
+        Ok("http://invalid.example/socket".to_owned()),
+    ] {
+        let client = Arc::new(ChangedInstallationClient {
+            open_count: Mutex::new(0),
+            open_result,
+        });
+        let (tx, _rx) = mpsc::channel();
+        let ext = Extension::new(client.clone(), tx);
+        {
+            let mut state = ext.state.lock().expect("state");
+            state.bot_user_id = Some("UBOT123".to_owned());
+            state.installation_team_id = Some("T123".to_owned());
+            state.capability_active = true;
+        }
+
+        assert!(ext.prepare_worker_start(&cfg()).is_err());
+        assert_eq!(*client.open_count.lock().expect("open count"), 0);
+        let state = ext.state.lock().expect("state");
+        assert!(state.installation_mismatch);
+        assert!(!state.capability_active);
+        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
+        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
+    }
+}
+
+/// An `auth.test` response is unusable unless it contains both halves of the
+/// bot-user/installing-team authority pair.
+#[test]
+fn auth_test_requires_both_bot_and_team_identity() {
+    assert_eq!(
+        installation_from_response(&serde_json::json!({
+            "user_id":"UBOT123",
+            "team_id":"T123"
+        }))
+        .expect("complete identity"),
+        SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned()
+        }
+    );
+    for malformed in [
+        serde_json::json!({"team_id":"T123"}),
+        serde_json::json!({"user_id":"UBOT123"}),
+        serde_json::json!({"user_id":null,"team_id":"T123"}),
+        serde_json::json!({"user_id":"UBOT123","team_id":7}),
+    ] {
+        assert_eq!(
+            installation_from_response(&malformed),
+            Err(SlackApiError::MalformedResponse)
+        );
+    }
 }
 
 /// `users.info` must put its required user argument in a form body rather than
@@ -3464,8 +4099,9 @@ fn users_info_uses_form_encoding() {
     };
     assert!(
         HttpSlackClient::default()
-            .is_human_user(&cfg, "U123")
+            .verified_human_identity(&cfg, "U123")
             .expect("form-encoded users.info")
+            .is_some()
     );
     server.join().expect("users.info test server");
 }
@@ -3936,6 +4572,9 @@ fn slack_send_rejects_missing_or_forged_origin_context() {
                 alias: "team".to_owned(),
             },
             user_id: "U123".to_owned(),
+            display_name: None,
+            identity_alias: None,
+            installation_team_id: "T123".to_owned(),
             policy_status: SenderPolicyStatus::Allowlisted,
         },
     );
@@ -4413,6 +5052,7 @@ fn valid_envelopes_are_acked_and_routed() {
         "envelope_id": "env-1",
         "payload": {
             "type": "event_callback",
+                    "context_team_id": "T123",
             "event_id": "Ev1",
             "event": {
                 "type": "app_mention",
@@ -4443,6 +5083,7 @@ fn malformed_message_thread_metadata_is_rejected() {
     let value = serde_json::json!({
         "payload": {
             "type": "event_callback",
+                    "context_team_id": "T123",
             "event_id": "Ev-thread-bad",
             "event": {
                 "type": "app_mention",
@@ -4498,6 +5139,7 @@ fn reaction_envelopes_are_acked_and_decoded() {
         "envelope_id": "env-reaction",
         "payload": {
             "type": "event_callback",
+                    "context_team_id": "T123",
             "event_id": "Er1",
             "event": {
                 "type": "reaction_removed",
@@ -4532,6 +5174,7 @@ fn message_changed_envelopes_decode_as_edits_and_reject_conflicts() {
         serde_json::json!({
             "payload": {
                 "type": "event_callback",
+                    "context_team_id": "T123",
                 "event_id": "EE-DECODE",
                 "event": {
                     "type": "message",
@@ -5227,6 +5870,15 @@ fn duplicate_slack_event_ids_are_resubmitted_for_durable_dedup() {
 #[test]
 fn alias_rename_retry_uses_first_canonical_route_snapshot() {
     let (first_ext, first_rx, _client) = extension();
+    first_ext
+        .state
+        .lock()
+        .expect("state")
+        .config
+        .as_mut()
+        .expect("config")
+        .sender_aliases
+        .insert("U123".to_owned(), "dpc".to_owned());
     register_agent(&first_ext, "agent-a");
     let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
     first_ext.process_slack_message(message.clone());
@@ -5235,6 +5887,9 @@ fn alias_rename_retry_uses_first_canonical_route_snapshot() {
 
     let (second_ext, second_rx, _client) = extension();
     let mut renamed = cfg();
+    renamed
+        .sender_aliases
+        .insert("U123".to_owned(), "renamed-user".to_owned());
     let mut policy = renamed.conversations.remove("team").expect("team");
     policy.alias = "renamed".to_owned();
     renamed.conversations.insert(policy.alias.clone(), policy);
@@ -5278,6 +5933,7 @@ fn alias_rename_retry_uses_first_canonical_route_snapshot() {
         .expect("canonical route");
     assert_eq!(route.conversation.alias, "team");
     assert_ne!(route.conversation.alias, "renamed");
+    assert_eq!(route.identity_alias.as_deref(), Some("dpc"));
     assert!(is_route_authorized(
         &state,
         state.config.as_ref().expect("config"),
@@ -5426,6 +6082,7 @@ fn socket_ack_diagnostics_are_safe_and_failure_prevents_routing() {
         "envelope_id": secret_id,
         "payload": {
             "type": "event_callback",
+                    "context_team_id": "T123",
             "event": {
                 "type": "app_mention", "channel": "C123", "user": "U123",
                 "text": "<@UBOT123> must-not-route", "ts": "2.0"
@@ -5468,7 +6125,8 @@ fn latency_markers_are_payload_free() {
             event_class: "create",
         };
         let (ingress_epoch, config_generation, agent_generation) = {
-            let state = ext.state.lock().expect("state");
+            let mut state = ext.state.lock().expect("state");
+            state.installation_team_id = Some("T123".to_owned());
             (
                 state.ingress_epoch,
                 state.config_generation,
@@ -5481,11 +6139,15 @@ fn latency_markers_are_payload_free() {
             ingress_epoch,
             config_generation,
             agent_generation,
+            installation_team_id: "T123".to_owned(),
             queue_wait_us: 0,
             identity_us: Cell::new(0),
             outcome: Cell::new("rejected_policy"),
         };
-        assert!(ext.verified_human_traced(&cfg(), sentinel_user, Some(&context)));
+        assert!(
+            ext.verified_human_traced(&cfg(), sentinel_user, Some(&context))
+                .is_some()
+        );
         ext.post_message_traced(&cfg(), sentinel_channel, sentinel_text, None, Some(timing));
     });
     let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
@@ -5514,6 +6176,7 @@ fn message_identity_failure_is_fail_closed_then_recovers() {
         state.config = Some(cfg());
         state.registered_agents.insert(agent_id("agent-a"));
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.capability_active = true;
     }
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> first"));
@@ -5552,6 +6215,7 @@ fn blocked_identity_completion_is_stale_after_session_teardown() {
         let mut state = ext.state.lock().expect("state");
         state.config = Some(cfg());
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.registered_agents.insert(agent_id("agent-a"));
         state.capability_active = true;
         state.session_active = true;
@@ -5568,6 +6232,7 @@ fn blocked_identity_completion_is_stale_after_session_teardown() {
             ingress_epoch: 0,
             config_generation: 0,
             agent_generation: 0,
+            installation_team_id: "T123".to_owned(),
             queue_wait_us: 0,
             identity_us: Cell::new(0),
             outcome: Cell::new("rejected_policy"),
@@ -5608,6 +6273,7 @@ fn blocked_identity_completion_has_no_local_effect_after_agent_unload() {
         let mut state = ext.state.lock().expect("state");
         state.config = Some(cfg());
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.registered_agents.insert(agent_id("agent-a"));
         state.capability_active = true;
         state.session_active = true;
@@ -5624,6 +6290,7 @@ fn blocked_identity_completion_has_no_local_effect_after_agent_unload() {
             ingress_epoch: 0,
             config_generation: 0,
             agent_generation: 0,
+            installation_team_id: "T123".to_owned(),
             queue_wait_us: 0,
             identity_us: Cell::new(0),
             outcome: Cell::new("rejected_policy"),
@@ -5657,6 +6324,7 @@ fn ingress_writer_closure_stops_socket_admission() {
         let mut state = ext.state.lock().expect("state");
         state.config = Some(cfg());
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
         state.registered_agents.insert(agent_id("agent-a"));
         state.capability_active = true;
         state.session_active = true;
@@ -5671,6 +6339,7 @@ fn ingress_writer_closure_stops_socket_admission() {
         ingress_epoch: 0,
         config_generation: 0,
         agent_generation: 0,
+        installation_team_id: "T123".to_owned(),
         queue_wait_us: 0,
         identity_us: Cell::new(0),
         outcome: Cell::new("rejected_policy"),

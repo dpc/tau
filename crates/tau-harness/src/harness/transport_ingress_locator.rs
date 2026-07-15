@@ -541,6 +541,7 @@ fn entry_from_message(
         | MessageEndpoint::External {
             stable_id: _,
             display_name: _,
+            identity_alias: _,
             actor_kind: _,
         }
         | MessageEndpoint::User => return None,

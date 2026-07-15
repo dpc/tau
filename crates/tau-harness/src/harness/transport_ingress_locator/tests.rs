@@ -21,6 +21,7 @@ fn record(value: &str) -> TransportDedupRecord {
             external_endpoint: MessageEndpoint::External {
                 stable_id: Some("U1".to_owned()),
                 display_name: None,
+                identity_alias: None,
                 actor_kind: ExternalActorKind::Human,
             },
             conversation: None,

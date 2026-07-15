@@ -21,6 +21,11 @@ any active static record. Native ids and raw thread selectors are never model
 inputs. `channel_ids`,
 `listening_scope`, and `send_destinations` were removed and are hard errors.
 Follow the [README migration procedure](../../tau-ext-slack/README.md#migration-from-removed-keys).
+Optional `sender_aliases` bind at most 64 exact U/W ids one-to-one to unique
+lowercase aliases. They are operator presentation only. The native U/W id stays
+authoritative/model-primary; bounded `profile.display_name` from the same
+`users.info` call is untrusted UI-only presentation. Durable retries keep the
+first committed display/alias snapshot.
 
 Dynamic DMs are opt-in, bounded to 64 exact D-to-allowlisted-U/W links,
 receive-and-source-reply only, multi-link, and runtime-only. Static receive DM policy wins over
@@ -47,6 +52,10 @@ Every setup needs `connections:write`, `users:read`, and `chat:write`. Add:
 
 Reinstall after scope/event changes and invite the app to every route.
 `chat:write.public` is unnecessary. DMs never use `app_mention`.
+`auth.test` must return both bot U/W and installing T workspace identity.
+Supported wrappers require matching `context_team_id` or one unambiguous
+matching authorization; missing/mixed/mismatched evidence is dropped before
+identity lookup. Slack Connect actor home team is not installation authority.
 
 Agents register to receive. `slack_send` requires `message` plus exactly one
 opaque `reply_to` or proactive `destination` alias. Only exact validated
@@ -63,6 +72,10 @@ reply authority, routing, threads, authorization, or configuration freeze.
 Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
 native controls are rejected. Bridge help/control/error output is escaped,
 bounded, and sent with mrkdwn/link expansion disabled.
+For source replies only, optional `mention_source_user: true` prepends a mention
+of the exact verified human already bound to `reply_to`; it defaults false,
+accepts no identity argument, is invalid with `destination`, and is frozen into
+the exact body reused by the sole retry.
 
 `slack_conversations` is disabled by default and separately authorizable through
 its exact prefixed name or `slack:discover` tag. It returns all static routes,
@@ -129,6 +142,9 @@ It accepts no native IDs, aliases, Unicode emoji, list, toggle, or discovery.
 Removal is limited to same-agent reactions unambiguously added in the current
 runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
 target conversations. Whole Slack-group grants now include this surface.
+The CLI renders inbound reaction action, exact actor U/W plus bounded
+display/configured alias, and the exact custom/skin-tone name; it performs no
+Unicode emoji lookup.
 
 Successful `slack_send` results use
 `{"status":"sent","message_ref":"slack-msg-v1-...","delivery_copies":"one"|"one_or_two_possible"}`

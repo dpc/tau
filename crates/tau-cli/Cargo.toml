@@ -37,6 +37,8 @@ tau-themes.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 
 [build-dependencies]
 built.workspace = true

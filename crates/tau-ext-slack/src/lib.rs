@@ -43,9 +43,9 @@ mod send_delivery;
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
 use send_delivery::{
-    CompletionOutput, FrozenPostBody, FrozenSendAuthority, ObservedSlackBotId, PostAttemptFailure,
-    PostAttemptOutcome, RemoteCopyPossibility, SendFailureCategory, SendLedgerDisposition,
-    SendLedgerEntry, SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
+    CompletionOutput, FrozenPostBody, FrozenSendAuthority, PostAttemptFailure, PostAttemptOutcome,
+    RemoteCopyPossibility, SendFailureCategory, SendLedgerDisposition, SendLedgerEntry,
+    SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
     SystemSendScheduler, classify_api_error, classify_post_api_error, parse_retry_after,
 };
 
@@ -150,6 +150,8 @@ struct AdmissionContext {
     config_generation: u64,
     /// Agent-registration generation captured before ACK for local effects.
     agent_generation: u64,
+    /// Exact authenticated installation team captured before ACK.
+    installation_team_id: String,
     /// Time spent waiting after successful ACK handoff.
     queue_wait_us: u64,
     /// Time spent in live identity verification.
@@ -174,6 +176,7 @@ impl AdmissionContext {
     fn matches_state(&self, state: &State) -> bool {
         state.ingress_epoch == self.ingress_epoch
             && state.config_generation == self.config_generation
+            && state.installation_team_id.as_deref() == Some(self.installation_team_id.as_str())
     }
 
     /// Check lifecycle plus agent registration authority for local effects.
@@ -217,11 +220,17 @@ trait SlackClient: Send + Sync + 'static {
     /// Open a Socket Mode websocket URL with the configured app token.
     fn open_socket(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError>;
 
-    /// Return the bot user id from `auth.test` using the configured bot token.
-    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError>;
+    /// Return the exact bot-user and installation-team binding from
+    /// `auth.test`.
+    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError>;
 
-    /// Return whether an allowlisted Slack user is a live human account.
-    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError>;
+    /// Return the verified live human plus bounded presentation from one
+    /// lookup.
+    fn verified_human_identity(
+        &self,
+        cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError>;
 
     /// Execute one exact frozen `chat.postMessage` body.
     fn post_message(
@@ -241,6 +250,24 @@ trait SlackClient: Send + Sync + 'static {
     ) -> Result<(), ReactionApiError> {
         Err(ReactionApiError::OutcomeUnknown)
     }
+}
+
+/// Exact bot and installing workspace returned by one `auth.test`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SlackInstallationIdentity {
+    /// Exact bot U/W identity authenticated by the configured bot token.
+    bot_user_id: String,
+    /// Exact installing T workspace authenticated by the configured bot token.
+    team_id: String,
+}
+
+/// Exact verified Slack account plus its UI-only display snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedSlackHuman {
+    /// Exact live-human U/W identity returned by `users.info`.
+    user_id: String,
+    /// Optional bounded, presentation-only Slack display snapshot.
+    display_name: Option<String>,
 }
 
 /// Explicit outbound reaction operation.
@@ -309,6 +336,8 @@ struct RuntimeConfig {
     /// Slack user ids explicitly allowlisted for ingress and bridge-control
     /// commands.
     allowed_user_ids: HashSet<String>,
+    /// Presentation aliases keyed one-to-one by exact native user id.
+    sender_aliases: HashMap<String, String>,
     /// Policy controlling which verified human senders may enter Tau.
     security_mode: SecurityMode,
     /// Exact validated static conversation policies, keyed by stable alias.
@@ -340,6 +369,8 @@ struct ExtConfig {
     /// Explicitly allowlisted Slack user ids; only these may run bridge-control
     /// commands.
     allowed_user_ids: Vec<String>,
+    /// Optional presentation-only sender aliases.
+    sender_aliases: Vec<RawSenderAlias>,
     /// Ingress sender policy. Omission deliberately preserves strict behavior.
     security_mode: SecurityMode,
     /// Exact static receive/proactive conversation policy.
@@ -361,6 +392,16 @@ struct ExtConfig {
     api_base: Option<String>,
     /// Optional maximum accepted text size in bytes.
     max_message_bytes: Option<usize>,
+}
+
+/// One operator-owned presentation alias.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSenderAlias {
+    /// Exact native Slack U/W identity receiving the alias.
+    user_id: String,
+    /// Operator-owned, presentation-only alias.
+    alias: String,
 }
 
 /// Mark any encountered removed key as present, including an explicit null.
@@ -470,6 +511,23 @@ impl ExtConfig {
                 return Err(format!(
                     "slack `allowed_user_ids` contains duplicate id `{user_id}`"
                 ));
+            }
+        }
+        if self.sender_aliases.len() > 64 {
+            return Err("slack `sender_aliases` supports at most 64 entries".to_owned());
+        }
+        let mut sender_aliases = HashMap::new();
+        let mut alias_values = HashSet::new();
+        for raw in self.sender_aliases {
+            if !valid_conversation_alias(&raw.alias) || !alias_values.insert(raw.alias.clone()) {
+                return Err(
+                    "slack sender aliases must be unique and match the conversation alias grammar"
+                        .to_owned(),
+                );
+            }
+            let user_id = validate_user_id("sender_aliases[].user_id", &raw.user_id)?;
+            if sender_aliases.insert(user_id, raw.alias).is_some() {
+                return Err("slack `sender_aliases` contains a duplicate user id".to_owned());
             }
         }
         if self.conversations.len() > CONVERSATION_LIMIT {
@@ -608,6 +666,7 @@ impl ExtConfig {
             app_token: app_token.to_owned(),
             bot_token: bot_token.to_owned(),
             allowed_user_ids,
+            sender_aliases,
             security_mode: self.security_mode,
             conversations,
             parent_receives,
@@ -659,6 +718,10 @@ impl RuntimeConfig {
 struct IngressSender {
     /// Transport-stable Slack user id.
     user_id: String,
+    /// Bounded UI-only `profile.display_name` snapshot.
+    display_name: Option<String>,
+    /// Operator-configured presentation-only alias.
+    identity_alias: Option<String>,
     /// Policy classification established before submission.
     policy_status: SenderPolicyStatus,
 }
@@ -895,6 +958,8 @@ struct AdmissionWork {
     config_generation: u64,
     /// Agent-registration generation captured before ACK.
     agent_generation: u64,
+    /// Exact authenticated installation team captured before ACK.
+    installation_team_id: String,
     /// Queue depth bucket observed while reserving the slot.
     queue_depth_bucket: QueueDepthBucket,
 }
@@ -925,6 +990,8 @@ struct PendingIngress {
     conversation: SlackConversation,
     /// Verified Slack account that authored the occurrence.
     user_id: String,
+    /// Exact installation team which admitted the event wrapper.
+    installation_team_id: String,
     /// Sender policy retained for the eventual source-bound reply route.
     policy_status: SenderPolicyStatus,
     /// Exact native occurrence identity submitted for canonical correlation.
@@ -949,6 +1016,12 @@ struct ReplyRoute {
     conversation: SlackConversation,
     /// Verified Slack account bound to the original route.
     user_id: String,
+    /// First-canonical UI-only display snapshot.
+    display_name: Option<String>,
+    /// First-canonical operator alias snapshot.
+    identity_alias: Option<String>,
+    /// Installation team bound to this source occurrence.
+    installation_team_id: String,
     /// Policy of the sender that activated this route.
     policy_status: SenderPolicyStatus,
 }
@@ -997,6 +1070,8 @@ struct ReactionTarget {
     conversation: SlackConversation,
     /// Exact item timestamp, which may be a thread child.
     message_ts: String,
+    /// Exact installation team that minted this private authority.
+    installation_team_id: String,
     /// Live route authority revalidated on every use.
     authority: ReactionAuthority,
 }
@@ -1166,10 +1241,16 @@ struct State {
     worker_started: bool,
     worker_online: bool,
     worker_startup_failure_reported: bool,
+    /// One-shot categorical restart notice after installation poisoning.
+    installation_restart_notice_reported: bool,
     /// Whether the current consecutive verified-human API failure episode was
     /// reported.
     identity_failure_reported: bool,
     bot_user_id: Option<String>,
+    /// Installing workspace paired with `bot_user_id`.
+    installation_team_id: Option<String>,
+    /// Process-lifetime fail-closed latch after an authenticated pair mismatch.
+    installation_mismatch: bool,
     duplicate_events: DuplicateCache,
     /// Recent bridge-authored Slack posts and their owning agents.
     posted_messages: PostedMessageCache,
@@ -1192,6 +1273,60 @@ struct State {
 }
 
 impl State {
+    /// Irreversibly revoke installation-scoped authority for this process.
+    fn latch_installation_mismatch(&mut self) {
+        self.ingress_epoch = self.ingress_epoch.wrapping_add(1);
+        self.capability_active = false;
+        self.capability_generation = self.capability_generation.wrapping_add(1);
+        self.pending_capability_request = None;
+        self.installation_mismatch = true;
+        self.pending_ingress.clear();
+        self.clear_reaction_state();
+        self.clear_reply_routes();
+        self.clear_incoming_messages();
+        self.posted_messages.clear();
+        self.linked_dms.clear();
+        self.selected_agent_by_route.clear();
+        self.duplicate_events = DuplicateCache::default();
+    }
+
+    /// Install the first authenticated pair or require an exact reconnect
+    /// match.
+    ///
+    /// A mismatch revokes all installation-scoped authority and requires a
+    /// process restart; it never reinterprets old native routes under a new
+    /// pair.
+    fn install_or_match_installation(
+        &mut self,
+        bot_user_id: String,
+        team_id: String,
+    ) -> Result<bool, String> {
+        if self.installation_mismatch {
+            return Err(
+                "Slack installation identity changed; restart Tau before reconnecting".to_owned(),
+            );
+        }
+        match (&self.bot_user_id, &self.installation_team_id) {
+            (None, None) => {
+                self.bot_user_id = Some(bot_user_id);
+                self.installation_team_id = Some(team_id);
+                Ok(true)
+            }
+            (Some(current_bot), Some(current_team))
+                if current_bot == &bot_user_id && current_team == &team_id =>
+            {
+                Ok(false)
+            }
+            _ => {
+                self.latch_installation_mismatch();
+                Err(
+                    "Slack installation identity changed; restart Tau before reconnecting"
+                        .to_owned(),
+                )
+            }
+        }
+    }
+
     /// Insert a target, evicting only the oldest target without live ownership.
     fn insert_reaction_target(&mut self, message_ref: String, target: ReactionTarget) -> bool {
         if let std::collections::hash_map::Entry::Occupied(mut entry) =
@@ -1626,6 +1761,8 @@ impl Extension {
         state.pending_posts.clear();
         state.posted_messages.clear();
         state.clear_reaction_state();
+        state.bot_user_id = None;
+        state.installation_team_id = None;
         state.capability_active = false;
         state.capability_generation = state.capability_generation.wrapping_add(1);
         state.pending_capability_request = None;
@@ -1658,6 +1795,7 @@ impl Extension {
         state.posted_messages.clear();
         state.linked_dms.clear();
         state.bot_user_id = None;
+        state.installation_team_id = None;
         state.duplicate_events = DuplicateCache::default();
         state.clear_reaction_state();
         self.send_wake.notify_lifecycle_change();
@@ -1710,6 +1848,12 @@ impl Extension {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.capability_active = false;
             state.capability_generation = state.capability_generation.wrapping_add(1);
+            if state.installation_mismatch {
+                state.pending_capability_request = None;
+                drop(state);
+                self.send_wake.notify_lifecycle_change();
+                return;
+            }
             state.next_capability_request = state.next_capability_request.wrapping_add(1);
             let request_id = format!(
                 "{CAPABILITY_REQUEST_PREFIX}{}",
@@ -1916,6 +2060,11 @@ impl Extension {
                         .to_owned(),
                 );
             }
+            if let Some((cfg, startup, _)) = startup
+                && let Err(message) = self.start_worker_locked(&mut state, cfg, Some(startup))
+            {
+                return tool_error(invoke, message);
+            }
             if state.registered_agents.insert(invoke.agent_id.clone()) {
                 state.agent_generation = state.agent_generation.wrapping_add(1);
                 state.bump_send_agent_generation(&invoke.agent_id);
@@ -1924,9 +2073,6 @@ impl Extension {
                 .agent_labels
                 .entry(invoke.agent_id.clone())
                 .or_insert_with(|| invoke.agent_id.to_string());
-            if let Some((cfg, startup, _)) = startup {
-                self.start_worker_locked(&mut state, cfg, Some(startup));
-            }
             self.send_wake.notify_lifecycle_change();
         } else {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1957,20 +2103,77 @@ impl Extension {
     }
 
     fn prepare_worker_start(&self, cfg: &RuntimeConfig) -> Result<WorkerStartup, String> {
-        let bot_user_id = self
-            .client
-            .auth_test(cfg)
-            .map_err(|error| error.to_string())?;
-        let bot_user_id = validate_slack_id("auth.test user_id", &bot_user_id)?;
+        let installation = self.authenticated_installation(cfg)?;
+        self.match_established_installation(&installation)?;
         let socket_url = self
             .client
             .open_socket(cfg)
             .map_err(|error| error.to_string())?;
         validate_socket_url(&socket_url)?;
         Ok(WorkerStartup {
-            bot_user_id,
+            bot_user_id: installation.bot_user_id,
+            installation_team_id: installation.team_id,
             socket_url,
         })
+    }
+
+    /// Authenticate and validate one complete installation observation.
+    ///
+    /// Once a pair exists, malformed or incomplete replacement evidence is as
+    /// terminal as an explicit mismatch and poisons capability until restart.
+    fn authenticated_installation(
+        &self,
+        cfg: &RuntimeConfig,
+    ) -> Result<SlackInstallationIdentity, String> {
+        let raw = match self.client.auth_test(cfg) {
+            Ok(raw) => raw,
+            Err(error) => {
+                if error == SlackApiError::MalformedResponse {
+                    self.latch_invalid_installation_if_established();
+                }
+                return Err(error.to_string());
+            }
+        };
+        let validated = validate_user_id("auth.test user_id", &raw.bot_user_id).and_then(|bot| {
+            validate_team_id("auth.test team_id", &raw.team_id).map(|team| {
+                SlackInstallationIdentity {
+                    bot_user_id: bot,
+                    team_id: team,
+                }
+            })
+        });
+        if validated.is_err() {
+            self.latch_invalid_installation_if_established();
+        }
+        validated
+    }
+
+    /// Compare every complete observation with an already established pair
+    /// before any subsequent Slack API call.
+    fn match_established_installation(
+        &self,
+        installation: &SlackInstallationIdentity,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.bot_user_id.is_none() && state.installation_team_id.is_none() {
+            return Ok(());
+        }
+        state
+            .install_or_match_installation(
+                installation.bot_user_id.clone(),
+                installation.team_id.clone(),
+            )
+            .map(|_| ())
+    }
+
+    /// Poison an established pair after malformed reconnect identity evidence.
+    fn latch_invalid_installation_if_established(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.bot_user_id.is_some() || state.installation_team_id.is_some() {
+            state.latch_installation_mismatch();
+            drop(state);
+            self.send_wake.notify_lifecycle_change();
+        }
     }
 
     fn start_worker_locked(
@@ -1978,13 +2181,19 @@ impl Extension {
         state: &mut State,
         cfg: RuntimeConfig,
         startup: Option<WorkerStartup>,
-    ) {
+    ) -> Result<(), String> {
         if state.worker_started {
-            return;
+            return Ok(());
         }
         state.config_frozen = true;
-        if let Some(startup) = &startup {
-            state.bot_user_id = Some(startup.bot_user_id.clone());
+        if let Some(startup) = &startup
+            && let Err(error) = state.install_or_match_installation(
+                startup.bot_user_id.clone(),
+                startup.installation_team_id.clone(),
+            )
+        {
+            self.send_wake.notify_lifecycle_change();
+            return Err(error);
         }
         state.worker_started = true;
         state.worker_startup_failure_reported = false;
@@ -1999,6 +2208,7 @@ impl Extension {
         std::thread::spawn(move || {
             socket_worker_loop(send_retirement, client, output, cfg, startup, shutdown)
         });
+        Ok(())
     }
 
     fn report_worker_startup_failure_once(&self, _cfg: &RuntimeConfig, message: &str) {
@@ -2025,9 +2235,28 @@ impl Extension {
         }
     }
 
+    /// Mark the Socket worker offline and report a terminal installation
+    /// poison.
+    fn report_installation_restart_once(&self) {
+        let should_report = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.worker_online = false;
+            state.installation_mismatch
+                && !std::mem::replace(&mut state.installation_restart_notice_reported, true)
+        };
+        if should_report {
+            self.output.emit(Event::HarnessNotice(HarnessNotice {
+                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+                message: "Slack installation identity changed or became invalid; restart Tau before using std-slack again".to_owned(),
+                level: NoticeLevel::Warning,
+                always_show: true,
+            }));
+        }
+    }
+
     #[cfg(test)]
     fn verified_human(&self, cfg: &RuntimeConfig, user_id: &str) -> bool {
-        self.verified_human_traced(cfg, user_id, None)
+        self.verified_human_traced(cfg, user_id, None).is_some()
     }
 
     /// Verify one sender while emitting only bounded, payload-free latency
@@ -2037,7 +2266,7 @@ impl Extension {
         cfg: &RuntimeConfig,
         user_id: &str,
         admission: Option<&AdmissionContext>,
-    ) -> bool {
+    ) -> Option<VerifiedSlackHuman> {
         let trace = admission.map(|context| context.trace);
         if let Some(trace) = trace {
             tracing::trace!(
@@ -2053,14 +2282,14 @@ impl Extension {
             );
         }
         let started_at = Instant::now();
-        let result = self.client.is_human_user(cfg, user_id);
+        let result = self.client.verified_human_identity(cfg, user_id);
         if let Some(admission) = admission {
             admission.identity_us.set(elapsed_us(started_at));
         }
         if let Some(trace) = trace {
             let outcome = match &result {
-                Ok(true) => "human",
-                Ok(false) => "not_human",
+                Ok(Some(_)) => "human",
+                Ok(None) => "not_human",
                 Err(error) => match error {
                     SlackApiError::RateLimited => "rate_limited",
                     SlackApiError::TransportTimeout => "timeout",
@@ -2093,21 +2322,21 @@ impl Extension {
                 admission.mark("stale_epoch");
             }
             log_ingress_rejection("stale_epoch");
-            return false;
+            return None;
         }
         match result {
-            Ok(is_human) => {
+            Ok(identity) => {
                 self.state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .identity_failure_reported = false;
-                if !is_human {
+                if identity.is_none() {
                     if let Some(admission) = admission {
                         admission.mark("rejected_identity");
                     }
                     log_ingress_rejection("sender_not_human");
                 }
-                is_human
+                identity
             }
             Err(error) => {
                 if let Some(admission) = admission {
@@ -2132,7 +2361,7 @@ impl Extension {
                         always_show: false,
                     }));
                 }
-                false
+                None
             }
         }
     }
@@ -2426,17 +2655,18 @@ impl Extension {
         if post.thread_ts.is_some() && post.thread_ts != conversation.thread_ts {
             return;
         }
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .posted_messages
-            .insert(
-                PostedMessageKey::new(&conversation.channel_id, &post.ts),
-                PostedMessageOwner {
-                    agent_id,
-                    thread_ts: conversation.thread_ts,
-                },
-            );
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(installation_team_id) = state.installation_team_id.clone() else {
+            return;
+        };
+        state.posted_messages.insert(
+            PostedMessageKey::new(&conversation.channel_id, &post.ts),
+            PostedMessageOwner {
+                agent_id,
+                thread_ts: conversation.thread_ts,
+                installation_team_id,
+            },
+        );
     }
 
     #[cfg(test)]
@@ -2476,9 +2706,9 @@ impl Extension {
             }
             cfg
         };
-        if !self.verified_human_traced(&cfg, &reaction.user_id, admission) {
+        let Some(identity) = self.verified_human_traced(&cfg, &reaction.user_id, admission) else {
             return;
-        }
+        };
         let (cfg, agent_id, route) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
@@ -2496,6 +2726,10 @@ impl Extension {
                 log_ingress_rejection("reaction_unknown_target");
                 return;
             };
+            if state.installation_team_id.as_deref() != Some(owner.installation_team_id.as_str()) {
+                log_ingress_rejection("reaction_unknown_target");
+                return;
+            }
             if reaction.thread_ts.is_some() && reaction.thread_ts != owner.thread_ts {
                 log_ingress_rejection("thread_mismatch");
                 return;
@@ -2537,6 +2771,8 @@ impl Extension {
                         .sender_policy(&reaction.user_id)
                         .expect("sender revalidated"),
                     user_id: reaction.user_id,
+                    display_name: identity.display_name,
+                    identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
                 operation: MessageOperation::Reaction {
                     target: MessageRef {
@@ -2615,9 +2851,10 @@ impl Extension {
             }
             (cfg, owner)
         };
-        if !self.verified_human_traced(&cfg, &edit.editor_user_id, admission) {
+        let Some(identity) = self.verified_human_traced(&cfg, &edit.editor_user_id, admission)
+        else {
             return;
-        }
+        };
         let text = edit.text.trim();
         if text.is_empty() || text.len() > cfg.max_message_bytes {
             log_ingress_rejection("malformed_text");
@@ -2639,6 +2876,8 @@ impl Extension {
                         .sender_policy(&edit.editor_user_id)
                         .expect("sender admitted"),
                     user_id: edit.editor_user_id,
+                    display_name: identity.display_name,
+                    identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
                 operation: MessageOperation::Edit {
                     target: MessageRef {
@@ -2726,9 +2965,9 @@ impl Extension {
         } {
             message.thread_ts = route.thread_ts;
         }
-        if !self.verified_human_traced(&cfg, &message.user_id, admission) {
+        let Some(identity) = self.verified_human_traced(&cfg, &message.user_id, admission) else {
             return;
-        }
+        };
         let leading_mention = self.has_leading_bot_mention(&message.text);
         let Some(mut text) = self.trimmed_message_text(&cfg, &message, admission) else {
             return;
@@ -2776,10 +3015,10 @@ impl Extension {
         if self.rejects_unlinked_command(&cfg, &message, command, admission) {
             return;
         }
-        if self.handle_command(&cfg, &message, is_dm, command, rest, admission) {
+        if self.handle_command(&cfg, &message, &identity, command, rest, admission) {
             return;
         }
-        self.route_plain_text(&cfg, &message, &text, admission);
+        self.route_plain_text(&cfg, &message, &identity, &text, admission);
     }
 
     /// Suppress retry side effects for bridge-local commands only.
@@ -2967,14 +3206,19 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &SlackMessage,
-        is_dm: bool,
+        identity: &VerifiedSlackHuman,
         command: Option<&str>,
         rest: &str,
         admission: Option<&AdmissionContext>,
     ) -> bool {
         match command {
             Some("start" | "/start") => {
-                self.handle_start_command(cfg, message, is_dm, admission);
+                self.handle_start_command(
+                    cfg,
+                    message,
+                    message.channel_type.as_deref() == Some("im"),
+                    admission,
+                );
                 true
             }
             Some("agents" | "/agents") => {
@@ -2986,7 +3230,7 @@ impl Extension {
                 true
             }
             Some("to" | "/to") => {
-                self.handle_to_command(cfg, message, rest, admission);
+                self.handle_to_command(cfg, message, identity, rest, admission);
                 true
             }
             Some(command) if command.starts_with('/') => {
@@ -3175,6 +3419,7 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &SlackMessage,
+        identity: &VerifiedSlackHuman,
         rest: &str,
         admission: Option<&AdmissionContext>,
     ) {
@@ -3193,7 +3438,7 @@ impl Extension {
             return;
         }
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => self.route_text(message, agent_id, body.trim(), admission),
+            Ok(agent_id) => self.route_text(message, identity, agent_id, body.trim(), admission),
             Err(reply) => {
                 if self.insert_command_duplicate(message, admission) {
                     self.reply(
@@ -3212,6 +3457,7 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &SlackMessage,
+        identity: &VerifiedSlackHuman,
         text: &str,
         admission: Option<&AdmissionContext>,
     ) {
@@ -3224,7 +3470,7 @@ impl Extension {
             return;
         };
         match self.plain_text_target(&route_key) {
-            Ok(agent_id) => self.route_text(message, agent_id, text, admission),
+            Ok(agent_id) => self.route_text(message, identity, agent_id, text, admission),
             Err(reply) => {
                 if self.insert_command_duplicate(message, admission) {
                     self.reply(
@@ -3351,6 +3597,7 @@ impl Extension {
     fn route_text(
         &self,
         message: &SlackMessage,
+        identity: &VerifiedSlackHuman,
         agent_id: AgentId,
         text: &str,
         admission: Option<&AdmissionContext>,
@@ -3400,6 +3647,8 @@ impl Extension {
                         .sender_policy(&message.user_id)
                         .expect("sender admitted"),
                     user_id: message.user_id.clone(),
+                    display_name: identity.display_name.clone(),
+                    identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
                 operation: MessageOperation::Create {
                     payload: MessagePayload::Text {
@@ -3442,6 +3691,8 @@ impl Extension {
         }
         let IngressSender {
             user_id,
+            display_name,
+            identity_alias,
             policy_status,
         } = sender;
         let original_key = matches!(operation, MessageOperation::Create { .. })
@@ -3493,12 +3744,22 @@ impl Extension {
             }
             state.next_route_id = state.next_route_id.wrapping_add(1);
             let request_id = format!("slack-in-{}", state.next_route_id);
+            let installation_team_id = admission
+                .map(|context| context.installation_team_id.clone())
+                .or_else(|| state.installation_team_id.clone());
+            let Some(installation_team_id) = installation_team_id else {
+                if let Some(admission) = admission {
+                    admission.mark("rejected_route");
+                }
+                return;
+            };
             state.pending_ingress.insert(
                 request_id.clone(),
                 PendingIngress {
                     agent_id: agent_id.clone(),
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
+                    installation_team_id,
                     policy_status,
                     external_identity: external_identity.clone(),
                     original_key,
@@ -3516,7 +3777,14 @@ impl Extension {
                 draft: transport_draft(
                     MessageEndpoint::External {
                         stable_id: Some(user_id),
-                        display_name: None,
+                        display_name,
+                        identity_alias: identity_alias.map(|value| {
+                            tau_proto::ExternalIdentityAlias {
+                                value,
+                                authority:
+                                    tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+                            }
+                        }),
                         actor_kind: ExternalActorKind::Human,
                     },
                     &conversation,
@@ -3807,6 +4075,7 @@ fn send_destination_endpoint(destination: &ConversationPolicy) -> MessageEndpoin
     MessageEndpoint::External {
         stable_id: None,
         display_name: Some(destination.alias.clone()),
+        identity_alias: None,
         actor_kind: ExternalActorKind::Unknown,
     }
 }
@@ -3848,7 +4117,13 @@ fn transport_draft(
 fn external_endpoint_for_route(route: &ReplyRoute) -> MessageEndpoint {
     MessageEndpoint::External {
         stable_id: Some(route.user_id.clone()),
-        display_name: None,
+        display_name: route.display_name.clone(),
+        identity_alias: route.identity_alias.clone().map(|value| {
+            tau_proto::ExternalIdentityAlias {
+                value,
+                authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+            }
+        }),
         actor_kind: ExternalActorKind::Human,
     }
 }
@@ -3974,6 +4249,21 @@ fn socket_worker_loop(
             }
             Ok(WorkerOutcome::Shutdown) => break,
             Err(message) => {
+                if ext
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .installation_mismatch
+                {
+                    ext.report_installation_restart_once();
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        lifecycle = "stopped",
+                        failure = "installation_restart_required",
+                        "Slack Socket Mode worker requires restart after installation identity failure"
+                    );
+                    break;
+                }
                 ext.report_worker_startup_failure_once(&cfg, &message);
                 tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", failure = "socket_worker", "Slack Socket Mode worker failed; reconnecting");
                 if runtime.block_on(shutdown.wait_timeout(backoff)) {
@@ -4013,6 +4303,7 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
             ingress_epoch: work.ingress_epoch,
             config_generation: work.config_generation,
             agent_generation: work.agent_generation,
+            installation_team_id: work.installation_team_id,
             queue_wait_us: elapsed_us(work.enqueued_at),
             identity_us: Cell::new(0),
             outcome: Cell::new("rejected_policy"),
@@ -4061,7 +4352,11 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
 }
 
 struct WorkerStartup {
+    /// Exact authenticated bot U/W identity.
     bot_user_id: String,
+    /// Exact authenticated installing T workspace.
+    installation_team_id: String,
+    /// Validated one-use Socket Mode websocket URL.
     socket_url: String,
 }
 
@@ -4081,22 +4376,29 @@ async fn socket_worker_once(
     let ws_url = match startup {
         Some(startup) => {
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.bot_user_id = Some(startup.bot_user_id);
+            if let Err(error) = state
+                .install_or_match_installation(startup.bot_user_id, startup.installation_team_id)
+            {
+                ext.send_wake.notify_lifecycle_change();
+                return Err(error);
+            }
             startup.socket_url
         }
         None => {
-            let bot_user_id = ext
-                .client
-                .auth_test(cfg)
-                .map_err(|error| error.to_string())?;
-            let bot_user_id = validate_slack_id("auth.test user_id", &bot_user_id)?;
+            let installation = ext.authenticated_installation(cfg)?;
+            ext.match_established_installation(&installation)?;
             let ws_url = ext
                 .client
                 .open_socket(cfg)
                 .map_err(|error| error.to_string())?;
             validate_socket_url(&ws_url)?;
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.bot_user_id = Some(bot_user_id);
+            if let Err(error) =
+                state.install_or_match_installation(installation.bot_user_id, installation.team_id)
+            {
+                ext.send_wake.notify_lifecycle_change();
+                return Err(error);
+            }
             ws_url
         }
     };
@@ -4245,10 +4547,14 @@ async fn handle_socket_text_frame(
         if !state.session_active {
             return Err("Slack admission unavailable without an active session".to_owned());
         }
+        let Some(installation_team_id) = state.installation_team_id.clone() else {
+            return Err("Slack admission unavailable without installation identity".to_owned());
+        };
         Some((
             state.ingress_epoch,
             state.config_generation,
             state.agent_generation,
+            installation_team_id,
         ))
     } else {
         None
@@ -4327,7 +4633,7 @@ async fn handle_socket_text_frame(
     ack_result?;
     let outcome = action.outcome();
     if let (Some(reservation), Some(event)) = (reservation, action.event) {
-        let (ingress_epoch, config_generation, agent_generation) =
+        let (ingress_epoch, config_generation, agent_generation, installation_team_id) =
             authority.expect("supported events capture authority before ACK");
         let queue_depth_bucket = admission.depth_bucket();
         reservation.commit(AdmissionWork {
@@ -4339,6 +4645,7 @@ async fn handle_socket_text_frame(
             ingress_epoch,
             config_generation,
             agent_generation,
+            installation_team_id,
             queue_depth_bucket,
         });
     }
@@ -4414,11 +4721,66 @@ fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
             action.shutdown = !action.reconnect;
         }
         Some("events_api") => {
-            action.event = decode_socket_event(&value);
+            let installation = {
+                let state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
+                state
+                    .installation_team_id
+                    .as_deref()
+                    .zip(state.bot_user_id.as_deref())
+                    .map(|(team, bot)| (team.to_owned(), bot.to_owned()))
+            };
+            let installation_matches = installation
+                .as_ref()
+                .is_some_and(|(team, bot)| event_matches_installation(&value, team, bot));
+            if installation_matches {
+                action.event = decode_socket_event(&value);
+            } else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    rejection = "installation_context",
+                    "dropping Slack event with missing, ambiguous, or mismatched installation context"
+                );
+            }
         }
         _ => {}
     }
     action
+}
+
+/// Prove that one Events API wrapper belongs to the currently authenticated
+/// installation. Top-level event team data is intentionally not authoritative.
+fn event_matches_installation(
+    value: &serde_json::Value,
+    expected_team: &str,
+    expected_bot: &str,
+) -> bool {
+    let Some(payload) = value.get("payload") else {
+        return false;
+    };
+    if let Some(context) = payload.get("context_team_id") {
+        return context.as_str() == Some(expected_team);
+    }
+    let Some(authorizations) = payload
+        .get("authorizations")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if authorizations.len() != 1 {
+        return false;
+    }
+    let authorization = &authorizations[0];
+    if authorization
+        .get("team_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_team)
+    {
+        return false;
+    }
+    match authorization.get("user_id") {
+        None => true,
+        Some(user) => user.as_str() == Some(expected_bot),
+    }
 }
 
 fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
@@ -4830,7 +5192,7 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
             let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.pending_capability_request.as_deref() == Some(result.request_id.as_str()) {
                 state.pending_capability_request = None;
-                state.capability_active = result.accepted;
+                state.capability_active = result.accepted && !state.installation_mismatch;
                 state.capability_generation = state.capability_generation.wrapping_add(1);
                 ext.send_wake.notify_lifecycle_change();
             }
@@ -4882,7 +5244,9 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                 canonical,
                 reply_activation: tau_proto::TransportReplyActivation::Active,
             } = &result.disposition
-                && let Some((conversation, user_id)) = instance_name
+                && state.installation_team_id.as_deref()
+                    == Some(pending.installation_team_id.as_str())
+                && let Some((conversation, user_id, display_name, identity_alias)) = instance_name
                     .as_ref()
                     .and_then(|instance| canonical_slack_reply_route(canonical, &pending, instance))
             {
@@ -4903,6 +5267,9 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                         agent_id: pending.agent_id.clone(),
                         conversation: conversation.clone(),
                         user_id: user_id.clone(),
+                        display_name,
+                        identity_alias,
+                        installation_team_id: pending.installation_team_id.clone(),
                         policy_status: canonical.policy_status,
                     },
                 );
@@ -4913,6 +5280,7 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                             agent_id: pending.agent_id,
                             conversation,
                             message_ts,
+                            installation_team_id: pending.installation_team_id,
                             authority: ReactionAuthority::Source {
                                 message_id: message_id.clone(),
                                 user_id,
@@ -4956,11 +5324,9 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                     && state.instance_name.as_ref()
                         == pending.send_authority.instance_name.as_ref()
                     && state.bot_user_id.as_deref()
-                        == pending
-                            .send_authority
-                            .observed_bot_user_id
-                            .as_ref()
-                            .map(ObservedSlackBotId::as_str);
+                        == Some(pending.send_authority.bot_user_id.as_str())
+                    && state.installation_team_id.as_deref()
+                        == Some(pending.send_authority.installation_team_id.as_str());
                 if result.accepted {
                     if reaction_authority_current {
                         let _ = state.insert_reaction_target(
@@ -4969,6 +5335,10 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                                 agent_id: pending.agent_id.clone(),
                                 conversation: pending.conversation.clone(),
                                 message_ts: pending.posted.ts.clone(),
+                                installation_team_id: pending
+                                    .send_authority
+                                    .installation_team_id
+                                    .clone(),
                                 authority: pending.authority,
                             },
                         );
@@ -4980,6 +5350,10 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                             PostedMessageOwner {
                                 agent_id: pending.agent_id,
                                 thread_ts: pending.conversation.thread_ts,
+                                installation_team_id: pending
+                                    .send_authority
+                                    .installation_team_id
+                                    .clone(),
                             },
                         );
                     }
@@ -5024,7 +5398,7 @@ fn canonical_slack_reply_route(
     canonical: &tau_proto::CommittedTransportIngressRoute,
     pending: &PendingIngress,
     instance_name: &tau_proto::ExtensionName,
-) -> Option<(SlackConversation, String)> {
+) -> Option<(SlackConversation, String, Option<String>, Option<String>)> {
     let tau_proto::CommittedTransportIngressRoute {
         target_agent_id,
         transport,
@@ -5044,15 +5418,21 @@ fn canonical_slack_reply_route(
     {
         return None;
     }
-    let user_id = match external_endpoint {
+    let (user_id, source_display_name, identity_alias) = match external_endpoint {
         MessageEndpoint::External {
             stable_id: Some(stable_id),
-            display_name: _,
+            display_name,
+            identity_alias,
             actor_kind: tau_proto::ExternalActorKind::Human,
-        } if stable_id == &pending.user_id => stable_id.clone(),
+        } if stable_id == &pending.user_id => (
+            stable_id.clone(),
+            display_name.clone(),
+            identity_alias.as_ref().map(|alias| alias.value.clone()),
+        ),
         MessageEndpoint::External {
             stable_id: _,
             display_name: _,
+            identity_alias: _,
             actor_kind: _,
         }
         | MessageEndpoint::Agent {
@@ -5124,6 +5504,8 @@ fn canonical_slack_reply_route(
             alias: alias.clone(),
         },
         user_id,
+        source_display_name,
+        identity_alias,
     ))
 }
 
@@ -5285,6 +5667,11 @@ fn send_tool_spec() -> ToolSpec {
                     "pattern": CONVERSATION_ALIAS_PATTERN,
                     "maxLength": MAX_CONVERSATION_ALIAS_BYTES,
                     "description": "Configured Slack destination alias; mutually exclusive with reply_to"
+                },
+                "mention_source_user": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, prepend an internal mention of the verified reply source; valid only with reply_to"
                 }
             },
             "required": ["message"],
@@ -5404,6 +5791,22 @@ fn cbor_bool_field(arguments: &CborValue, field: &str) -> Result<bool, String> {
         }
     }
     Err(format!("missing required argument `{field}`"))
+}
+
+fn cbor_optional_bool_field(arguments: &CborValue, field: &str) -> Result<Option<bool>, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("tool arguments must be an object".to_owned());
+    };
+    for (key, value) in entries {
+        if matches!(key, CborValue::Text(key) if key == field) {
+            return match value {
+                CborValue::Bool(value) => Ok(Some(*value)),
+                CborValue::Null => Ok(None),
+                _ => Err(format!("`{field}` must be a boolean")),
+            };
+        }
+    }
+    Ok(None)
 }
 
 /// Read an optional non-negative integer argument representable as `usize`.
@@ -5567,6 +5970,9 @@ fn valid_outbound_emoji(value: &str) -> bool {
 
 /// Revalidate the exact current route authority for one cached target.
 fn reaction_target_authorized(state: &State, cfg: &RuntimeConfig, target: &ReactionTarget) -> bool {
+    if state.installation_team_id.as_deref() != Some(target.installation_team_id.as_str()) {
+        return false;
+    }
     match &target.authority {
         ReactionAuthority::Source {
             message_id,
@@ -5577,6 +5983,8 @@ fn reaction_target_authorized(state: &State, cfg: &RuntimeConfig, target: &React
                     route.agent_id == target.agent_id
                         && route.user_id == *user_id
                         && route.conversation == target.conversation
+                        && state.installation_team_id.as_deref()
+                            == Some(route.installation_team_id.as_str())
                 })
                 && is_route_authorized(state, cfg, &target.conversation, user_id)
         }
@@ -5799,6 +6207,14 @@ fn validate_user_id(field: &str, value: &str) -> Result<String, String> {
         return Err(format!(
             "slack `{field}` must contain exact U… or W… user ids"
         ));
+    }
+    Ok(value)
+}
+
+fn validate_team_id(field: &str, value: &str) -> Result<String, String> {
+    let value = validate_slack_id(field, value)?;
+    if !value.starts_with('T') || value.len() < 2 {
+        return Err(format!("slack `{field}` must contain an exact T… team id"));
     }
     Ok(value)
 }
@@ -6126,18 +6542,18 @@ impl SlackClient for HttpSlackClient {
             .ok_or(SlackApiError::MalformedResponse)
     }
 
-    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
+    fn auth_test(&self, cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
         let value = self.post(cfg, "auth.test", &cfg.bot_token, serde_json::json!({}))?;
-        value
-            .get("user_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned)
-            .ok_or(SlackApiError::MalformedResponse)
+        installation_from_response(&value)
     }
 
-    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        cfg: &RuntimeConfig,
+        user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         let value = self.get_user(cfg, user_id)?;
-        human_user_from_response(&value, user_id)
+        verified_human_from_response(&value, user_id)
     }
 
     fn post_message(
@@ -6236,16 +6652,64 @@ impl SlackClient for HttpSlackClient {
     }
 }
 
+fn installation_from_response(
+    value: &serde_json::Value,
+) -> Result<SlackInstallationIdentity, SlackApiError> {
+    let bot_user_id = value
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or(SlackApiError::MalformedResponse)?;
+    let team_id = value
+        .get("team_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or(SlackApiError::MalformedResponse)?;
+    Ok(SlackInstallationIdentity {
+        bot_user_id,
+        team_id,
+    })
+}
+
+fn verified_human_from_response(
+    value: &serde_json::Value,
+    expected_user_id: &str,
+) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+    let user = value.get("user").ok_or(SlackApiError::MalformedResponse)?;
+    let human = expected_user_id != "USLACKBOT"
+        && user.get("id").and_then(|value| value.as_str()) == Some(expected_user_id)
+        && user.get("deleted").and_then(|value| value.as_bool()) == Some(false)
+        && user.get("is_bot").and_then(|value| value.as_bool()) == Some(false)
+        && user.get("is_app_user").and_then(|value| value.as_bool()) == Some(false);
+    if !human {
+        return Ok(None);
+    }
+    let display_name = user
+        .get("profile")
+        .and_then(|profile| profile.get("display_name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.chars().count() <= 80
+                && value
+                    .chars()
+                    .all(|character| !tau_proto::requires_visible_escape(character))
+        })
+        .map(str::to_owned);
+    Ok(Some(VerifiedSlackHuman {
+        user_id: expected_user_id.to_owned(),
+        display_name,
+    }))
+}
+
+#[cfg(test)]
 fn human_user_from_response(
     value: &serde_json::Value,
     expected_user_id: &str,
 ) -> Result<bool, SlackApiError> {
-    let user = value.get("user").ok_or(SlackApiError::MalformedResponse)?;
-    Ok(expected_user_id != "USLACKBOT"
-        && user.get("id").and_then(|value| value.as_str()) == Some(expected_user_id)
-        && user.get("deleted").and_then(|value| value.as_bool()) == Some(false)
-        && user.get("is_bot").and_then(|value| value.as_bool()) == Some(false)
-        && user.get("is_app_user").and_then(|value| value.as_bool()) == Some(false))
+    verified_human_from_response(value, expected_user_id).map(|identity| identity.is_some())
 }
 
 fn posted_message_from_response(

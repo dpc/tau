@@ -26,3 +26,7 @@ remotely, and Tau has no durable outbox, restart-spanning idempotency, or
 exactly-once claim. Prompt
 injection can influence a role granted this tool, so destination sets and roles
 should remain minimal. App membership is required; `chat:write.public` is not.
+`mention_source_user` remains omitted or false for proactive sends because no
+authenticated source route exists. When no worker has observed the current
+installation, a read-only `auth.test` preflight binds the exact bot and team
+before the send is reserved.

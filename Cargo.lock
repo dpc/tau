@@ -3563,6 +3563,8 @@ dependencies = [
  "time",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
  "vt100",
 ]
 

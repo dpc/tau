@@ -17,6 +17,13 @@ configuration and ingress lifecycle epochs after identity I/O and before effects
 or submission. Session shutdown and inactive configuration replacement invalidate
 late work; reconnect does not, preserving already-ACKed order.
 
+Before entering that FIFO, a supported event wrapper must match the exact
+`auth.test` bot/team installation through `context_team_id` or one unambiguous
+authorization record. Top-level event team and actor home team are not
+installation authority. Exact human verification and optional bounded display
+capture come from one `users.info` snapshot; see
+[DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md).
+
 Each route independently chooses mentions-only or all-message triggers. Outside
 DMs, commands require an exact leading authenticated bot mention regardless of
 Slack event wrapper. Only an exact validated Committed+Active ingress result activates its opaque source-bound

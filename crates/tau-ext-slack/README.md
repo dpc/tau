@@ -20,6 +20,9 @@ extensions:
       app_token_secret: slack_app_token
       bot_token_secret: slack_bot_token
       allowed_user_ids: ["U12345678", "W23456789"]
+      sender_aliases:
+        - { user_id: U12345678, alias: dpc }
+        - { user_id: W23456789, alias: alice }
       security_mode: strict
       prefix_agent_id: false
       conversations:
@@ -73,6 +76,14 @@ operator text, allowed on any active static route, and limited to 120 non-contro
 Unicode scalars. The removed `channel_ids`, `listening_scope`, and
 `send_destinations` keys are hard errors with migration guidance.
 
+`sender_aliases` optionally binds at most 64 exact U/W accounts one-to-one to
+unique aliases using the same grammar. The alias is presentation only: the
+native U/W account remains authoritative and visible, and aliases never grant
+admission, command, routing, reply, reaction, or mention authority. Inbound
+creates, edits, and reactions take bounded `profile.display_name` from the same
+live `users.info` verification call (80 scalars/256 bytes); it is mutable,
+untrusted UI presentation and is never the model's primary sender identity.
+
 Agent replies and proactive sends contain only the supplied `message` text by
 default. Set `prefix_agent_id: true` to retain the earlier
 `[agent-id] message` presentation. This setting changes presentation only:
@@ -95,6 +106,13 @@ claim. Apart from the optional prefix, Tau does not split the supplied message.
 Agent text containing raw Slack `<@`, `<!`, or `<#` controls is rejected; the
 bridge's own reflected help/control/error text is escaped, bounded, and posted
 with mrkdwn and link expansion disabled.
+
+For a source-bound reply only, `mention_source_user: true` asks the bridge to
+prepend one native mention of the exact verified human already bound to
+`reply_to`. The field defaults to false, accepts no user/name/alias argument,
+and is invalid with `destination`. Generated mention text is part of the exact
+frozen body reused by the sole retry, while the durable logical message remains
+the agent-supplied text.
 
 When upgrading from a release that always added the prefix, add
 `prefix_agent_id: true` before restarting if downstream readers or automations
@@ -159,6 +177,14 @@ accepts durable send completion; the short returned-before-activation window
 fails closed, and rejected/missing-ID completions never activate it.
 
 ## Slack events and scopes
+
+Startup and reconnect require `auth.test` to return both the exact bot U/W id
+and installing T workspace id. Each Events API wrapper must then prove that
+installation through an exact `context_team_id`, or (when absent) one
+unambiguous authorization for the same team and bot when supplied. Missing,
+malformed, mixed, ambiguous, or mismatched evidence is ACKed as required but
+dropped before identity lookup or any local/ingress effect. Slack Connect actor
+home teams may differ; top-level `team_id` alone is not authority.
 
 Every setup needs app-token scope `connections:write` and bot-token scopes
 `users:read` and `chat:write`. Add the rows used by the configured policy:

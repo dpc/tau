@@ -34,3 +34,12 @@ Retry-After/jitter bounds, lifecycle cancellation, terminal ledger replay, and
 one-or-two-copy ambiguity. Provider privacy fixtures use hostile bodies, tokens,
 native ids, mentions, newlines, and bidi sentinels and assert that only closed
 categories reach displays or protocol output.
+
+Identity fixtures cover missing/malformed bot/team responses, exact event-wrapper
+installation matching without top-level actor-team authority, reconnect pair
+mismatch/partial-state failure, no-cache per-occurrence lookup, alias mutation
+across a duplicate, safe display filtering, and first-canonical presentation.
+Mention fixtures cover explicit and omitted false behavior, reply-only targeting,
+raw entity controls, exact generated wire text, and stale-installation failure.
+CLI fixtures cover compact reaction Add/Remove facts, actor, exact name, hostile
+Unicode, grapheme truncation, and final byte/column caps.

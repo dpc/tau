@@ -35,38 +35,49 @@ fn message_envelope_item(
         tau_proto::MessageEndpoint::External {
             stable_id,
             display_name,
+            identity_alias,
             ..
-        } => match envelope.trust.identity {
-            tau_proto::SenderIdentityAssurance::VerifiedAccount => {
-                match (display_name, stable_id) {
-                    (Some(display), Some(stable)) if display != stable => {
-                        format!("{display} ({stable})")
+        } => {
+            if (envelope.transport.name == "slack" || identity_alias.is_some())
+                && envelope.trust.identity == tau_proto::SenderIdentityAssurance::VerifiedAccount
+            {
+                stable_id
+                    .clone()
+                    .unwrap_or_else(|| "unverified external sender".to_owned())
+            } else {
+                match envelope.trust.identity {
+                    tau_proto::SenderIdentityAssurance::VerifiedAccount => {
+                        match (display_name, stable_id) {
+                            (Some(display), Some(stable)) if display != stable => {
+                                format!("{display} ({stable})")
+                            }
+                            (_, Some(stable)) => stable.clone(),
+                            (Some(display), None) => format!("unverified {display}"),
+                            (None, None) => "unverified external sender".to_owned(),
+                        }
                     }
-                    (_, Some(stable)) => stable.clone(),
-                    (Some(display), None) => format!("unverified {display}"),
-                    (None, None) => "unverified external sender".to_owned(),
+                    tau_proto::SenderIdentityAssurance::RoomMembership => format!(
+                        "room occupant {}",
+                        display_name
+                            .clone()
+                            .or_else(|| stable_id.clone())
+                            .unwrap_or_else(|| "unknown".to_owned())
+                    ),
+                    tau_proto::SenderIdentityAssurance::DisplayOnly
+                    | tau_proto::SenderIdentityAssurance::Unknown => format!(
+                        "unverified {}",
+                        display_name
+                            .clone()
+                            .or_else(|| stable_id.clone())
+                            .unwrap_or_else(|| "external sender".to_owned())
+                    ),
+                    tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent => display_name
+                        .clone()
+                        .or_else(|| stable_id.clone())
+                        .unwrap_or_else(|| "external sender".to_owned()),
                 }
             }
-            tau_proto::SenderIdentityAssurance::RoomMembership => format!(
-                "room occupant {}",
-                display_name
-                    .clone()
-                    .or_else(|| stable_id.clone())
-                    .unwrap_or_else(|| "unknown".to_owned())
-            ),
-            tau_proto::SenderIdentityAssurance::DisplayOnly
-            | tau_proto::SenderIdentityAssurance::Unknown => format!(
-                "unverified {}",
-                display_name
-                    .clone()
-                    .or_else(|| stable_id.clone())
-                    .unwrap_or_else(|| "external sender".to_owned())
-            ),
-            tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent => display_name
-                .clone()
-                .or_else(|| stable_id.clone())
-                .unwrap_or_else(|| "external sender".to_owned()),
-        },
+        }
     };
     tau_proto::MessageEnvelopeItem {
         direction,
@@ -74,6 +85,17 @@ fn message_envelope_item(
         model_presentation: tau_proto::MessageModelPresentation {
             transport_label: envelope.transport.name.clone(),
             source_label,
+            transport_instance_label: envelope
+                .transport
+                .instance
+                .as_ref()
+                .map(ToString::to_string),
+            source_alias: match &envelope.source {
+                tau_proto::MessageEndpoint::External { identity_alias, .. } => {
+                    identity_alias.clone()
+                }
+                _ => None,
+            },
             live_send_tool: None,
             conversation_label: envelope.conversation.as_ref().and_then(|conversation| {
                 conversation

@@ -35,11 +35,18 @@ impl SlackClient for StaleFirstPostClient {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only client")
     }
 
@@ -101,11 +108,18 @@ impl SlackClient for OrderedBlockingPostClient {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only client")
     }
 
@@ -160,11 +174,18 @@ impl SlackClient for BlockingSendClient {
         unreachable!("not used")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("not used")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("not used")
     }
 
@@ -205,11 +226,18 @@ impl SlackClient for BlockingPostOutcomeClient {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only client")
     }
 
@@ -247,11 +275,18 @@ impl SlackClient for MismatchedPostClient {
         unreachable!("post-only test client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only test client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only test client")
     }
 
@@ -292,11 +327,18 @@ impl SlackClient for ScriptedPostClient {
         unreachable!("post-only client")
     }
 
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
+        Ok(SlackInstallationIdentity {
+            bot_user_id: "UBOT123".to_owned(),
+            team_id: "T123".to_owned(),
+        })
     }
 
-    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, SlackApiError> {
+    fn verified_human_identity(
+        &self,
+        _cfg: &RuntimeConfig,
+        _user_id: &str,
+    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
         unreachable!("post-only client")
     }
 
@@ -425,6 +467,32 @@ fn slack_send_rejects_destination_arguments() {
         panic!("expected error");
     };
     assert!(err.message.contains("unknown argument `channel_id`"));
+}
+
+/// Deterministic agent-text rejection must not contact Slack merely to
+/// establish installation evidence or freeze otherwise replaceable
+/// configuration.
+#[test]
+fn invalid_agent_text_fails_before_installation_preflight() {
+    let (ext, _rx, client) = extension();
+    apply_test_config(&ext, proactive_cfg());
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.bot_user_id = None;
+        state.installation_team_id = None;
+    }
+    let invoke = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message":"unsafe <@U123>","destination":"team-ops"}),
+        ),
+    );
+
+    assert!(matches!(ext.handle_send(invoke), Some(Event::ToolError(_))));
+    assert_eq!(*client.auth_count.lock().expect("auth count"), 0);
+    assert!(client.sent_pairs().is_empty());
+    assert!(!ext.state.lock().expect("state").config_frozen);
 }
 
 /// Proactive aliases work without agent registration, preserve a configured
@@ -617,7 +685,12 @@ fn proactive_api_failure_still_freezes_configuration() {
     let (tx, rx) = mpsc::channel();
     let ext = Extension::new(Arc::new(FailingPostClient), tx);
     ext.apply_config(proactive_cfg()).expect("config");
-    ext.state.lock().expect("state").capability_active = true;
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.capability_active = true;
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
+    }
     let result = ext.handle_send(tool(
         SEND_TOOL_NAME,
         "agent-a",
@@ -922,7 +995,7 @@ fn ambiguous_send_retries_once_with_exact_frozen_body() {
     let client = ScriptedPostClient::new([
         PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Transport),
         PostAttemptOutcome::Accepted(PostedMessage {
-            channel_id: "C456".to_owned(),
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         }),
@@ -931,13 +1004,28 @@ fn ambiguous_send_retries_once_with_exact_frozen_body() {
     let (tx, rx) = mpsc::channel();
     let ext = Extension::new_with_scheduler(client.clone(), tx, scheduler.clone());
     apply_test_config(&ext, proactive_cfg());
+    register_agent(&ext, "agent-a");
+    ext.state.lock().expect("state").insert_reply_route(
+        MessageId::new("msg-source"),
+        ReplyRoute {
+            agent_id: agent_id("agent-a"),
+            conversation: slack_conversation("C123", None),
+            user_id: "U123".to_owned(),
+            display_name: None,
+            identity_alias: None,
+            installation_team_id: "T123".to_owned(),
+            policy_status: SenderPolicyStatus::Allowlisted,
+        },
+    );
     let invoke = tool_call(
         SEND_TOOL_NAME,
         "agent-a",
         "retry-exact",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message":"bounded retry","destination":"team-ops"}),
-        ),
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "message":"bounded retry",
+            "reply_to":"msg-source",
+            "mention_source_user":true
+        })),
     );
 
     let generation = ext.send_wake.generation();
@@ -954,6 +1042,10 @@ fn ambiguous_send_retries_once_with_exact_frozen_body() {
     let bodies = client.bodies.lock().expect("bodies");
     assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[0], bodies[1]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&bodies[0]).expect("frozen body JSON")["text"],
+        "<@U123> bounded retry"
+    );
     drop(bodies);
     let delays = scheduler.delays.lock().expect("delays");
     assert_eq!(delays.len(), 1);

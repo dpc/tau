@@ -1074,6 +1074,7 @@ impl Harness {
             | MessageEndpoint::External {
                 stable_id: _,
                 display_name: _,
+                identity_alias: _,
                 actor_kind: _,
             }
             | MessageEndpoint::User => {
@@ -1233,6 +1234,17 @@ fn validate_draft(draft: &TransportMessageDraft) -> Result<(), &'static str> {
     if !matches!(draft.external_endpoint, MessageEndpoint::External { .. }) {
         return Err("external_endpoint_required");
     }
+    if let MessageEndpoint::External {
+        stable_id,
+        identity_alias: Some(alias),
+        ..
+    } = &draft.external_endpoint
+        && (stable_id.is_none()
+            || draft.identity_assurance != tau_proto::SenderIdentityAssurance::VerifiedAccount
+            || !valid_identity_alias(&alias.value))
+    {
+        return Err("invalid_identity_alias");
+    }
     let encoded = tau_proto::encode_message_to_vec(draft).map_err(|_| "invalid_metadata")?;
     if encoded.len() > MAX_DRAFT_BYTES {
         return Err("metadata_too_large");
@@ -1246,6 +1258,16 @@ fn validate_draft(draft: &TransportMessageDraft) -> Result<(), &'static str> {
         return Err("invalid_dedup_key");
     }
     Ok(())
+}
+
+fn valid_identity_alias(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 fn ingress_dedup_key(
@@ -1464,6 +1486,7 @@ fn draft_authority(draft: &TransportMessageDraft) -> IngressAuthority<'_> {
         MessageEndpoint::External {
             stable_id,
             display_name: _,
+            identity_alias: _,
             actor_kind,
         } => ExternalEndpointAuthority::External {
             stable_id,
@@ -1587,6 +1610,7 @@ mod tests {
         if let MessageEndpoint::External {
             stable_id: _,
             display_name,
+            identity_alias: _,
             actor_kind: _,
         } = &mut retry.draft.external_endpoint
         {
@@ -1619,6 +1643,7 @@ mod tests {
                     MessageEndpoint::External {
                         stable_id: _,
                         display_name: Some(ref display),
+                        identity_alias: None,
                         actor_kind: _,
                     } if display == "Alice"
                 ));
@@ -1815,6 +1840,7 @@ mod tests {
         let endpoint = MessageEndpoint::External {
             stable_id: None,
             display_name: Some("team-ops".to_owned()),
+            identity_alias: None,
             actor_kind: ExternalActorKind::Unknown,
         };
         let conversation = tau_proto::MessageConversation {
@@ -1975,6 +2001,7 @@ mod tests {
             external_endpoint: MessageEndpoint::External {
                 stable_id: Some("U123".to_owned()),
                 display_name: Some("Alice".to_owned()),
+                identity_alias: None,
                 actor_kind: ExternalActorKind::Human,
             },
             conversation: None,
@@ -2074,10 +2101,15 @@ mod tests {
         if let MessageEndpoint::External {
             stable_id: _,
             display_name,
+            identity_alias,
             actor_kind: _,
         } = &mut retry.external_endpoint
         {
             *display_name = Some("renamed".to_owned());
+            *identity_alias = Some(tau_proto::ExternalIdentityAlias {
+                value: "renamed-alias".to_owned(),
+                authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+            });
         }
         retry
             .conversation
@@ -2085,11 +2117,27 @@ mod tests {
             .expect("conversation")
             .display_name = Some("renamed-channel".to_owned());
         assert!(drafts_authority_equal(&original, &retry));
+        assert_eq!(validate_draft(&retry), Ok(()));
+
+        let mut invalid_alias = original.clone();
+        if let MessageEndpoint::External { identity_alias, .. } =
+            &mut invalid_alias.external_endpoint
+        {
+            *identity_alias = Some(tau_proto::ExternalIdentityAlias {
+                value: "Uppercase".to_owned(),
+                authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+            });
+        }
+        assert_eq!(
+            validate_draft(&invalid_alias),
+            Err("invalid_identity_alias")
+        );
 
         let mut changed = original.clone();
         if let MessageEndpoint::External {
             stable_id,
             display_name: _,
+            identity_alias: _,
             actor_kind: _,
         } = &mut changed.external_endpoint
         {
@@ -2100,6 +2148,7 @@ mod tests {
         if let MessageEndpoint::External {
             stable_id: _,
             display_name: _,
+            identity_alias: _,
             actor_kind,
         } = &mut changed.external_endpoint
         {
@@ -2644,6 +2693,7 @@ mod tests {
                 external_endpoint: MessageEndpoint::External {
                     stable_id: None,
                     display_name: Some(display.clone()),
+                    identity_alias: None,
                     actor_kind: ExternalActorKind::Unknown,
                 },
                 conversation: tau_proto::MessageConversation {
@@ -2859,6 +2909,7 @@ mod tests {
                     external_endpoint: MessageEndpoint::External {
                         stable_id: Some("U1".to_owned()),
                         display_name: None,
+                        identity_alias: None,
                         actor_kind: ExternalActorKind::Human,
                     },
                     conversation: None,

@@ -59,6 +59,12 @@ decoding, so harness and extensions must be upgraded together. Existing durable
 message envelopes require no rewrite: the harness migrates an absent or obsolete
 derived locator by rebuilding it from retained incoming envelopes.
 
+Version 11 external endpoints may carry an optional operator-configured identity
+alias with explicit authority. It is presentation-only, requires a verified
+stable account, and does not change dedup equality. The exact first committed
+endpoint—including its display/alias snapshot—is returned on every duplicate;
+adapters must use that canonical endpoint rather than pending retry metadata.
+
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For
 bus events themselves, see [events.md](events.md).

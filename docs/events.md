@@ -15,6 +15,11 @@ wakes an agent or activates a reply route. Native identifiers are bounded
 durable metadata. A canonical `reply_to` id is an opaque selector rather than a
 bearer capability and is reauthorized against the live source, session, agent,
 route, and tool at send completion.
+External stable ids remain audit identity. Optional display names and explicitly
+authorized aliases are presentation snapshots: they do not alter durable dedup
+authority, and replay preserves the first committed values. Provider projection
+keeps the stable id primary and separately labels an operator alias plus the
+harness-authenticated transport instance.
 
 The tau bus mostly carries facts: components broadcast what happened, while the
 `ui.*` category carries user-intent requests from attached UIs to the harness.

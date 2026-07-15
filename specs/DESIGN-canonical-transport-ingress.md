@@ -1,6 +1,6 @@
 # DESIGN-canonical-transport-ingress: Canonical transport ingress authority
 
-Status: unconfirmed
+Status: confirmed, 2026-07-15, dpc
 
 The harness owns transport-ingress deduplication across all retained durable
 agent history. Its scope is authenticated extension instance, transport family,

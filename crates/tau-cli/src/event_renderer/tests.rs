@@ -21,6 +21,7 @@ fn external_message_rendering_is_always_full_and_typed() {
             source: tau_proto::MessageEndpoint::External {
                 stable_id: Some("U123".to_owned()),
                 display_name: Some("Alice".to_owned()),
+                identity_alias: None,
                 actor_kind: tau_proto::ExternalActorKind::Human,
             },
             destination: tau_proto::MessageEndpoint::Agent {
@@ -52,7 +53,7 @@ fn external_message_rendering_is_always_full_and_typed() {
     );
     assert_eq!(
         super::EventRenderer::agent_message_summary(&event),
-        "slack message received · Alice"
+        "slack message received · U123 (Slack \"Alice\")"
     );
     assert_eq!(
         super::EventRenderer::agent_message_body(&event),
@@ -75,9 +76,188 @@ fn external_message_rendering_is_always_full_and_typed() {
     };
     assert_eq!(
         super::EventRenderer::agent_message_summary(&edit),
-        "slack edit received · Alice · updates msg-original"
+        "slack edit received · U123 (Slack \"Alice\") · updates msg-original"
     );
     assert_eq!(super::EventRenderer::agent_message_body(&edit), "corrected");
+}
+
+/// Slack reaction facts retain the validated native action/name and use the
+/// same visibly escaped layered actor label as other typed messages.
+#[test]
+fn slack_reaction_rendering_preserves_actor_action_alias_and_exact_name() {
+    let mut envelope = match external_message_rendering_fixture() {
+        tau_proto::Event::AgentMessageIncoming(message) => message.envelope,
+        _ => unreachable!(),
+    };
+    if let tau_proto::MessageEndpoint::External {
+        identity_alias,
+        display_name,
+        ..
+    } = &mut envelope.source
+    {
+        *display_name = Some("A\"lice\u{202e}".to_owned());
+        *identity_alias = Some(tau_proto::ExternalIdentityAlias {
+            value: "dpc".to_owned(),
+            authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+        });
+    }
+    envelope.operation = tau_proto::MessageOperation::Reaction {
+        target: tau_proto::MessageRef {
+            message_id: None,
+            external_message_id: Some("1.0".to_owned()),
+        },
+        action: tau_proto::ReactionAction::Remove,
+        reaction: tau_proto::MessageReaction {
+            name: "thumbsup::skin-tone-6".to_owned(),
+            display: None,
+        },
+    };
+    let event = tau_proto::Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
+        recipient_id: agent_id("agent-a"),
+        envelope,
+    });
+    assert_eq!(
+        super::EventRenderer::message_render_mode(
+            tau_config::settings::ShowMessages::AllFull,
+            &event
+        ),
+        MessageRenderMode::Summary
+    );
+    assert_eq!(
+        super::EventRenderer::agent_message_summary(&event),
+        "slack reaction removed by U123 (Slack \"A\\\"lice\\u{202E}\"; alias dpc) · :thumbsup::skin-tone-6:"
+    );
+    assert_eq!(
+        super::EventRenderer::agent_message_body(&event),
+        "removed :thumbsup::skin-tone-6:"
+    );
+    let renderer = renderer_for_agent_id_tests();
+    let rendered = renderer
+        .render_agent_message_block(&event)
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert_eq!(
+        rendered,
+        "> slack reaction removed by U123 (Slack \"A\\\"lice\\u{202E}\"; alias dpc) · :thumbsup::skin-tone-6:"
+    );
+
+    let mut added = event;
+    let tau_proto::Event::AgentMessageIncoming(message) = &mut added else {
+        unreachable!()
+    };
+    let tau_proto::MessageOperation::Reaction { action, .. } = &mut message.envelope.operation
+    else {
+        unreachable!()
+    };
+    *action = tau_proto::ReactionAction::Add;
+    let rendered = renderer
+        .render_agent_message_block(&added)
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert_eq!(
+        rendered,
+        "> slack reaction added by U123 (Slack \"A\\\"lice\\u{202E}\"; alias dpc) · :thumbsup::skin-tone-6:"
+    );
+}
+
+/// Generic external endpoint labels truncate only whole graphemes and keep
+/// structural Unicode visible within their final byte and column caps.
+#[test]
+fn generic_external_formatter_is_grapheme_safe_and_final_bounded() {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+
+    let endpoint = tau_proto::MessageEndpoint::External {
+        stable_id: Some(format!("acct\u{180e}-{}", "x".repeat(500))),
+        display_name: Some("👩‍🚀".repeat(100)),
+        identity_alias: Some(tau_proto::ExternalIdentityAlias {
+            value: "operator-alias".to_owned(),
+            authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
+        }),
+        actor_kind: tau_proto::ExternalActorKind::Human,
+    };
+    let label = super::EventRenderer::message_endpoint_label("xmpp", &endpoint, true);
+    assert!(label.contains("\\u{180E}"));
+    assert!(label.contains("alias operator-alias"));
+    assert!(label.len() <= 512);
+    assert!(label.width() <= 160);
+    assert!(
+        label.graphemes(true).all(|grapheme| grapheme != "\u{200d}"),
+        "ZWJ must never be split out as its own retained grapheme"
+    );
+}
+
+/// Typed transport events file under their actual receiving or sending agent,
+/// independent of the currently displayed transcript.
+#[test]
+fn typed_transport_events_resolve_actual_transcript_owner() {
+    let incoming = external_message_rendering_fixture();
+    assert!(matches!(
+        super::EventRenderer::agent_message_event_agent_id(&incoming),
+        super::EventAgentIdResolution::Agent(agent) if agent == "agent-a"
+    ));
+    let tau_proto::Event::AgentMessageIncoming(incoming) = incoming else {
+        unreachable!()
+    };
+    let outgoing = tau_proto::Event::AgentMessageOutgoing(tau_proto::AgentMessageOutgoing {
+        sender_id: agent_id("agent-b"),
+        envelope: incoming.envelope,
+        acceptance: tau_proto::MessageTransportAcceptance::SubmittedToTransport,
+        in_reply_to: None,
+        configured_destination: Some("team".to_owned()),
+        tool_call_id: None,
+    });
+    assert!(matches!(
+        super::EventRenderer::agent_message_event_agent_id(&outgoing),
+        super::EventAgentIdResolution::Agent(agent) if agent == "agent-b"
+    ));
+}
+
+/// Build one typed external message suitable for endpoint rendering tests.
+fn external_message_rendering_fixture() -> tau_proto::Event {
+    tau_proto::Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
+        recipient_id: agent_id("agent-a"),
+        envelope: tau_proto::MessageEnvelope {
+            message_id: tau_proto::MessageId::new("msg-1"),
+            transport: tau_proto::MessageTransportRef {
+                name: "slack".to_owned(),
+                instance: Some(tau_proto::ExtensionName::from("std-slack")),
+            },
+            source: tau_proto::MessageEndpoint::External {
+                stable_id: Some("U123".to_owned()),
+                display_name: Some("Alice".to_owned()),
+                identity_alias: None,
+                actor_kind: tau_proto::ExternalActorKind::Human,
+            },
+            destination: tau_proto::MessageEndpoint::Agent {
+                session_id: None,
+                agent_id: agent_id("agent-a"),
+                display_name: None,
+            },
+            conversation: None,
+            operation: tau_proto::MessageOperation::Create {
+                payload: tau_proto::MessagePayload::Text {
+                    text: "hello".to_owned(),
+                    format: tau_proto::TextFormat::Plain,
+                },
+            },
+            trust: tau_proto::MessageTrust {
+                content: tau_proto::MessageContentTrust::UntrustedExternal,
+                identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,
+                policy: tau_proto::SenderPolicyStatus::Allowlisted,
+            },
+            external_identity: None,
+            ordering: None,
+            occurred_at: None,
+            reply_path: None,
+        },
+    })
 }
 
 fn agent_id(value: &str) -> tau_proto::AgentId {

@@ -43,9 +43,29 @@ pub enum MessageEndpoint {
         /// Presentation-only actor label.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
+        /// Presentation-only alias with explicit local authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_alias: Option<ExternalIdentityAlias>,
         /// Transport-reported actor class.
         actor_kind: ExternalActorKind,
     },
+}
+
+/// Presentation-only alias for an external identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalIdentityAlias {
+    /// Stable bounded alias.
+    pub value: String,
+    /// Authority that assigned the alias.
+    pub authority: ExternalIdentityAliasAuthority,
+}
+
+/// Closed provenance for an external identity alias.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalIdentityAliasAuthority {
+    /// The local operator bound the alias to an exact transport identity.
+    OperatorConfigured,
 }
 
 /// External actor classification.
@@ -339,6 +359,12 @@ pub struct MessageModelPresentation {
     pub transport_label: String,
     /// Safe source label.
     pub source_label: String,
+    /// Harness-authenticated transport instance that scopes source aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_instance_label: Option<String>,
+    /// Stable presentation-only source alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_alias: Option<ExternalIdentityAlias>,
     /// Safe conversation label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_label: Option<String>,
@@ -409,6 +435,9 @@ impl MessageEnvelopeItem {
             "transport",
             &self.model_presentation.transport_label,
         );
+        if let Some(instance) = &self.model_presentation.transport_instance_label {
+            push_xml_attribute(&mut rendered, "transport_instance", instance);
+        }
         push_xml_attribute(
             &mut rendered,
             "message_id",
@@ -419,6 +448,16 @@ impl MessageEnvelopeItem {
             "sender",
             &self.model_presentation.source_label,
         );
+        if let Some(alias) = &self.model_presentation.source_alias {
+            push_xml_attribute(&mut rendered, "sender_alias", &alias.value);
+            push_xml_attribute(
+                &mut rendered,
+                "sender_alias_authority",
+                match alias.authority {
+                    ExternalIdentityAliasAuthority::OperatorConfigured => "operator_configured",
+                },
+            );
+        }
         if let Some(conversation) = &self.model_presentation.conversation_label {
             push_xml_attribute(&mut rendered, "conversation", conversation);
         }
@@ -486,13 +525,52 @@ fn sender_allowlisted(value: SenderPolicyStatus) -> Option<&'static str> {
     }
 }
 
-fn requires_visible_escape(character: char) -> bool {
+/// Return whether untrusted metadata must be rendered as a visible escape.
+///
+/// This includes controls, bidi/zero-width structure, Unicode default
+/// ignorables used to spoof visible labels, variation selectors, and
+/// noncharacters.
+#[must_use]
+pub fn requires_visible_escape(character: char) -> bool {
+    let scalar = character as u32;
     character.is_control()
-        || matches!(character, '\u{00AD}' | '\u{061C}' | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
-            | '\u{FDD0}'..='\u{FDEF}' | '\u{FEFF}')
-        || (character as u32 & 0xFFFF == 0xFFFE)
-        || (character as u32 & 0xFFFF == 0xFFFF)
+        || matches!(
+            scalar,
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFF0..=0xFFF8
+                | 0xFFA0
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+                | 0xFDD0..=0xFDEF
+        )
+        || scalar & 0xFFFF == 0xFFFE
+        || scalar & 0xFFFF == 0xFFFF
+}
+
+/// Render untrusted metadata with structural Unicode made explicit.
+#[must_use]
+pub fn visible_escape_metadata(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if requires_visible_escape(character) {
+            push_visible_escape(&mut escaped, character);
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 fn push_visible_escape(output: &mut String, character: char) {

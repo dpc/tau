@@ -30,6 +30,14 @@ representations summarize byte length rather than formatting image bytes.
 
 Harness input and output messages are directionally typed. Keep request/response envelopes in the correct enum, and preserve existing serde names unless a migration plan updates all producers, consumers, docs, and recorded fixtures.
 
+Canonical external endpoints keep stable transport identity separate from
+mutable display presentation and an optional explicitly sourced operator alias.
+Provider presentation carries the harness-stamped transport instance and alias
+authority separately while retaining the stable id as the primary sender.
+Shared visible escaping covers controls, bidi/zero-width/default-ignorable
+structure, variation selectors, Hangul fillers, and noncharacters so UIs and
+provider XML never interpret hostile metadata.
+
 `encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
 
 External agent-message delivery is modeled as a dedicated directional RPC
