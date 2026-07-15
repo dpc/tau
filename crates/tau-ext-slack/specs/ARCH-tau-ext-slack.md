@@ -40,6 +40,15 @@ return the first durable display/alias snapshot rather than rewriting history.
 See
 [DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md).
 
+Exact occurrences of the authenticated installation bot's native mention are
+recognized only outside complete equal-length backtick code ranges. One leading
+occurrence is removed for command compatibility and every remaining occurrence
+becomes the semantic `@slack_bridge` token. The generic
+`transport_identity_mentioned` fact records either case in the first durable
+snapshot; it is transport-instance context, not authority or an egress
+capability. See
+[DESIGN-tau-ext-slack-transport-identity-mentions](DESIGN-tau-ext-slack-transport-identity-mentions.md).
+
 The harness stamps trust, durably deduplicates, and commits ingress. Only a
 protocol-v11 Committed+Active result whose exact first canonical instance,
 target, native occurrence, human, conversation/thread, assurance, and policy

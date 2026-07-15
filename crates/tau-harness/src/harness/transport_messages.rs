@@ -7,11 +7,12 @@ use tau_proto::{
     AgentMessageIncoming, AgentMessageOutgoing, CommittedTransportIngressRoute,
     CompleteTransportSendRequest, CompleteTransportSendResult, Event, ExtensionName,
     HarnessOutputMessage, MessageContentTrust, MessageEndpoint, MessageEnvelope, MessageId,
-    MessageReplyPath, MessageTransportRef, MessageTrust, RegisterTransportCapabilityRequest,
-    RegisterTransportCapabilityResult, ReplyPathLifetime, ReplySelector, SenderPolicyStatus,
-    ToolName, TransportIngressRejection, TransportMessageDraft, TransportMessageIngressDisposition,
-    TransportMessageIngressOutcome, TransportMessageIngressRequest, TransportMessageIngressResult,
-    TransportReplyActivation, TransportReplyInactiveReason, TransportSendAuthorization,
+    MessageOperation, MessageReplyPath, MessageTransportRef, MessageTrust,
+    RegisterTransportCapabilityRequest, RegisterTransportCapabilityResult, ReplyPathLifetime,
+    ReplySelector, SenderPolicyStatus, ToolName, TransportIngressRejection, TransportMessageDraft,
+    TransportMessageIngressDisposition, TransportMessageIngressOutcome,
+    TransportMessageIngressRequest, TransportMessageIngressResult, TransportReplyActivation,
+    TransportReplyInactiveReason, TransportSendAuthorization,
 };
 
 use super::transport_ingress_locator::{LocatorFailure, LocatorLookup, LocatorReservation};
@@ -542,6 +543,7 @@ impl Harness {
             },
             conversation: request.draft.conversation.clone(),
             operation: request.draft.operation.clone(),
+            transport_identity_mentioned: request.draft.transport_identity_mentioned,
             trust: MessageTrust {
                 content: MessageContentTrust::UntrustedExternal,
                 identity: request.draft.identity_assurance,
@@ -899,6 +901,7 @@ impl Harness {
             destination: request.draft.external_endpoint.clone(),
             conversation: request.draft.conversation.clone(),
             operation: request.draft.operation.clone(),
+            transport_identity_mentioned: false,
             trust: MessageTrust {
                 content: MessageContentTrust::AuthenticatedTauAgent,
                 identity: tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent,
@@ -1245,6 +1248,14 @@ fn validate_draft(draft: &TransportMessageDraft) -> Result<(), &'static str> {
     {
         return Err("invalid_identity_alias");
     }
+    if draft.transport_identity_mentioned
+        && !matches!(
+            &draft.operation,
+            MessageOperation::Create { .. } | MessageOperation::Edit { .. }
+        )
+    {
+        return Err("invalid_transport_identity_mention");
+    }
     let encoded = tau_proto::encode_message_to_vec(draft).map_err(|_| "invalid_metadata")?;
     if encoded.len() > MAX_DRAFT_BYTES {
         return Err("metadata_too_large");
@@ -1328,6 +1339,7 @@ pub(super) fn draft_from_envelope(envelope: &MessageEnvelope) -> TransportMessag
         external_endpoint: envelope.source.clone(),
         conversation: envelope.conversation.clone(),
         operation: envelope.operation.clone(),
+        transport_identity_mentioned: envelope.transport_identity_mentioned,
         identity_assurance: envelope.trust.identity,
         policy_status: envelope.trust.policy,
         external_identity: envelope.external_identity.clone(),
@@ -1440,6 +1452,8 @@ struct IngressAuthority<'a> {
     conversation: Option<ConversationAuthority<'a>>,
     /// Exact immutable operation and payload.
     operation: &'a tau_proto::MessageOperation,
+    /// Whether text addressed the transport's receiving identity.
+    transport_identity_mentioned: bool,
     /// Canonical identity assurance.
     identity_assurance: tau_proto::SenderIdentityAssurance,
     /// Canonical routing policy.
@@ -1519,6 +1533,7 @@ fn draft_authority(draft: &TransportMessageDraft) -> IngressAuthority<'_> {
         endpoint,
         conversation,
         operation: &draft.operation,
+        transport_identity_mentioned: draft.transport_identity_mentioned,
         identity_assurance: draft.identity_assurance,
         policy_status: draft.policy_status,
         external_identity: &draft.external_identity,
@@ -1544,7 +1559,7 @@ fn mint_message_id() -> MessageId {
 #[cfg(test)]
 mod tests {
     use tau_proto::{
-        ExternalActorKind, ExternalMessageIdentity, MessageOperation, MessagePayload,
+        ExternalActorKind, ExternalMessageIdentity, MessageOperation, MessagePayload, MessageRef,
         SenderIdentityAssurance, TextFormat,
     };
 
@@ -1882,6 +1897,7 @@ mod tests {
                         format: TextFormat::Plain,
                     },
                 },
+                transport_identity_mentioned: false,
                 identity_assurance: SenderIdentityAssurance::Unknown,
                 policy_status: SenderPolicyStatus::Allowlisted,
                 external_identity: None,
@@ -2011,6 +2027,7 @@ mod tests {
                     format: TextFormat::Plain,
                 },
             },
+            transport_identity_mentioned: false,
             identity_assurance: SenderIdentityAssurance::VerifiedAccount,
             policy_status: SenderPolicyStatus::Allowlisted,
             external_identity: Some(ExternalMessageIdentity {
@@ -2057,7 +2074,14 @@ mod tests {
     /// be rejected after restart.
     #[test]
     fn persisted_envelope_reconstructs_dedup_comparison_draft() {
-        let input = draft("event-1");
+        let mut input = draft("event-1");
+        input.transport_identity_mentioned = true;
+        input.operation = MessageOperation::Create {
+            payload: MessagePayload::Text {
+                text: "hello @slack_bridge".to_owned(),
+                format: TextFormat::Plain,
+            },
+        };
         let envelope = MessageEnvelope {
             message_id: MessageId::new("msg-1"),
             transport: MessageTransportRef {
@@ -2068,6 +2092,7 @@ mod tests {
             destination: MessageEndpoint::User,
             conversation: input.conversation.clone(),
             operation: input.operation.clone(),
+            transport_identity_mentioned: input.transport_identity_mentioned,
             trust: MessageTrust {
                 content: MessageContentTrust::UntrustedExternal,
                 identity: input.identity_assurance,
@@ -2131,6 +2156,20 @@ mod tests {
         assert_eq!(
             validate_draft(&invalid_alias),
             Err("invalid_identity_alias")
+        );
+
+        let mut changed = original.clone();
+        changed.transport_identity_mentioned = true;
+        assert!(!drafts_authority_equal(&original, &changed));
+
+        let mut invalid = original.clone();
+        invalid.transport_identity_mentioned = true;
+        invalid.operation = MessageOperation::Delete {
+            target: MessageRef::default(),
+        };
+        assert_eq!(
+            validate_draft(&invalid),
+            Err("invalid_transport_identity_mention")
         );
 
         let mut changed = original.clone();
@@ -2470,6 +2509,7 @@ mod tests {
                 },
                 conversation: None,
                 operation: canonical_draft.operation.clone(),
+                transport_identity_mentioned: canonical_draft.transport_identity_mentioned,
                 trust: MessageTrust {
                     content: MessageContentTrust::UntrustedExternal,
                     identity: canonical_draft.identity_assurance,

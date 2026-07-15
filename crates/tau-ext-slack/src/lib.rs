@@ -39,6 +39,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 mod admission;
 mod posted_message_cache;
 mod send_delivery;
+mod transport_mentions;
 
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
@@ -47,6 +48,9 @@ use send_delivery::{
     RemoteCopyPossibility, SendFailureCategory, SendLedgerDisposition, SendLedgerEntry,
     SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
     SystemSendScheduler, classify_api_error, classify_post_api_error, parse_retry_after,
+};
+use transport_mentions::{
+    NormalizedTransportMention, SLACK_BRIDGE_REFERENCE, normalize_transport_mentions,
 };
 
 /// Tracing target used by this extension.
@@ -736,8 +740,19 @@ struct IngressSubmission {
     sender: IngressSender,
     /// Immutable create/edit/reaction operation.
     operation: MessageOperation,
+    /// Whether normalized text addressed this installation's receiving
+    /// identity.
+    transport_identity_mentioned: bool,
     /// Native identity used by durable harness deduplication.
     external_identity: ExternalMessageIdentity,
+}
+
+/// Command prefix and remainder parsed from normalized Slack text.
+struct ParsedSlackCommand<'a> {
+    /// Recognized or command-shaped first token.
+    name: Option<&'a str>,
+    /// Text after the first token.
+    rest: &'a str,
 }
 
 fn secret_value<'a>(
@@ -2092,14 +2107,21 @@ impl Extension {
             state.posted_messages.remove_agent(&invoke.agent_id);
             self.send_wake.notify_lifecycle_change();
         }
-        tool_result(
-            invoke,
-            if enabled {
-                "registered for Slack messages; Socket Mode connection is starting"
+        let mut result = vec![example_field(
+            "status",
+            example_text(if enabled {
+                "registered"
             } else {
-                "unregistered from Slack messages"
-            },
-        )
+                "unregistered"
+            }),
+        )];
+        if enabled {
+            result.push(example_field(
+                "incoming_transport_reference",
+                example_text(SLACK_BRIDGE_REFERENCE),
+            ));
+        }
+        structured_tool_result(invoke, CborValue::Map(result))
     }
 
     fn prepare_worker_start(&self, cfg: &RuntimeConfig) -> Result<WorkerStartup, String> {
@@ -2788,6 +2810,7 @@ impl Extension {
                         display: None,
                     },
                 },
+                transport_identity_mentioned: false,
                 external_identity: ExternalMessageIdentity {
                     event_id: reaction.event_id,
                     message_id: Some(reaction.message_ts),
@@ -2822,7 +2845,7 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let (cfg, owner) = {
+        let (cfg, owner, bot_user_id) = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let Some(cfg) = state.config.clone() else {
                 return;
@@ -2849,7 +2872,10 @@ impl Extension {
                 log_ingress_rejection("edit_owner_or_thread");
                 return;
             }
-            (cfg, owner)
+            let Some(bot_user_id) = state.bot_user_id.clone() else {
+                return;
+            };
+            (cfg, owner, bot_user_id)
         };
         let Some(identity) = self.verified_human_traced(&cfg, &edit.editor_user_id, admission)
         else {
@@ -2857,6 +2883,15 @@ impl Extension {
         };
         let text = edit.text.trim();
         if text.is_empty() || text.len() > cfg.max_message_bytes {
+            log_ingress_rejection("malformed_text");
+            return;
+        }
+        let NormalizedTransportMention {
+            text,
+            mentioned,
+            leading: _,
+        } = normalize_transport_mentions(text, &bot_user_id);
+        if text.is_empty() {
             log_ingress_rejection("malformed_text");
             return;
         }
@@ -2885,10 +2920,11 @@ impl Extension {
                         external_message_id: Some(edit.message_ts.clone()),
                     },
                     payload: MessagePayload::Text {
-                        text: text.to_owned(),
+                        text,
                         format: TextFormat::Plain,
                     },
                 },
+                transport_identity_mentioned: mentioned,
                 external_identity: ExternalMessageIdentity {
                     event_id: edit.event_id,
                     message_id: Some(edit.message_ts),
@@ -2968,13 +3004,24 @@ impl Extension {
         let Some(identity) = self.verified_human_traced(&cfg, &message.user_id, admission) else {
             return;
         };
-        let leading_mention = self.has_leading_bot_mention(&message.text);
-        let Some(mut text) = self.trimmed_message_text(&cfg, &message, admission) else {
+        let bot_user_id = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if admission.is_some_and(|context| !context.matches_state(&state)) {
+                return;
+            }
+            state.bot_user_id.clone()
+        };
+        let Some(bot_user_id) = bot_user_id else {
             return;
         };
-        if leading_mention {
-            text = self.strip_bot_mention(&text);
-        }
+        let Some(text) = self.trimmed_message_text(&cfg, &message, admission) else {
+            return;
+        };
+        let NormalizedTransportMention {
+            text,
+            mentioned,
+            leading: leading_mention,
+        } = normalize_transport_mentions(&text, &bot_user_id);
         if text.is_empty() {
             if !self.insert_command_duplicate(&message, admission) {
                 return;
@@ -2988,14 +3035,14 @@ impl Extension {
             );
             return;
         }
-        let (command, rest) = if is_dm || leading_mention {
+        let (name, rest) = if is_dm || leading_mention {
             parse_command(&text)
         } else {
             (None, "")
         };
         // Lax senders contribute untrusted prompt content; they never gain
         // bridge-control authority (including linking or target selection).
-        if command.is_some_and(|command| {
+        if name.is_some_and(|command| {
             matches!(
                 command,
                 "start" | "/start" | "agents" | "/agents" | "select" | "/select" | "to" | "/to"
@@ -3005,20 +3052,27 @@ impl Extension {
             log_ingress_rejection("sender_control_policy");
             return;
         }
-        if command.is_some()
-            && !matches!(command, Some("to" | "/to"))
+        if name.is_some()
+            && !matches!(name, Some("to" | "/to"))
             && !self.insert_command_duplicate(&message, admission)
         {
             log_ingress_rejection("command_dedup");
             return;
         }
-        if self.rejects_unlinked_command(&cfg, &message, command, admission) {
+        if self.rejects_unlinked_command(&cfg, &message, name, admission) {
             return;
         }
-        if self.handle_command(&cfg, &message, &identity, command, rest, admission) {
+        if self.handle_command(
+            &cfg,
+            &message,
+            &identity,
+            mentioned,
+            ParsedSlackCommand { name, rest },
+            admission,
+        ) {
             return;
         }
-        self.route_plain_text(&cfg, &message, &identity, &text, admission);
+        self.route_plain_text(&cfg, &message, &identity, &text, mentioned, admission);
     }
 
     /// Suppress retry side effects for bridge-local commands only.
@@ -3146,34 +3200,6 @@ impl Extension {
         }
     }
 
-    fn strip_bot_mention(&self, text: &str) -> String {
-        let bot_user_id = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .bot_user_id
-            .clone();
-        let Some(bot_user_id) = bot_user_id else {
-            return text.trim().to_owned();
-        };
-        let mention = format!("<@{bot_user_id}>");
-        text.trim()
-            .strip_prefix(&mention)
-            .map(str::trim)
-            .unwrap_or_else(|| text.trim())
-            .to_owned()
-    }
-
-    fn has_leading_bot_mention(&self, text: &str) -> bool {
-        let bot_user_id = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .bot_user_id
-            .clone();
-        bot_user_id.is_some_and(|id| text.trim().starts_with(&format!("<@{id}>")))
-    }
-
     fn rejects_unlinked_command(
         &self,
         cfg: &RuntimeConfig,
@@ -3207,11 +3233,11 @@ impl Extension {
         cfg: &RuntimeConfig,
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
-        command: Option<&str>,
-        rest: &str,
+        transport_identity_mentioned: bool,
+        parsed: ParsedSlackCommand<'_>,
         admission: Option<&AdmissionContext>,
     ) -> bool {
-        match command {
+        match parsed.name {
             Some("start" | "/start") => {
                 self.handle_start_command(
                     cfg,
@@ -3226,11 +3252,18 @@ impl Extension {
                 true
             }
             Some("select" | "/select") => {
-                self.handle_select_command(cfg, message, rest, admission);
+                self.handle_select_command(cfg, message, parsed.rest, admission);
                 true
             }
             Some("to" | "/to") => {
-                self.handle_to_command(cfg, message, identity, rest, admission);
+                self.handle_to_command(
+                    cfg,
+                    message,
+                    identity,
+                    parsed.rest,
+                    transport_identity_mentioned,
+                    admission,
+                );
                 true
             }
             Some(command) if command.starts_with('/') => {
@@ -3421,6 +3454,7 @@ impl Extension {
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
         rest: &str,
+        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let (target, body) = split_first(rest);
@@ -3438,7 +3472,14 @@ impl Extension {
             return;
         }
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => self.route_text(message, identity, agent_id, body.trim(), admission),
+            Ok(agent_id) => self.route_text(
+                message,
+                identity,
+                agent_id,
+                body.trim(),
+                transport_identity_mentioned,
+                admission,
+            ),
             Err(reply) => {
                 if self.insert_command_duplicate(message, admission) {
                     self.reply(
@@ -3459,6 +3500,7 @@ impl Extension {
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
         text: &str,
+        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let route_key = {
@@ -3470,7 +3512,14 @@ impl Extension {
             return;
         };
         match self.plain_text_target(&route_key) {
-            Ok(agent_id) => self.route_text(message, identity, agent_id, text, admission),
+            Ok(agent_id) => self.route_text(
+                message,
+                identity,
+                agent_id,
+                text,
+                transport_identity_mentioned,
+                admission,
+            ),
             Err(reply) => {
                 if self.insert_command_duplicate(message, admission) {
                     self.reply(
@@ -3600,6 +3649,7 @@ impl Extension {
         identity: &VerifiedSlackHuman,
         agent_id: AgentId,
         text: &str,
+        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let Some(cfg) = self
@@ -3656,6 +3706,7 @@ impl Extension {
                         format: TextFormat::Plain,
                     },
                 },
+                transport_identity_mentioned,
                 external_identity: ExternalMessageIdentity {
                     event_id: message
                         .ts
@@ -3683,6 +3734,7 @@ impl Extension {
             agent_id,
             sender,
             operation,
+            transport_identity_mentioned,
             external_identity,
         } = submission;
         if !self.admission_authority_is_current(admission) {
@@ -3789,6 +3841,7 @@ impl Extension {
                     },
                     &conversation,
                     operation,
+                    transport_identity_mentioned,
                     external_identity,
                     policy_status,
                     self.output.wire_tool_name(SEND_TOOL_NAME),
@@ -4095,6 +4148,7 @@ fn transport_draft(
     external_endpoint: MessageEndpoint,
     conversation: &SlackConversation,
     operation: MessageOperation,
+    transport_identity_mentioned: bool,
     external_identity: ExternalMessageIdentity,
     policy_status: SenderPolicyStatus,
     send_tool: tau_proto::ToolName,
@@ -4104,6 +4158,7 @@ fn transport_draft(
         external_endpoint,
         conversation: Some(message_conversation(conversation)),
         operation,
+        transport_identity_mentioned,
         identity_assurance: SenderIdentityAssurance::VerifiedAccount,
         policy_status,
         external_identity: Some(external_identity),
@@ -6054,10 +6109,6 @@ fn validate_object_fields(arguments: &CborValue, allowed_fields: &[&str]) -> Res
         }
     }
     Ok(())
-}
-
-fn tool_result(invoke: ToolStarted, text: &str) -> Event {
-    Event::ToolResult(successful_tool_result(&invoke, text))
 }
 
 /// Construct a terminal success with a structured model-facing result.

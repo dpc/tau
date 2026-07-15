@@ -39,6 +39,10 @@ dedup authority; the first durable label/alias snapshot is nevertheless the only
 canonical presentation returned for every duplicate. Model projection keeps the
 stable id primary and separately exposes alias authority plus the
 harness-authenticated transport instance.
+The generic default-false `transport_identity_mentioned` fact is likewise part
+of the first canonical ingress snapshot and duplicate compatibility. It records
+transport-own addressing without exposing the transport's native identifier and
+confers no authority or egress behavior.
 Retained-history uncertainty fails closed as specified by
 [DESIGN-canonical-transport-ingress](DESIGN-canonical-transport-ingress.md).
 

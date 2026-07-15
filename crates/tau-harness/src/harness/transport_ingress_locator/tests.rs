@@ -31,6 +31,7 @@ fn record(value: &str) -> TransportDedupRecord {
                     format: TextFormat::Plain,
                 },
             },
+            transport_identity_mentioned: false,
             identity_assurance: SenderIdentityAssurance::VerifiedAccount,
             policy_status: SenderPolicyStatus::Allowlisted,
             external_identity: Some(ExternalMessageIdentity {

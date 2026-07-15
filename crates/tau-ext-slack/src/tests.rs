@@ -966,6 +966,78 @@ fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> Sl
     }
 }
 
+/// Exact own-bot entities normalize only outside complete equal-length
+/// backtick code ranges; unmatched delimiters remain ordinary text.
+#[test]
+fn transport_mention_normalization_is_exact_and_code_aware() {
+    let cases = [
+        ("<@UBOT123> hello", "hello", true, true),
+        (
+            "hello <@UBOT123> <@UBOT123>",
+            "hello @slack_bridge @slack_bridge",
+            true,
+            false,
+        ),
+        ("hello <@UBOT123>", "hello @slack_bridge", true, false),
+        ("<@UBOT123><@UBOT123>", "@slack_bridge", true, true),
+        ("`<@UBOT123>`", "`<@UBOT123>`", false, false),
+        ("``<@UBOT123>``", "``<@UBOT123>``", false, false),
+        (
+            "```text\n<@UBOT123>\n``` after <@UBOT123>",
+            "```text\n<@UBOT123>\n``` after @slack_bridge",
+            true,
+            false,
+        ),
+        (
+            "` unmatched <@UBOT123>",
+            "` unmatched @slack_bridge",
+            true,
+            false,
+        ),
+        ("&lt;@UBOT123&gt;", "&lt;@UBOT123&gt;", false, false),
+        ("<@UOTHER>", "<@UOTHER>", false, false),
+        ("<@UBOT123|bridge>", "<@UBOT123|bridge>", false, false),
+        ("<@UBOT123", "<@UBOT123", false, false),
+        ("<@ubot123>", "<@ubot123>", false, false),
+        ("<@UBOT12>", "<@UBOT12>", false, false),
+        ("＠slack_bridge", "＠slack_bridge", false, false),
+        ("@slack_bridge", "@slack_bridge", false, false),
+    ];
+    for (input, expected, mentioned, leading) in cases {
+        let normalized = normalize_transport_mentions(input, "UBOT123");
+        assert_eq!(normalized.text, expected, "{input}");
+        assert_eq!(normalized.mentioned, mentioned, "{input}");
+        assert_eq!(normalized.leading, leading, "{input}");
+    }
+}
+
+/// Canonical create drafts carry normalized text and the independent typed
+/// addressing fact for leading, embedded, and literal-token inputs.
+#[test]
+fn transport_mention_create_projection_is_canonical() {
+    for (input, expected, mentioned) in [
+        ("<@UBOT123> hello", "hello", true),
+        (
+            "hello <@UBOT123> and `<@UBOT123>`",
+            "hello @slack_bridge and `<@UBOT123>`",
+            true,
+        ),
+        ("literal @slack_bridge", "literal @slack_bridge", false),
+    ] {
+        let (ext, rx, _client) = extension();
+        register_agent(&ext, "agent-a");
+        ext.process_slack_message(slack_message("C123", Some("channel"), input));
+        let request = recv_prompt_request(&rx);
+        assert_eq!(request.draft.transport_identity_mentioned, mentioned);
+        assert!(matches!(
+            request.draft.operation,
+            MessageOperation::Create {
+                payload: MessagePayload::Text { ref text, .. }
+            } if text == expected
+        ));
+    }
+}
+
 fn dual_slack_messages(text: &str) -> (SlackMessage, SlackMessage) {
     let mut message = slack_message("C123", Some("channel"), text);
     message.event_type = "message".to_owned();
@@ -3125,7 +3197,22 @@ fn slack_send_fails_before_register() {
 fn slack_register_toggles_agent_and_starts_worker() {
     let (ext, _rx, _client) = extension();
     let result = ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(true)));
-    assert!(matches!(result, Event::ToolResult(_)));
+    let Event::ToolResult(result) = result else {
+        panic!("expected structured registration result")
+    };
+    assert_eq!(
+        result.result,
+        CborValue::Map(vec![
+            example_field("status", example_text("registered")),
+            example_field(
+                "incoming_transport_reference",
+                example_text("@slack_bridge")
+            ),
+        ])
+    );
+    let encoded = serde_json::to_string(&result.result).expect("registration result");
+    assert!(!encoded.contains("UBOT123"));
+    assert!(!encoded.contains("T123"));
     {
         let state = ext.state.lock().expect("lock");
         assert!(state.worker_started);
@@ -3151,7 +3238,13 @@ fn slack_register_toggles_agent_and_starts_worker() {
         agent_id("agent-a"),
     );
     let result = ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false)));
-    assert!(matches!(result, Event::ToolResult(_)));
+    let Event::ToolResult(result) = result else {
+        panic!("expected structured unregister result")
+    };
+    assert_eq!(
+        result.result,
+        CborValue::Map(vec![example_field("status", example_text("unregistered"))])
+    );
     let state = ext.state.lock().expect("lock");
     assert!(!state.registered_agents.contains(&agent_id("agent-a")));
     assert!(state.selected_agent_by_route.is_empty());
@@ -3350,6 +3443,7 @@ fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
     ext.process_slack_reaction(reaction);
     let prompt = recv_prompt_request(&rx);
     assert_eq!(prompt.target_agent_id, agent_id("agent-a"));
+    assert!(!prompt.draft.transport_identity_mentioned);
     assert_eq!(
         prompt.draft.external_endpoint,
         MessageEndpoint::External {
@@ -3397,9 +3491,16 @@ fn committed_root_message_edit_references_canonical_original() {
     let original = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &original);
 
-    ext.process_slack_edit(slack_edit("EE1", "C123", "1.0", None, "edited"));
+    ext.process_slack_edit(slack_edit(
+        "EE1",
+        "C123",
+        "1.0",
+        None,
+        "<@UBOT123> edited <@UBOT123>",
+    ));
     let edit = recv_prompt_request(&rx);
     assert_eq!(edit.target_agent_id, agent_id("agent-a"));
+    assert!(edit.draft.transport_identity_mentioned);
     assert_eq!(
         edit.draft.operation,
         MessageOperation::Edit {
@@ -3408,7 +3509,7 @@ fn committed_root_message_edit_references_canonical_original() {
                 external_message_id: Some("1.0".to_owned()),
             },
             payload: MessagePayload::Text {
-                text: "edited".to_owned(),
+                text: "edited @slack_bridge".to_owned(),
                 format: TextFormat::Plain,
             },
         }
@@ -3417,6 +3518,17 @@ fn committed_root_message_edit_references_canonical_original() {
     assert_eq!(identity.event_id.as_deref(), Some("EE1"));
     assert_eq!(identity.message_id.as_deref(), Some("1.0"));
     assert_eq!(identity.revision_id.as_deref(), Some("2.0"));
+
+    ext.process_slack_edit(slack_edit("EE2", "C123", "1.0", None, "plain edit"));
+    let edit = recv_prompt_request(&rx);
+    assert!(!edit.draft.transport_identity_mentioned);
+    assert!(matches!(
+        edit.draft.operation,
+        MessageOperation::Edit {
+            payload: MessagePayload::Text { ref text, .. },
+            ..
+        } if text == "plain edit"
+    ));
 }
 
 /// Incoming native identity ownership is bounded, immutable on collision, and
@@ -4808,10 +4920,14 @@ fn dm_linking_is_explicit_and_multi_link() {
             .linked_dms
             .contains_key("D999")
     );
-    ext.process_slack_message(slack_message("D123", Some("im"), "first DM"));
+    ext.process_slack_message(slack_message("D123", Some("im"), "first DM <@UBOT123>"));
     ext.process_slack_message(slack_message("D999", Some("im"), "second DM"));
-    assert_eq!(recv_prompt(&rx), "first DM");
-    assert_eq!(recv_prompt(&rx), "second DM");
+    let first = recv_prompt_request(&rx);
+    assert!(first.draft.transport_identity_mentioned);
+    assert_eq!(ingress_text(&first), "first DM @slack_bridge");
+    let second = recv_prompt_request(&rx);
+    assert!(!second.draft.transport_identity_mentioned);
+    assert_eq!(ingress_text(&second), "second DM");
 }
 
 /// A dynamic D id remains bound to its exact allowlisted U/W user for prompts,
@@ -5015,9 +5131,16 @@ fn agents_select_and_to_route_by_agent_id() {
     ext.process_slack_message(slack_message(
         "C123",
         None,
-        "<@UBOT123> to agent-beta direct",
+        "<@UBOT123> to agent-beta direct <@UBOT123>",
     ));
-    assert_eq!(recv_prompt(&rx), "direct");
+    let direct = recv_prompt_request(&rx);
+    assert!(direct.draft.transport_identity_mentioned);
+    assert!(matches!(
+        direct.draft.operation,
+        MessageOperation::Create {
+            payload: MessagePayload::Text { ref text, .. }
+        } if text == "direct @slack_bridge"
+    ));
 }
 
 /// Malformed command-shaped text is handled as command feedback and must not
@@ -5525,6 +5648,7 @@ fn static_route_kinds_and_fixed_threads_normalize_ingress() {
     root.ts = Some("7.0".to_owned());
     ext.process_slack_message(root);
     let root = recv_prompt_request(&rx);
+    assert!(root.draft.transport_identity_mentioned);
     let root_conversation = root.draft.conversation.expect("conversation");
     assert_eq!(root_conversation.display_name.as_deref(), Some("fixed"));
     assert_eq!(
@@ -5535,20 +5659,21 @@ fn static_route_kinds_and_fixed_threads_normalize_ingress() {
         Some("7.0")
     );
 
-    let mut mpim = slack_message("G777", Some("mpim"), "group");
+    let mut mpim = slack_message("G777", Some("mpim"), "group <@UBOT123>");
     mpim.event_type = "message".to_owned();
     ext.process_slack_message(mpim);
+    let mpim = recv_prompt_request(&rx);
+    assert!(mpim.draft.transport_identity_mentioned);
+    assert_eq!(ingress_text(&mpim), "group @slack_bridge");
     assert_eq!(
-        recv_prompt_request(&rx)
-            .draft
-            .conversation
-            .expect("conversation")
-            .kind,
+        mpim.draft.conversation.expect("conversation").kind,
         ConversationKind::Group
     );
 
-    ext.process_slack_message(slack_message("D777", Some("im"), "direct"));
-    assert_eq!(recv_prompt(&rx), "direct");
+    ext.process_slack_message(slack_message("D777", Some("im"), "direct <@UBOT123>"));
+    let direct = recv_prompt_request(&rx);
+    assert!(direct.draft.transport_identity_mentioned);
+    assert_eq!(ingress_text(&direct), "direct @slack_bridge");
 }
 
 /// Private-channel, parent-thread, fixed-thread, and explicit kind matching
@@ -5758,7 +5883,10 @@ fn dual_wrapper_commands_have_one_local_effect() {
 /// effects.
 #[test]
 fn dual_wrapper_routed_creates_are_identical() {
-    for text in ["<@UBOT123> to agent-a hello", "<@UBOT123> hello"] {
+    for text in [
+        "<@UBOT123> to agent-a hello <@UBOT123>",
+        "<@UBOT123> hello <@UBOT123>",
+    ] {
         for message_first in [true, false] {
             let (ext, rx, client) = extension();
             ext.state
@@ -5782,6 +5910,7 @@ fn dual_wrapper_routed_creates_are_identical() {
             }
             let first = recv_prompt_request(&rx);
             let second = recv_prompt_request(&rx);
+            assert!(first.draft.transport_identity_mentioned);
             assert_eq!(first.draft, second.draft);
             assert!(client.sent_pairs().is_empty());
         }

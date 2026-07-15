@@ -61,6 +61,7 @@ fn test_message_envelope() -> MessageEnvelope {
                 format: TextFormat::Plain,
             },
         },
+        transport_identity_mentioned: false,
         trust: MessageTrust {
             content: MessageContentTrust::UntrustedExternal,
             identity: SenderIdentityAssurance::VerifiedAccount,
@@ -2018,11 +2019,68 @@ fn visible_metadata_classifier_covers_default_ignorables_and_noncharacters() {
     assert!(!requires_visible_escape('🦀'));
 }
 
+/// Transport-identity addressing is absent-by-default on old envelopes and is
+/// projected as an explicit true-only model XML attribute.
+#[test]
+fn transport_identity_mention_defaults_false_and_projects_true() {
+    let mut envelope = test_message_envelope();
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&envelope, &mut encoded).expect("encode envelope");
+    let mut legacy: ciborium::value::Value =
+        ciborium::from_reader(encoded.as_slice()).expect("decode generic envelope");
+    let ciborium::value::Value::Map(fields) = &mut legacy else {
+        panic!("envelope must encode as a CBOR map");
+    };
+    fields.retain(|(key, _)| {
+        !matches!(
+            key,
+            ciborium::value::Value::Text(name)
+                if name == "transport_identity_mentioned"
+        )
+    });
+    encoded.clear();
+    ciborium::into_writer(&legacy, &mut encoded).expect("encode legacy envelope");
+    let decoded: MessageEnvelope =
+        ciborium::from_reader(encoded.as_slice()).expect("decode legacy envelope");
+    assert!(!decoded.transport_identity_mentioned);
+    let render = |envelope| {
+        MessageEnvelopeItem {
+            direction: MessageDirection::Incoming,
+            envelope,
+            model_presentation: MessageModelPresentation {
+                transport_label: "slack".to_owned(),
+                source_label: "U123".to_owned(),
+                transport_instance_label: Some("corp".to_owned()),
+                source_alias: None,
+                live_send_tool: None,
+                conversation_label: None,
+            },
+        }
+        .render_provider_text()
+    };
+    assert!(!render(decoded).contains("transport_identity_mentioned"));
+
+    envelope.transport_identity_mentioned = true;
+    if let MessageOperation::Create {
+        payload: MessagePayload::Text { text, .. },
+    } = &mut envelope.operation
+    {
+        *text = "hello @slack_bridge".to_owned();
+    }
+    encoded.clear();
+    ciborium::into_writer(&envelope, &mut encoded).expect("encode true envelope");
+    envelope = ciborium::from_reader(encoded.as_slice()).expect("round-trip true envelope");
+    let rendered = render(envelope);
+    assert!(rendered.contains(" transport_identity_mentioned=\"true\""));
+    assert!(rendered.contains(">hello @slack_bridge</tau_message>"));
+}
+
 /// Delete rendering must not invent sender text and must use the shared compact
 /// mutation vocabulary.
 #[test]
 fn compact_message_delete_is_self_closing() {
     let mut envelope = test_message_envelope();
+    envelope.transport_identity_mentioned = true;
     envelope.operation = MessageOperation::Delete {
         target: MessageRef {
             message_id: Some(MessageId::new("original")),
@@ -2045,6 +2103,7 @@ fn compact_message_delete_is_self_closing() {
     assert!(rendered.contains(" operation=\"delete\" target=\"original\""));
     assert!(rendered.ends_with(" reply=\"slack_send\"/>"));
     assert!(!rendered.contains("message deleted"));
+    assert!(!rendered.contains("transport_identity_mentioned"));
 }
 
 /// Attribute and text escaping must neutralize closing tags, quotes, controls,
@@ -2112,6 +2171,7 @@ fn typed_message_facts_and_rpcs_round_trip() {
                 external_endpoint: envelope.source,
                 conversation: envelope.conversation,
                 operation: envelope.operation,
+                transport_identity_mentioned: envelope.transport_identity_mentioned,
                 identity_assurance: SenderIdentityAssurance::VerifiedAccount,
                 policy_status: SenderPolicyStatus::Allowlisted,
                 external_identity: envelope.external_identity,

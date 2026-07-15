@@ -36,6 +36,7 @@ fn external_message_rendering_is_always_full_and_typed() {
                     format: tau_proto::TextFormat::Plain,
                 },
             },
+            transport_identity_mentioned: false,
             trust: tau_proto::MessageTrust {
                 content: tau_proto::MessageContentTrust::UntrustedExternal,
                 identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,
@@ -247,6 +248,7 @@ fn external_message_rendering_fixture() -> tau_proto::Event {
                     format: tau_proto::TextFormat::Plain,
                 },
             },
+            transport_identity_mentioned: false,
             trust: tau_proto::MessageTrust {
                 content: tau_proto::MessageContentTrust::UntrustedExternal,
                 identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,

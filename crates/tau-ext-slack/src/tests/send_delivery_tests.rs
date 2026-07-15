@@ -1604,6 +1604,9 @@ fn typed_post_boundary_is_bounded_private_and_literal_safe() {
     let generated = SlackPostMode::agent("hello".to_owned(), Some(&mention))
         .expect("internal exact source mention");
     assert_eq!(generated.text(), "<@U123> hello");
+    let semantic_reference = SlackPostMode::agent("@slack_bridge".to_owned(), None)
+        .expect("semantic reference stays literal");
+    assert_eq!(semantic_reference.text(), "@slack_bridge");
     let literal = SlackPostMode::bridge_literal("<@U123> & <!channel> <#C123>");
     assert_eq!(
         literal.text(),

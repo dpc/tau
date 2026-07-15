@@ -84,6 +84,18 @@ creates, edits, and reactions take bounded `profile.display_name` from the same
 live `users.info` verification call (80 scalars/256 bytes); it is mutable,
 untrusted UI presentation and is never the model's primary sender identity.
 
+Incoming exact mentions of the authenticated installation bot set the generic
+`transport_identity_mentioned` fact on the durable envelope. Exactly one
+eligible leading mention is removed for routing/command compatibility; every
+remaining eligible mention is represented to the model as `@slack_bridge`.
+Complete equal-length backtick code ranges suppress recognition; escaped,
+labeled, partial, case-changed, and literal `@slack_bridge` text do not count.
+A successful `slack_register` returns exactly
+`{"status":"registered","incoming_transport_reference":"@slack_bridge"}`;
+unregister returns `{"status":"unregistered"}`. This is advisory model syntax,
+not a bot-id disclosure, capability, routing authority, or egress expansion.
+Sending the token posts it literally.
+
 Agent replies and proactive sends contain only the supplied `message` text by
 default. Set `prefix_agent_id: true` to retain the earlier
 `[agent-id] message` presentation. This setting changes presentation only:

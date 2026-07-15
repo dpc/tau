@@ -1136,6 +1136,7 @@ fn incoming_message(agent_id: AgentId) -> Event {
                     format: tau_proto::TextFormat::Plain,
                 },
             },
+            transport_identity_mentioned: false,
             trust: tau_proto::MessageTrust {
                 content: tau_proto::MessageContentTrust::UntrustedExternal,
                 identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,

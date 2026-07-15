@@ -1398,6 +1398,7 @@ impl SendDeliveryWorker {
             prepared.endpoint.clone(),
             &prepared.route,
             operation,
+            false,
             ExternalMessageIdentity {
                 event_id: None,
                 message_id: Some(posted.ts.clone()),

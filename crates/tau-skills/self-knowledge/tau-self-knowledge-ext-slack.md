@@ -27,6 +27,18 @@ authoritative/model-primary; bounded `profile.display_name` from the same
 `users.info` call is untrusted UI-only presentation. Durable retries keep the
 first committed display/alias snapshot.
 
+Inbound exact mentions of the authenticated installation bot set the durable
+generic `transport_identity_mentioned` fact. Exactly one eligible leading
+mention is removed for routing/command compatibility; remaining eligible
+mentions become the semantic model token `@slack_bridge`. Complete
+equal-length backtick code ranges suppress recognition. Escaped, labeled,
+partial, case-changed, and literal `@slack_bridge` text do not count. Successful
+registration returns exactly
+`{"status":"registered","incoming_transport_reference":"@slack_bridge"}`;
+unregister returns `{"status":"unregistered"}`. The token discloses no native
+id, grants no authority or capability, and does not expand egress; outbound
+`@slack_bridge` remains literal text.
+
 Dynamic DMs are opt-in, bounded to 64 exact D-to-allowlisted-U/W links,
 receive-and-source-reply only, multi-link, and runtime-only. Static receive DM policy wins over
 dynamic discovery; proactive-only static DM policy does not block it.

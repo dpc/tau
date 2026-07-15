@@ -326,6 +326,14 @@ pub struct MessageEnvelope {
     pub conversation: Option<MessageConversation>,
     /// Immutable operation.
     pub operation: MessageOperation,
+    /// Informational, non-authoritative fact that normalized Create/Edit text
+    /// addressed this transport instance's authenticated receiving identity.
+    ///
+    /// Absent legacy data defaults to false. This must remain false for
+    /// textless operations and grants no routing, instruction, or transport
+    /// capability.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transport_identity_mentioned: bool,
     /// Trust classification.
     pub trust: MessageTrust,
     /// Optional native identity.
@@ -448,6 +456,14 @@ impl MessageEnvelopeItem {
             "sender",
             &self.model_presentation.source_label,
         );
+        if self.envelope.transport_identity_mentioned
+            && matches!(
+                &self.envelope.operation,
+                MessageOperation::Create { .. } | MessageOperation::Edit { .. }
+            )
+        {
+            push_xml_attribute(&mut rendered, "transport_identity_mentioned", "true");
+        }
         if let Some(alias) = &self.model_presentation.source_alias {
             push_xml_attribute(&mut rendered, "sender_alias", &alias.value);
             push_xml_attribute(
@@ -653,6 +669,13 @@ pub struct TransportMessageDraft {
     pub conversation: Option<MessageConversation>,
     /// Immutable operation.
     pub operation: MessageOperation,
+    /// Informational, non-authoritative fact that normalized Create/Edit text
+    /// addressed the transport's authenticated receiving identity.
+    ///
+    /// Absent data defaults to false. This must remain false for textless
+    /// operations and grants no routing, instruction, or transport capability.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transport_identity_mentioned: bool,
     /// Sender identity assurance.
     pub identity_assurance: SenderIdentityAssurance,
     /// Sender policy status.

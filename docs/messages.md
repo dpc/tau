@@ -64,6 +64,11 @@ alias with explicit authority. It is presentation-only, requires a verified
 stable account, and does not change dedup equality. The exact first committed
 endpoint—including its display/alias snapshot—is returned on every duplicate;
 adapters must use that canonical endpoint rather than pending retry metadata.
+Incoming envelopes may also carry the default-false
+`transport_identity_mentioned` fact. True means the adapter recognized its own
+authenticated receiving identity in normalized text; it is part of immutable
+duplicate compatibility and provider projection, not a capability or routing
+grant.
 
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For

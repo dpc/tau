@@ -20,6 +20,10 @@ authorized aliases are presentation snapshots: they do not alter durable dedup
 authority, and replay preserves the first committed values. Provider projection
 keeps the stable id primary and separately labels an operator alias plus the
 harness-authenticated transport instance.
+Incoming envelopes may additionally record the default-false
+`transport_identity_mentioned` fact. It is immutable duplicate-compatible
+content indicating that normalized text addressed the receiving transport's own
+authenticated identity, not an identity disclosure, capability, or route grant.
 
 The tau bus mostly carries facts: components broadcast what happened, while the
 `ui.*` category carries user-intent requests from attached UIs to the harness.

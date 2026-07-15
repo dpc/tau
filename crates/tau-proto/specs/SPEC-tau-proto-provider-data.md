@@ -90,6 +90,10 @@ delete and reaction occurrences are self-closing. `origin="external"` means
 all payload text is untrusted. `sender_allowlisted="true"` means the operator
 allowlisted the authenticated sender, while `"false"` means lax policy admitted
 an outsider; neither value grants instruction, tool, or control authority.
+The optional true-only `transport_identity_mentioned="true"` attribute is an
+informational, non-routing fact: normalized Create/Edit text addressed the
+authenticated receiving transport identity. It grants no routing, instruction,
+tool, control, or transport capability and is absent from textless operations.
 
 Attribute and text escaping are deliberately separate. Attribute controls,
 line separators, bidi/format controls, and noncharacters become visible

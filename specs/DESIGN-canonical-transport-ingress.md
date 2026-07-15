@@ -35,8 +35,9 @@ revoke/re-register ABA.
 Dedup equality uses an explicit authority projection. It includes original
 target, stable endpoint id and kind, conversation kind/stable id/thread/reply,
 operation and payload, trust and policy, native identity, ordering and
-occurrence time, and send tool. It excludes only endpoint and conversation
-presentation labels.
+occurrence time, send tool, and whether normalized text addressed the receiving
+transport identity. It excludes only endpoint and conversation presentation
+labels.
 
 Adapters have no authority before commit. They may install private reply state
 only after validating an Active canonical result against their pending stable

@@ -14,6 +14,10 @@ keeps the native sender primary and adds `transport_instance`, `sender_alias`,
 and `sender_alias_authority="operator_configured"` attributes. Mutable
 transport-fetched display labels stay UI-only. Presentation changes are excluded
 from durable dedup authority, and duplicates return the first committed snapshot.
+The optional true-only `transport_identity_mentioned="true"` attribute records
+that normalized text addressed the authenticated receiving transport identity.
+It is generic typed context—not a native identifier, routing signal, or
+capability—and belongs to the immutable first snapshot.
 
 Reply tools select an extension-private live destination with an opaque
 canonical `reply_to` id. Replayed messages do not restore reply authority.

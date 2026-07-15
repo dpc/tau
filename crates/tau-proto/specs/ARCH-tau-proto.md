@@ -38,6 +38,12 @@ Shared visible escaping covers controls, bidi/zero-width/default-ignorable
 structure, variation selectors, Hangul fillers, and noncharacters so UIs and
 provider XML never interpret hostile metadata.
 
+Incoming envelopes also carry a generic default-false
+`transport_identity_mentioned` fact. When true it projects as a true-only XML
+attribute and records that the normalized text addressed the receiving
+transport instance's own authenticated identity. It is immutable canonical
+content, not identity disclosure, capability, or routing authority.
+
 `encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
 
 External agent-message delivery is modeled as a dedicated directional RPC
