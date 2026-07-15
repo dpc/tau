@@ -268,8 +268,11 @@ inherits = "dev"
 lto = "off"
 
 [profile.release]
-codegen-units = 1
+# Keep the universal binary's whole-program optimization parallel. Fat LTO with
+# one codegen unit made the final source-release build take several minutes.
+# flake.nix asserts these values; see DESIGN-release-build-profile.
+codegen-units = 16
 debug = false
-lto = "fat"
+lto = "thin"
 panic = "abort"
 strip = "symbols"

@@ -74,13 +74,21 @@
           "crates"
         ];
 
-        buildSrc = flakeboxLib.filterSubPaths {
-          root = builtins.path {
-            name = projectName;
-            path = ./.;
+        cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        releaseProfile = cargoManifest.profile.release;
+        buildSrc =
+          # The universal release binary needs parallel LLVM optimization. This
+          # evaluation guard prevents normal release builds from silently
+          # returning to the multi-minute fat-LTO/one-CGU configuration.
+          assert releaseProfile.lto == "thin";
+          assert releaseProfile.codegen-units == 16;
+          flakeboxLib.filterSubPaths {
+            root = builtins.path {
+              name = projectName;
+              path = ./.;
+            };
+            paths = buildPaths;
           };
-          paths = buildPaths;
-        };
 
         # Placeholders are 40 / 16 raw bytes that the binary embeds via
         # a `static [u8; N]` in `crates/tau-harness/src/version.rs`.
@@ -363,10 +371,18 @@
             };
 
             tau = replaceTauBuildInfo (
-              craneLib.buildPackage {
-                cargoArtifacts = tauDeps;
-                cargoExtraArgs = "-p tau";
-              }
+              craneLib.buildPackage (
+                {
+                  cargoArtifacts = tauDeps;
+                  cargoExtraArgs = "-p tau";
+                }
+                // pkgs.lib.optionalAttrs (craneLib.cargoProfile == "release") {
+                  # Keep the final command, wall time, and peak RSS visible in
+                  # release logs without changing dev/CI profile semantics.
+                  cargoBuildCommand = "${pkgs.time}/bin/time -v cargo build --release --locked";
+                  nativeBuildInputs = [ pkgs.time ];
+                }
+              )
             );
           }
         );

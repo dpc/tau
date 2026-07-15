@@ -77,6 +77,16 @@ blocked. Core validation and warm/cold replay regressions enforce these rules.
 Revisit them when adding any explicit abandon/rewind operation or changing
 compaction replay ownership.
 
+## Release build resource reliability
+
+The universal release binary's accepted build-time, memory, size, and runtime
+tradeoffs are documented in
+[`DESIGN-release-build-profile`](specs/DESIGN-release-build-profile.md) with
+measurement details in
+[`docs/release-builds.md`](docs/release-builds.md). The design record owns the
+reliability limits and revisit triggers; the evidence document owns the
+measurements.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:
