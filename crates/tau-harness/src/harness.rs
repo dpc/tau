@@ -742,6 +742,11 @@ struct PendingIngressAck {
     connection_id: String,
     request_id: String,
     session_generation: u64,
+    /// Harness-local monotonic activation start retained until durable commit.
+    activation_started_at: std::time::Instant,
+    /// Harness-validated Slack process-local ordinal used only for TRACE
+    /// correlation.
+    request_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

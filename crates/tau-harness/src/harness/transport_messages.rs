@@ -1,6 +1,7 @@
 //! Source-bound canonical transport message intake and send completion.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use tau_proto::{
     AgentMessageIncoming, AgentMessageOutgoing, CompleteTransportSendRequest,
@@ -41,6 +42,15 @@ impl Harness {
                     .remove(&message.envelope.message_id)
                     .unwrap_or_default();
                 for waiter in waiters {
+                    if let Some(request_seq) = waiter.request_seq {
+                        tracing::trace!(
+                            schema = "slack_latency_v1",
+                            request_seq,
+                            activation_to_commit_us = monotonic_us(waiter.activation_started_at),
+                            outcome = "commit_failed",
+                            "transport.ingress.commit_finished"
+                        );
+                    }
                     let _ = self.bus.send_to(
                         &waiter.connection_id,
                         None,
@@ -318,7 +328,41 @@ impl Harness {
         source_id: &str,
         request: TransportMessageIngressRequest,
     ) {
-        if let Err(result) = self.begin_transport_message_ingress(source_id, request) {
+        let transport_class = if request.draft.transport_name == "slack" {
+            "slack"
+        } else {
+            "other"
+        };
+        let request_seq = slack_request_seq(&request);
+        let started_at = Instant::now();
+        if let Some(request_seq) = request_seq {
+            tracing::trace!(
+                schema = "slack_latency_v1",
+                request_seq,
+                transport_class,
+                "transport.ingress.activation_started"
+            );
+        }
+        let result =
+            self.begin_transport_message_ingress(source_id, request, started_at, request_seq);
+        let outcome = match &result {
+            Ok(()) => "published",
+            Err(result) if result.outcome == Some(TransportMessageIngressOutcome::Duplicate) => {
+                "duplicate_committed"
+            }
+            Err(_) => "rejected",
+        };
+        if let Some(request_seq) = request_seq {
+            tracing::trace!(
+                schema = "slack_latency_v1",
+                request_seq,
+                transport_class,
+                duration_us = monotonic_us(started_at),
+                outcome,
+                "transport.ingress.activation_finished"
+            );
+        }
+        if let Err(result) = result {
             let _ = self.bus.send_to(
                 source_id,
                 None,
@@ -331,6 +375,8 @@ impl Harness {
         &mut self,
         source_id: &str,
         request: TransportMessageIngressRequest,
+        activation_started_at: Instant,
+        request_seq: Option<u64>,
     ) -> Result<(), TransportMessageIngressResult> {
         let fail = |message: &str| TransportMessageIngressResult {
             request_id: request.request_id.clone(),
@@ -407,6 +453,8 @@ impl Harness {
                     connection_id: source_id.to_owned(),
                     request_id: result.request_id,
                     session_generation: self.current_session_generation,
+                    activation_started_at,
+                    request_seq,
                 });
             return Ok(());
         }
@@ -506,6 +554,8 @@ impl Harness {
                 connection_id: source_id.to_owned(),
                 request_id: request.request_id,
                 session_generation: self.current_session_generation,
+                activation_started_at,
+                request_seq,
             });
         let cid = self
             .agent_routes
@@ -574,6 +624,15 @@ impl Harness {
         for (index, waiter) in waiters.into_iter().enumerate() {
             if waiter.session_generation != self.current_session_generation {
                 continue;
+            }
+            if let Some(request_seq) = waiter.request_seq {
+                tracing::trace!(
+                    schema = "slack_latency_v1",
+                    request_seq,
+                    activation_to_commit_us = monotonic_us(waiter.activation_started_at),
+                    outcome = if index == 0 { "accepted" } else { "duplicate" },
+                    "transport.ingress.commit_finished"
+                );
             }
             let _ = self.bus.send_to(
                 &waiter.connection_id,
@@ -955,6 +1014,26 @@ impl Harness {
                 .insert(route_key.clone(), sequence);
         }
     }
+}
+
+/// Convert a harness-local monotonic interval to a saturating microsecond
+/// field.
+fn monotonic_us(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Extract only the Slack extension's bounded process-local request ordinal.
+///
+/// Arbitrary extension-controlled request identifiers are never logged.
+fn slack_request_seq(request: &TransportMessageIngressRequest) -> Option<u64> {
+    if request.draft.transport_name != "slack" {
+        return None;
+    }
+    let digits = request.request_id.strip_prefix("slack-in-")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn valid_request_id(value: &str) -> bool {

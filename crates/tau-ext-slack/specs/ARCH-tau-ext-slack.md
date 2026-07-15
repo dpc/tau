@@ -9,7 +9,14 @@ conversation-route list into alias, parent-receive, thread-receive, and
 proactive-alias indexes. Routes carry explicit channel/MPIM/DM kind and optional
 fixed root. A bounded runtime map holds exact dynamic D-to-U/W links.
 
-Socket events are acked before authorization. The bridge rejects malformed,
+Supported Socket events reserve one of 64 process-local outstanding slots before
+ACK. A successful local ACK write commits the occurrence to one persistent serial
+FIFO that survives websocket reconnects; failed ACKs release the reservation, and
+saturation/worker closure does not ACK so Slack may retry after reconnect. The FIFO
+owns capacity through the terminal admission outcome and keeps identity checks,
+local replies, and ingress submission off the websocket reader while preserving
+global successful-ACK order. It is not durable: process death after ACK retains the
+existing loss window. Socket events are authorized only after ACK. The bridge rejects malformed,
 bot/self, subtype, kind, route, thread, and sender metadata; verifies humans via
 `users.info`; applies strict/lax and allowlist-only control; then submits a typed
 native route to a route-selected registered agent. `message` and `app_mention`
@@ -67,7 +74,11 @@ Admission authority follows
 
 Socket lifecycle, rejection logging, diagnostics, token redaction, HTTPS/WSS
 requirements, and shutdown are fail-closed and identifier-free as described in
-the [README](../README.md).
+the [README](../README.md). Payload-free `TRACE` latency markers use only monotonic
+durations, bounded classes/depth buckets, connection generations, and process-local
+occurrence/request ordinals; they never enter the durable event protocol.
+The decision and privacy contract are recorded in
+[DESIGN-tau-ext-slack-latency-observability](DESIGN-tau-ext-slack-latency-observability.md).
 
 ## Agent-invoked reactions
 

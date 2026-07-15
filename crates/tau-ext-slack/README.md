@@ -229,3 +229,18 @@ only). Shutdown and reconnect waits are event-driven. Logs expose bounded,
 identifier-free connect/hello/ACK/degraded/reconnect states and redact tokens,
 websocket URLs, payloads, envelope ids, and native identifiers. A `users.info`
 outage rejects ingress and emits at most one warning per failure episode.
+
+Supported events reserve a bounded slot before ACK and then enter one persistent
+64-occurrence serial admission FIFO. Slow identity checks and local replies do not
+block websocket reads, ACKs, Ping/Pong, reconnect, or shutdown. Saturation is
+fail-closed: the bridge does not ACK the occurrence and reconnects so Slack can
+retry. The handoff is memory-only and does not add a post-ACK durability claim.
+
+`TRACE` enables `slack_latency_v1` monotonic stage markers for websocket receipt,
+decode, ACK, queue/admission, identity, post, ingress, harness activation/commit,
+and result timing. Markers contain bounded outcome classes and depth buckets plus
+process-local connection/occurrence/request correlation only; they contain no
+Slack identifiers, text, tokens, URLs, response bodies, or durable events.
+See
+[`DESIGN-tau-ext-slack-latency-observability`](specs/DESIGN-tau-ext-slack-latency-observability.md)
+for the exact privacy and correlation boundary.

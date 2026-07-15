@@ -81,6 +81,16 @@ sends remain reconfigurable. Runtime links/routes/selections clear on restart;
 durable native create dedup survives and Slack retries can restore edit
 ownership. Logs and notices omit payloads, ids, websocket URLs, and tokens.
 
+Supported events reserve one of 64 process-local queued/in-flight admission slots
+before ACK. Slow live-human verification and bridge-local replies run on one serial
+worker, so they do not block later websocket ACKs, Ping/Pong, reconnect, or
+shutdown. Saturation reconnects without ACK so Slack can retry. The FIFO survives
+reconnect but is memory-only; process death after ACK can still lose an occurrence.
+For latency troubleshooting, enable `TRACE` and inspect `slack_latency_v1`
+monotonic stage markers. They contain bounded classes and process-local ordinals,
+not Slack identifiers, message text, tokens, URLs, agent identities, or durable
+events; retain them only in bounded local logs.
+
 For missing delivery, check the exact `message.*`/`app_mention` subscription and
 history/app-mention scope, reinstall after scope changes, verify app membership,
 and ensure app/bot tokens share one workspace installation. `missing_scope`

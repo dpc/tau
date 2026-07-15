@@ -376,6 +376,46 @@ struct IdentitySequenceClient {
     results: Mutex<VecDeque<Result<bool, String>>>,
 }
 
+/// Identity fake whose first lookup blocks behind a deterministic barrier.
+struct BlockingIdentityClient {
+    /// Signals when the first users.info call begins.
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    /// Releases the first users.info call.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl SlackClient for BlockingIdentityClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("socket URL supplied by test")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("startup supplied by test")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        if let Some(started) = self.started.lock().expect("started lock").take() {
+            started.send(()).expect("signal identity start");
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release identity");
+        }
+        Ok(true)
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        unreachable!("routed fixtures do not post locally")
+    }
+}
+
 impl SlackClient for IdentitySequenceClient {
     fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
         unreachable!("identity-only test client")
@@ -1240,6 +1280,8 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
                 bot_user_id: "UBOT123".to_owned(),
                 socket_url,
             }),
+            &AdmissionQueue::new(),
+            1,
         )
         .await
     });
@@ -1254,6 +1296,199 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
         .expect("socket worker should exit cleanly");
     assert_eq!(outcome, WorkerOutcome::Shutdown);
     server.abort();
+}
+
+/// A blocked users.info call runs only on the serial actor: the reader still
+/// ACKs a later envelope, answers Ping, and honors shutdown before release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let event = |envelope: &str, ts: &str| {
+        Message::Text(
+            serde_json::json!({
+                "type": "events_api",
+                "envelope_id": envelope,
+                "payload": {
+                    "type": "event_callback",
+                    "event_id": format!("Ev-{ts}"),
+                    "event": {
+                        "type": "app_mention",
+                        "channel": "C123",
+                        "channel_type": "channel",
+                        "user": "U123",
+                        "text": "<@UBOT123> hello",
+                        "ts": ts
+                    }
+                }
+            })
+            .to_string()
+            .into(),
+        )
+    };
+    let (reader_live_tx, reader_live_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        ws.send(event("env-1", "1.0")).await.expect("send first");
+        let first = ws
+            .next()
+            .await
+            .expect("first ACK frame")
+            .expect("first ACK");
+        assert!(matches!(first, Message::Text(_)));
+        ws.send(event("env-2", "2.0")).await.expect("send second");
+        ws.send(Message::Ping(vec![7].into()))
+            .await
+            .expect("send ping");
+        let mut saw_ack = false;
+        let mut saw_pong = false;
+        for _ in 0..2 {
+            match ws.next().await.expect("reader response").expect("response") {
+                Message::Text(_) => saw_ack = true,
+                Message::Pong(payload) if payload.as_ref() == [7] => saw_pong = true,
+                other => panic!("unexpected reader response: {other:?}"),
+            }
+        }
+        assert!(saw_ack && saw_pong);
+        let _ = reader_live_tx.send(());
+        std::future::pending::<()>().await;
+    });
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingIdentityClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output_tx, _output_rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(client, output_tx));
+    {
+        let mut state = ext.state.lock().expect("state lock");
+        state.config = Some(cfg());
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.registered_agents.insert(agent_id("agent-a"));
+        state.capability_active = true;
+        state.session_active = true;
+    }
+    let queue = AdmissionQueue::new();
+    let actor_ext = Arc::clone(&ext);
+    let actor_queue = Arc::clone(&queue);
+    let actor = std::thread::spawn(move || admission_worker_loop(actor_ext, actor_queue));
+    let worker_ext = Arc::clone(&ext);
+    let worker_queue = Arc::clone(&queue);
+    let worker_cfg = cfg();
+    let worker = tokio::spawn(async move {
+        socket_worker_once(
+            &worker_ext,
+            &worker_cfg,
+            Some(WorkerStartup {
+                bot_user_id: "UBOT123".to_owned(),
+                socket_url,
+            }),
+            &worker_queue,
+            1,
+        )
+        .await
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("identity barrier reached");
+    tokio::time::timeout(Duration::from_secs(1), reader_live_rx)
+        .await
+        .expect("later ACK and Pong remain responsive")
+        .expect("server signal");
+    ext.shutdown.request();
+    let outcome = tokio::time::timeout(Duration::from_millis(200), worker)
+        .await
+        .expect("shutdown must not wait for users.info")
+        .expect("reader task")
+        .expect("reader outcome");
+    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    release_tx.send(()).expect("release identity");
+    queue.close();
+    actor.join().expect("serial actor exits");
+    server.abort();
+}
+
+/// A 65th supported occurrence is not ACKed: the reader degrades the connection
+/// so Slack can retry after an outstanding terminal outcome releases capacity.
+#[tokio::test]
+async fn saturated_admission_does_not_ack_supported_envelope() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "events_api",
+                "envelope_id": "env-overflow",
+                "payload": {
+                    "type": "event_callback",
+                    "event": {
+                        "type": "app_mention",
+                        "channel": "C123",
+                        "channel_type": "channel",
+                        "user": "U123",
+                        "text": "<@UBOT123> overflow",
+                        "ts": "65.0"
+                    }
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send overflow");
+        let received_ack = matches!(
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await,
+            Ok(Some(Ok(Message::Text(_))))
+        );
+        let _ = result_tx.send(received_ack);
+    });
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    ext.state.lock().expect("state").session_active = true;
+    let queue = AdmissionQueue::new();
+    let reservations = (0..admission::CAPACITY)
+        .map(|_| queue.reserve().expect("fill admission"))
+        .collect::<Vec<_>>();
+    let result = socket_worker_once(
+        &ext,
+        &cfg(),
+        Some(WorkerStartup {
+            bot_user_id: "UBOT123".to_owned(),
+            socket_url,
+        }),
+        &queue,
+        1,
+    )
+    .await;
+    assert!(result.is_err(), "saturation must degrade the connection");
+    assert!(
+        !result_rx.await.expect("server result"),
+        "must not ACK overflow"
+    );
+    drop(reservations);
+    queue.reserve().expect("terminal release permits retry");
+    server.await.expect("server task");
 }
 
 /// Long successful Slack Web API JSON responses must be parsed from the raw
@@ -5404,10 +5639,66 @@ fn socket_ack_diagnostics_are_safe_and_failure_prevents_routing() {
     })
     .to_string();
     let action = handle_socket_text(&ext, &routed_text);
-    assert!(
-        complete_socket_action(&ext, action, Err("forced ACK write failure".to_owned())).is_err()
-    );
+    let queue = AdmissionQueue::<DecodedSlackEvent>::new();
+    let reservation = queue.reserve().expect("reserve before ACK");
+    assert!(finish_socket_ack(Err("forced ACK write failure".to_owned()), true).is_err());
+    drop(reservation);
+    assert!(queue.reserve().is_ok(), "ACK failure must release capacity");
+    assert!(action.event.is_some(), "fixture must decode supported work");
     assert_no_ingress(&rx);
+}
+
+/// Latency markers expose only local ordinals, durations, and bounded classes;
+/// sentinel native identities, content, tokens, and destinations never appear.
+#[test]
+fn latency_markers_are_payload_free() {
+    let (ext, _rx, _client) = extension();
+    let trace = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let sentinel_user = "U_SENTINEL_SECRET";
+    let sentinel_channel = "C_SENTINEL_SECRET";
+    let sentinel_text = "payload-sentinel-secret";
+    tracing::subscriber::with_default(subscriber, || {
+        let timing = LatencyTrace {
+            connection_generation: 7,
+            trace_seq: 11,
+            event_class: "create",
+        };
+        let (ingress_epoch, config_generation, agent_generation) = {
+            let state = ext.state.lock().expect("state");
+            (
+                state.ingress_epoch,
+                state.config_generation,
+                state.agent_generation,
+            )
+        };
+        let context = AdmissionContext {
+            trace: timing,
+            received_at: Instant::now(),
+            ingress_epoch,
+            config_generation,
+            agent_generation,
+            queue_wait_us: 0,
+            identity_us: Cell::new(0),
+            outcome: Cell::new("rejected_policy"),
+        };
+        assert!(ext.verified_human_traced(&cfg(), sentinel_user, Some(&context)));
+        ext.post_message_traced(&cfg(), sentinel_channel, sentinel_text, None, Some(timing));
+    });
+    let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(output.contains("slack.identity.verification_finished"));
+    assert!(output.contains("slack.api.post_message_finished"));
+    for sentinel in [sentinel_user, sentinel_channel, sentinel_text, "xoxb-test"] {
+        assert!(!output.contains(sentinel));
+    }
 }
 
 /// A users.info failure at the real create ingress boundary emits no transport
@@ -5448,4 +5739,151 @@ fn message_identity_failure_is_fail_closed_then_recovers() {
         panic!("expected create ingress");
     };
     assert_eq!(text, "recovered");
+}
+
+/// Session teardown during a blocked identity lookup invalidates the explicit
+/// admission epoch, so the late success cannot submit into a later session.
+#[test]
+fn blocked_identity_completion_is_stale_after_session_teardown() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingIdentityClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output_tx, output_rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(client, output_tx));
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.config = Some(cfg());
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.registered_agents.insert(agent_id("agent-a"));
+        state.capability_active = true;
+        state.session_active = true;
+    }
+    let worker_ext = Arc::clone(&ext);
+    let worker = std::thread::spawn(move || {
+        let context = AdmissionContext {
+            trace: LatencyTrace {
+                connection_generation: 1,
+                trace_seq: 1,
+                event_class: "create",
+            },
+            received_at: Instant::now(),
+            ingress_epoch: 0,
+            config_generation: 0,
+            agent_generation: 0,
+            queue_wait_us: 0,
+            identity_us: Cell::new(0),
+            outcome: Cell::new("rejected_policy"),
+        };
+        worker_ext.process_slack_message_admitted(
+            slack_message("C123", Some("channel"), "<@UBOT123> late"),
+            Some(&context),
+        );
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("identity barrier reached");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+        state.session_active = false;
+        state.registered_agents.clear();
+        state.capability_active = false;
+    }
+    release_tx.send(()).expect("release identity");
+    worker.join().expect("admission worker");
+    assert_no_ingress(&output_rx);
+}
+
+/// Agent unload uses exact local-effect generation revalidation rather than the
+/// global ingress epoch, suppressing late help/link/select replies after I/O.
+#[test]
+fn blocked_identity_completion_has_no_local_effect_after_agent_unload() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingIdentityClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output_tx, output_rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(client, output_tx));
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.config = Some(cfg());
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.registered_agents.insert(agent_id("agent-a"));
+        state.capability_active = true;
+        state.session_active = true;
+    }
+    let worker_ext = Arc::clone(&ext);
+    let worker = std::thread::spawn(move || {
+        let context = AdmissionContext {
+            trace: LatencyTrace {
+                connection_generation: 1,
+                trace_seq: 1,
+                event_class: "local_command",
+            },
+            received_at: Instant::now(),
+            ingress_epoch: 0,
+            config_generation: 0,
+            agent_generation: 0,
+            queue_wait_us: 0,
+            identity_us: Cell::new(0),
+            outcome: Cell::new("rejected_policy"),
+        };
+        worker_ext.process_slack_message_admitted(
+            slack_message("C123", Some("channel"), "<@UBOT123>"),
+            Some(&context),
+        );
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("identity barrier reached");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.registered_agents.clear();
+        state.agent_generation = state.agent_generation.wrapping_add(1);
+    }
+    release_tx.send(()).expect("release identity");
+    worker.join().expect("admission worker");
+    assert_no_ingress(&output_rx);
+}
+
+/// A closed harness writer is terminal for Socket Mode admission: after rolling
+/// back private correlation, shutdown prevents later ACK-and-drop behavior.
+#[test]
+fn ingress_writer_closure_stops_socket_admission() {
+    let (output_tx, output_rx) = mpsc::channel();
+    drop(output_rx);
+    let ext = Extension::new(FakeClient::new(), output_tx);
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.config = Some(cfg());
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.registered_agents.insert(agent_id("agent-a"));
+        state.capability_active = true;
+        state.session_active = true;
+    }
+    let context = AdmissionContext {
+        trace: LatencyTrace {
+            connection_generation: 1,
+            trace_seq: 1,
+            event_class: "create",
+        },
+        received_at: Instant::now(),
+        ingress_epoch: 0,
+        config_generation: 0,
+        agent_generation: 0,
+        queue_wait_us: 0,
+        identity_us: Cell::new(0),
+        outcome: Cell::new("rejected_policy"),
+    };
+    ext.process_slack_message_admitted(
+        slack_message("C123", Some("channel"), "<@UBOT123> writer"),
+        Some(&context),
+    );
+    assert!(ext.shutdown.is_requested());
+    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
 }

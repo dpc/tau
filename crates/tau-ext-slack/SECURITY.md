@@ -10,6 +10,8 @@
 - Harness capability/session/tool/agent checks and extension route checks are both required. Configuration freezes before an authorized post or reaction API attempt, or after successful worker preflight.
 - Runtime caches, routes, ownership, selections, and links are bounded. Committed creates are durably deduplicated/restorable by native conversation+timestamp when Slack retries; edits require restored create ownership and inbound human reactions require same-process post ownership. Crashes/API ambiguity do not provide exactly-once delivery.
 - Identity/API outages fail closed. Slack, workspace administrators, members, and Slack Connect participants may read transported text; this is not end-to-end encrypted.
+- Supported ingress uses one persistent serial in-memory FIFO bounded at 64 queued/in-flight occurrences. Capacity is reserved before ACK, retained through terminal processing, and released on ACK failure or terminal rejection/application. Saturation, actor failure, and harness-writer closure stop later ACK admission. Reconnect preserves accepted order; session/config/process teardown invalidates late authority. Process death after ACK can still lose work.
+- Latency observability is TRACE-only and non-durable. It permits process-local volume/order correlation but never native IDs, payloads, tokens, URLs, response bodies, agent IDs, or stable hashes. Keep retention bounded and never promote occurrence/request ordinals to metric labels.
 - Recheck these invariants and the adversarial matrix in `specs/ARCH-tau-ext-slack.md` when changing config freeze, routing, sender admission, mutations, dedup, lifecycle, or capability schemas.
 
 ## Agent-invoked reaction boundary
