@@ -1,12 +1,15 @@
 //! OAuth flows: auth-code + PKCE (manual paste) and device-code (polling).
 
+mod error;
+
 use std::collections::HashMap;
-use std::io;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use error::MAX_OAUTH_RESPONSE_BODY_BYTES;
+pub use error::{OAuthError, OAuthErrorKind};
 use rand::RngCore;
 use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
@@ -80,12 +83,15 @@ const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
 const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
-
 /// Result of a successful OAuth token exchange.
 pub struct OAuthTokens {
+    /// Bearer token used for authenticated provider requests.
     pub access_token: String,
+    /// Credential used to obtain a replacement access token.
     pub refresh_token: String,
+    /// Milliseconds since the Unix epoch when the access token expires.
     pub expires_at_ms: u64,
+    /// Provider account identifier associated with the token, when available.
     pub account_id: Option<String>,
 }
 
@@ -137,8 +143,14 @@ pub fn parse_redirect_url(input: &str) -> Result<(String, String), String> {
     Ok((code, state))
 }
 
-/// Exchange authorization code for tokens (OpenAI Codex).
-pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, io::Error> {
+/// Exchanges an authorization code for OpenAI Codex tokens.
+///
+/// # Errors
+///
+/// Returns a bounded [`OAuthError`] for transport failure, HTTP rejection, or
+/// an oversized, malformed, incorrectly encoded, or incomplete successful
+/// response.
+pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, OAuthError> {
     // `code` and `verifier` must be form-encoded: the code is an opaque
     // server-issued token that can legally contain `+`, `=`, `&`, etc.,
     // and a raw `+` in a form body would be decoded as a space on the
@@ -156,8 +168,14 @@ pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, 
     parse_openai_token_response(&json)
 }
 
-/// Refresh an OpenAI Codex access token using the refresh token.
-pub fn openai_codex_refresh(refresh_token: &str) -> Result<OAuthTokens, io::Error> {
+/// Refreshes an OpenAI Codex access token using the refresh token.
+///
+/// # Errors
+///
+/// Returns a bounded [`OAuthError`] for transport failure, HTTP rejection, or
+/// an oversized, malformed, incorrectly encoded, or incomplete successful
+/// response.
+pub fn openai_codex_refresh(refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
     let body = format!(
         "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}",
         refresh_token = urlencoding(refresh_token),
@@ -168,18 +186,18 @@ pub fn openai_codex_refresh(refresh_token: &str) -> Result<OAuthTokens, io::Erro
     parse_openai_token_response(&json)
 }
 
-fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, io::Error> {
+fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
     let access_token = json["access_token"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing access_token"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing access_token"))?
         .to_string();
     let refresh_token = json["refresh_token"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing refresh_token"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing refresh_token"))?
         .to_string();
     let expires_in = json["expires_in"]
         .as_u64()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing expires_in"))?;
+        .ok_or_else(|| OAuthError::invalid_response("missing expires_in"))?;
 
     let now_ms: u64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -231,41 +249,47 @@ const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/
 
 /// Device code flow step 1 response.
 pub struct DeviceCodeResponse {
+    /// Opaque code sent while polling the authorization endpoint.
     pub device_code: String,
+    /// Short code displayed for the user to enter.
     pub user_code: String,
+    /// Provider page where the user enters the short code.
     pub verification_uri: String,
+    /// Initial number of seconds between polling attempts.
     pub interval: u64,
     /// Seconds from now until the device code expires.
     pub expires_in: u64,
 }
 
-/// Start the GitHub device code flow.
-pub fn github_device_code_start() -> Result<DeviceCodeResponse, io::Error> {
+/// Starts the GitHub device code flow.
+///
+/// # Errors
+///
+/// Returns a bounded [`OAuthError`] when the request fails or GitHub returns an
+/// invalid or rejected device-code response.
+pub fn github_device_code_start() -> Result<DeviceCodeResponse, OAuthError> {
     let body = format!("client_id={GITHUB_CLIENT_ID}&scope=read:user");
 
     let json = post_form_with_accept(GITHUB_DEVICE_CODE_URL, &body, "application/json")?;
 
     if let Some(err) = json["error"].as_str() {
-        let desc = json["error_description"].as_str().unwrap_or("");
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("device code start failed: {err} {desc}")
-                .trim()
-                .to_string(),
+        return Err(OAuthError::authorization(
+            err,
+            json["error_description"].as_str(),
         ));
     }
 
     let device_code = json["device_code"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing device_code"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing device_code"))?
         .to_string();
     let user_code = json["user_code"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing user_code"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing user_code"))?
         .to_string();
     let verification_uri = json["verification_uri"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing verification_uri"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing verification_uri"))?
         .to_string();
     let interval = json["interval"].as_u64().unwrap_or(5);
     // RFC 8628 requires `expires_in` but the GitHub flow has historically
@@ -283,18 +307,22 @@ pub fn github_device_code_start() -> Result<DeviceCodeResponse, io::Error> {
 
 /// Poll for device code flow completion. Returns the access token on success,
 /// or an error if the user does not authorize within `expires_in` seconds.
+///
+/// # Errors
+///
+/// Returns a bounded [`OAuthError`] when polling fails, GitHub rejects the
+/// device code, or the flow expires.
 pub fn github_device_code_poll(
     device_code: &str,
     interval: u64,
     expires_in: u64,
-) -> Result<String, io::Error> {
+) -> Result<String, OAuthError> {
     let mut wait = Duration::from_secs(interval);
     let deadline = std::time::Instant::now() + Duration::from_secs(expires_in);
 
     loop {
         if std::time::Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
+            return Err(OAuthError::timed_out(
                 "device code expired before authorization completed",
             ));
         }
@@ -316,14 +344,10 @@ pub fn github_device_code_poll(
                 wait = wait.mul_f32(1.4);
             }
             Some(err) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("device code flow failed: {err}"),
-                ));
+                return Err(OAuthError::authorization(err, None));
             }
             None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(OAuthError::invalid_response(
                     "unexpected response from GitHub",
                 ));
             }
@@ -331,24 +355,29 @@ pub fn github_device_code_poll(
     }
 }
 
-/// Exchange GitHub access token for a Copilot token.
-pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error> {
+/// Exchanges a GitHub access token for a Copilot token.
+///
+/// # Errors
+///
+/// Returns a bounded [`OAuthError`] when the request fails or the response is
+/// rejected, oversized, malformed, or missing required token fields.
+pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, OAuthError> {
     let resp = proxy_agent()
         .get(GITHUB_COPILOT_TOKEN_URL)
         .header("Authorization", format!("Bearer {github_token}"))
         .header("Accept", "application/json")
         .call()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+        .map_err(OAuthError::transport)?;
 
-    let json = read_success_json(GITHUB_COPILOT_TOKEN_URL, resp)?;
+    let json = read_success_json(resp)?;
 
     let token = json["token"]
         .as_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing token"))?
+        .ok_or_else(|| OAuthError::invalid_response("missing token"))?
         .to_string();
     let expires_at = json["expires_at"]
         .as_u64()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing expires_at"))?;
+        .ok_or_else(|| OAuthError::invalid_response("missing expires_at"))?;
 
     Ok(OAuthTokens {
         access_token: token,
@@ -363,13 +392,13 @@ pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error
 // ---------------------------------------------------------------------------
 
 /// POST a form-encoded body and parse JSON response.
-fn post_form(url: &str, body: &str) -> Result<serde_json::Value, io::Error> {
+fn post_form(url: &str, body: &str) -> Result<serde_json::Value, OAuthError> {
     let resp = proxy_agent()
         .post(url)
         .content_type("application/x-www-form-urlencoded")
         .send(body)
-        .map_err(|e| map_ureq_error(url, e))?;
-    read_success_json(url, resp)
+        .map_err(OAuthError::transport)?;
+    read_success_json(resp)
 }
 
 /// POST a form-encoded body with custom Accept header and parse JSON
@@ -378,84 +407,68 @@ fn post_form_with_accept(
     url: &str,
     body: &str,
     accept: &str,
-) -> Result<serde_json::Value, io::Error> {
+) -> Result<serde_json::Value, OAuthError> {
     let resp = proxy_agent()
         .post(url)
         .content_type("application/x-www-form-urlencoded")
         .header("Accept", accept)
         .send(body)
-        .map_err(|e| map_ureq_error(url, e))?;
-    read_success_json(url, resp)
-}
-
-/// Convert transport-level `ureq::Error`s into `io::Error`s. HTTP status
-/// responses are handled separately so OAuth error bodies can be surfaced.
-fn map_ureq_error(url: &str, err: ureq::Error) -> io::Error {
-    io::Error::other(format!("{url}: {err}"))
+        .map_err(OAuthError::transport)?;
+    read_success_json(resp)
 }
 
 fn map_status_error(
-    url: &str,
     mut resp: ureq::http::Response<ureq::Body>,
-) -> Result<ureq::http::Response<ureq::Body>, io::Error> {
+) -> Result<ureq::http::Response<ureq::Body>, OAuthError> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
 
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
-    let body = resp.body_mut().read_to_string().unwrap_or_default();
-    let detail = format_error_body(&content_type, &body);
-    let msg = if detail.is_empty() {
-        format!("{url}: HTTP {} (empty response body)", status.as_u16())
-    } else {
-        format!("{url}: HTTP {}: {detail}", status.as_u16())
-    };
-    Err(io::Error::other(msg))
+    let body = read_bounded_oauth_body(resp.body_mut()).ok();
+    Err(OAuthError::http(status.as_u16(), body.as_deref()))
 }
 
-/// Pretty-print an error body. If it parses as JSON with `error` /
-/// `error_description` fields (OAuth 2.0 standard), surface those; otherwise
-/// return the raw body trimmed of trailing whitespace.
-fn format_error_body(content_type: &str, body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return String::new();
+/// Failure while reading one explicitly bounded OAuth response body.
+enum OAuthBodyReadError {
+    /// The response exceeded the configured byte cap.
+    TooLarge,
+    /// The complete bounded response was not valid UTF-8.
+    InvalidEncoding,
+    /// The transport failed before a complete body was available.
+    Transport(ureq::Error),
+}
+
+fn read_bounded_oauth_body(body: &mut ureq::Body) -> Result<String, OAuthBodyReadError> {
+    let bytes = body
+        .with_config()
+        .limit(MAX_OAUTH_RESPONSE_BODY_BYTES.saturating_add(1))
+        .read_to_vec()
+        .map_err(|error| match error {
+            ureq::Error::BodyExceedsLimit(_) => OAuthBodyReadError::TooLarge,
+            other => OAuthBodyReadError::Transport(other),
+        })?;
+    if bytes.len() > MAX_OAUTH_RESPONSE_BODY_BYTES as usize {
+        return Err(OAuthBodyReadError::TooLarge);
     }
-    if content_type.contains("json")
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
-    {
-        let err = v.get("error").and_then(|e| e.as_str());
-        let desc = v
-            .get("error_description")
-            .or_else(|| v.get("message"))
-            .and_then(|e| e.as_str());
-        match (err, desc) {
-            (Some(e), Some(d)) => return format!("{e}: {d}"),
-            (Some(e), None) => return e.to_string(),
-            (None, Some(d)) => return d.to_string(),
-            (None, None) => {}
-        }
-    }
-    trimmed.to_string()
+    String::from_utf8(bytes).map_err(|_| OAuthBodyReadError::InvalidEncoding)
 }
 
 /// Read a ureq response body as JSON.
 fn read_success_json(
-    url: &str,
     resp: ureq::http::Response<ureq::Body>,
-) -> Result<serde_json::Value, io::Error> {
-    let mut resp = map_status_error(url, resp)?;
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+) -> Result<serde_json::Value, OAuthError> {
+    let mut resp = map_status_error(resp)?;
+    let text = read_bounded_oauth_body(resp.body_mut()).map_err(|error| match error {
+        OAuthBodyReadError::TooLarge => {
+            OAuthError::invalid_response("OAuth response exceeded size limit")
+        }
+        OAuthBodyReadError::InvalidEncoding => {
+            OAuthError::invalid_response("OAuth response was not valid UTF-8")
+        }
+        OAuthBodyReadError::Transport(error) => OAuthError::transport(error),
+    })?;
+    serde_json::from_str(&text).map_err(OAuthError::invalid_response)
 }
 
 fn urlencoding(s: &str) -> String {

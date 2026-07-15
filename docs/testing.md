@@ -97,6 +97,17 @@ through renderer state to assert main, global, and watched
 activity become idle. These gates use loopback peers and explicit completion
 signals only—never provider auth, Internet access, model prose, tmux, or sleeps.
 
+## OAuth response safety
+
+Shared OAuth protocol regressions live in `tau-provider`: bounded response
+reads, flat and nested error envelopes, malformed responses, typed field bounds,
+and credential-safe `Display`/`Debug` formatting. Parser and formatting cases use
+synthetic in-process values; HTTP read/classification cases use loopback servers.
+Live provider auth, Internet access, and real credentials are intentionally
+excluded. Provider-builtin changes that log typed OAuth failures should cover the
+consumer integration boundary without placing credentials or raw OAuth bodies
+in fixtures.
+
 ## Curated provider VCR compatibility evidence
 
 The small corpus under

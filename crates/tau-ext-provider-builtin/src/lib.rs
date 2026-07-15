@@ -3845,7 +3845,8 @@ fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::
             return Ok(current);
         }
 
-        let tokens = tau_provider::oauth::openai_codex_refresh(&current.refresh_token)?;
+        let tokens = tau_provider::oauth::openai_codex_refresh(&current.refresh_token)
+            .map_err(std::io::Error::other)?;
         let refreshed = OpenAiAuth {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,

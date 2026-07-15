@@ -382,7 +382,9 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
 }
 
 /// Startup quota initialization must resolve one model per ChatGPT profile, so
-/// one rejected refresh cannot be amplified by every published model.
+/// one rejected refresh cannot be amplified by every published model. The
+/// compatibility wrapper must retain typed handling while its trace projection
+/// excludes arbitrary provider fields and preserves provider attribution.
 #[test]
 fn startup_quota_initialization_resolves_once_per_provider() {
     let first = ProviderName::new("first");
@@ -428,6 +430,15 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             move || trace.clone()
         })
         .finish();
+    let reflected_secret = "oauth-reflected-secret";
+    let rejection_body = serde_json::json!({
+        "error": {
+            "code": reflected_secret,
+            "message": format!("reflected {reflected_secret}"),
+        }
+    })
+    .to_string();
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(400, &rejection_body);
     let resolved = tracing::subscriber::with_default(subscriber, || {
         profiles.resolve_initial_quota_backends(|model, profiles| {
             let BuiltinProviderProfile::Chatgpt(profile) = profiles
@@ -445,10 +456,16 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 mode,
                 |provider| {
                     attempts.push(provider.clone());
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "refresh rejected",
-                    ))
+                    let wrapped = std::io::Error::other(rejection.clone());
+                    assert!(
+                        wrapped
+                            .get_ref()
+                            .and_then(|error| {
+                                error.downcast_ref::<tau_provider::oauth::OAuthError>()
+                            })
+                            .is_some()
+                    );
+                    Err(wrapped)
                 },
             )
         })
@@ -471,6 +488,8 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     assert!(trace.contains(&format!("provider={first}")));
     assert!(trace.contains(&format!("provider={second}")));
     assert!(!trace.contains("provider=router"));
+    assert!(trace.contains("HTTP 400"));
+    assert!(!trace.contains(reflected_secret));
 
     for profile in profiles.providers.values_mut() {
         if let BuiltinProviderProfile::Chatgpt(profile) = profile {

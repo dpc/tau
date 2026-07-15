@@ -8,3 +8,9 @@ final provider event shapes. Backend wire-format parsing and HTTP/SSE/WebSocket
 transport details belong in `tau-provider-chatgpt` and
 `tau-provider-chat-completions`; this crate should test its integration with
 those backends without duplicating their protocol parser matrices.
+
+Shared OAuth body caps, flat/nested error-envelope parsing, bounded untrusted
+fields, and credential-safe default formatting belong to `tau-provider`.
+Changes in this crate that log typed OAuth failures should add an integration
+regression proving the consumer uses only that safe projection while preserving
+provider attribution.

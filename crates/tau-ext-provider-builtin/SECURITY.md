@@ -18,6 +18,11 @@ ownership/counting, and unrelated providers or generations. Configured
 credential, endpoint, or backend-family identity rotation invalidates only the
 old provider profile cooldown.
 
+Shared OAuth response parsing, byte caps, and credential-safe error formatting
+are governed by [`tau-provider/SECURITY.md`](../tau-provider/SECURITY.md). This
+extension logs only the typed error's default safe projection and never its
+untrusted parsed provider fields.
+
 The cross-component authority and no-guessed-applicability rule are defined by
 [DESIGN-provider-quota-pacing](../../specs/DESIGN-provider-quota-pacing.md).
 
