@@ -13,6 +13,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tau_config::atomic::atomic_write_following_symlink;
 
+mod auth_file_lock_result;
+
+pub use auth_file_lock_result::AuthFileLockResult;
+use auth_file_lock_result::{classify_callback_result, into_legacy_result};
+
 /// Returns the auth state directory.
 ///
 /// Prefers `XDG_STATE_HOME/tau` (`~/.local/state/tau` on Linux). Falls back to
@@ -108,18 +113,28 @@ impl<T> AuthFile<T> {
         &self,
         f: impl FnOnce(&LockedAuthFile<'_, T>) -> io::Result<R>,
     ) -> io::Result<R> {
-        let lock_file = self.open_lock_file()?;
-        lock_file.lock()?;
+        into_legacy_result(self.with_lock_result(f))
+    }
+
+    /// Run a callback under the exclusive sidecar lock while preserving the
+    /// callback outcome separately from lock-release failure.
+    pub fn with_lock_result<R>(
+        &self,
+        f: impl FnOnce(&LockedAuthFile<'_, T>) -> io::Result<R>,
+    ) -> AuthFileLockResult<R> {
+        let lock_file = match self.open_lock_file() {
+            Ok(lock_file) => lock_file,
+            Err(error) => return AuthFileLockResult::LockFailed(error),
+        };
+        if let Err(error) = lock_file.lock() {
+            return AuthFileLockResult::LockFailed(error);
+        }
         let locked = LockedAuthFile {
             auth_file: self,
             lock_file,
         };
         let result = f(&locked);
-        let unlock_result = locked.lock_file.unlock();
-        match (result, unlock_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        }
+        classify_callback_result(result, locked.lock_file.unlock())
     }
 
     fn open_lock_file(&self) -> io::Result<File> {

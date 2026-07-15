@@ -21,5 +21,13 @@ prewarm, retry, and quota resolution. Mutable credential reload and OAuth refres
 preserve it, but an on-disk mode edit takes effect only after restart. Different
 ChatGPT profile namespaces may select different modes.
 
+Within one provider process, a permanent refresh rejection is remembered for
+the exact locked credential/mode generation and shared by every profile
+consumer. A different credential or mode clears that negative result. The
+locked profile generation, not a stale pre-lock snapshot, owns valid-only
+fallback. The negative cache is intentionally not persisted; a cold restart may
+probe the unchanged generation once before resuming the normal slow Auth retry
+cadence.
+
 The default and compatibility policy is defined by
 [DESIGN-tau-provider-chatgpt-responses-surface-selection](../../tau-provider-chatgpt/specs/DESIGN-tau-provider-chatgpt-responses-surface-selection.md).

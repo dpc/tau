@@ -243,7 +243,13 @@ trusted reset/`Retry-After` hints, and shares cooldowns by configured provider
 profile. Retry status is visible and says how to cancel. Profiles and
 credentials are resolved again when delayed work becomes due. This state lasts
 only for the process/session lifetime; Tau deliberately does not replay
-ambiguous in-flight requests after a cold restart.
+ambiguous in-flight requests after a cold restart. Permanent OAuth rejection
+suppression is likewise process-local. Within one provider process, an
+unchanged credential generation is sent once after a permanent rejection;
+credential/profile change permits a new attempt, and restart may probe once
+again. A failed preemptive refresh can use only an access token that remains
+valid; an expired bearer is never used. The logical prompt keeps its existing
+slow authentication retry cadence.
 `/retry` initially bypasses a shared cooldown for only the selected prompt. A
 successful terminal response from that probe invalidates the exact cooldown it
 tested and wakes same-profile peers with stable anti-herd jitter. Error,

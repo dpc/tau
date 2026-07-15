@@ -22,6 +22,14 @@ cancellation instruction. Same-profile limits share cooldown state, trusted
 server reset hints are not shortened, and mutable profiles are reloaded before
 later attempts. Retry state does not survive a cold process restart.
 
+Within one provider process, a permanently rejected ChatGPT OAuth refresh is
+suppressed for the exact unchanged credential/profile generation across startup
+quota, prewarm, prompt, retry, and scheduled quota resolution. Credential or
+profile change permits a new attempt; cold restart may probe once again. A
+failed preemptive refresh may fall back only to the authoritative locked access
+token while it remains valid, never to an expired or stale pre-lock bearer. This
+does not change the logical prompt's slow authentication retry cadence.
+
 ## Provider profiles and CLI
 
 Provider profiles live as JSON files under Tau state `auth.d/` (`~/.local/state/tau/auth.d/<name>.json` on typical Linux systems). Manage them with:

@@ -3711,6 +3711,7 @@ dependencies = [
  "tau-provider",
  "tau-provider-chat-completions",
  "tau-provider-chatgpt",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

@@ -81,7 +81,7 @@ fn uri(value: &str) -> ureq::http::Uri {
 /// OpenAI's nested OAuth envelope must expose only typed, bounded fields rather
 /// than retaining the complete response body.
 #[test]
-fn nested_openai_error_envelope_is_typed_and_sanitized() {
+fn nested_openai_error_envelope_is_typed_and_bounded() {
     let error = super::OAuthError::http(
         401,
         Some(
@@ -153,7 +153,7 @@ fn malformed_oauth_error_body_is_not_rendered() {
 }
 
 /// The HTTP reader must stop oversized OAuth error bodies before parsing and
-/// return the same status-only sanitized error.
+/// return the same status-only error with credential-safe default formatting.
 #[test]
 fn oversized_oauth_error_body_is_not_retained() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
@@ -358,4 +358,38 @@ fn read_complete_http_request(stream: &mut std::net::TcpStream) {
             return;
         }
     }
+}
+
+/// Only explicit credential-invalidating provider codes may suppress future
+/// refreshes; status alone is not enough to classify an ambiguous outage.
+#[test]
+fn permanent_refresh_rejection_requires_known_provider_code() {
+    for code in [
+        "invalid_grant",
+        "invalid_refresh_token",
+        "refresh_token_reused",
+        "refresh_token_revoked",
+    ] {
+        let body = serde_json::json!({"error": {"code": code}}).to_string();
+        assert!(super::OAuthError::from_http_response(400, &body).is_permanent_refresh_rejection());
+        assert!(super::OAuthError::from_http_response(401, &body).is_permanent_refresh_rejection());
+    }
+
+    assert!(
+        !super::OAuthError::from_http_response(
+            401,
+            r#"{"error":{"code":"temporarily_unavailable"}}"#,
+        )
+        .is_permanent_refresh_rejection()
+    );
+    assert!(
+        !super::OAuthError::from_http_response(401, "malformed").is_permanent_refresh_rejection()
+    );
+    assert!(
+        !super::OAuthError::from_http_response(
+            500,
+            r#"{"error":{"code":"refresh_token_reused"}}"#,
+        )
+        .is_permanent_refresh_rejection()
+    );
 }

@@ -108,6 +108,11 @@ excluded. Provider-builtin changes that log typed OAuth failures should cover th
 consumer integration boundary without placing credentials or raw OAuth bodies
 in fixtures.
 
+Provider-builtin refresh tests use temporary auth files and injected endpoint
+outcomes to cover per-process exact-generation suppression, profile changes,
+authoritative locked-generation handoff, and valid-only fallback. They exclude
+live provider auth, Internet access, real credentials, and wall-clock sleeps.
+
 ## Curated provider VCR compatibility evidence
 
 The small corpus under

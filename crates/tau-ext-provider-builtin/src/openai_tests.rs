@@ -1342,7 +1342,8 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         model: chat_model("model"),
     };
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
-    let responses = resolve_prompt_backend(&prompt().model, &mut profiles)
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
+    let responses = resolve_prompt_backend(&prompt().model, &mut profiles, &mut refresh_rejections)
         .expect("configured Responses backend");
 
     assert_ne!(
@@ -1681,15 +1682,20 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
     );
 }
 
+/// ChatGPT profiles resolve to the Codex Responses transport configuration.
 #[test]
 fn resolves_chatgpt_to_codex_responses_backend() {
     // ChatGPT is OAuth-backed and enables Codex-specific transport and replay
     // features owned by this provider slice.
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
 
-    let config =
-        resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"), &mut profiles)
-            .expect("chatgpt backend");
+    let config = resolve_responses_backend(
+        &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"),
+        &mut profiles,
+        &mut refresh_rejections,
+    )
+    .expect("chatgpt backend");
 
     assert_eq!(config.surface, responses::ResponsesSurface::ChatGpt);
     assert_eq!(config.base_url, tau_provider_chatgpt::DEFAULT_BASE_URL);
@@ -1701,20 +1707,25 @@ fn resolves_chatgpt_to_codex_responses_backend() {
     assert!(config.supports_encrypted_reasoning);
 }
 
+/// Assistant phase metadata remains limited to the supported Codex model
+/// families.
 #[test]
 fn chatgpt_phase_metadata_is_model_specific() {
     // The assistant `phase` field is only accepted by newer Codex model
     // families, so the hardcoded resolver must preserve the old whitelist.
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
 
     let old = resolve_responses_backend(
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.2-codex"),
         &mut profiles,
+        &mut refresh_rejections,
     )
     .expect("old codex backend");
     let new = resolve_responses_backend(
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.3-codex"),
         &mut profiles,
+        &mut refresh_rejections,
     )
     .expect("new codex backend");
 
@@ -1722,6 +1733,7 @@ fn chatgpt_phase_metadata_is_model_specific() {
     assert!(new.supports_phase);
 }
 
+/// Extra-high reasoning metadata remains limited to supported model families.
 #[test]
 fn xhigh_metadata_is_model_specific() {
     // The UI cycles through the provider-published effort list, so hardcoded

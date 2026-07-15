@@ -14,3 +14,9 @@ fields, and credential-safe default formatting belong to `tau-provider`.
 Changes in this crate that log typed OAuth failures should add an integration
 regression proving the consumer uses only that safe projection while preserving
 provider attribution.
+
+OAuth refresh integration tests use temporary auth files and injected endpoint
+outcomes. They cover exact-generation suppression, credential/mode invalidation,
+authoritative locked-generation handoff, expired-versus-valid fallback, and
+credential-safe provider-attributed warnings without live auth, Internet, or
+wall-clock sleeps.

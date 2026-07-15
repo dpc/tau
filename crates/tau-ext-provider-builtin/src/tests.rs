@@ -383,8 +383,8 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
 
 /// Startup quota initialization must resolve one model per ChatGPT profile, so
 /// one rejected refresh cannot be amplified by every published model. The
-/// compatibility wrapper must retain typed handling while its trace projection
-/// excludes arbitrary provider fields and preserves provider attribution.
+/// typed trace projection excludes arbitrary provider fields and preserves
+/// provider attribution.
 #[test]
 fn startup_quota_initialization_resolves_once_per_provider() {
     let first = ProviderName::new("first");
@@ -439,6 +439,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     })
     .to_string();
     let rejection = tau_provider::oauth::OAuthError::from_http_response(400, &rejection_body);
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
     let resolved = tracing::subscriber::with_default(subscriber, || {
         profiles.resolve_initial_quota_backends(|model, profiles| {
             let BuiltinProviderProfile::Chatgpt(profile) = profiles
@@ -449,30 +450,26 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 panic!("quota initialization selected non-ChatGPT profile");
             };
             let mode = profile.responses_mode();
+            let authoritative = profile.auth.clone();
             resolve_chatgpt_backend_with_refresh(
                 model,
                 &model.provider,
                 &mut profile.auth,
                 mode,
-                |provider| {
+                &mut refresh_rejections,
+                |provider, _, _| {
                     attempts.push(provider.clone());
-                    let wrapped = std::io::Error::other(rejection.clone());
-                    assert!(
-                        wrapped
-                            .get_ref()
-                            .and_then(|error| {
-                                error.downcast_ref::<tau_provider::oauth::OAuthError>()
-                            })
-                            .is_some()
-                    );
-                    Err(wrapped)
+                    Err(RefreshCredentialsError::OAuth {
+                        credentials: Box::new(authoritative),
+                        error: rejection.clone(),
+                    })
                 },
             )
         })
     });
     let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
 
-    assert_eq!(resolved.len(), 2);
+    assert!(resolved.is_empty(), "expired credentials stay unavailable");
     assert!(published.len() > attempts.len());
     assert_eq!(attempts.len(), 2);
     assert_eq!(
@@ -496,8 +493,621 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             profile.auth.expires_at_ms = u64::MAX;
         }
     }
-    let successful = profiles.resolve_initial_quota_backends(resolve_responses_backend);
+    let mut successful_rejections = OAuthRefreshRejectionCache::default();
+    let successful = profiles.resolve_initial_quota_backends(|model, profiles| {
+        resolve_responses_backend(model, profiles, &mut successful_rejections)
+    });
     assert_eq!(successful.len(), 2);
+}
+
+/// A permanent provider rejection is attempted once for an exact on-disk
+/// credential and Responses-mode generation. Credential or mode replacement
+/// permits a new attempt, while a valid replacement clears stale suppression
+/// without calling the endpoint.
+#[test]
+fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
+    let temp = tempfile::tempdir().expect("temporary provider state");
+    let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+        .auth_file::<BuiltinProviderProfile>("chatgpt")
+        .expect("test auth file");
+    let provider = ProviderName::new("chatgpt");
+    let expired = OpenAiAuth {
+        access_token: "expired-access".to_owned(),
+        refresh_token: "reused-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: Some("account".to_owned()),
+    };
+    auth_file
+        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: expired.clone(),
+            responses_lite_compatibility: false,
+        }))
+        .expect("save expired profile");
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+        400,
+        r#"{"error":{"code":"refresh_token_reused","message":"already used"}}"#,
+    );
+    let mut attempts = 0;
+    let mut cache = OAuthRefreshRejectionCache::default();
+
+    for expected_suppressed in [false, true] {
+        let error = refresh_chatgpt_credentials_in(
+            &auth_file,
+            &provider,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+            |_| {
+                attempts += 1;
+                Err(rejection.clone())
+            },
+        )
+        .expect_err("refresh rejection");
+        assert_eq!(
+            matches!(
+                error,
+                RefreshCredentialsError::Suppressed {
+                    credentials: _,
+                    error: _
+                }
+            ),
+            expected_suppressed
+        );
+    }
+    assert_eq!(attempts, 1);
+
+    let changed = OpenAiAuth {
+        access_token: expired.access_token,
+        refresh_token: "replacement-refresh".to_owned(),
+        expires_at_ms: expired.expires_at_ms,
+        account_id: expired.account_id,
+    };
+    auth_file
+        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: changed,
+            responses_lite_compatibility: false,
+        }))
+        .expect("replace credential generation");
+    let error = refresh_chatgpt_credentials_in(
+        &auth_file,
+        &provider,
+        responses::ResponsesMode::Standard,
+        &mut cache,
+        |_| {
+            attempts += 1;
+            Err(rejection)
+        },
+    )
+    .expect_err("replacement credential gets one attempt");
+
+    assert!(matches!(
+        error,
+        RefreshCredentialsError::OAuth {
+            credentials: _,
+            error: _
+        }
+    ));
+    assert_eq!(attempts, 2);
+
+    let error = refresh_chatgpt_credentials_in(
+        &auth_file,
+        &provider,
+        responses::ResponsesMode::LiteCompatibility,
+        &mut cache,
+        |_| {
+            attempts += 1;
+            Err(tau_provider::oauth::OAuthError::from_http_response(
+                400,
+                r#"{"error":{"code":"refresh_token_reused"}}"#,
+            ))
+        },
+    )
+    .expect_err("profile mode change permits a new attempt");
+    assert!(matches!(
+        error,
+        RefreshCredentialsError::OAuth {
+            credentials: _,
+            error: _
+        }
+    ));
+    assert_eq!(attempts, 3);
+
+    let fresh = OpenAiAuth {
+        access_token: "fresh-access".to_owned(),
+        refresh_token: "fresh-refresh".to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("fresh-account".to_owned()),
+    };
+    auth_file
+        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: fresh.clone(),
+            responses_lite_compatibility: false,
+        }))
+        .expect("save valid replacement profile");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let mut loaded_fresh = fresh;
+    let config = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut loaded_fresh,
+        responses::ResponsesMode::Standard,
+        &mut cache,
+        |provider, mode, cache| {
+            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
+                attempts += 1;
+                panic!("valid replacement must not call OAuth endpoint")
+            })
+        },
+    )
+    .expect("valid replacement resolves");
+    assert_eq!(config.api_key, "fresh-access");
+    assert_eq!(attempts, 3);
+    assert!(!cache.contains(&provider));
+}
+
+/// Refresh error formatting must never expose the authoritative credential
+/// carrier used for stale-generation-safe fallback.
+#[test]
+fn refresh_credentials_error_debug_excludes_credentials() {
+    let secret = "authoritative-credential-secret";
+    let error = RefreshCredentialsError::OAuth {
+        credentials: Box::new(OpenAiAuth {
+            access_token: secret.to_owned(),
+            refresh_token: secret.to_owned(),
+            expires_at_ms: 1,
+            account_id: Some(secret.to_owned()),
+        }),
+        error: tau_provider::oauth::OAuthError::from_http_response(
+            400,
+            r#"{"error":{"code":"refresh_token_reused"}}"#,
+        ),
+    };
+
+    assert!(!error.to_string().contains(secret));
+    assert!(!format!("{error:?}").contains(secret));
+}
+
+/// A permanent endpoint rejection remains cached when sidecar unlock fails.
+/// The authoritative locked generation controls valid-only fallback, the next
+/// attempt is suppressed without network access, and diagnostics expose neither
+/// credentials nor reflected provider content.
+#[test]
+fn permanent_rejection_survives_unlock_failure() {
+    for (expires_at_ms, expected_available) in [
+        (now_ms().saturating_add(60_000), true),
+        (now_ms().saturating_sub(1), false),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary provider state");
+        let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+            .auth_file::<BuiltinProviderProfile>("chatgpt")
+            .expect("test auth file");
+        let provider = ProviderName::new("chatgpt");
+        let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+        let secret = "authoritative-unlock-secret";
+        let authoritative = OpenAiAuth {
+            access_token: secret.to_owned(),
+            refresh_token: secret.to_owned(),
+            expires_at_ms,
+            account_id: Some(secret.to_owned()),
+        };
+        auth_file
+            .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                auth: authoritative.clone(),
+                responses_lite_compatibility: false,
+            }))
+            .expect("save authoritative generation");
+        let rejection_body = serde_json::json!({
+            "error": {
+                "code": "refresh_token_reused",
+                "message": format!("reflected {secret}"),
+            }
+        })
+        .to_string();
+        let rejection = tau_provider::oauth::OAuthError::from_http_response(400, &rejection_body);
+        let mut subsequent_attempts = 0;
+        let mut cache = OAuthRefreshRejectionCache::default();
+        let failure = finish_chatgpt_refresh_attempt(
+            AuthFileLockResult::Completed {
+                value: LockedRefreshOutcome::Rejected {
+                    credentials: authoritative.clone(),
+                    error: rejection.clone(),
+                },
+                unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+            },
+            &provider,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+        )
+        .expect_err("endpoint rejection plus unlock failure");
+
+        match &failure {
+            RefreshCredentialsError::OAuthWithUnlockFailure {
+                credentials,
+                error,
+                unlock_error,
+            } => {
+                assert_eq!(credentials.as_ref(), &authoritative);
+                assert_eq!(error, &rejection);
+                assert_eq!(unlock_error.kind(), std::io::ErrorKind::Other);
+            }
+            other => panic!("unexpected refresh failure: {other:?}"),
+        }
+        assert!(
+            cache
+                .rejection(
+                    &provider,
+                    &authoritative,
+                    responses::ResponsesMode::Standard
+                )
+                .is_some()
+        );
+        assert!(failure.to_string().contains("lock release also failed"));
+        assert!(!failure.to_string().contains(secret));
+        assert!(!format!("{failure:?}").contains(secret));
+
+        let trace = SharedTraceWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_writer({
+                let trace = trace.clone();
+                move || trace.clone()
+            })
+            .finish();
+        let mut pending_failure = Some(failure);
+        let mut stale_outer = OpenAiAuth {
+            access_token: "stale-outer".to_owned(),
+            refresh_token: "stale-refresh".to_owned(),
+            expires_at_ms: now_ms().saturating_sub(1),
+            account_id: None,
+        };
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            resolve_chatgpt_backend_with_refresh(
+                &model,
+                &provider,
+                &mut stale_outer,
+                responses::ResponsesMode::Standard,
+                &mut cache,
+                |_, _, _| Err(pending_failure.take().expect("one injected unlock failure")),
+            )
+        });
+        assert_eq!(resolved.is_some(), expected_available);
+        assert_eq!(stale_outer, authoritative);
+
+        let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+        assert!(trace.contains("provider=chatgpt"));
+        assert!(trace.contains("releasing the credential lock failed"));
+        assert!(trace.contains("unlock_error_kind=Other"));
+        assert!(!trace.contains(secret));
+
+        let repeated = refresh_chatgpt_credentials_in(
+            &auth_file,
+            &provider,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+            |_| {
+                subsequent_attempts += 1;
+                Err(rejection.clone())
+            },
+        )
+        .expect_err("unchanged rejected generation stays suppressed");
+        match repeated {
+            RefreshCredentialsError::Suppressed { credentials, error } => {
+                assert_eq!(*credentials, authoritative);
+                assert_eq!(error, rejection);
+            }
+            other => panic!("unexpected repeated refresh result: {other:?}"),
+        }
+        assert_eq!(subsequent_attempts, 0);
+    }
+}
+
+/// Unlock failure cannot discard a cached authoritative rejection in favor of
+/// stale pre-lock credentials; the locked expired generation remains
+/// unavailable without another OAuth request.
+#[test]
+fn suppressed_generation_survives_unlock_failure() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let secret = "suppressed-locked-secret";
+    let locked_expired = OpenAiAuth {
+        access_token: secret.to_owned(),
+        refresh_token: secret.to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: Some(secret.to_owned()),
+    };
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+        400,
+        r#"{"error":{"code":"refresh_token_reused"}}"#,
+    );
+    let mut cache = OAuthRefreshRejectionCache::default();
+    cache.record_if_permanent(
+        &provider,
+        &locked_expired,
+        responses::ResponsesMode::Standard,
+        &rejection,
+    );
+    let mut stale_valid = OpenAiAuth {
+        access_token: "stale-valid".to_owned(),
+        refresh_token: "stale-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: Some("stale-account".to_owned()),
+    };
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let mut oauth_calls = 0;
+    let resolved = tracing::subscriber::with_default(subscriber, || {
+        resolve_chatgpt_backend_with_refresh(
+            &model,
+            &provider,
+            &mut stale_valid,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+            |provider, mode, cache| {
+                let error = cache
+                    .rejection(provider, &locked_expired, mode)
+                    .unwrap_or_else(|| {
+                        oauth_calls += 1;
+                        panic!("cached rejection must suppress the OAuth endpoint")
+                    });
+                finish_chatgpt_refresh_attempt(
+                    AuthFileLockResult::Completed {
+                        value: LockedRefreshOutcome::Suppressed {
+                            credentials: locked_expired.clone(),
+                            error,
+                        },
+                        unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+                    },
+                    provider,
+                    mode,
+                    cache,
+                )
+            },
+        )
+    });
+
+    assert!(resolved.is_none());
+    assert_eq!(stale_valid, locked_expired);
+    assert_eq!(oauth_calls, 0);
+    assert!(cache.contains(&provider));
+    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(trace.contains("provider=chatgpt"));
+    assert!(trace.contains("releasing the credential lock failed"));
+    assert!(!trace.contains(secret));
+}
+
+/// Unlock failure after loading current or saving refreshed credentials still
+/// installs that authoritative generation and clears rejection state for the
+/// replaced generation.
+#[test]
+fn authoritative_credentials_survive_unlock_failure() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let rejected = OpenAiAuth {
+        access_token: "rejected-access".to_owned(),
+        refresh_token: "rejected-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: None,
+    };
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+        400,
+        r#"{"error":{"code":"refresh_token_reused"}}"#,
+    );
+    let mut cache = OAuthRefreshRejectionCache::default();
+    cache.record_if_permanent(
+        &provider,
+        &rejected,
+        responses::ResponsesMode::Standard,
+        &rejection,
+    );
+    let secret = "authoritative-current-secret";
+    let authoritative = OpenAiAuth {
+        access_token: secret.to_owned(),
+        refresh_token: secret.to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: Some(secret.to_owned()),
+    };
+    let mut stale_valid = OpenAiAuth {
+        access_token: "stale-valid".to_owned(),
+        refresh_token: "stale-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: None,
+    };
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let resolved = tracing::subscriber::with_default(subscriber, || {
+        resolve_chatgpt_backend_with_refresh(
+            &model,
+            &provider,
+            &mut stale_valid,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+            |provider, mode, cache| {
+                finish_chatgpt_refresh_attempt(
+                    AuthFileLockResult::Completed {
+                        value: LockedRefreshOutcome::Credentials(authoritative.clone()),
+                        unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+                    },
+                    provider,
+                    mode,
+                    cache,
+                )
+            },
+        )
+    })
+    .expect("authoritative valid credentials remain available");
+
+    assert_eq!(resolved.api_key, secret);
+    assert_eq!(stale_valid, authoritative);
+    assert!(!cache.contains(&provider));
+    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(trace.contains("provider=chatgpt"));
+    assert!(trace.contains("failed to release credential lock"));
+    assert!(!trace.contains(secret));
+}
+
+/// The auth-file generation loaded under lock is authoritative for failed
+/// refresh fallback; a stale pre-lock profile may never be used after rotation.
+#[test]
+fn rejected_locked_generation_replaces_stale_prelock_credentials() {
+    let temp = tempfile::tempdir().expect("temporary provider state");
+    let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+        .auth_file::<BuiltinProviderProfile>("chatgpt")
+        .expect("test auth file");
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+        400,
+        r#"{"error":{"code":"refresh_token_reused"}}"#,
+    );
+    let mut attempts = 0;
+    let mut cache = OAuthRefreshRejectionCache::default();
+
+    let locked_expired = OpenAiAuth {
+        access_token: "locked-expired".to_owned(),
+        refresh_token: "locked-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: Some("locked-account".to_owned()),
+    };
+    auth_file
+        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: locked_expired.clone(),
+            responses_lite_compatibility: false,
+        }))
+        .expect("save locked expired generation");
+    let mut stale_valid = OpenAiAuth {
+        access_token: "stale-valid".to_owned(),
+        refresh_token: "stale-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: Some("stale-account".to_owned()),
+    };
+    let unavailable = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut stale_valid,
+        responses::ResponsesMode::Standard,
+        &mut cache,
+        |provider, mode, cache| {
+            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
+                attempts += 1;
+                Err(rejection.clone())
+            })
+        },
+    );
+    assert!(unavailable.is_none());
+    assert_eq!(stale_valid, locked_expired);
+
+    let locked_valid = OpenAiAuth {
+        access_token: "locked-valid".to_owned(),
+        refresh_token: "locked-refresh-2".to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: Some("locked-account-2".to_owned()),
+    };
+    auth_file
+        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: locked_valid.clone(),
+            responses_lite_compatibility: false,
+        }))
+        .expect("save locked valid generation");
+    let mut stale_expired = OpenAiAuth {
+        access_token: "stale-expired".to_owned(),
+        refresh_token: "stale-refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: Some("stale-account".to_owned()),
+    };
+    let config = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut stale_expired,
+        responses::ResponsesMode::Standard,
+        &mut cache,
+        |provider, mode, cache| {
+            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
+                attempts += 1;
+                Err(rejection.clone())
+            })
+        },
+    )
+    .expect("authoritative still-valid bearer may fall back");
+    assert_eq!(config.api_key, "locked-valid");
+    assert_eq!(stale_expired, locked_valid);
+    assert_eq!(attempts, 2);
+
+    let mut same_generation = locked_valid.clone();
+    let cached = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut same_generation,
+        responses::ResponsesMode::Standard,
+        &mut cache,
+        |provider, mode, cache| {
+            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
+                attempts += 1;
+                Err(rejection.clone())
+            })
+        },
+    )
+    .expect("cached rejection retains valid fallback");
+    assert_eq!(cached.api_key, "locked-valid");
+    assert_eq!(attempts, 2);
+}
+
+/// Failed preemptive refresh may use an access token until its exact expiry,
+/// but an already expired bearer must make the backend unavailable.
+#[test]
+fn refresh_failure_falls_back_only_to_still_valid_access_token() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+        400,
+        r#"{"error":{"code":"refresh_token_reused"}}"#,
+    );
+
+    for (expires_at_ms, refresh_token, expected_available) in [
+        (now_ms().saturating_sub(1), "refresh", false),
+        (now_ms().saturating_sub(1), "", false),
+        (now_ms().saturating_add(60_000), "refresh", true),
+    ] {
+        let mut auth = OpenAiAuth {
+            access_token: "access".to_owned(),
+            refresh_token: refresh_token.to_owned(),
+            expires_at_ms,
+            account_id: None,
+        };
+        let mut cache = OAuthRefreshRejectionCache::default();
+        let authoritative = auth.clone();
+        let config = resolve_chatgpt_backend_with_refresh(
+            &model,
+            &provider,
+            &mut auth,
+            responses::ResponsesMode::Standard,
+            &mut cache,
+            |_, _, _| {
+                Err(RefreshCredentialsError::OAuth {
+                    credentials: Box::new(authoritative),
+                    error: rejection.clone(),
+                })
+            },
+        );
+
+        assert_eq!(config.is_some(), expected_available);
+    }
 }
 
 /// Startup-selected modes independently control same-process publication and
@@ -555,6 +1165,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
     ));
 }
 
+/// Chat Completions setup defaults to legacy token and streaming compatibility.
 #[test]
 fn chat_completions_add_defaults_to_legacy_max_tokens() {
     // The setup wizard is usually used for local OpenAI-compatible servers.
@@ -567,6 +1178,8 @@ fn chat_completions_add_defaults_to_legacy_max_tokens() {
     assert!(compat.prompt_cache_key);
 }
 
+/// Persistent provider profiles reject unknown fields instead of hiding schema
+/// mistakes.
 #[test]
 fn provider_profiles_reject_unknown_fields() {
     // Provider profiles are user-authored persistent config. Unknown fields are
@@ -593,6 +1206,8 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
     }
 }
 
+/// Chat Completions profiles publish and route only explicitly configured
+/// models.
 #[test]
 fn chat_completions_profiles_publish_and_route_only_configured_models() {
     // Under `DESIGN-tau-ext-provider-builtin-profile-ownership`, user-configured
@@ -615,13 +1230,15 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             BuiltinProviderProfile::ChatCompletions(provider),
         )]),
     };
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
 
     let models = models_for_profiles(&profiles);
     assert_eq!(model_ids(&models), vec!["local/llama"]);
     assert!(matches!(
         resolve_prompt_backend(
             &ModelId::new(provider_name.clone(), configured.id.clone()),
-            &mut profiles
+            &mut profiles,
+            &mut refresh_rejections,
         ),
         Some(PromptBackend::ChatCompletions { model, .. }) if model.id == configured.id
     ));
@@ -629,11 +1246,13 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
         resolve_prompt_backend(
             &ModelId::new(provider_name, ModelName::new("missing")),
             &mut profiles,
+            &mut refresh_rejections,
         )
         .is_none()
     );
 }
 
+/// OpenRouter profiles publish and route only explicitly configured models.
 #[test]
 fn openrouter_profiles_publish_and_route_only_configured_models() {
     // OpenRouter profiles are wrapped into Chat Completions at dispatch time.
@@ -651,13 +1270,15 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             BuiltinProviderProfile::OpenRouter(profile),
         )]),
     };
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
 
     let models = models_for_profiles(&profiles);
     assert_eq!(model_ids(&models), vec!["openrouter/anthropic/claude-test"]);
     assert!(matches!(
         resolve_prompt_backend(
             &ModelId::new(provider_name.clone(), configured.id.clone()),
-            &mut profiles
+            &mut profiles,
+            &mut refresh_rejections,
         ),
         Some(PromptBackend::ChatCompletions { provider, model })
             if provider.base_url == "https://openrouter.ai/api/v1"
@@ -667,6 +1288,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
         resolve_prompt_backend(
             &ModelId::new(provider_name, ModelName::new("missing")),
             &mut profiles,
+            &mut refresh_rejections,
         )
         .is_none()
     );

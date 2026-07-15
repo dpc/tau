@@ -23,6 +23,13 @@ are governed by [`tau-provider/SECURITY.md`](../tau-provider/SECURITY.md). This
 extension logs only the typed error's default safe projection and never its
 untrusted parsed provider fields.
 
+Permanent refresh suppression is memory-only and contains secret credential
+copies solely for exact equality; its types have no credential-revealing debug
+projection. The auth-file lock serializes reload and refresh, and the generation
+loaded under that lock replaces any stale caller snapshot before valid-only
+fallback. Closed credential-invalidating 400/401 codes may suppress the exact
+generation for this process. Profile rotation clears it; restart may retry once.
+
 The cross-component authority and no-guessed-applicability rule are defined by
 [DESIGN-provider-quota-pacing](../../specs/DESIGN-provider-quota-pacing.md).
 

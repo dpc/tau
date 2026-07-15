@@ -29,6 +29,17 @@ fixtures. Debug request/response capture may include full prompt contents and
 tool results, so it must remain gated on explicit durable-session policy from
 `harness.session_dir`.
 
+Permanent OAuth refresh rejection is process-local main-loop state keyed by the
+provider namespace and exact credential plus startup-selected Responses mode.
+Startup quota, scheduled quota, prewarm, prompt, and retry-time resolution share
+that cache. Resolution reloads under the auth-file lock; the locked generation
+is authoritative for both rejection caching and any still-valid access-token
+fallback. Only closed credential-invalidating codes on HTTP 400/401 suppress a
+repeat. Expired access tokens never fall back, while preemptive refresh may use
+the authoritative bearer until its exact expiry. Credential/profile change
+invalidates suppression; cold process restart may make one new attempt. This
+does not change the logical prompt scheduler's existing slow Auth cadence.
+
 ## Provider response trust boundary
 
 External provider responses are untrusted prompt-surface data. Keep emitted

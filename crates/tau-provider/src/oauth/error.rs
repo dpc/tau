@@ -10,7 +10,7 @@ const MAX_OAUTH_ERROR_CODE_CHARS: usize = 64;
 /// Maximum retained provider message characters, including truncation marker.
 const MAX_OAUTH_ERROR_MESSAGE_CHARS: usize = 256;
 
-/// Stable category for a sanitized OAuth operation failure.
+/// Stable category for a bounded OAuth operation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OAuthErrorKind {
     /// The request could not be completed at the HTTP transport layer.
@@ -89,6 +89,22 @@ impl OAuthError {
             return Self::http(status, None);
         }
         Self::http(status, Some(body))
+    }
+
+    /// Returns whether a token refresh was rejected for a credential condition
+    /// that cannot succeed again until the credential generation changes.
+    #[must_use]
+    pub fn is_permanent_refresh_rejection(&self) -> bool {
+        matches!(self.http_status(), Some(400 | 401))
+            && matches!(
+                self.provider_code(),
+                Some(
+                    "invalid_grant"
+                        | "invalid_refresh_token"
+                        | "refresh_token_reused"
+                        | "refresh_token_revoked"
+                )
+            )
     }
 
     pub(super) fn transport(error: impl fmt::Display) -> Self {

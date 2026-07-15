@@ -11,6 +11,7 @@
 //! `DESIGN-tau-ext-provider-builtin-structured-retry-facts` and
 //! `DESIGN-tau-ext-provider-builtin-durable-session-diagnostics`.
 
+mod oauth_refresh_rejection;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
@@ -30,6 +31,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dialoguer::{Confirm, Input};
+use oauth_refresh_rejection::{
+    LockedRefreshOutcome, OAuthRefreshRejectionCache, RefreshCredentialsError,
+};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
@@ -47,7 +51,7 @@ use tau_proto::{
     ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
-use tau_provider::storage::{AuthFile, ProviderStore};
+use tau_provider::storage::{AuthFile, AuthFileLockResult, ProviderStore};
 use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
 use tau_provider_chat_completions::{
     ChatCompletionsModel, ChatCompletionsProvider, PromptAttemptOutcome,
@@ -168,7 +172,7 @@ impl BuiltinProviderProfiles {
 }
 
 /// OAuth credentials for the ChatGPT/Codex Responses provider.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiAuth {
     /// ChatGPT access token used as bearer auth for Codex Responses calls.
@@ -1156,6 +1160,7 @@ where
         input_closed: false,
         cancel_generation: 0,
         quota: QuotaCoordinator::default(),
+        oauth_refresh_rejections: OAuthRefreshRejectionCache::default(),
     };
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
         .start_manual_loop(reader, writer, runtime)?;
@@ -1356,6 +1361,8 @@ struct ProviderRuntime<F> {
     cancel_generation: u64,
     /// Single-loop owner for ephemeral provider quota state.
     quota: QuotaCoordinator,
+    /// Permanent refresh rejections scoped to exact credential generations.
+    oauth_refresh_rejections: OAuthRefreshRejectionCache,
 }
 
 impl<F> ProviderRuntime<F>
@@ -1380,8 +1387,10 @@ where
     #[cfg(not(test))]
     fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
-        for (provider, config) in profiles.resolve_initial_quota_backends(resolve_responses_backend)
-        {
+        let backends = profiles.resolve_initial_quota_backends(|model, profiles| {
+            resolve_responses_backend(model, profiles, &mut self.oauth_refresh_rejections)
+        });
+        for (provider, config) in backends {
             self.ensure_quota_profile(&provider, &config, handle)?;
         }
         Ok(())
@@ -1454,7 +1463,8 @@ where
         profiles: &mut BuiltinProviderProfiles,
         handle: &ClientHandle,
     ) -> ClientResult<PromptBackend> {
-        let backend = resolve_prompt_backend(model, profiles).unwrap_or(PromptBackend::Unavailable);
+        let backend = resolve_prompt_backend(model, profiles, &mut self.oauth_refresh_rejections)
+            .unwrap_or(PromptBackend::Unavailable);
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
@@ -1556,7 +1566,9 @@ where
     ) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
         let requested_provider = prewarm.model.as_ref().map(|model| model.provider.clone());
-        let Some((model, config)) = resolve_prewarm_backend(&prewarm, &mut profiles) else {
+        let Some((model, config)) =
+            resolve_prewarm_backend(&prewarm, &mut profiles, &mut self.oauth_refresh_rejections)
+        else {
             if let Some(provider) = requested_provider {
                 self.clear_prewarm_profile(&provider);
             }
@@ -2069,7 +2081,13 @@ where
                         let config = models_for_profiles(&profiles)
                             .into_iter()
                             .find(|model| model.id.provider == provider)
-                            .and_then(|model| resolve_responses_backend(&model.id, &mut profiles));
+                            .and_then(|model| {
+                                resolve_responses_backend(
+                                    &model.id,
+                                    &mut profiles,
+                                    &mut self.oauth_refresh_rejections,
+                                )
+                            });
                         if let Some(config) = config {
                             let started = self.ensure_quota_profile(&provider, &config, handle)?;
                             if !started && let Some(epoch) = self.quota.profile_epoch(&provider) {
@@ -3732,14 +3750,26 @@ impl TurnAbort for SharedRetryContext {
 fn resolve_prompt_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> Option<PromptBackend> {
-    match profiles.providers.get_mut(&model.provider)? {
+    let Some(profile) = profiles.providers.get_mut(&model.provider) else {
+        refresh_rejections.clear(&model.provider);
+        return None;
+    };
+    match profile {
         BuiltinProviderProfile::Chatgpt(profile) => {
             let mode = profile.responses_mode();
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, mode)
-                .map(PromptBackend::Responses)
+            resolve_chatgpt_backend(
+                model,
+                &model.provider,
+                &mut profile.auth,
+                mode,
+                refresh_rejections,
+            )
+            .map(PromptBackend::Responses)
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
+            refresh_rejections.clear(&model.provider);
             let configured_model = provider
                 .models
                 .iter()
@@ -3751,6 +3781,7 @@ fn resolve_prompt_backend(
             })
         }
         BuiltinProviderProfile::OpenRouter(profile) => {
+            refresh_rejections.clear(&model.provider);
             let provider = profile.to_chat_completions();
             let configured_model = provider
                 .models
@@ -3768,13 +3799,27 @@ fn resolve_prompt_backend(
 fn resolve_responses_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> Option<responses::ResponsesConfig> {
-    match profiles.providers.get_mut(&model.provider)? {
+    let Some(profile) = profiles.providers.get_mut(&model.provider) else {
+        refresh_rejections.clear(&model.provider);
+        return None;
+    };
+    match profile {
         BuiltinProviderProfile::Chatgpt(profile) => {
             let mode = profile.responses_mode();
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, mode)
+            resolve_chatgpt_backend(
+                model,
+                &model.provider,
+                &mut profile.auth,
+                mode,
+                refresh_rejections,
+            )
         }
-        BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => None,
+        BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => {
+            refresh_rejections.clear(&model.provider);
+            None
+        }
     }
 }
 
@@ -3783,12 +3828,14 @@ fn resolve_chatgpt_backend(
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
     mode: responses::ResponsesMode,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> Option<responses::ResponsesConfig> {
     resolve_chatgpt_backend_with_refresh(
         model,
         provider_name,
         auth_store,
         mode,
+        refresh_rejections,
         refresh_chatgpt_credentials_locked,
     )
 }
@@ -3798,23 +3845,68 @@ fn resolve_chatgpt_backend_with_refresh(
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
     mode: responses::ResponsesMode,
-    refresh: impl FnOnce(&ProviderName) -> std::io::Result<OpenAiAuth>,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+    refresh: impl FnOnce(
+        &ProviderName,
+        responses::ResponsesMode,
+        &mut OAuthRefreshRejectionCache,
+    ) -> Result<OpenAiAuth, RefreshCredentialsError>,
 ) -> Option<responses::ResponsesConfig> {
-    if oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
-        && !auth_store.refresh_token.trim().is_empty()
-    {
-        match refresh(provider_name) {
+    let refresh_due =
+        oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
+            && !auth_store.refresh_token.trim().is_empty();
+    if refresh_due || refresh_rejections.contains(provider_name) {
+        match refresh(provider_name, mode, refresh_rejections) {
             Ok(refreshed) => {
                 *auth_store = refreshed;
             }
-            Err(error) => tracing::warn!(
-                target: LOG_TARGET,
-                provider = %provider_name,
-                "failed to refresh ChatGPT credentials: {error}"
-            ),
+            Err(error @ RefreshCredentialsError::Storage(_)) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    provider = %provider_name,
+                    "failed to refresh ChatGPT credentials: {error}"
+                );
+            }
+            Err(
+                RefreshCredentialsError::OAuth { credentials, error }
+                | RefreshCredentialsError::Suppressed { credentials, error },
+            ) => {
+                *auth_store = *credentials;
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    provider = %provider_name,
+                    "failed to refresh ChatGPT credentials: {error}"
+                );
+            }
+            Err(RefreshCredentialsError::OAuthWithUnlockFailure {
+                credentials,
+                error,
+                unlock_error,
+            }) => {
+                *auth_store = *credentials;
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    provider = %provider_name,
+                    unlock_error_kind = ?unlock_error.kind(),
+                    "ChatGPT credential refresh failed or was suppressed, and releasing the credential lock failed: {error}"
+                );
+            }
+            Err(RefreshCredentialsError::CredentialsWithUnlockFailure {
+                credentials,
+                unlock_error,
+            }) => {
+                *auth_store = *credentials;
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    provider = %provider_name,
+                    unlock_error_kind = ?unlock_error.kind(),
+                    "resolved authoritative ChatGPT credentials but failed to release credential lock"
+                );
+            }
         }
     }
-    if auth_store.access_token.trim().is_empty() {
+    if auth_store.access_token.trim().is_empty() || oauth_token_is_expired(auth_store.expires_at_ms)
+    {
         return None;
     }
 
@@ -3826,9 +3918,33 @@ fn resolve_chatgpt_backend_with_refresh(
     ))
 }
 
-fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::Result<OpenAiAuth> {
-    let auth_file = AuthFile::<BuiltinProviderProfile>::open_default(provider_name.as_str())?;
-    auth_file.with_lock(|locked| {
+fn refresh_chatgpt_credentials_locked(
+    provider_name: &ProviderName,
+    mode: responses::ResponsesMode,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+) -> Result<OpenAiAuth, RefreshCredentialsError> {
+    let auth_file = AuthFile::<BuiltinProviderProfile>::open_default(provider_name.as_str())
+        .map_err(RefreshCredentialsError::Storage)?;
+    refresh_chatgpt_credentials_in(
+        &auth_file,
+        provider_name,
+        mode,
+        refresh_rejections,
+        tau_provider::oauth::openai_codex_refresh,
+    )
+}
+
+fn refresh_chatgpt_credentials_in(
+    auth_file: &AuthFile<BuiltinProviderProfile>,
+    provider_name: &ProviderName,
+    mode: responses::ResponsesMode,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+    refresh: impl FnOnce(
+        &str,
+    )
+        -> Result<tau_provider::oauth::OAuthTokens, tau_provider::oauth::OAuthError>,
+) -> Result<OpenAiAuth, RefreshCredentialsError> {
+    let lock_result = auth_file.with_lock_result(|locked| {
         let BuiltinProviderProfile::Chatgpt(mut profile) = locked.load()?.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "provider profile not found")
         })?
@@ -3839,14 +3955,27 @@ fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::
             ));
         };
         let current = profile.auth.clone();
+        if let Some(error) = refresh_rejections.rejection(provider_name, &current, mode) {
+            return Ok(LockedRefreshOutcome::Suppressed {
+                credentials: current,
+                error,
+            });
+        }
         if !oauth_token_should_refresh(&current.access_token, current.expires_at_ms)
             || current.refresh_token.trim().is_empty()
         {
-            return Ok(current);
+            return Ok(LockedRefreshOutcome::Credentials(current));
         }
 
-        let tokens = tau_provider::oauth::openai_codex_refresh(&current.refresh_token)
-            .map_err(std::io::Error::other)?;
+        let tokens = match refresh(&current.refresh_token) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                return Ok(LockedRefreshOutcome::Rejected {
+                    credentials: current,
+                    error,
+                });
+            }
+        };
         let refreshed = OpenAiAuth {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
@@ -3855,8 +3984,70 @@ fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::
         };
         profile.replace_auth(refreshed.clone());
         locked.save(&BuiltinProviderProfile::Chatgpt(profile))?;
-        Ok(refreshed)
-    })
+        Ok(LockedRefreshOutcome::Credentials(refreshed))
+    });
+    finish_chatgpt_refresh_attempt(lock_result, provider_name, mode, refresh_rejections)
+}
+
+fn finish_chatgpt_refresh_attempt(
+    lock_result: AuthFileLockResult<LockedRefreshOutcome>,
+    provider_name: &ProviderName,
+    mode: responses::ResponsesMode,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+) -> Result<OpenAiAuth, RefreshCredentialsError> {
+    let (outcome, unlock_error) = match lock_result {
+        AuthFileLockResult::LockFailed(error)
+        | AuthFileLockResult::CallbackFailed {
+            error,
+            unlock_error: _,
+        } => return Err(RefreshCredentialsError::Storage(error)),
+        AuthFileLockResult::Completed {
+            value,
+            unlock_error,
+        } => (value, unlock_error),
+    };
+    match outcome {
+        LockedRefreshOutcome::Credentials(credentials) => {
+            refresh_rejections.clear(provider_name);
+            if let Some(unlock_error) = unlock_error {
+                Err(RefreshCredentialsError::CredentialsWithUnlockFailure {
+                    credentials: Box::new(credentials),
+                    unlock_error,
+                })
+            } else {
+                Ok(credentials)
+            }
+        }
+        LockedRefreshOutcome::Suppressed { credentials, error } => {
+            if let Some(unlock_error) = unlock_error {
+                Err(RefreshCredentialsError::OAuthWithUnlockFailure {
+                    credentials: Box::new(credentials),
+                    error,
+                    unlock_error,
+                })
+            } else {
+                Err(RefreshCredentialsError::Suppressed {
+                    credentials: Box::new(credentials),
+                    error,
+                })
+            }
+        }
+        LockedRefreshOutcome::Rejected { credentials, error } => {
+            refresh_rejections.record_if_permanent(provider_name, &credentials, mode, &error);
+            if let Some(unlock_error) = unlock_error {
+                Err(RefreshCredentialsError::OAuthWithUnlockFailure {
+                    credentials: Box::new(credentials),
+                    error,
+                    unlock_error,
+                })
+            } else {
+                Err(RefreshCredentialsError::OAuth {
+                    credentials: Box::new(credentials),
+                    error,
+                })
+            }
+        }
+    }
 }
 
 fn oauth_token_should_refresh(access_token: &str, expires_at_ms: u64) -> bool {
@@ -3869,6 +4060,10 @@ fn oauth_token_should_refresh(access_token: &str, expires_at_ms: u64) -> bool {
         }
     }
     expires_at_ms <= now_ms.saturating_add(duration_millis_u64(Duration::from_secs(5 * 60)))
+}
+
+fn oauth_token_is_expired(expires_at_ms: u64) -> bool {
+    expires_at_ms <= now_ms()
 }
 
 fn now_ms() -> u64 {
@@ -3932,6 +4127,7 @@ fn is_canceled_by_harness(error: &common::LlmError) -> bool {
 fn resolve_prewarm_backend(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> Option<(ModelId, responses::ResponsesConfig)> {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -3941,7 +4137,7 @@ fn resolve_prewarm_backend(
         );
         return None;
     };
-    let Some(config) = resolve_responses_backend(model, profiles) else {
+    let Some(config) = resolve_responses_backend(model, profiles, refresh_rejections) else {
         tracing::debug!(
             target: LOG_TARGET,
             agent_id = %prewarm.agent_id,
