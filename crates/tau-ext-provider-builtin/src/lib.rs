@@ -139,6 +139,32 @@ impl BuiltinProviderProfiles {
                 .is_lite_compatibility();
         }
     }
+
+    fn resolve_initial_quota_backends<R>(
+        &mut self,
+        mut resolve: impl FnMut(&ModelId, &mut Self) -> Option<R>,
+    ) -> Vec<(ProviderName, R)> {
+        let models = self
+            .providers
+            .iter()
+            .filter_map(|(provider, profile)| {
+                let BuiltinProviderProfile::Chatgpt(profile) = profile else {
+                    return None;
+                };
+                tau_provider_chatgpt::models_for_provider_mode(provider, profile.responses_mode())
+                    .into_iter()
+                    .next()
+                    .map(|model| model.id)
+            })
+            .collect::<Vec<_>>();
+        models
+            .into_iter()
+            .filter_map(|model| {
+                let backend = resolve(&model, self)?;
+                Some((model.provider, backend))
+            })
+            .collect()
+    }
 }
 
 /// OAuth credentials for the ChatGPT/Codex Responses provider.
@@ -1354,10 +1380,9 @@ where
     #[cfg(not(test))]
     fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
-        for model in models_for_profiles(&profiles) {
-            if let Some(config) = resolve_responses_backend(&model.id, &mut profiles) {
-                self.ensure_quota_profile(&model.id.provider, &config, handle)?;
-            }
+        for (provider, config) in profiles.resolve_initial_quota_backends(resolve_responses_backend)
+        {
+            self.ensure_quota_profile(&provider, &config, handle)?;
         }
         Ok(())
     }
@@ -3759,15 +3784,32 @@ fn resolve_chatgpt_backend(
     auth_store: &mut OpenAiAuth,
     mode: responses::ResponsesMode,
 ) -> Option<responses::ResponsesConfig> {
+    resolve_chatgpt_backend_with_refresh(
+        model,
+        provider_name,
+        auth_store,
+        mode,
+        refresh_chatgpt_credentials_locked,
+    )
+}
+
+fn resolve_chatgpt_backend_with_refresh(
+    model: &ModelId,
+    provider_name: &ProviderName,
+    auth_store: &mut OpenAiAuth,
+    mode: responses::ResponsesMode,
+    refresh: impl FnOnce(&ProviderName) -> std::io::Result<OpenAiAuth>,
+) -> Option<responses::ResponsesConfig> {
     if oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
         && !auth_store.refresh_token.trim().is_empty()
     {
-        match refresh_chatgpt_credentials_locked(provider_name) {
+        match refresh(provider_name) {
             Ok(refreshed) => {
                 *auth_store = refreshed;
             }
             Err(error) => tracing::warn!(
                 target: LOG_TARGET,
+                provider = %provider_name,
                 "failed to refresh ChatGPT credentials: {error}"
             ),
         }

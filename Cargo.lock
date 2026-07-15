@@ -3712,6 +3712,7 @@ dependencies = [
  "tau-provider-chat-completions",
  "tau-provider-chatgpt",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

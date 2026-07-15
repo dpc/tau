@@ -2,6 +2,33 @@ use tau_provider_chat_completions::openrouter::OpenRouterProfile;
 
 use super::*;
 
+/// Cloneable in-memory sink used to inspect structured tracing output.
+#[derive(Clone, Default)]
+struct SharedTraceWriter {
+    /// Bytes written by the temporary tracing subscriber.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedTraceWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("trace writer lock").clone()
+    }
+}
+
+impl Write for SharedTraceWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("trace writer lock")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Every provider retry class must map to its stable provider retry category.
 #[test]
 fn retry_classes_map_to_provider_categories() {
@@ -352,6 +379,106 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
             auth: OpenAiAuth { access_token, .. },
         }) if access_token == "fresh"
     ));
+}
+
+/// Startup quota initialization must resolve one model per ChatGPT profile, so
+/// one rejected refresh cannot be amplified by every published model.
+#[test]
+fn startup_quota_initialization_resolves_once_per_provider() {
+    let first = ProviderName::new("first");
+    let second = ProviderName::new("second");
+    let expired = OpenAiAuth {
+        access_token: "expired".to_owned(),
+        refresh_token: "reused".to_owned(),
+        expires_at_ms: now_ms().saturating_sub(1),
+        account_id: None,
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        providers: BTreeMap::from([
+            (
+                first.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    auth: expired.clone(),
+                    responses_lite_compatibility: false,
+                }),
+            ),
+            (
+                second.clone(),
+                BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+                    auth: expired,
+                    responses_lite_compatibility: false,
+                }),
+            ),
+            (
+                ProviderName::new("router"),
+                BuiltinProviderProfile::OpenRouter(OpenRouterProfile::default()),
+            ),
+        ]),
+    };
+
+    let published = models_for_profiles(&profiles);
+    let mut attempts = Vec::new();
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let resolved = tracing::subscriber::with_default(subscriber, || {
+        profiles.resolve_initial_quota_backends(|model, profiles| {
+            let BuiltinProviderProfile::Chatgpt(profile) = profiles
+                .providers
+                .get_mut(&model.provider)
+                .expect("selected ChatGPT profile")
+            else {
+                panic!("quota initialization selected non-ChatGPT profile");
+            };
+            let mode = profile.responses_mode();
+            resolve_chatgpt_backend_with_refresh(
+                model,
+                &model.provider,
+                &mut profile.auth,
+                mode,
+                |provider| {
+                    attempts.push(provider.clone());
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "refresh rejected",
+                    ))
+                },
+            )
+        })
+    });
+    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+
+    assert_eq!(resolved.len(), 2);
+    assert!(published.len() > attempts.len());
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts.iter().cloned().collect::<HashSet<_>>(),
+        HashSet::from([first.clone(), second.clone()])
+    );
+    assert_eq!(
+        trace
+            .matches("failed to refresh ChatGPT credentials")
+            .count(),
+        2
+    );
+    assert!(trace.contains(&format!("provider={first}")));
+    assert!(trace.contains(&format!("provider={second}")));
+    assert!(!trace.contains("provider=router"));
+
+    for profile in profiles.providers.values_mut() {
+        if let BuiltinProviderProfile::Chatgpt(profile) = profile {
+            profile.auth.expires_at_ms = u64::MAX;
+        }
+    }
+    let successful = profiles.resolve_initial_quota_backends(resolve_responses_backend);
+    assert_eq!(successful.len(), 2);
 }
 
 /// Startup-selected modes independently control same-process publication and
