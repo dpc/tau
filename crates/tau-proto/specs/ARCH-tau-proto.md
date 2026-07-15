@@ -9,10 +9,15 @@ contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
-Protocol version 10 requires an extension's first harness response after
+Protocol version 11 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
 [DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+Version 11 also makes transport-ingress results closed: a rejection carries only
+a typed reason, while a committed result carries the canonical message id, exact
+first committed route snapshot, Accepted/Duplicate outcome, and typed
+Active/Inactive reply disposition. Version 10's correlated optional
+`message_id`/`outcome`/`error` shape is intentionally not accepted as version 11.
 Streaming readers reject a single encoded protocol message larger than 16 MiB
 before higher-level connection or activation queues receive it.
 

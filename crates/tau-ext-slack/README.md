@@ -184,8 +184,9 @@ identity; local help/control side effects run once. Commands are `start`,
 Selection is per configured receive route: parent-route threads share selection,
 receive-enabled fixed-thread routes are isolated, and dynamic DMs select per D id.
 
-An agent calls `slack_register(enabled: true)` to receive messages. Every
-accepted create, edit, or owned-post reaction gets its own opaque, source-bound
+An agent calls `slack_register(enabled: true)` to receive messages. Every exact
+validated protocol-v11 Committed+Active create, edit, or owned-post reaction gets
+its own opaque, source-bound
 reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
 alias-only `destination`; raw Slack ids and thread selectors are never accepted.
 Its fixed schema never enumerates configuration. Call `slack_conversations` for
@@ -211,10 +212,10 @@ therefore influence proactive sends available to that role. Keep destination
 sets and roles minimal; use separate roles or separately prefixed Slack instances
 when receive and proactive authority need isolation.
 
-Edits require a recent committed original with matching sender, route, and
+Edits require a recent Active canonical original with matching sender, route, and
 thread. Inbound human reaction events require a recent post created through `slack_send`, matching
 owner, verified actor, and a covering receive route. Creates survive durable
-replay/restart dedup and can restore edit ownership when Slack retries them;
+replay/restart dedup, but historical Inactive duplicates restore no private ownership;
 runtime links, selections, reply routes, reaction ownership, and registrations
 clear on restart. Tau prevents same-process accepted-send reposts but does not
 claim crash-safe exactly-once delivery.

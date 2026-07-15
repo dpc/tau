@@ -24,9 +24,11 @@ wrappers normalize leading-mention commands and `(conversation, ts)` create
 identity identically. Parent routes share selection across actual threads;
 receive-enabled fixed-thread routes and dynamic DMs isolate it.
 
-The harness stamps trust, durably deduplicates, and commits ingress. Only an
-accepted/identical result installs the canonical source-bound reply route. Create
-results also install bounded native edit ownership. Successful sends install
+The harness stamps trust, durably deduplicates, and commits ingress. Only a
+protocol-v11 Committed+Active result whose exact first canonical instance,
+target, native occurrence, human, conversation/thread, assurance, and policy
+match pending state installs source-bound reply/edit/reaction authority. Inactive,
+Rejected, orphaned, or mismatched results install nothing. Successful sends install
 bounded reaction ownership. Edits and reactions revalidate original/owner,
 sender, agent, receive route, thread, capability, and completion. Replay cannot
 wake or reactivate a route.
@@ -34,6 +36,8 @@ These ownership flows follow
 [DESIGN-tau-ext-slack-canonical-reply-selectors](DESIGN-tau-ext-slack-canonical-reply-selectors.md),
 [DESIGN-tau-ext-slack-edit-ownership](DESIGN-tau-ext-slack-edit-ownership.md),
 and [DESIGN-tau-ext-slack-reaction-ownership](DESIGN-tau-ext-slack-reaction-ownership.md).
+The cross-adapter authority contract is
+[DESIGN-canonical-transport-ingress](../../../specs/DESIGN-canonical-transport-ingress.md).
 
 `slack_conversations` returns bounded pages of static aliases, operator
 descriptions, kinds, scopes, and configured receive/proactive policy; it excludes
@@ -53,8 +57,8 @@ and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-im
 
 Runtime links, selections, registrations, reply routes, post ownership, and
 worker state clear on restart. Durable create identity permits Slack retry after
-restart to deduplicate and restore edit ownership; edits need that create retry,
-and old post reactions remain unavailable. Same-process accepted sends do not
+restart to deduplicate, but historical duplicates are Inactive and restore no
+private authority. Same-process accepted sends do not
 repost, without claiming crash-safe exactly-once delivery.
 
 Configuration has a monotonic freeze latch. Successful auth/socket preflight

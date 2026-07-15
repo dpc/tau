@@ -2,6 +2,11 @@
 
 Status: inferred
 
+Protocol-consumer fixtures cover Active and fail-closed Inactive, Rejected,
+orphaned, foreign-instance, and mismatched canonical authority. Only exact
+Active may install reply, edit, or reaction state, and presentation-only retries
+use the first canonical snapshot.
+
 Slack lifecycle behavior is tested without live Slack credentials. Unit tests use
 fake `SlackClient` implementations for Web API calls and loopback websocket
 servers for Socket Mode behavior. Production Socket Mode URLs still require

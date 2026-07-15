@@ -25,6 +25,17 @@ contain bounded native sender, conversation/thread, event, and message ids
 visible to authorized event subscribers, but never transport credentials or raw
 private route capabilities.
 
+Transport-ingress deduplication is global to the authenticated extension
+instance, transport, and native dedup key across every retained agent journal.
+The first durable envelope fixes the original target and canonical route.
+Protocol v11 returns that exact snapshot with an explicit Active or typed
+Inactive reply disposition; adapters may install private reply authority only
+from Active. Presentation-only endpoint and conversation labels do not change
+dedup authority, while stable identity, destination, conversation/thread,
+operation, trust/policy, native identity, ordering/time, and send tool do.
+Retained-history uncertainty fails closed as specified by
+[DESIGN-canonical-transport-ingress](DESIGN-canonical-transport-ingress.md).
+
 ## Cross-harness messages
 
 Cross-harness agent messages are local IPC between Tau harness daemons for the

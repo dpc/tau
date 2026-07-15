@@ -674,15 +674,108 @@ pub enum TransportMessageIngressOutcome {
 pub struct TransportMessageIngressResult {
     /// Caller correlation id.
     pub request_id: String,
-    /// Canonical id when accepted/duplicate.
+    /// Closed committed or rejected disposition.
+    pub disposition: TransportMessageIngressDisposition,
+}
+
+/// Closed result of one canonical transport-ingress attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TransportMessageIngressDisposition {
+    /// A first canonical occurrence exists durably.
+    Committed {
+        /// Canonical occurrence id.
+        message_id: MessageId,
+        /// Whether this request created or rediscovered the occurrence.
+        outcome: TransportMessageIngressOutcome,
+        /// Exact route snapshot from the first committed occurrence.
+        canonical: Box<CommittedTransportIngressRoute>,
+        /// Whether this result owns a current live reply route.
+        reply_activation: TransportReplyActivation,
+    },
+    /// No authority was activated for the request.
+    Rejected {
+        /// Bounded, non-secret rejection category.
+        reason: TransportIngressRejection,
+    },
+}
+
+/// First committed route snapshot returned to the authenticated adapter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommittedTransportIngressRoute {
+    /// Original target agent.
+    pub target_agent_id: AgentId,
+    /// Harness-stamped transport and extension instance.
+    pub transport: MessageTransportRef,
+    /// Exact canonical external source endpoint.
+    pub external_endpoint: MessageEndpoint,
+    /// Exact canonical conversation metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<MessageId>,
-    /// Success outcome.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<TransportMessageIngressOutcome>,
-    /// Bounded error code/message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub conversation: Option<MessageConversation>,
+    /// Exact canonical native occurrence identity used for adapter correlation.
+    pub external_identity: ExternalMessageIdentity,
+    /// Canonical sender identity assurance.
+    pub identity_assurance: SenderIdentityAssurance,
+    /// Canonical sender policy.
+    pub policy_status: SenderPolicyStatus,
+}
+
+/// Closed reason why a transport ingress request was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportIngressRejection {
+    /// Correlation, metadata, trust, or draft validation failed.
+    InvalidRequest,
+    /// The source was not an authenticated extension owner.
+    UnauthorizedSource,
+    /// The current connection has no matching active capability.
+    InactiveCapability,
+    /// The requested target is not live.
+    InactiveTarget,
+    /// The dedup key names a different immutable occurrence.
+    DedupConflict,
+    /// Source ordering conflicts with retained history.
+    OrderingConflict,
+    /// A bounded locator or pending reservation reached capacity.
+    CapacityExceeded,
+    /// The incoming fact or its derived locator could not be persisted.
+    DurableCommitFailed,
+    /// Retained canonical history could not be read or decoded.
+    CanonicalUnavailable,
+    /// Retained history contains multiple authorities for the same key.
+    CanonicalAmbiguous,
+    /// A retained locator names canonical history that has been pruned.
+    CanonicalPruned,
+}
+
+/// Live reply activation granted with a committed canonical result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "reason", rename_all = "snake_case")]
+pub enum TransportReplyActivation {
+    /// The exact result connection owns a current live reply route.
+    Active,
+    /// The canonical occurrence exists but no route was activated.
+    Inactive(TransportReplyInactiveReason),
+}
+
+/// Closed reason why a committed occurrence did not activate a reply route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportReplyInactiveReason {
+    /// The first occurrence did not carry a reply path.
+    NoReplyPath,
+    /// The canonical occurrence belongs to another active session.
+    NonCurrentSession,
+    /// The waiter was admitted under an older session generation.
+    NonCurrentGeneration,
+    /// The original target is no longer live.
+    InactiveTarget,
+    /// The matching transport capability or reply tool is no longer active.
+    InactiveCapability,
+    /// The requesting extension connection is no longer live.
+    InactiveConnection,
+    /// Another current waiter owns the one installed route.
+    SupersededWaiter,
 }
 
 /// Successful transport egress report awaiting durable completion.

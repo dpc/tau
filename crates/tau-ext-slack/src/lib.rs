@@ -980,6 +980,8 @@ struct PendingIngress {
     user_id: String,
     /// Sender policy retained for the eventual source-bound reply route.
     policy_status: SenderPolicyStatus,
+    /// Exact native occurrence identity submitted for canonical correlation.
+    external_identity: ExternalMessageIdentity,
     /// Native create identity to bind after durable commit, when applicable.
     original_key: Option<PostedMessageKey>,
     /// Exact native item eligible for reaction after commit, if this is
@@ -1143,6 +1145,8 @@ impl DuplicateCache {
 
 #[derive(Default)]
 struct State {
+    /// Immutable harness-configured extension instance for canonical matching.
+    instance_name: Option<tau_proto::ExtensionName>,
     config: Option<RuntimeConfig>,
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
@@ -3800,6 +3804,7 @@ impl Extension {
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
                     policy_status,
+                    external_identity: external_identity.clone(),
                     original_key,
                     reaction_message_ts,
                     submitted_at: Instant::now(),
@@ -4013,7 +4018,7 @@ fn static_parent_receive_covers_dm(cfg: &RuntimeConfig, channel_id: &str) -> boo
 }
 
 /// Coarse conversation-id prefilter; callers must still resolve or revalidate
-/// the exact alias, kind, thread, sender, and owner.
+/// the exact stable route, kind, thread, sender, and owner.
 fn conversation_has_receive_source(state: &State, cfg: &RuntimeConfig, channel_id: &str) -> bool {
     cfg.parent_receives.contains_key(channel_id)
         || cfg
@@ -4051,7 +4056,7 @@ fn is_route_authorized(
                 .get(&route.channel_id)
                 .and_then(|alias| cfg.conversations.get(alias))
         });
-    policy.is_some_and(|policy| policy.alias == route.alias && policy.kind == route.kind)
+    policy.is_some_and(|policy| policy.kind == route.kind)
 }
 
 /// Build the canonical conversation metadata used identically for ingress and
@@ -4964,6 +4969,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
     if cx.state.ext.config_frozen() {
         return Err(ClientError::handler(immutable_config_error()));
     }
+    let instance_name = cx.instance_name().cloned();
     let cfg = match cx.parse_config::<ExtConfig>() {
         Ok(cfg) => cfg,
         Err(error) => {
@@ -4985,6 +4991,12 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         cx.state.ext.clear_config_after_error();
         return Err(ClientError::handler(message));
     }
+    cx.state
+        .ext
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .instance_name = instance_name;
     cx.state.ext.request_transport_capability();
     Ok(())
 }
@@ -5036,11 +5048,24 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                 );
                 return;
             };
+            let instance_name = state.instance_name.clone();
             if let Some(trace) = pending.latency_trace {
-                let outcome = match result.outcome {
-                    Some(tau_proto::TransportMessageIngressOutcome::Accepted) => "accepted",
-                    Some(tau_proto::TransportMessageIngressOutcome::Duplicate) => "duplicate",
-                    None => "rejected",
+                let outcome = match &result.disposition {
+                    tau_proto::TransportMessageIngressDisposition::Committed {
+                        message_id: _,
+                        outcome: tau_proto::TransportMessageIngressOutcome::Accepted,
+                        canonical: _,
+                        reply_activation: _,
+                    } => "accepted",
+                    tau_proto::TransportMessageIngressDisposition::Committed {
+                        message_id: _,
+                        outcome: tau_proto::TransportMessageIngressOutcome::Duplicate,
+                        canonical: _,
+                        reply_activation: _,
+                    } => "duplicate",
+                    tau_proto::TransportMessageIngressDisposition::Rejected { reason: _ } => {
+                        "rejected"
+                    }
                 };
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -5053,15 +5078,24 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                     "slack.ingress.result_received"
                 );
             }
-            if let (Some(message_id), Some(_)) = (&result.message_id, result.outcome) {
+            if let tau_proto::TransportMessageIngressDisposition::Committed {
+                message_id,
+                outcome: _,
+                canonical,
+                reply_activation: tau_proto::TransportReplyActivation::Active,
+            } = &result.disposition
+                && let Some((conversation, user_id)) = instance_name
+                    .as_ref()
+                    .and_then(|instance| canonical_slack_reply_route(canonical, &pending, instance))
+            {
                 if let Some(original_key) = pending.original_key.clone() {
                     state.insert_incoming_message(
                         original_key,
                         IncomingMessageOwner {
                             agent_id: pending.agent_id.clone(),
                             message_id: message_id.clone(),
-                            conversation: pending.conversation.clone(),
-                            user_id: pending.user_id.clone(),
+                            conversation: conversation.clone(),
+                            user_id: user_id.clone(),
                         },
                     );
                 }
@@ -5069,9 +5103,9 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                     message_id.clone(),
                     ReplyRoute {
                         agent_id: pending.agent_id.clone(),
-                        conversation: pending.conversation.clone(),
-                        user_id: pending.user_id.clone(),
-                        policy_status: pending.policy_status,
+                        conversation: conversation.clone(),
+                        user_id: user_id.clone(),
+                        policy_status: canonical.policy_status,
                     },
                 );
                 if let Some(message_ts) = pending.reaction_message_ts {
@@ -5079,11 +5113,11 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                         message_id.as_ref().to_owned(),
                         ReactionTarget {
                             agent_id: pending.agent_id,
-                            conversation: pending.conversation,
+                            conversation,
                             message_ts,
                             authority: ReactionAuthority::Source {
                                 message_id: message_id.clone(),
-                                user_id: pending.user_id,
+                                user_id,
                             },
                         },
                     );
@@ -5128,6 +5162,117 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
         }
         _ => {}
     }
+}
+
+/// Validates and lowers only an Active first-canonical Slack source route.
+///
+/// Presentation comes exclusively from the committed snapshot; pending state is
+/// used only to prove that stable native authority did not change in flight.
+fn canonical_slack_reply_route(
+    canonical: &tau_proto::CommittedTransportIngressRoute,
+    pending: &PendingIngress,
+    instance_name: &tau_proto::ExtensionName,
+) -> Option<(SlackConversation, String)> {
+    let tau_proto::CommittedTransportIngressRoute {
+        target_agent_id,
+        transport,
+        external_endpoint,
+        conversation,
+        external_identity,
+        identity_assurance,
+        policy_status,
+    } = canonical;
+    let tau_proto::MessageTransportRef { name, instance } = transport;
+    if target_agent_id != &pending.agent_id
+        || name != "slack"
+        || instance.as_ref() != Some(instance_name)
+        || *identity_assurance != SenderIdentityAssurance::VerifiedAccount
+        || *policy_status != pending.policy_status
+        || external_identity != &pending.external_identity
+    {
+        return None;
+    }
+    let user_id = match external_endpoint {
+        MessageEndpoint::External {
+            stable_id: Some(stable_id),
+            display_name: _,
+            actor_kind: tau_proto::ExternalActorKind::Human,
+        } if stable_id == &pending.user_id => stable_id.clone(),
+        MessageEndpoint::External {
+            stable_id: _,
+            display_name: _,
+            actor_kind: _,
+        }
+        | MessageEndpoint::Agent {
+            session_id: _,
+            agent_id: _,
+            display_name: _,
+        }
+        | MessageEndpoint::User => return None,
+    };
+    let MessageConversation {
+        kind: canonical_kind,
+        stable_id,
+        display_name,
+        thread,
+        reply_to,
+    } = conversation.as_ref()?;
+    let channel_id = stable_id.as_ref()?;
+    let alias = display_name.as_ref()?;
+    let kind = match canonical_kind {
+        ConversationKind::Channel => ConversationPolicyKind::Channel,
+        ConversationKind::Group => ConversationPolicyKind::Mpim,
+        ConversationKind::Direct => ConversationPolicyKind::Dm,
+        ConversationKind::Room | ConversationKind::Unknown => return None,
+    };
+    let thread_ts = match thread {
+        None => None,
+        Some(MessageThread {
+            stable_id,
+            root:
+                Some(MessageRef {
+                    message_id: None,
+                    external_message_id: Some(root_id),
+                }),
+        }) if root_id == stable_id => Some(stable_id.clone()),
+        Some(MessageThread {
+            stable_id: _,
+            root:
+                Some(MessageRef {
+                    message_id: None,
+                    external_message_id: Some(_),
+                }),
+        }) => return None,
+        Some(MessageThread {
+            stable_id: _,
+            root:
+                None
+                | Some(MessageRef {
+                    message_id: Some(_),
+                    external_message_id: _,
+                })
+                | Some(MessageRef {
+                    message_id: None,
+                    external_message_id: None,
+                }),
+        }) => return None,
+    };
+    if channel_id != &pending.conversation.channel_id
+        || thread_ts != pending.conversation.thread_ts
+        || kind != pending.conversation.kind
+        || reply_to.is_some()
+    {
+        return None;
+    }
+    Some((
+        SlackConversation {
+            channel_id: channel_id.clone(),
+            thread_ts,
+            kind,
+            alias: alias.clone(),
+        },
+        user_id,
+    ))
 }
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> ClientResult<()> {

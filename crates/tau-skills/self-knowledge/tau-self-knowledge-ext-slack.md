@@ -49,8 +49,9 @@ Reinstall after scope/event changes and invite the app to every route.
 `chat:write.public` is unnecessary. DMs never use `app_mention`.
 
 Agents register to receive. `slack_send` requires `message` plus exactly one
-opaque `reply_to` or proactive `destination` alias. Accepted creates, edits, and
-owned reactions each receive source-bound reply authority. Edits require a known
+opaque `reply_to` or proactive `destination` alias. Only exact validated
+protocol-v11 Committed+Active creates, edits, and owned reactions receive
+source-bound reply authority; historical Inactive duplicates restore nothing. Edits require a known
 committed original; reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 harness capability and effective tool policy.

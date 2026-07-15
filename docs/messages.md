@@ -43,6 +43,22 @@ and extension together; the version bump does not make newer on-disk agent logs
 downgrade-safe. Built-in bridge adapters are not migrated by the protocol
 foundation alone.
 
+### Protocol v11 ingress migration
+
+Version 11 replaces the ingress result's three optional
+`message_id`/`outcome`/`error` fields. A result is now exactly one of:
+
+- `committed`, containing the canonical id, Accepted or Duplicate outcome, exact
+  first committed route snapshot, and Active or typed Inactive reply activation;
+- `rejected`, containing one closed, non-secret rejection category.
+
+Adapters must not infer success from field presence and must not reconstruct
+reply identity from their pending retry. Only Active permits installation of
+private reply authority. Version 10 fixtures intentionally fail version 11
+decoding, so harness and extensions must be upgraded together. Existing durable
+message envelopes require no rewrite: the harness migrates an absent or obsolete
+derived locator by rebuilding it from retained incoming envelopes.
+
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For
 bus events themselves, see [events.md](events.md).

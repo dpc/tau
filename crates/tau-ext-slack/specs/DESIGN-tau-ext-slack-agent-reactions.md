@@ -119,8 +119,8 @@ The native `(channel, message_ts)` is private extension state and is never accep
 
 | Reference source | Eligible? | Required live authority |
 |---|---:|---|
-| Accepted/duplicate incoming message create | Yes | Its own canonical reply route, exact receiving agent, registered receive/source route, current config/dynamic link |
-| Accepted/duplicate incoming edit | Yes | New edit occurrence ref resolves to the edited original `(channel, ts)`; its own canonical source route remains live |
+| Validated Committed+Active incoming message create | Yes | Its own canonical reply route, exact receiving agent, registered receive/source route, current config/dynamic link |
+| Validated Committed+Active incoming edit | Yes | New edit occurrence ref resolves to the edited original `(channel, ts)`; its own canonical source route remains live |
 | Incoming human reaction occurrence | No | It is an occurrence about a target, not a message target; do not turn its reply ID into confused-deputy target authority |
 | Successful `slack_send` reply | Yes | Commit-accepted opaque send ref plus the original current source reply route |
 | Successful proactive `slack_send` | Yes | Commit-accepted opaque send ref plus the same current configured proactive alias/route; registration is not required |
@@ -128,7 +128,7 @@ The native `(channel, message_ts)` is private extension state and is never accep
 | Rejected/failed/uncommitted ingress or send | No | No target activation |
 | Arbitrary Slack ID/timestamp, destination alias, or message not routed to Tau | No | Never accepted |
 
-For incoming creates, extend `PendingIngress` with an optional exact reaction target key and install it only on accepted/duplicate `TransportMessageIngressResult`. For edits, carry the original message timestamp into the pending occurrence and map the edit's new canonical ID to that same Slack item. Reaction operations deliberately carry no eligible target. A retried committed create can restore an incoming target after restart in the same way it restores edit ownership; old outbound target refs cannot be restored.
+For incoming creates, extend `PendingIngress` with an optional exact reaction target key and install it only on validated Committed+Active `TransportMessageIngressResult`. For edits, carry the original message timestamp into the pending occurrence and map the edit's new canonical ID to that same Slack item. Reaction operations deliberately carry no eligible target. A historical Inactive duplicate after restart restores no incoming target, edit ownership, or outbound target reference.
 
 ### Threads and dynamic DMs
 
@@ -261,7 +261,7 @@ Primary changes should stay inside `crates/tau-ext-slack`:
    - strict parsers for action/ref/emoji;
    - `SlackClient` reaction method plus typed error;
    - target/ownership/attempt state and lifecycle clearing;
-   - `PendingIngress` target metadata and accepted ingress activation;
+   - `PendingIngress` target metadata and Active canonical ingress activation;
    - `PendingPostedMessage` ref/authority and accepted send activation;
    - structured `slack_send` result and `handle_react`;
    - generic safe 429 handling without leaking response bodies.
@@ -283,8 +283,8 @@ All new/changed Rust structs, fields, public methods, helpers, and tests need in
 
 ### Target creation and routing
 
-- Incoming create target appears only after accepted/duplicate ingress completion; rejection/failed ingress does not activate it.
-- An accepted edit ref resolves to the exact original item; an accepted reaction occurrence ref is ineligible.
+- Incoming create target appears only after validated Committed+Active ingress completion; rejection/failed ingress does not activate it.
+- An Active canonical edit ref resolves to the exact original item; an accepted reaction occurrence ref is ineligible.
 - Successful send returns a non-native opaque ref; only completion with
   `accepted:true` and `message_id:Some` activates it. Exercise the unavoidable
   ref-before-activation window plus rejected/missing-ID completion. Accepted-send

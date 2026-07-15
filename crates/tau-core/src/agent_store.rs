@@ -554,6 +554,23 @@ impl AgentStore {
             recorded_at,
         };
         if persistence.is_durable() {
+            let scan_lock_path = agent_dir.join("events.scan.lock");
+            let scan_lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&scan_lock_path)
+                .map_err(|source| AgentStoreError::Open {
+                    path: scan_lock_path.clone(),
+                    source,
+                })?;
+            scan_lock
+                .lock_exclusive()
+                .map_err(|source| AgentStoreError::Open {
+                    path: scan_lock_path,
+                    source,
+                })?;
             append_cbor_record(&agent_dir.join("events.cbor"), &record)?;
         } else {
             self.ephemeral_events
@@ -647,11 +664,109 @@ impl AgentStore {
         load_agent_events(&path)
     }
 
+    /// Streams one retained agent journal while excluding concurrent record
+    /// appends from other harness processes. The visitor returns `true` to
+    /// continue or `false` to stop successfully; sequence validation then
+    /// covers the visited prefix only, not the intentionally unscanned
+    /// suffix.
+    pub fn visit_retained_agent_events(
+        &self,
+        agent_id: &AgentId,
+        mut visitor: impl FnMut(PersistedAgentEvent) -> bool,
+    ) -> Result<(), AgentStoreError> {
+        let agent_dir = self.agent_dir(agent_id.as_str());
+        let lock_path = agent_dir.join("events.scan.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|source| AgentStoreError::Open {
+                path: lock_path.clone(),
+                source,
+            })?;
+        lock.lock_shared().map_err(|source| AgentStoreError::Open {
+            path: lock_path,
+            source,
+        })?;
+        let path = agent_dir.join("events.cbor");
+        let mut expected = 0_u64;
+        let mut invalid = None;
+        read_cbor_records(&path, |record: PersistedAgentEvent| {
+            let expected_seq = PersistedAgentEventSeq::new(expected);
+            if invalid.is_none() && record.seq != expected_seq {
+                invalid = Some((expected_seq, record.seq));
+            }
+            expected = expected.saturating_add(1);
+            visitor(record)
+        })?;
+        if let Some((expected, actual)) = invalid {
+            return Err(AgentStoreError::InvalidSequence {
+                path,
+                expected,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
     /// Returns the per-agent storage root this store is rooted at
     /// (typically `<state_dir>/agents/`).
     #[must_use]
     pub fn agents_dir(&self) -> &Path {
         &self.agents_dir
+    }
+
+    /// Lists every durable agent id with a retained event journal.
+    ///
+    /// Unlike [`Self::agents`], this enumerates storage rather than the lazy
+    /// in-memory tree cache. Callers must treat any directory or identifier
+    /// error as an incomplete global view.
+    pub fn retained_agent_ids(&self) -> Result<Vec<AgentId>, AgentStoreError> {
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.agents_dir).map_err(|source| AgentStoreError::Read {
+            path: self.agents_dir.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| AgentStoreError::Read {
+                path: self.agents_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|source| AgentStoreError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let events_path = path.join("events.cbor");
+            match fs::metadata(&events_path) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => continue,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(AgentStoreError::Read {
+                        path: events_path,
+                        source,
+                    });
+                }
+            }
+            let raw = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| AgentStoreError::InvalidAgentDir { path: path.clone() })?;
+            ids.push(parse_agent_id_for_store(raw)?);
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Returns whether an agent's transcript is memory-only in this process.
+    #[must_use]
+    pub fn agent_is_ephemeral(&self, agent_id: &AgentId) -> bool {
+        self.ephemeral_agents.contains(agent_id)
     }
 
     /// Returns one agent tree if it exists, loading a persisted log
@@ -971,6 +1086,7 @@ fn load_agent_events(path: &Path) -> Result<Vec<PersistedAgentEvent>, AgentStore
     let mut events = Vec::new();
     read_cbor_records(path, |record: PersistedAgentEvent| {
         events.push(record);
+        true
     })?;
     for (idx, record) in events.iter().enumerate() {
         let expected = PersistedAgentEventSeq::new(idx as u64);
@@ -997,7 +1113,7 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), AgentStoreError>
 where
     T: for<'de> Deserialize<'de>,
-    F: FnMut(T),
+    F: FnMut(T) -> bool,
 {
     let mut file = File::open(path).map_err(|source| AgentStoreError::Open {
         path: path.to_path_buf(),
@@ -1038,6 +1154,8 @@ where
                 source,
             }
         })?;
-        handle(record);
+        if !handle(record) {
+            return Ok(());
+        }
     }
 }

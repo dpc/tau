@@ -19,5 +19,5 @@ late work; reconnect does not, preserving already-ACKed order.
 
 Each route independently chooses mentions-only or all-message triggers. Outside
 DMs, commands require an exact leading authenticated bot mention regardless of
-Slack event wrapper. Accepted ingress activates only its opaque source-bound
+Slack event wrapper. Only an exact validated Committed+Active ingress result activates its opaque source-bound
 reply route and grants no proactive authority.

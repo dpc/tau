@@ -2041,9 +2041,30 @@ fn typed_message_facts_and_rpcs_round_trip() {
     let result =
         HarnessOutputMessage::TransportMessageIngressResult(TransportMessageIngressResult {
             request_id: "req-1".to_owned(),
-            message_id: Some(MessageId::new("msg-1")),
-            outcome: Some(TransportMessageIngressOutcome::Accepted),
-            error: None,
+            disposition: TransportMessageIngressDisposition::Committed {
+                message_id: MessageId::new("msg-1"),
+                outcome: TransportMessageIngressOutcome::Accepted,
+                canonical: Box::new(CommittedTransportIngressRoute {
+                    target_agent_id: AgentId::parse("agent-a").expect("agent"),
+                    transport: MessageTransportRef {
+                        name: "slack".to_owned(),
+                        instance: Some("std-slack".into()),
+                    },
+                    external_endpoint: MessageEndpoint::External {
+                        stable_id: Some("U123".to_owned()),
+                        display_name: Some("Alice".to_owned()),
+                        actor_kind: ExternalActorKind::Human,
+                    },
+                    conversation: None,
+                    external_identity: ExternalMessageIdentity {
+                        dedup_key: Some("event:Ev1".to_owned()),
+                        ..ExternalMessageIdentity::default()
+                    },
+                    identity_assurance: SenderIdentityAssurance::VerifiedAccount,
+                    policy_status: SenderPolicyStatus::Allowlisted,
+                }),
+                reply_activation: TransportReplyActivation::Active,
+            },
         });
     let mut encoded = Vec::new();
     encode_message(&mut encoded, &result).expect("encode result");
@@ -2051,6 +2072,121 @@ fn typed_message_facts_and_rpcs_round_trip() {
         decode_harness_output_from_slice(&encoded).expect("decode result"),
         result
     );
+}
+
+/// Protocol v11 must round-trip every closed ingress rejection and inactivity
+/// category through both human-readable JSON and the production CBOR codec.
+#[test]
+fn transport_ingress_v11_closed_dispositions_round_trip() {
+    let canonical = CommittedTransportIngressRoute {
+        target_agent_id: AgentId::parse("agent-a").expect("agent"),
+        transport: MessageTransportRef {
+            name: "slack".to_owned(),
+            instance: Some("std-slack".into()),
+        },
+        external_endpoint: MessageEndpoint::External {
+            stable_id: Some("U123".to_owned()),
+            display_name: Some("first".to_owned()),
+            actor_kind: ExternalActorKind::Human,
+        },
+        conversation: None,
+        external_identity: ExternalMessageIdentity {
+            dedup_key: Some("event:Ev1".to_owned()),
+            ..ExternalMessageIdentity::default()
+        },
+        identity_assurance: SenderIdentityAssurance::VerifiedAccount,
+        policy_status: SenderPolicyStatus::Allowlisted,
+    };
+    let rejections = [
+        TransportIngressRejection::InvalidRequest,
+        TransportIngressRejection::UnauthorizedSource,
+        TransportIngressRejection::InactiveCapability,
+        TransportIngressRejection::InactiveTarget,
+        TransportIngressRejection::DedupConflict,
+        TransportIngressRejection::OrderingConflict,
+        TransportIngressRejection::CapacityExceeded,
+        TransportIngressRejection::DurableCommitFailed,
+        TransportIngressRejection::CanonicalUnavailable,
+        TransportIngressRejection::CanonicalAmbiguous,
+        TransportIngressRejection::CanonicalPruned,
+    ];
+    let inactive = [
+        TransportReplyInactiveReason::NoReplyPath,
+        TransportReplyInactiveReason::NonCurrentSession,
+        TransportReplyInactiveReason::NonCurrentGeneration,
+        TransportReplyInactiveReason::InactiveTarget,
+        TransportReplyInactiveReason::InactiveCapability,
+        TransportReplyInactiveReason::InactiveConnection,
+        TransportReplyInactiveReason::SupersededWaiter,
+    ];
+    let mut dispositions = rejections
+        .into_iter()
+        .map(|reason| TransportMessageIngressDisposition::Rejected { reason })
+        .collect::<Vec<_>>();
+    for outcome in [
+        TransportMessageIngressOutcome::Accepted,
+        TransportMessageIngressOutcome::Duplicate,
+    ] {
+        dispositions.push(TransportMessageIngressDisposition::Committed {
+            message_id: MessageId::new("msg-1"),
+            outcome,
+            canonical: Box::new(canonical.clone()),
+            reply_activation: TransportReplyActivation::Active,
+        });
+        dispositions.extend(inactive.into_iter().map(|reason| {
+            TransportMessageIngressDisposition::Committed {
+                message_id: MessageId::new("msg-1"),
+                outcome,
+                canonical: Box::new(canonical.clone()),
+                reply_activation: TransportReplyActivation::Inactive(reason),
+            }
+        }));
+    }
+    for disposition in dispositions {
+        let result = TransportMessageIngressResult {
+            request_id: "req-1".to_owned(),
+            disposition,
+        };
+        let json = serde_json::to_vec(&result).expect("encode JSON");
+        assert_eq!(
+            serde_json::from_slice::<TransportMessageIngressResult>(&json).expect("decode JSON"),
+            result
+        );
+        let bytes = encode_message_to_vec(&result).expect("encode CBOR");
+        assert_eq!(
+            decode_message_from_slice::<TransportMessageIngressResult>(&bytes)
+                .expect("decode CBOR"),
+            result
+        );
+    }
+}
+
+/// The v10 optional success/error shape must not decode as a v11 disposition,
+/// preventing an omitted field from being interpreted as authority.
+#[test]
+fn transport_ingress_v10_optional_result_is_rejected_by_v11_codec() {
+    let legacy = serde_json::json!({
+        "request_id": "req-1",
+        "message_id": "msg-1",
+        "outcome": "accepted"
+    });
+    assert!(serde_json::from_value::<TransportMessageIngressResult>(legacy).is_err());
+
+    #[derive(serde::Serialize)]
+    struct LegacyResult {
+        request_id: String,
+        message_id: Option<MessageId>,
+        outcome: Option<TransportMessageIngressOutcome>,
+        error: Option<String>,
+    }
+    let legacy = LegacyResult {
+        request_id: "req-1".to_owned(),
+        message_id: Some(MessageId::new("msg-1")),
+        outcome: Some(TransportMessageIngressOutcome::Accepted),
+        error: None,
+    };
+    let bytes = encode_message_to_vec(&legacy).expect("encode v10 CBOR fixture");
+    assert!(decode_message_from_slice::<TransportMessageIngressResult>(&bytes).is_err());
 }
 
 /// Canonical activation markers must default false for legacy payloads and

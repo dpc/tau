@@ -50,6 +50,20 @@ The Slack bridge requires exact configured conversation/kind/thread policy and
 verified live-human admission. Receive permission creates only opaque
 source-bound reply authority; proactive permission is a separate alias-only
 grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
+Transport ingress has no adapter reply authority before durable commit.
+Deduplication is global across retained agent journals and preserves the first
+target and route. Harness processes sharing an agents root serialize a
+checksummed append-only locator transaction. Its dirty marker is parent-fsynced
+before publication and retained after ambiguous journal failure; count and byte
+capacity are prospective. Retention/import/pruning must take the same lock and
+atomically rebuild. Unreadable, ambiguous, pruned, over-capacity, or
+unpersistable canonical state rejects intake rather than falling back to a new
+occurrence. A committed result activates at most one exact current
+connection/session-generation/capability-epoch waiter. Re-check these invariants,
+the focused locator state-machine tests, and the cold-reopen/waiter regressions
+whenever agent retention, journal format, session rollover, capability
+revocation, or locator storage changes. Subprocess power-loss testing remains a
+future hardening layer rather than a current release claim.
 The separately authorized, default-off Slack reaction tool accepts only commit-accepted opaque exact-message refs, requires current route and role authority, and permits removal only of same-agent runtime-owned reactions. It adds `reactions:write` without reaction listing; reactions are externally visible and can trigger notifications or workflows.
 
 The separately authorized Slack discovery tool reveals all static model-facing

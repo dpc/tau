@@ -11,5 +11,5 @@ closed.
 
 The authoritative root comes from the authenticated outbound request. Omitted
 later response/reaction thread metadata is tolerated; conflicting metadata
-prevents ownership or routing. Every accepted reaction gets opaque reply
-authority even though reaction presentation omits a redundant reply marker.
+prevents ownership or routing. Every exact validated Committed+Active reaction
+gets opaque reply authority even though reaction presentation omits a redundant reply marker.

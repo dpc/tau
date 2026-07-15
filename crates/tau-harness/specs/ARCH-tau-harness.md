@@ -30,12 +30,30 @@ the protected durable fact. Per-peer retention is capped at 16 distinct transpor
 capabilities, in addition to the route-count and encoded-metadata bounds on each
 registration.
 
-Deduplication precedes publication and a bounded index is lazily rebuilt from
-typed transcript entries. Source sequence checks are scoped by extension,
+Deduplication precedes publication. A harness-owned, non-evicting global locator
+under the agents root covers every retained durable agent journal, not merely
+loaded trees or the requested target. A missing, dirty, corrupt, or old locator
+is rebuilt once from typed incoming transcript entries; subsequent misses are
+indexed. A checksummed append-only log and atomic head avoid full-index rewrites.
+An agents-root process lock serializes harness daemons. A parent-fsynced dirty
+marker precedes incoming publication, remains after ambiguous journal failure,
+and clears only after locator append/head commit, so a crash window forces a
+rebuild. The canonical envelope remains authority. An unreadable journal,
+ambiguous key, pruned referenced envelope, locator write failure, concurrent
+reservation, or prospective 65,536-entry/64-MiB capacity fails closed instead of
+admitting a fresh occurrence. The smaller
+4,096-entry runtime map may evict committed acceleration records safely because a
+miss consults the global locator.
+
+Source sequence checks are scoped by extension,
 transport, conversation, and thread; durable append order remains authoritative.
-Only the live post-commit hook acknowledges ingress and activates the runtime
-route. It queues message identity, durable sequence, and an optional transcript
-node; tool-adjacent messages remain unresolved until tool closure. Replay
+Only the post-commit hook acknowledges ingress. It returns the first committed
+canonical route on Accepted and Duplicate results and activates at most one
+reply route: the exact live current-generation waiter whose connection,
+capability registration epoch, target, session, and reply tool are still current. Every other
+committed result is typed Inactive. It queues message identity, durable sequence,
+and an optional transcript node; tool-adjacent messages remain unresolved until
+tool closure. Replay
 reconstructs unacknowledged typed wakes from their durable identities and
 inference watermarks rather than replaying live acknowledgements.
 

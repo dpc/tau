@@ -1,5 +1,11 @@
 # tau-ext-slack security and reliability notes
 
+Private reply, edit, and reaction state is installed only from a protocol-v11
+Committed+Active result whose first canonical extension instance, target, native
+occurrence identity, stable human, conversation kind/id/thread, assurance, and
+policy exactly match the current pending occurrence. Inactive, rejected,
+orphaned, or mismatched results install nothing.
+
 - `std-slack` is disabled by default. Enabling its tools is a role-policy decision; configuration is not a per-agent ACL.
 - App/bot tokens and Socket Mode URLs are secrets. Never log them or message bodies; diagnostics stay bounded and token/URL-redacted. Production endpoints require HTTPS/WSS.
 - Slack events, metadata, edits, reactions, and text are untrusted external ingress. ACK is transport behavior, not authorization. Text stays `UntrustedExternal` and may contain prompt injection.
