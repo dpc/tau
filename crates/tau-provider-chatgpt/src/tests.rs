@@ -6,6 +6,46 @@ struct TransportCounts {
     http_post_requests: std::sync::atomic::AtomicUsize,
 }
 
+/// Bounded loopback peer used to prove WebSocket routing never falls back.
+struct WsFailureServer {
+    /// Provider base URL targeting the loopback listener.
+    base_url: String,
+    /// Captured transport attempt counts.
+    counts: std::sync::Arc<TransportCounts>,
+    /// Signals the blocking accept loop to stop.
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Listener address used to wake accept during teardown.
+    addr: std::net::SocketAddr,
+    /// Joined server worker.
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WsFailureServer {
+    /// Returns the synthetic provider base URL.
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    /// Returns captured request counts.
+    fn counts(&self) -> &TransportCounts {
+        &self.counts
+    }
+}
+
+impl Drop for WsFailureServer {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.expect("join fake provider");
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WsFailureMode {
     Upgrade426,
@@ -13,45 +53,40 @@ enum WsFailureMode {
     ContextWindowExceeded,
 }
 
-fn spawn_ws_426_server() -> (String, std::sync::Arc<TransportCounts>) {
+fn spawn_ws_426_server() -> WsFailureServer {
     spawn_ws_failure_server(WsFailureMode::Upgrade426)
 }
 
-fn spawn_ws_disconnect_server() -> (String, std::sync::Arc<TransportCounts>) {
+fn spawn_ws_disconnect_server() -> WsFailureServer {
     spawn_ws_failure_server(WsFailureMode::CloseWithoutResponse)
 }
 
-fn spawn_ws_context_error_server() -> (String, std::sync::Arc<TransportCounts>) {
+fn spawn_ws_context_error_server() -> WsFailureServer {
     spawn_ws_failure_server(WsFailureMode::ContextWindowExceeded)
 }
 
-fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<TransportCounts>) {
+fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
-    listener
-        .set_nonblocking(true)
-        .expect("set fake provider nonblocking");
     let addr = listener.local_addr().expect("fake provider addr");
     let counts = std::sync::Arc::new(TransportCounts::default());
     let thread_counts = std::sync::Arc::clone(&counts);
-    std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            let (mut stream, _) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                Err(_) => break,
-            };
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_shutdown = std::sync::Arc::clone(&shutdown);
+    let worker = std::thread::spawn(move || {
+        const MAX_REQUESTS: usize = 8;
+        for request_index in 0..MAX_REQUESTS {
+            let (mut stream, _) = listener.accept().expect("accept fake provider request");
+            if thread_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             if matches!(mode, WsFailureMode::ContextWindowExceeded) {
-                thread_counts
-                    .ws_upgrade_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let Ok(mut socket) = tungstenite::accept(stream) else {
                     continue;
                 };
+                thread_counts
+                    .ws_upgrade_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = socket.read();
                 let _ = socket.send(tungstenite::Message::Text(
                     serde_json::json!({
@@ -80,16 +115,33 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<Trans
                 ));
                 continue;
             }
-            let mut request = [0_u8; 1024];
-            let read = std::io::Read::read(&mut stream, &mut request).unwrap_or(0);
-            if request[..read].starts_with(b"POST ") {
+            let request = read_bounded_http_request_head(&mut stream);
+            let request_text = std::str::from_utf8(&request).expect("ASCII HTTP request head");
+            let request_line = request_text.lines().next().expect("HTTP request line");
+            if request_line == "POST /backend-api/codex/responses HTTP/1.1" {
                 thread_counts
                     .http_post_requests
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            } else {
+                let response = concat!(
+                    "HTTP/1.1 500 Internal Server Error\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n",
+                    "\r\n"
+                );
+                std::io::Write::write_all(&mut stream, response.as_bytes())
+                    .expect("reject unexpected HTTP fallback");
+                continue;
+            }
+            let lower = request_text.to_ascii_lowercase();
+            if request_line == "GET /backend-api/codex/responses HTTP/1.1"
+                && lower.contains("\r\nupgrade: websocket\r\n")
+                && lower.contains("\r\nconnection: upgrade\r\n")
+            {
                 thread_counts
                     .ws_upgrade_requests
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                panic!("unexpected fake-provider request: {request_line}");
             }
             match mode {
                 WsFailureMode::Upgrade426 => {
@@ -105,9 +157,35 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<Trans
                 WsFailureMode::CloseWithoutResponse => {}
                 WsFailureMode::ContextWindowExceeded => unreachable!("handled above"),
             }
+            assert!(
+                request_index + 1 < MAX_REQUESTS,
+                "fake provider request bound exhausted"
+            );
         }
     });
-    (format!("http://{addr}/backend-api"), counts)
+    WsFailureServer {
+        base_url: format!("http://{addr}/backend-api"),
+        counts,
+        shutdown,
+        addr,
+        worker: Some(worker),
+    }
+}
+
+/// Reads one complete bounded HTTP request head from the loopback peer.
+fn read_bounded_http_request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    const MAX_HEAD_BYTES: usize = 16 * 1024;
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while head.len() < MAX_HEAD_BYTES {
+        let read = std::io::Read::read(stream, &mut byte).expect("read complete HTTP request head");
+        assert_ne!(read, 0, "HTTP request ended before complete head");
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            return head;
+        }
+    }
+    panic!("HTTP request head exceeds test bound");
 }
 
 /// Reproduces the incident: an exact WebSocket context rejection under an
@@ -115,8 +193,8 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<Trans
 /// or HTTP/SSE fallback.
 #[test]
 fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
-    let (base_url, counts) = spawn_ws_context_error_server();
-    let config = test_config(base_url);
+    let server = spawn_ws_context_error_server();
+    let config = test_config(server.base_url());
     let runtime = ChatGptRuntime::new();
     let session_id = tau_proto::SessionId::new("session-ws-context");
     let agent_id = tau_proto::AgentId::parse("agent-ws-context").expect("agent id");
@@ -145,13 +223,15 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
     assert_eq!(
-        counts
+        server
+            .counts()
             .ws_upgrade_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
     assert_eq!(
-        counts
+        server
+            .counts()
             .http_post_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         0
@@ -405,14 +485,12 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
     assert!(older_info.supports_parallel_tool_calls);
 }
 
+/// A WebSocket capability rejection surfaces after one upgrade and never
+/// retries the logical turn through HTTP/SSE.
 #[test]
 fn websocket_capability_error_does_not_fallback_to_http_sse() {
-    // Regression for tau-agent-y8vc: WebSocket-capable ChatGPT/Codex models
-    // treat WS support as a routing commitment. An upgrade/capability failure
-    // must be surfaced to the caller instead of silently POSTing the same turn
-    // through HTTP/SSE.
-    let (base_url, counts) = spawn_ws_426_server();
-    let config = test_config(base_url);
+    let server = spawn_ws_426_server();
+    let config = test_config(server.base_url());
     let runtime = ChatGptRuntime::new();
     let session_id = tau_proto::SessionId::new("session-ws-426");
     let agent_id = tau_proto::AgentId::parse("agent-ws-426").expect("agent id");
@@ -436,13 +514,15 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
 
     assert!(matches!(error, common::LlmError::HttpStatus(426, _)));
     assert_eq!(
-        counts
+        server
+            .counts()
             .ws_upgrade_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
     assert_eq!(
-        counts
+        server
+            .counts()
             .http_post_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -450,13 +530,12 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
     );
 }
 
+/// Exhausting the per-turn WebSocket retry budget surfaces the transport
+/// failure without disabling WebSocket or replaying over HTTP/SSE.
 #[test]
 fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
-    // Regression for tau-agent-y8vc: even when the per-turn WS retry budget is
-    // exhausted, retryable transport failures must return a terminal provider
-    // error for that turn rather than disabling WS and using HTTP/SSE.
-    let (base_url, counts) = spawn_ws_disconnect_server();
-    let config = test_config(base_url);
+    let server = spawn_ws_disconnect_server();
+    let config = test_config(server.base_url());
     let runtime = ChatGptRuntime::new();
     let session_id = tau_proto::SessionId::new("session-ws-retry");
     let agent_id = tau_proto::AgentId::parse("agent-ws-retry").expect("agent id");
@@ -483,7 +562,20 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
         "fake disconnect should remain a retryable WS error"
     );
     assert_eq!(
-        counts
+        error.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Unknown)
+    );
+    assert_eq!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exhausted zero-budget turn makes one WebSocket attempt"
+    );
+    assert_eq!(
+        server
+            .counts()
             .http_post_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         0,

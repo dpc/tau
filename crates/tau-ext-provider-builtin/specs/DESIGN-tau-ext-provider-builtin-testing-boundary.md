@@ -20,3 +20,11 @@ outcomes. They cover exact-generation suppression, credential/mode invalidation,
 authoritative locked-generation handoff, expired-versus-valid fallback, and
 credential-safe provider-attributed warnings without live auth, Internet, or
 wall-clock sleeps.
+
+Acceptance tests for required-work retry and shared cooldowns use the injected
+prompt executor and monotonic retry clock. Virtual time owns long reset
+boundaries, generation release, fairness, and profile-rotation cases; provider
+backend wire behavior is not recreated in those fixtures. Focused loopback WebSocket
+lowering, parsing, pooling, reconnect, cancellation, timeout, and error tests
+remain in `tau-provider-chatgpt`, without a harness-to-builtin backend resolver
+or user-configurable OAuth endpoint seam.

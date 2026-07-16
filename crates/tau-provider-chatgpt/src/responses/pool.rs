@@ -199,10 +199,16 @@ impl Default for WsPool {
 /// same-key callers wait for that turn to release/drop the socket instead of
 /// opening a second socket for the same chain. Different keys can still run
 /// their network turns concurrently.
+#[cfg(test)]
+type CheckoutWaitHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub struct SharedWsPool {
     inner: Arc<Mutex<SharedWsPoolInner>>,
     changed: Arc<Condvar>,
+    /// Test-only observation hook fired at the exact same-key wait boundary.
+    #[cfg(test)]
+    checkout_wait_hook: Arc<Mutex<Option<CheckoutWaitHook>>>,
 }
 
 struct SharedWsPoolInner {
@@ -228,7 +234,18 @@ impl SharedWsPool {
                 abort_wake_generation: 0,
             })),
             changed: Arc::new(Condvar::new()),
+            #[cfg(test)]
+            checkout_wait_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Installs a test observer for the exact busy-key condition-variable wait.
+    #[cfg(test)]
+    fn set_checkout_wait_hook(&self, hook: CheckoutWaitHook) {
+        *self
+            .checkout_wait_hook
+            .lock()
+            .expect("checkout wait hook lock") = Some(hook);
     }
 
     pub fn stats(&self) -> Option<WsPoolStats> {
@@ -339,6 +356,15 @@ impl SharedWsPool {
             }
             let wake_generation = inner.abort_wake_generation;
             while inner.busy.contains(key) && inner.abort_wake_generation == wake_generation {
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .checkout_wait_hook
+                    .lock()
+                    .expect("checkout wait hook lock")
+                    .clone()
+                {
+                    hook();
+                }
                 inner = self.changed.wait(inner).map_err(pool_poisoned)?;
             }
         }

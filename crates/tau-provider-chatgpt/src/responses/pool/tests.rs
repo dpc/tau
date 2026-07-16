@@ -168,7 +168,7 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
         .expect("turn ok");
     }
 
-    let state = server.lock().expect("server state lock");
+    let state = server.lock_state();
     assert_eq!(
         state.upgrade_count, 2,
         "expected one upgrade per distinct prompt-cache thread (alternating A/B/A — reuses A's socket)"
@@ -185,7 +185,7 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
 #[test]
 fn local_websocket_usage_window_contract_returns_typed_retry() {
     let (addr, server) = spawn_fake_codex_server();
-    server.lock().expect("server state lock").scripted_error = Some(serde_json::json!({
+    server.lock_state().scripted_error = Some(serde_json::json!({
         "type": "error",
         "error": {
             "code": "usage_limit_reached",
@@ -230,7 +230,7 @@ fn local_websocket_usage_window_contract_returns_typed_retry() {
     );
     assert_eq!(decision.retry_after, Some(Duration::from_secs(432_000)));
     assert_eq!(
-        server.lock().expect("server state lock").upgrade_count,
+        server.lock_state().upgrade_count,
         1,
         "account errors must not trigger a silent reconnect"
     );
@@ -243,38 +243,51 @@ fn local_websocket_usage_window_contract_returns_typed_retry() {
 #[test]
 fn shared_pool_serializes_same_key_turns() {
     let (addr, server) = spawn_fake_codex_server();
-    server.lock().expect("server lock").response_delay = Duration::from_millis(100);
+    let gate = Arc::new(ResponseGate::new());
+    server.lock_state().response_gate = Some(Arc::clone(&gate));
     let config = Arc::new(make_config(
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
     let pool = Arc::new(SharedWsPool::new());
-    let barrier = Arc::new(Barrier::new(2));
-
-    let mut handles = Vec::new();
-    for idx in 0..2 {
+    let first = {
         let config = config.clone();
         let pool = pool.clone();
-        let barrier = barrier.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            run_shared_turn(&pool, &config, "same-session", &format!("sp-{idx}"));
-        }));
-    }
-    for handle in handles {
-        handle.join().expect("worker join");
+        thread::spawn(move || run_shared_turn(&pool, &config, "same-session", "sp-0"))
+    };
+    gate.wait_for_arrival();
+
+    let (waiting_tx, waiting_rx) = std_mpsc::sync_channel(1);
+    pool.set_checkout_wait_hook(Arc::new(move || {
+        waiting_tx.send(()).expect("checkout wait observer");
+    }));
+    let second = {
+        let config = Arc::clone(&config);
+        let pool = Arc::clone(&pool);
+        thread::spawn(move || run_shared_turn(&pool, &config, "same-session", "sp-1"))
+    };
+    waiting_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second turn reaches busy same-key condition wait");
+    {
+        let state = server.lock_state();
+        assert_eq!(state.upgrade_count, 1);
+        assert_eq!(state.requests.len(), 1);
+        assert_eq!(state.active_turns, 1);
     }
 
-    let state = server.lock().expect("server state lock");
+    gate.release_one();
+    gate.wait_for_arrival();
+    gate.release_one();
+    first.join().expect("first same-key turn");
+    second.join().expect("second same-key turn");
+
+    let state = server.lock_state();
     assert_eq!(
         state.upgrade_count, 1,
         "same PoolKey must reuse one reserved socket rather than opening a parallel chain"
     );
     assert_eq!(state.turns_per_connection, vec![2]);
-    assert_eq!(
-        state.max_active_turns, 1,
-        "same-key WS turns should run one at a time"
-    );
 }
 
 /// A prompt canceled while it is queued behind a same-key WS reservation
@@ -547,7 +560,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
 #[test]
 fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
     let (addr, server) = spawn_fake_codex_server();
-    server.lock().expect("server state").response_delay = Duration::from_secs(10);
+    server.lock_state().silent_response = true;
     let config = Arc::new(make_config(
         &format!("http://{addr}/backend-api"),
         Some("acc"),
@@ -817,7 +830,7 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
         .expect("shared prewarm");
     run_shared_turn(&pool, &config, session_id.as_str(), "sp-after-prewarm");
 
-    let state = server.lock().expect("server state");
+    let state = server.lock_state();
     assert_eq!(state.upgrade_count, 1);
     assert_eq!(state.requests.len(), 2);
 }
@@ -894,7 +907,7 @@ fn already_canceled_cached_prewarm_sends_no_request() {
         Err(LlmError::Canceled)
     ));
     assert_eq!(
-        server.lock().expect("server state").requests.len(),
+        server.lock_state().requests.len(),
         1,
         "canceled prewarm must not send after the warm-up turn"
     );
@@ -950,7 +963,8 @@ fn staged_prewarm_reservation_drop_removes_socket() {
 #[test]
 fn shared_pool_allows_different_keys_to_run_concurrently() {
     let (addr, server) = spawn_fake_codex_server();
-    server.lock().expect("server lock").response_delay = Duration::from_millis(150);
+    let gate = Arc::new(ResponseGate::new());
+    server.lock_state().response_gate = Some(Arc::clone(&gate));
     let config = Arc::new(make_config(
         &format!("http://{addr}/backend-api"),
         Some("acc"),
@@ -974,11 +988,15 @@ fn shared_pool_allows_different_keys_to_run_concurrently() {
             );
         }));
     }
+    gate.wait_for_arrival();
+    gate.wait_for_arrival();
+    gate.release_one();
+    gate.release_one();
     for handle in handles {
         handle.join().expect("worker join");
     }
 
-    let state = server.lock().expect("server state lock");
+    let state = server.lock_state();
     assert_eq!(
         state.upgrade_count, 2,
         "different keys use different sockets"
@@ -1007,12 +1025,12 @@ fn pool_evicts_lru_when_capacity_exceeded() {
         run_turn_for_agent(&mut pool, &config, "session-lru", agent, &mut on_update);
     }
     assert_eq!(pool.len(), 2);
-    assert_eq!(server.lock().expect("server state lock").upgrade_count, 3);
+    assert_eq!(server.lock_state().upgrade_count, 3);
 
     // Touching A again must re-upgrade (its old socket got
     // evicted on C's release).
     run_turn_for_agent(&mut pool, &config, "session-lru", "agent-a", &mut on_update);
-    assert_eq!(server.lock().expect("server state lock").upgrade_count, 4);
+    assert_eq!(server.lock_state().upgrade_count, 4);
 }
 
 /// Connections older than `MAX_CONNECTION_AGE` must be
@@ -1027,7 +1045,7 @@ fn pool_reopens_aged_out_connections_on_checkout() {
 
     // First turn opens connection #1.
     run_turn(&mut pool, &config, "session-aged", &mut on_update);
-    assert_eq!(server.lock().expect("server state lock").upgrade_count, 1);
+    assert_eq!(server.lock_state().upgrade_count, 1);
 
     // Forcibly age the cached connection past the threshold.
     let key = pool_key_for(
@@ -1045,7 +1063,7 @@ fn pool_reopens_aged_out_connections_on_checkout() {
     // Next turn must reopen rather than send on the stale socket.
     run_turn(&mut pool, &config, "session-aged", &mut on_update);
     assert_eq!(
-        server.lock().expect("server state lock").upgrade_count,
+        server.lock_state().upgrade_count,
         2,
         "aged-out connection should have been replaced"
     );
@@ -1135,7 +1153,7 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
     )
     .expect("turn ok");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     let headers = s.upgrade_headers.first().expect("captured upgrade headers");
     assert_eq!(headers.get("session-id"), Some(&expected));
     assert_eq!(headers.get("thread-id"), Some(&expected));
@@ -1190,7 +1208,7 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
     )
     .expect("turn ok");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     assert_eq!(s.upgrade_count, 1, "prewarm and turn must share one socket");
     assert_eq!(s.requests.len(), 2, "expected prewarm plus real turn");
     let warm = &s.requests[0];
@@ -1248,7 +1266,7 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
     )
     .expect("fresh chained WS turn should rebuild warmth");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     assert_eq!(s.upgrade_count, 1, "must open a replacement WS socket");
     assert_eq!(s.requests.len(), 1, "expected one WS full replay envelope");
     assert!(
@@ -1298,7 +1316,7 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     )
     .expect("fresh chained WS turn should replay compacted context");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     let input = s.requests[0]
         .get("input")
         .and_then(serde_json::Value::as_array)
@@ -1321,7 +1339,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     let (addr, server) = spawn_fake_codex_server();
     // Make connection #0 die mid-turn-#2 (after_turn=1 -> the
     // second arriving turn on conn 0 is the one that gets closed).
-    server.lock().expect("server lock").fault = Some(MidStreamCloseFault {
+    server.lock_state().fault = Some(MidStreamCloseFault {
         on_conn_index: 0,
         after_turn: 1,
     });
@@ -1383,7 +1401,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     )
     .expect("chained reconnect should rebuild WS warmth");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     assert_eq!(
         s.upgrade_count, 2,
         "mid-stream close should force one replacement WS upgrade"
@@ -1422,7 +1440,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
 #[test]
 fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     let (addr, server) = spawn_fake_codex_server();
-    server.lock().expect("server lock").fault = Some(MidStreamCloseFault {
+    server.lock_state().fault = Some(MidStreamCloseFault {
         on_conn_index: 0,
         after_turn: 1,
     });
@@ -1487,7 +1505,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     )
     .expect("shared chained reconnect should rebuild WS warmth");
 
-    let s = server.lock().expect("server lock");
+    let s = server.lock_state();
     assert_eq!(
         s.upgrade_count, 2,
         "shared reconnect should open exactly one replacement socket"
@@ -1637,10 +1655,11 @@ struct ServerState {
     /// connections. Available for tests that want to inspect
     /// what the client actually sent (chain ids, model knobs).
     requests: Vec<serde_json::Value>,
-    /// Artificial per-turn response delay used by concurrency tests to make
-    /// overlapping network turns observable.
-    response_delay: Duration,
-    /// Number of fake server turns currently sleeping/streaming.
+    /// Optional explicit request/release synchronization for concurrency tests.
+    response_gate: Option<Arc<ResponseGate>>,
+    /// Whether this peer keeps the turn silent until the client disconnects.
+    silent_response: bool,
+    /// Number of fake server turns currently awaiting or emitting a response.
     active_turns: usize,
     /// Maximum simultaneous fake server turns observed during a test.
     max_active_turns: usize,
@@ -1655,6 +1674,56 @@ struct ServerState {
     scripted_error: Option<serde_json::Value>,
 }
 
+/// Explicit request-arrival and response-release synchronization for tests.
+struct ResponseGate {
+    /// Reports each server request that reached the response boundary.
+    arrival_tx: std_mpsc::Sender<()>,
+    /// Receives request-arrival acknowledgements.
+    arrival_rx: Mutex<std_mpsc::Receiver<()>>,
+    /// Grants one server turn permission to emit its response.
+    release_tx: std_mpsc::Sender<()>,
+    /// Receives one release permit per server turn.
+    release_rx: Mutex<std_mpsc::Receiver<()>>,
+}
+
+impl ResponseGate {
+    /// Creates an empty response gate.
+    fn new() -> Self {
+        let (arrival_tx, arrival_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        Self {
+            arrival_tx,
+            arrival_rx: Mutex::new(arrival_rx),
+            release_tx,
+            release_rx: Mutex::new(release_rx),
+        }
+    }
+
+    /// Waits for one request to reach the server response boundary.
+    fn wait_for_arrival(&self) {
+        self.arrival_rx
+            .lock()
+            .expect("arrival receiver")
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server request arrival");
+    }
+
+    /// Allows one waiting server turn to emit its response.
+    fn release_one(&self) {
+        self.release_tx.send(()).expect("response release receiver");
+    }
+
+    /// Reports arrival and waits for one explicit response permit.
+    fn arrive_and_wait(&self) {
+        self.arrival_tx.send(()).expect("arrival observer");
+        self.release_rx
+            .lock()
+            .expect("release receiver")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("response release");
+    }
+}
+
 /// "After connection index `on_conn_index` has fully served
 /// `after_turn` turns, drop the next incoming turn mid-stream."
 /// Indices are zero-based; `after_turn: 1` means the second
@@ -1665,19 +1734,75 @@ struct MidStreamCloseFault {
     after_turn: usize,
 }
 
-fn spawn_fake_codex_server() -> (SocketAddr, Arc<Mutex<ServerState>>) {
+/// Joined loopback WebSocket server with finite connection and request bounds.
+struct FakeCodexServer {
+    /// Listener address used to wake blocking accept during teardown.
+    addr: SocketAddr,
+    /// Captured server state used by assertions.
+    state: Arc<Mutex<ServerState>>,
+    /// Signals the accept loop to stop.
+    shutdown: Arc<AtomicBool>,
+    /// Joined accept supervisor, which in turn joins connection workers.
+    supervisor: Option<thread::JoinHandle<()>>,
+}
+
+impl FakeCodexServer {
+    /// Locks captured server state for test setup or assertions.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ServerState> {
+        self.state.lock().expect("fake Codex server state")
+    }
+}
+
+impl Drop for FakeCodexServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(supervisor) = self.supervisor.take() {
+            let result = supervisor.join();
+            if !thread::panicking() {
+                result.expect("join fake Codex server");
+            }
+        }
+    }
+}
+
+fn spawn_fake_codex_server() -> (SocketAddr, FakeCodexServer) {
+    const MAX_CONNECTIONS: usize = 32;
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let state = Arc::new(Mutex::new(ServerState::default()));
     let state_clone = state.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdown = Arc::clone(&shutdown);
+    let supervisor = thread::spawn(move || {
+        let mut workers = Vec::new();
+        for connection_index in 0..MAX_CONNECTIONS {
+            let (stream, _) = listener.accept().expect("accept fake Codex connection");
+            if worker_shutdown.load(Ordering::SeqCst) {
+                break;
+            }
             let conn_state = state_clone.clone();
-            thread::spawn(move || handle_one_connection(stream, conn_state));
+            workers.push(thread::spawn(move || {
+                handle_one_connection(stream, conn_state);
+            }));
+            assert!(
+                connection_index + 1 < MAX_CONNECTIONS,
+                "fake Codex connection bound exhausted"
+            );
+        }
+        for worker in workers {
+            worker.join().expect("join fake Codex connection");
         }
     });
-    (addr, state)
+    (
+        addr,
+        FakeCodexServer {
+            addr,
+            state,
+            shutdown,
+            supervisor: Some(supervisor),
+        },
+    )
 }
 
 fn capture_headers(headers: &tungstenite::http::HeaderMap) -> BTreeMap<String, String> {
@@ -1693,6 +1818,9 @@ fn capture_headers(headers: &tungstenite::http::HeaderMap) -> BTreeMap<String, S
 }
 
 fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("bound fake Codex reads");
     let mut upgrade_headers = BTreeMap::new();
     let mut ws = match tungstenite::accept_hdr(
         stream,
@@ -1724,8 +1852,9 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             Message::Text(text) => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                let (fault_now, response_delay, scripted_error) = {
+                let (fault_now, response_gate, silent_response, scripted_error) = {
                     let mut s = state.lock().expect("server state lock");
+                    assert!(s.requests.len() < 128, "fake Codex request bound");
                     s.requests.push(parsed.clone());
                     s.turns_per_connection[conn_idx] += 1;
                     s.active_turns += 1;
@@ -1733,11 +1862,16 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     let fault_now = s
                         .fault
                         .filter(|f| f.on_conn_index == conn_idx && turn_counter >= f.after_turn);
-                    (fault_now, s.response_delay, s.scripted_error.clone())
+                    (
+                        fault_now,
+                        s.response_gate.clone(),
+                        s.silent_response,
+                        s.scripted_error.clone(),
+                    )
                 };
                 turn_counter += 1;
-                if !response_delay.is_zero() {
-                    thread::sleep(response_delay);
+                if let Some(gate) = response_gate {
+                    gate.arrive_and_wait();
                 }
                 if fault_now.is_some() {
                     // Mimic the live Codex 1011 keepalive-timeout
@@ -1749,6 +1883,15 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                         code: tungstenite::protocol::frame::coding::CloseCode::Error,
                         reason: "keepalive ping timeout".into(),
                     })));
+                    finish_server_turn(&state);
+                    return;
+                }
+                if silent_response {
+                    while let Ok(message) = ws.read() {
+                        if matches!(message, Message::Close(_)) {
+                            break;
+                        }
+                    }
                     finish_server_turn(&state);
                     return;
                 }
@@ -1882,6 +2025,19 @@ fn run_shared_turn_for_agent(
     agent: &str,
     agent_prompt_id: &str,
 ) {
+    let mut abort = NeverAbort;
+    run_shared_turn_with_abort(pool, config, session, agent, agent_prompt_id, &mut abort);
+}
+
+/// Runs one shared-pool turn with an observable abort source.
+fn run_shared_turn_with_abort(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    session: &str,
+    agent: &str,
+    agent_prompt_id: &str,
+    abort: &mut impl TurnAbort,
+) {
     let session_id = tau_proto::SessionId::new(session);
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
@@ -1899,13 +2055,12 @@ fn run_shared_turn_for_agent(
         debug_provider_requests: false,
     };
     let mut on_update = |_: crate::StreamUpdate<'_>| {};
-    let mut abort = NeverAbort;
     run_turn_through_shared_pool(
         pool,
         config,
         agent_prompt_id,
         &request,
-        &mut abort,
+        abort,
         &mut on_update,
     )
     .expect("shared turn ok");

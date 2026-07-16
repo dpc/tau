@@ -152,6 +152,18 @@ through renderer state to assert main, global, and watched
 activity become idle. These gates use loopback peers and explicit completion
 signals only—never provider auth, Internet access, model prose, tmux, or sleeps.
 
+The focused ChatGPT WebSocket lane stays inside `tau-provider-chatgpt`.
+Loopback-only finite peers exercise production request lowering and frame
+parsing together with pool reuse, reconnect, cooperative cancellation,
+provider-frame deadlines, typed errors, and the no-HTTP-fallback commitment.
+Peers use synthetic credentials, explicit request/completion signals, bounded
+scripts and socket deadlines, and joined teardown. Provider-builtin retry and
+cooldown tests remain separate on its injected executor and virtual monotonic
+clock. Do not add a harness→provider-builtin→local-WebSocket gate, backend
+resolver, user OAuth URL override, or common scenario language merely to join
+these layers; the deterministic fake provider does not cover upstream ChatGPT
+transport contracts.
+
 ## OAuth response safety
 
 Shared OAuth protocol regressions live in `tau-provider`: bounded response
@@ -176,6 +188,8 @@ structurally sanitized evidence that representative Responses SSE and
 WebSocket wire frames still traverse the production parsers. It is not a
 scheduler, retry-timing, concurrency, or model-output oracle; deterministic
 runtime and local scripted-transport tests own those contracts.
+Persisted transcript replay is likewise reconstruction evidence, not live
+transport execution or a substitute for the focused localhost lane.
 Its durable ownership and scope are recorded in
 [`DESIGN-tau-provider-chatgpt-curated-vcr`](../crates/tau-provider-chatgpt/specs/DESIGN-tau-provider-chatgpt-curated-vcr.md):
 the provider crate owns the corpus, manifest/audit, parser facts, and refresh

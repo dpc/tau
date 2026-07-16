@@ -147,6 +147,12 @@ content text, and phase remain semantic truth; the raw sidecar is a replay/cache
 fidelity aid for provider-owned ids, statuses, annotations, content-part
 boundaries, and unknown fields.
 
+Transcript replay proves persisted reconstruction, not backend transport
+execution. ChatGPT/Codex request lowering, WebSocket frame parsing, pooling,
+reconnect, cancellation, deadlines, and fallback policy are covered separately
+by focused provider-local transport tests; curated VCR replay remains bounded
+request/parser compatibility evidence.
+
 ## Roles
 
 Roles are harness-owned.

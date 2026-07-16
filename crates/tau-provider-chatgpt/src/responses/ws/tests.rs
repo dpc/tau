@@ -6,6 +6,10 @@ use super::*;
 use crate::responses::{ResponsesMode, ResponsesSurface};
 use crate::{NeverAbort, TurnAbortWaker};
 
+mod test_server;
+
+use test_server::{ServerScript, TestWsServer};
+
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
 struct CapturingAbort {
@@ -255,6 +259,213 @@ impl PromptFixture {
     }
 }
 
+/// A localhost WebSocket round trip must use the production upgrade, request
+/// lowering, reader task, frame parser, and typed stream-state accumulation.
+#[test]
+fn localhost_ws_round_trip_lowers_and_parses_production_frames() {
+    let frames = [
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "hello",
+        }),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {
+                "type": "function_call",
+                "id": "fc_local",
+                "call_id": "call_local",
+                "name": "shell",
+                "status": "in_progress",
+            },
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "delta": "{\"command\":\"pwd\"}",
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_local",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "input_tokens_details": { "cached_tokens": 3 },
+                },
+            },
+        }),
+    ]
+    .map(|frame| frame.to_string())
+    .to_vec();
+    let server = TestWsServer::spawn(ServerScript::Frames(frames));
+    let mut config = test_responses_config();
+    config.base_url = server.base_url();
+    config.account_id = Some("account-local".to_owned());
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let mut abort = NeverAbort;
+    let mut conn =
+        WsConn::connect(&config, "thread-local", &mut abort).expect("connect localhost WebSocket");
+
+    let result = conn
+        .run_turn(
+            &config,
+            "ap-local-round-trip",
+            &request,
+            None,
+            &mut abort,
+            &mut |_| {},
+        )
+        .expect("complete localhost WebSocket turn");
+    server.wait_for_request();
+    let capture = server.capture();
+    let capture = capture.lock().expect("localhost WebSocket capture");
+    assert_eq!(capture.requests.len(), 1);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&capture.requests[0]).expect("production request envelope");
+    assert_eq!(envelope["type"], "response.create");
+    assert_eq!(envelope["model"], "gpt-test");
+    assert_eq!(
+        capture.headers.get("thread-id").map(String::as_str),
+        Some("thread-local")
+    );
+    assert_eq!(
+        capture.headers.get("session-id").map(String::as_str),
+        Some("thread-local")
+    );
+    assert_eq!(
+        capture
+            .headers
+            .get("chatgpt-account-id")
+            .map(String::as_str),
+        Some("account-local")
+    );
+    drop(capture);
+
+    assert_eq!(result.state.text, "hello");
+    assert_eq!(result.state.response_id.as_deref(), Some("resp_local"));
+    assert_eq!(result.state.input_tokens, Some(11));
+    assert_eq!(result.state.cached_tokens, Some(3));
+    assert_eq!(result.state.output_tokens, Some(7));
+    let output = result.state.into_output_items();
+    assert_eq!(output.len(), 2);
+    let tau_proto::ContextItem::ToolCall(call) = &output[1] else {
+        panic!("expected parsed function call");
+    };
+    assert_eq!(call.call_id.as_str(), "call_local");
+    assert_eq!(call.name.as_str(), "shell");
+    assert_eq!(
+        call.raw_arguments_json.as_deref(),
+        Some("{\"command\":\"pwd\"}")
+    );
+
+    drop(conn);
+    server.join();
+}
+
+/// A silent upgraded localhost peer must be interrupted through the production
+/// connection's abort-waker path and return typed cancellation.
+#[test]
+fn localhost_ws_silent_turn_returns_typed_cancellation() {
+    let server = TestWsServer::spawn(ServerScript::Silent);
+    let mut config = test_responses_config();
+    config.base_url = server.base_url();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let mut connect_abort = NeverAbort;
+    let mut conn = WsConn::connect(&config, "thread-cancel", &mut connect_abort)
+        .expect("connect localhost WS");
+    let aborted = Arc::new(AtomicBool::new(false));
+    let (registered_tx, registered_rx) = std_mpsc::channel();
+    let waker = Arc::new(Mutex::new(None));
+    let mut abort = CapturingAbort {
+        aborted: Arc::clone(&aborted),
+        registered_tx,
+        waker: Arc::clone(&waker),
+    };
+    let (result_tx, result_rx) = std_mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = conn.run_turn(
+                &config,
+                "ap-local-cancel",
+                &request,
+                None,
+                &mut abort,
+                &mut |_| {},
+            );
+            result_tx
+                .send(result)
+                .expect("cancellation result receiver");
+        });
+        server.wait_for_request();
+        registered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("turn abort-waker registration");
+        aborted.store(true, Ordering::SeqCst);
+        waker
+            .lock()
+            .expect("waker slot lock")
+            .as_ref()
+            .expect("registered turn waker")();
+        assert!(matches!(
+            result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("typed cancellation result"),
+            Err(LlmError::Canceled)
+        ));
+    });
+
+    drop(conn);
+    server.join();
+}
+
+/// A silent upgraded localhost peer must traverse the production reader and
+/// request writer before the test-sized provider-frame idle deadline fires.
+#[test]
+fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
+    let server = TestWsServer::spawn(ServerScript::Silent);
+    let mut config = test_responses_config();
+    config.base_url = server.base_url();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let envelope = build_ws_envelope(&config, &request, None, None);
+    let mut abort = NeverAbort;
+    let mut conn =
+        WsConn::connect(&config, "thread-timeout", &mut abort).expect("connect localhost WS");
+
+    let result = conn.run_envelope_with_timeouts(
+        "ap-local-timeout",
+        envelope,
+        None,
+        &mut abort,
+        EnvelopeTimeouts {
+            idle: Duration::from_millis(20),
+            absolute: None,
+        },
+        &mut |_| {},
+    );
+    server.wait_for_request();
+    let Err(LlmError::HttpStatus(0, body)) = result else {
+        panic!("expected typed provider-frame idle timeout");
+    };
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("transport=Websocket"), "{body}");
+    assert!(body.contains("agent_prompt_id=ap-local-timeout"), "{body}");
+    assert!(body.contains("partial_output=false"), "{body}");
+    let error = LlmError::HttpStatus(0, body);
+    assert_eq!(
+        error.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Transport)
+    );
+
+    drop(conn);
+    server.join();
+}
+
 /// Ensure WebSocket turns wake promptly from registered cancellation rather
 /// than waiting for the five-minute provider-stream idle timeout.
 #[test]
@@ -348,10 +559,10 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     assert!(body.contains("partial_output=true"), "{body}");
 }
 
-/// Prewarm has an absolute response bound independent of provider frame
-/// activity, so a peer cannot keep supervised work alive with nonterminal data.
+/// Prewarm's elapsed absolute deadline wins even when nonterminal provider
+/// frames are already queued for processing.
 #[test]
-fn prewarm_absolute_timeout_bounds_nonterminal_frame_stream() {
+fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
     let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
     let config = test_responses_config();
     let fixture = PromptFixture::new();
@@ -373,9 +584,9 @@ fn prewarm_absolute_timeout_bounds_nonterminal_frame_stream() {
         &mut abort,
         EnvelopeTimeouts {
             idle: Duration::from_secs(1),
-            absolute: Some(Duration::from_millis(20)),
+            absolute: Some(Duration::ZERO),
         },
-        &mut |_| std::thread::sleep(Duration::from_millis(10)),
+        &mut |_| {},
     );
 
     assert!(matches!(
