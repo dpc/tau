@@ -255,6 +255,7 @@
                  env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
                    -p tau-e2e-tests \
                    --test core_resume \
+                   --test core_shell_resume \
                    --cargo-profile $CARGO_PROFILE \
                    --no-tests=fail
                  mkdir -p "$out"

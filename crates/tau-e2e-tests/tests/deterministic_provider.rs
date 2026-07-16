@@ -1,16 +1,9 @@
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
     DeterministicFixture, ScenarioActionV2, ScenarioLaneV2, ScenarioV1, ScenarioV2,
 };
-use tau_proto::{
-    CborValue, ClientKind, Event, EventName, EventSelector, HarnessInputMessage,
-    HarnessOutputMessage, Hello, ProviderFailureKind, Subscribe, ToolResultKind,
-};
-use tau_socket::{SocketPeer, SocketReceive};
+use tau_proto::{CborValue, Event, ProviderFailureKind, ToolResultKind};
 
 #[path = "deterministic_provider/daemon_support.rs"]
 mod daemon_support;

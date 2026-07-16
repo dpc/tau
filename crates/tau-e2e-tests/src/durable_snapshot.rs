@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use tau_core::{AgentStore, PersistedAgentEvent, PersistedSessionEvent, SessionStore};
-use tau_proto::{AgentId, Event, SessionId};
+use tau_proto::{AgentId, AgentMetadataKey, CborValue, Event, SessionId};
 
 /// One authoritative session-membership and agent-transcript snapshot.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,5 +84,18 @@ impl DurableSnapshot {
             return Err("durable CBOR prefix changed across cold resume".into());
         }
         Ok(())
+    }
+
+    /// Folds the authoritative transcript and returns one committed metadata
+    /// value.
+    pub fn metadata_value(
+        &self,
+        key: &str,
+    ) -> Result<Option<CborValue>, Box<dyn std::error::Error>> {
+        let tree = tau_core::AgentTree::from_events(self.agent_id.clone(), &self.agent_events);
+        Ok(tree
+            .metadata()
+            .get(&AgentMetadataKey::new(key))
+            .map(|entry| entry.value.clone()))
     }
 }

@@ -425,6 +425,15 @@ impl FakeState {
             action_count - self.lane_cursors[lane_index]
         ))?;
 
+        self.emit_v2_action(prompt, handle, action)
+    }
+
+    fn emit_v2_action(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+        action: ScenarioActionV2,
+    ) -> ClientResult<()> {
         match action {
             ScenarioActionV2::Text { response, .. } => {
                 handle.emit(Event::ProviderResponseFinished(finished(
@@ -452,6 +461,44 @@ impl FakeState {
                 call_id, response, ..
             } => {
                 let _ = call_id;
+                handle.emit(Event::ProviderResponseFinished(finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
+            ScenarioActionV2::CoreShellWorkdirCall { call_id, .. } => emit_tool_call(
+                handle,
+                prompt,
+                call_id,
+                "workdir",
+                cbor_map(vec![("path", CborValue::Text("project".to_owned()))]),
+            ),
+            ScenarioActionV2::CoreShellWorkdirResult {
+                edit_call_id,
+                nonce,
+                ..
+            } => emit_tool_call(
+                handle,
+                prompt,
+                edit_call_id,
+                "edit",
+                edit_arguments(1, 1, format!("before:{nonce}\n"), ""),
+            ),
+            ScenarioActionV2::CoreShellResumeEditCall { call_id, nonce, .. } => emit_tool_call(
+                handle,
+                prompt,
+                call_id,
+                "edit",
+                edit_arguments(
+                    1,
+                    2,
+                    format!("before:{nonce}\nafter:{nonce}\n"),
+                    &format!("before:{nonce}"),
+                ),
+            ),
+            ScenarioActionV2::CoreShellCreateResult { response, .. }
+            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => {
                 handle.emit(Event::ProviderResponseFinished(finished(
                     prompt,
                     vec![assistant_message(response)],
@@ -685,6 +732,55 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
             }
+            ScenarioActionV2::CoreShellWorkdirCall { .. }
+            | ScenarioActionV2::CoreShellResumeEditCall { .. } => {
+                let mut names = prompt
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>();
+                names.sort_unstable();
+                if names != ["edit", "workdir"] {
+                    return Err(self.mismatch(cursor, "core-shell tool snapshot mismatch"));
+                }
+                if let ScenarioActionV2::CoreShellResumeEditCall { nonce, .. } = action {
+                    let context = serde_json::to_string(&prompt.context)
+                        .map_err(|error| ClientError::handler(error.to_string()))?;
+                    if !context.contains(&format!("before:{nonce}")) {
+                        return Err(
+                            self.mismatch(cursor, "resumed provider context lacks old sentinel")
+                        );
+                    }
+                    let workdirs = prompt
+                        .system_prompt
+                        .lines()
+                        .filter(|line| line.contains("Workdir "))
+                        .collect::<Vec<_>>();
+                    if workdirs.len() != 1 || !workdirs[0].contains("/shell-base/project") {
+                        return Err(self.mismatch(
+                            cursor,
+                            "resumed provider context lacks restored core-shell workdir",
+                        ));
+                    }
+                }
+            }
+            ScenarioActionV2::CoreShellWorkdirResult { call_id, .. }
+            | ScenarioActionV2::CoreShellCreateResult { call_id, .. }
+            | ScenarioActionV2::CoreShellResumeEditResult { call_id, .. } => {
+                let results = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::ToolResult(result) if result.call_id == *call_id => {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if results.len() != 1 || results[0].status != tau_proto::ToolResultStatus::Success {
+                    return Err(self.mismatch(cursor, "core-shell result continuity mismatch"));
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -823,12 +919,62 @@ impl ScenarioActionV2 {
             Self::Text { user_text, .. }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
+            | Self::CoreShellWorkdirCall { user_text, .. }
+            | Self::CoreShellWorkdirResult { user_text, .. }
+            | Self::CoreShellCreateResult { user_text, .. }
+            | Self::CoreShellResumeEditCall { user_text, .. }
+            | Self::CoreShellResumeEditResult { user_text, .. }
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
             | Self::BarrierText { user_text, .. } => user_text,
         }
     }
+}
+
+fn cbor_map(fields: Vec<(&str, CborValue)>) -> CborValue {
+    CborValue::Map(
+        fields
+            .into_iter()
+            .map(|(key, value)| (CborValue::Text(key.to_owned()), value))
+            .collect(),
+    )
+}
+
+fn edit_arguments(start: i64, end: i64, new_text: String, context: &str) -> CborValue {
+    cbor_map(vec![
+        ("path", CborValue::Text("resume-sentinel.txt".to_owned())),
+        (
+            "edits",
+            CborValue::Array(vec![cbor_map(vec![
+                ("start_line", CborValue::Integer(start.into())),
+                ("end_line_exclusive", CborValue::Integer(end.into())),
+                ("newText", CborValue::Text(new_text)),
+                ("context_line", CborValue::Text(context.to_owned())),
+            ])]),
+        ),
+    ])
+}
+
+fn emit_tool_call(
+    handle: &tau_client::ClientHandle,
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: tau_proto::ToolCallId,
+    name: &str,
+    arguments: CborValue,
+) -> ClientResult<()> {
+    handle.emit(Event::ProviderResponseFinished(finished(
+        prompt,
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id,
+            name: ToolName::new(name),
+            tool_type: ToolType::Function,
+            raw_arguments_json: None,
+            arguments,
+            responses_envelope: None,
+        })],
+        ProviderStopReason::ToolCalls,
+    )))
 }
 
 impl ScenarioConfig {

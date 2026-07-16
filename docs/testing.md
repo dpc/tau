@@ -80,6 +80,17 @@ known-bug terminal projection gate, not broad rendering fidelity. The lane does
 not validate provider-builtin, upstream ChatGPT lowering/parsing, WebSocket
 behavior, production retries, or crash-exact replay.
 
+The separate `core_shell_resume` target starts that same universal binary as
+bundled `component ext-shell`. Its closed scenario exposes only `workdir` and
+`edit`, commits a canonical per-agent workdir, replaces the daemon and extension,
+and performs a relative context-checked edit on the same durable agent. Scratch
+bytes and an outside canary are safety oracles; locks stay disabled and this is
+not a filesystem sandbox claim.
+Unlike the PTY gate, the headless daemon has no post-EndTurn UI-idle frame.
+Gate 2 therefore defines quiescence as an exact correlated terminal response
+with complete durable tool facts followed by verified disappearance of its
+owned daemon/extension process group and Unix socket.
+
 `ci.deterministicE2eTests` is a mandatory selfci derivation. Its exact target
 plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox
 denies network access independently of the fixture implementation.

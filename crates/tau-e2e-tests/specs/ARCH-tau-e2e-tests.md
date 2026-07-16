@@ -4,8 +4,9 @@
 
 `DeterministicFixture` is always-on and hermetic. It starts an exact
 Cargo-built, test-only provider subprocess through normal extension supervision,
-publishes and routes `fake/test`, and optionally starts only the no-side-effect
-`tau-ext-test-dummy` wrapper. Generated configuration, durable session state,
+publishes and routes `fake/test`, and normally starts only the no-side-effect
+`tau-ext-test-dummy` wrapper. Gate 2 instead starts the exact universal Tau
+binary as bundled `component ext-shell`. Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
 configuration; V2 uses bounded exact-correlation lanes and clean-resume cursor
@@ -28,8 +29,9 @@ provider event validation, tool dispatch/continuation, typed failures,
 cancellation, fatal provider disconnect, concurrent lane isolation, clean
 restore, durable projection, and headless shutdown. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
-behavior, production retries, crash-exact action replay, universal-binary
-packaging, or broad terminal rendering.
+behavior, production retries, crash-exact action replay, or broad terminal
+rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
+bundled core-shell component.
 
 The Unix-only core-resume gate is the deterministic fixture's public-UI boundary.
 It runs the exact built universal `tau` under a fixed real PTY, while the fake
@@ -39,3 +41,12 @@ durable terminal dummy result and is fully reaped; Boot B uses explicit
 terminal row, a replay-aware side UI peer is authoritative for delivery ordering
 and replay boundaries, and typed `SessionStore`/`AgentStore` reads are
 authoritative for membership and transcript prefix/suffix integrity.
+
+The complementary core-shell resume gate is headless so failures localize to the
+production extension boundary already packaged by the same universal binary.
+It replaces both daemon and `component ext-shell`, resumes the same durable
+agent only after replay/context boundaries, and checks folded
+`ext_core-shell_cwd`, old provider context, a byte-identical store prefix, and a
+fresh relative edit. Its closed workdir/edit grammar, scratch layout, and canary
+do not turn advisory core-shell permissions into a sandbox or test directory
+locks.

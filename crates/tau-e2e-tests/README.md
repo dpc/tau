@@ -12,6 +12,7 @@ access, shell, or VCR cassette is involved:
 cargo nextest run -p tau-e2e-tests --test deterministic_provider
 cargo build -p tau --bin tau
 cargo nextest run -p tau-e2e-tests --test core_resume
+TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_shell_resume
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
@@ -25,6 +26,11 @@ with explicit `tau -r <session-id>`, and checks the actual VT projection never
 repaints the completed row as pending. A replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.
+The separate headless `core_shell_resume` gate runs that universal binary as the
+bundled `component ext-shell`, exposes only `workdir` and `edit`, and proves a
+canonical per-agent workdir plus a relative context-checked edit survive full
+daemon and extension replacement. Its scratch canary and exact-byte assertions
+are safety oracles, not a filesystem sandbox or directory-lock test.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

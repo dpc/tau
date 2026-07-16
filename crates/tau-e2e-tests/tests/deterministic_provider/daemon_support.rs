@@ -1,4 +1,17 @@
 //! Bounded child-daemon protocol support for deterministic acceptance.
+#![allow(dead_code)]
+
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+
+use tau_e2e_tests::DeterministicFixture;
+use tau_proto::{
+    ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
+    Subscribe,
+};
+use tau_socket::{SocketPeer, SocketReceive};
 
 use super::*;
 
@@ -11,6 +24,10 @@ pub(super) struct DaemonGuard {
     completed: bool,
     /// Captured synthetic daemon diagnostic.
     stderr_path: std::path::PathBuf,
+    /// Dedicated process group containing daemon and supervised extensions.
+    pgid: nix::unistd::Pid,
+    /// Unix socket that must disappear with this daemon generation.
+    socket_path: std::path::PathBuf,
 }
 
 impl DaemonGuard {
@@ -30,6 +47,10 @@ impl DaemonGuard {
                 }
             }
         };
+        reap_process_group(self.pgid)?;
+        if self.socket_path.exists() {
+            return Err("daemon socket survived process-group cleanup".to_owned());
+        }
         self.child.take();
         self.completed = true;
         if status.success() {
@@ -52,7 +73,18 @@ impl Drop for DaemonGuard {
             return;
         }
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && process_group_exists(self.pgid) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if process_group_exists(self.pgid) {
+                let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline && process_group_exists(self.pgid) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
             let _ = child.wait();
         }
     }
@@ -69,22 +101,67 @@ pub(super) fn spawn_daemon(
         .root()
         .join(format!("daemon-{}.stderr", status_label(status)));
     let stderr = std::fs::File::create(&stderr_path).expect("create daemon stderr");
-    let child = Command::new(HARNESS_DAEMON)
+    let mut command = Command::new(HARNESS_DAEMON);
+    command
+        .env_clear()
+        .env("HOME", fixture.root().join("home"))
+        .env("XDG_CONFIG_HOME", fixture.root().join("xdg-config"))
+        .env("XDG_STATE_HOME", fixture.root().join("xdg-state"))
+        .env("XDG_CACHE_HOME", fixture.root().join("xdg-cache"))
+        .env("XDG_RUNTIME_DIR", fixture.root().join("xdg-runtime"))
+        .env("LANG", "C.UTF-8")
+        .process_group(0)
         .arg(socket)
         .arg(fixture.harness_state_dir())
         .arg(fixture.root().join("config"))
         .arg(fixture.root().join("state"))
-        .arg(status_label(status))
+        .arg(status_label(status));
+    if fixture.core_shell_enabled() {
+        command.arg(fixture.shell_base());
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr))
         .spawn()
         .expect("spawn deterministic daemon");
+    let pgid = nix::unistd::Pid::from_raw(child.id().try_into().expect("daemon pid fits i32"));
     DaemonGuard {
         child: Some(child),
         completed: false,
         stderr_path,
+        pgid,
+        socket_path: socket.to_path_buf(),
     }
+}
+
+fn process_group_exists(pgid: nix::unistd::Pid) -> bool {
+    nix::sys::signal::killpg(pgid, None).is_ok()
+}
+
+fn reap_process_group(pgid: nix::unistd::Pid) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && process_group_exists(pgid) {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if process_group_exists(pgid) {
+        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && process_group_exists(pgid) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if process_group_exists(pgid) {
+        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && process_group_exists(pgid) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if process_group_exists(pgid) {
+        return Err("daemon process group survived SIGKILL cleanup".to_owned());
+    }
+    Ok(())
 }
 
 pub(super) fn status_label(status: tau_harness::SessionLaunchStatus) -> &'static str {
@@ -101,7 +178,7 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
             Ok(peer) => break peer,
             Err(error) if Instant::now() < deadline => {
                 let _ = error;
-                thread::yield_now();
+                thread::sleep(Duration::from_millis(5));
             }
             Err(error) => return Err(error.into()),
         }
@@ -113,12 +190,23 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
     }))?;
     let selectors = [
         EventName::AGENT_PROMPT_CREATED,
+        EventName::SESSION_STARTED,
+        EventName::SESSION_AGENT_LOADED,
+        EventName::AGENT_STARTED,
         EventName::PROVIDER_PROMPT_SUBMITTED,
         EventName::PROVIDER_RESPONSE_FINISHED,
         EventName::AGENT_PROMPT_TERMINATED,
+        EventName::AGENT_STATS_UPDATED,
         EventName::EXTENSION_EXITED,
         EventName::EXTENSION_RESTARTING,
         EventName::HARNESS_NOTICE,
+        EventName::AGENT_METADATA_SET,
+        EventName::EXTENSION_READY,
+        EventName::EXTENSION_CONTEXT_READY,
+        EventName::EXTENSION_SESSION_CONTEXT_READY,
+        EventName::AGENT_REPLAY_COMPLETE,
+        EventName::SESSION_REPLAY_COMPLETE,
+        EventName::TOOL_RESULT,
     ]
     .into_iter()
     .map(EventSelector::Exact)
@@ -193,13 +281,35 @@ pub(super) fn disconnect_ui(peer: &mut SocketPeer) -> Result<(), Box<dyn std::er
 }
 
 pub(super) fn recv_event(peer: &mut SocketPeer) -> Result<Event, Box<dyn std::error::Error>> {
+    Ok(recv_observed(peer)?.event)
+}
+
+pub(super) struct DaemonObserved {
+    /// Delivered typed event.
+    pub event: Event,
+    /// Whether the delivery belongs to historical replay.
+    pub replay: bool,
+    /// Durable append timestamp when the event came from a journal.
+    pub recorded_at: Option<tau_proto::UnixMicros>,
+}
+
+pub(super) fn recv_observed(
+    peer: &mut SocketPeer,
+) -> Result<DaemonObserved, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match peer.recv_timeout(remaining)? {
             SocketReceive::Message {
                 message: HarnessOutputMessage::Deliver(delivery),
-            } => return Ok(delivery.into_event()),
+            } => {
+                let (event, replay, recorded_at) = delivery.into_parts();
+                return Ok(DaemonObserved {
+                    event,
+                    replay,
+                    recorded_at,
+                });
+            }
             SocketReceive::Message {
                 message: HarnessOutputMessage::Disconnect(disconnect),
             } => {

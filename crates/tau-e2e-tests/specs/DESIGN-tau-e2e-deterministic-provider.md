@@ -16,8 +16,10 @@ configuration, unexpected prompts, overlaps, first mismatches, and unconsumed
 actions fail closed with bounded synthetic diagnostics.
 
 The fixture uses fresh private config, state, session, and artifact directories.
-It disables every unrelated built-in extension and may enable only the
-no-side-effect `tau-ext-test-dummy` success mode. The fake has no network,
+It disables every unrelated built-in extension and normally enables only the
+no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is the sole controlled
+exception: the exact universal `component ext-shell` may expose only `workdir`
+and `edit` to a closed scratch-only scenario. The fake has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
 
@@ -27,7 +29,8 @@ for runtime settings reloads, then check an exact extension-name allowlist befor
 any process starts. This is a deterministic-test exception to
 normal interactive startup availability in
 [DESIGN-extension-availability-startup](../../../specs/DESIGN-extension-availability-startup.md);
-it does not scrub the ordinary child OS environment.
+embedded launches do not scrub the ordinary child OS environment. Spawned daemon
+acceptance clears it and supplies private HOME/XDG roots plus a fixed locale.
 
 `ScenarioV1` remains the closed phase-one grammar. `ScenarioV2` adds at most
 eight exact `ctx_id` lanes with independent bounded cursors. It supports typed
@@ -42,6 +45,12 @@ The public terminal UI supplies no initial `ctx_id`, so an unbound first prompt
 may select the sole configured lane; multi-lane scenarios still require an exact
 `ctx_id`. Continuations cannot change that binding. The fake subscribes only to live prompt/cancel
 traffic, so restored event replay cannot consume actions.
+
+The core-shell action family is likewise closed rather than generic: it can set
+only relative `project`, edit only `resume-sentinel.txt` with the two fixed
+line-range shapes, and vary only bounded call IDs, nonce text, prompts, and final
+markers. Its result continuations require success; the resumed provider prompt
+must contain both the old nonce-bearing transcript and restored workdir context.
 
 V2 cursors and immutable agent-to-lane bindings are atomically checkpointed in
 the harness-assigned extension state directory and restored only after validating
@@ -64,7 +73,8 @@ projection, clean restore/shutdown, and the spawned public terminal's completed
 tool projection across one quiescent cold resume. Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,
-production retry scheduling, crash-exact replay, universal packaging, or
+production retry scheduling, crash-exact replay, universal packaging beyond
+the exact Gate 1 CLI and Gate 2 bundled core-shell components, or
 broad terminal rendering fidelity. Live/VCR and transcript-replay fixtures remain separate.
 
 Refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).

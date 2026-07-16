@@ -75,6 +75,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     let mut ids = std::collections::HashSet::new();
     let mut barriers: HashMap<&str, (usize, std::collections::HashSet<&str>)> = HashMap::new();
     let mut dummy_call_ids = std::collections::HashSet::new();
+    let mut core_call_ids = std::collections::HashSet::new();
     for lane in &scenario.lanes {
         if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
             return Err(ClientError::handler(
@@ -116,6 +117,45 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 {
                     return Err(ClientError::handler(
                         "dummy tool result must have a 1..=256 byte id and matching prior call",
+                    ));
+                }
+                ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }
+                | ScenarioActionV2::CoreShellResumeEditCall { call_id, .. }
+                    if call_id.is_empty()
+                        || call_id.len() > 256
+                        || !core_call_ids.insert(call_id.as_str()) =>
+                {
+                    return Err(ClientError::handler(
+                        "core-shell call ids must be unique and bounded",
+                    ));
+                }
+                ScenarioActionV2::CoreShellWorkdirResult {
+                    call_id,
+                    edit_call_id,
+                    nonce,
+                    ..
+                } if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                        Some(ScenarioActionV2::CoreShellWorkdirCall { call_id: prior, .. }) if prior == call_id)
+                    || edit_call_id.is_empty()
+                    || edit_call_id.len() > 256
+                    || !core_call_ids.insert(edit_call_id.as_str())
+                    || nonce.is_empty()
+                    || nonce.len() > 128 =>
+                {
+                    return Err(ClientError::handler("workdir result must follow its call"));
+                }
+                ScenarioActionV2::CoreShellCreateResult { call_id, .. }
+                    if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                        Some(ScenarioActionV2::CoreShellWorkdirResult { edit_call_id: prior, .. }) if prior == call_id) =>
+                {
+                    return Err(ClientError::handler("create result must follow its call"));
+                }
+                ScenarioActionV2::CoreShellResumeEditResult { call_id, .. }
+                    if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                        Some(ScenarioActionV2::CoreShellResumeEditCall { call_id: prior, .. }) if prior == call_id) =>
+                {
+                    return Err(ClientError::handler(
+                        "resume edit result must follow its call",
                     ));
                 }
                 ScenarioActionV2::HoldUntilCancel { timeout_ms, .. }

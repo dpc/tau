@@ -69,6 +69,51 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after the tool result.
         response: String,
     },
+    /// Request the closed Gate 2 relative `workdir("project")` operation.
+    CoreShellWorkdirCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+    },
+    /// Accept the successful workdir result before dependent filesystem work.
+    CoreShellWorkdirResult {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact identity for the dependent relative edit.
+        edit_call_id: ToolCallId,
+        /// Per-run nonce embedded only in file contents.
+        nonce: String,
+    },
+    /// Accept creation and terminate Boot A with an exact marker.
+    CoreShellCreateResult {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant marker.
+        response: String,
+    },
+    /// Replace the restored sentinel through the same fixed relative path.
+    CoreShellResumeEditCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Per-run nonce that must already be present in restored context.
+        nonce: String,
+    },
+    /// Accept the resumed edit and terminate Boot B with an exact marker.
+    CoreShellResumeEditResult {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant marker.
+        response: String,
+    },
     /// Complete with a typed terminal provider error.
     Error {
         /// Exact latest user text.

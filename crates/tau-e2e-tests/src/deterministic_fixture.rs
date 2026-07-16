@@ -29,6 +29,12 @@ pub struct DeterministicFixture {
     expected_lanes: usize,
     /// Whether the deterministic dummy subprocess is configured.
     dummy_enabled: bool,
+    /// Whether the bundled production core-shell subprocess is configured.
+    core_shell_enabled: bool,
+    /// Private daemon and extension working directory.
+    shell_base: PathBuf,
+    /// Outside-target canary whose exact bytes must remain unchanged.
+    outside_canary: PathBuf,
     /// Whether an operation failed and artifacts must be retained.
     failed: Cell<bool>,
 }
@@ -56,6 +62,7 @@ impl DeterministicFixture {
             1,
             fake_provider_bin,
             dummy_tool_bin,
+            false,
         )
     }
 
@@ -78,6 +85,25 @@ impl DeterministicFixture {
             scenario.lanes.len(),
             fake_provider_bin,
             None,
+            false,
+        )
+    }
+
+    /// Creates the closed production core-shell cold-resume fixture.
+    pub fn new_core_shell(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            None,
+            true,
         )
     }
 
@@ -88,6 +114,7 @@ impl DeterministicFixture {
         expected_lanes: usize,
         fake_provider_bin: impl AsRef<Path>,
         dummy_tool_bin: Option<PathBuf>,
+        core_shell_enabled: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
@@ -95,10 +122,31 @@ impl DeterministicFixture {
         let state_dir = root.join("state");
         let harness_state_dir = root.join("harness-state");
         let artifacts_dir = root.join("artifacts");
+        for private_root in [
+            "home",
+            "xdg-config",
+            "xdg-state",
+            "xdg-cache",
+            "xdg-runtime",
+        ] {
+            std::fs::create_dir_all(root.join(private_root))?;
+        }
         std::fs::create_dir_all(&config_dir)?;
         std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(&harness_state_dir)?;
         std::fs::create_dir_all(&artifacts_dir)?;
+        let shell_base = root.join("shell-base");
+        let project = shell_base.join("project");
+        std::fs::create_dir_all(&project)?;
+        let shell_base = shell_base.canonicalize()?;
+        let project = project.canonicalize()?;
+        if shell_base.symlink_metadata()?.file_type().is_symlink()
+            || project.symlink_metadata()?.file_type().is_symlink()
+        {
+            return Err("core-shell scratch layout must not contain symlinks".into());
+        }
+        let outside_canary = root.join("outside-canary");
+        std::fs::write(&outside_canary, b"outside-canary:unchanged\n")?;
         let trace_path = artifacts_dir.join("fake-provider.trace");
 
         let mut extensions = serde_json::Map::new();
@@ -145,6 +193,27 @@ impl DeterministicFixture {
         } else {
             serde_json::json!([])
         };
+        let tools = if core_shell_enabled {
+            let tau_bin = exact_tau_binary()?;
+            extensions.insert(
+                "core-shell".to_owned(),
+                serde_json::json!({
+                    "enable": true,
+                    "command": [tau_bin],
+                    "suffix": ["component", "ext-shell"],
+                    "role": "tool",
+                    "require": true,
+                    "cwd": shell_base,
+                    "config": {
+                        "working_directory": shell_base,
+                        "dir_lock": { "enable": false }
+                    }
+                }),
+            );
+            serde_json::json!(["workdir", "edit"])
+        } else {
+            tools
+        };
         let config = serde_json::json!({
             "agents": {
                 "default_role": "deterministic-e2e",
@@ -179,6 +248,9 @@ impl DeterministicFixture {
             expected_actions,
             expected_lanes,
             dummy_enabled,
+            core_shell_enabled,
+            shell_base,
+            outside_canary,
             failed: Cell::new(false),
         })
     }
@@ -253,6 +325,31 @@ impl DeterministicFixture {
             .expect("fixture config directory has a root")
     }
 
+    /// Returns the canonical core-shell base directory.
+    pub fn shell_base(&self) -> &Path {
+        &self.shell_base
+    }
+
+    /// Returns the exact outside-target canary path.
+    pub fn outside_canary(&self) -> &Path {
+        &self.outside_canary
+    }
+
+    /// Returns whether this fixture enables the bundled production core-shell.
+    pub fn core_shell_enabled(&self) -> bool {
+        self.core_shell_enabled
+    }
+
+    /// Returns the generated harness configuration directory.
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    /// Returns the private extension state directory.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// Reads the bounded provider semantic trace.
     pub fn trace(&self) -> Result<String, std::io::Error> {
         std::fs::read_to_string(&self.trace_path)
@@ -310,6 +407,19 @@ impl DeterministicFixture {
         }
         Ok(events)
     }
+}
+
+fn exact_tau_binary() -> Result<String, Box<dyn std::error::Error>> {
+    let candidate = if let Some(path) = std::env::var_os("TAU_E2E_TAU_BIN") {
+        PathBuf::from(path)
+    } else {
+        std::env::current_exe()?
+            .ancestors()
+            .map(|ancestor| ancestor.join("tau"))
+            .find(|candidate| candidate.is_file())
+            .ok_or("integration test executable has no ancestor Cargo profile containing `tau`")?
+    };
+    exact_binary(&candidate)
 }
 
 impl Drop for DeterministicFixture {

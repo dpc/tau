@@ -43,6 +43,15 @@ An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.
 
+The headless core-shell resume gate is a controlled production-extension
+exception. It enables only the fake provider and exact universal
+`component ext-shell`, exposes only `workdir` and `edit`, keeps directory locking
+disabled, and supplies a closed grammar with fixed relative paths and no command
+interpreter. Core-shell still runs with same-UID filesystem permissions and is
+not a sandbox. A private scratch tree, symlink rejection, exact target bytes,
+wrong-path absence, and an outside canary bound the scenario and detect drift;
+the Nix build sandbox remains the outer isolation boundary.
+
 `VcrFixture` is deliberately non-hermetic. It can use real provider credentials
 and lets `core-shell` execute with the user's permissions. Its cassettes can
 contain prompts, provider traffic, tool calls, output, and local paths. Run and
