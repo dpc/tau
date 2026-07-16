@@ -3996,6 +3996,137 @@ fn show_messages_summary_modes_do_not_show_body() {
     assert!(!vt.screen_contains(80, "secret summarized body"));
 }
 
+/// Late display-name facts must replace an already rendered message label
+/// without changing its body or leaving the stale block visible.
+#[test]
+fn late_agent_names_reproject_visible_message_blocks() {
+    let (_term, handle, vt) = setup(100, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-messages", "all-full");
+    let message = agent_message("agent-a", "agent-b", "semantic body");
+    renderer.handle(&message);
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b:"));
+
+    let generation = vt.frame_generation();
+    renderer.handle(&Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-b"),
+            display_name: "review result".to_owned(),
+        },
+    ));
+    vt.wait_for_frame_containing_after(
+        generation,
+        "Message from agent-a to agent-b (review result):",
+    );
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (review result):"));
+    assert!(!vt.screen_contains(100, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(100, "semantic body"));
+}
+
+/// Hidden agent and no-agent transcript snapshots reproject current display
+/// names when selected again instead of retaining event-time labels.
+#[test]
+fn hidden_message_snapshots_reproject_late_agent_names() {
+    let (_term, handle, vt) = setup(100, 10);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-messages", "all-full");
+
+    renderer.switch_agent("agent-a".to_owned());
+    renderer.handle(&agent_message("agent-a", "agent-b", "agent history"));
+    renderer.switch_agent("viewer".to_owned());
+    renderer.handle(&Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-b"),
+            display_name: "late worker".to_owned(),
+        },
+    ));
+    sync(&handle);
+    let generation = vt.frame_generation();
+    renderer.switch_agent("agent-a".to_owned());
+    vt.wait_for_frame_containing_after(
+        generation,
+        "Message from agent-a to agent-b (late worker):",
+    );
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (late worker):"));
+
+    renderer.clear_selected_agent();
+    renderer.handle(&agent_message("agent-a", "user", "broadcast history"));
+    renderer.switch_agent("viewer".to_owned());
+    renderer.handle(&Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-a"),
+            display_name: "late sender".to_owned(),
+        },
+    ));
+    sync(&handle);
+    let generation = vt.frame_generation();
+    renderer.clear_selected_agent();
+    vt.wait_for_frame_containing_after(generation, "Message from agent-a (late sender) to user:");
+    assert!(vt.screen_contains(100, "Message from agent-a (late sender) to user:"));
+    assert!(vt.screen_contains(100, "broadcast history"));
+}
+
+/// Retained history keeps its originating session's name authority when a
+/// different resumed session later publishes metadata for the same agent id.
+#[test]
+fn resumed_session_names_do_not_relabel_prior_message_history() {
+    let (_term, handle, vt) = setup(100, 12);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-messages", "all-full");
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "session-a".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-b"),
+            display_name: "session A worker".to_owned(),
+        },
+    ));
+    renderer.handle(&agent_message("agent-a", "agent-b", "session A body"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (session A worker):"));
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "session-b".into(),
+        reason: SessionStartReason::Resume,
+    }));
+    renderer.handle(&Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-b"),
+            display_name: "session B worker".to_owned(),
+        },
+    ));
+    renderer.handle(&agent_message("agent-a", "agent-b", "session B body"));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (session B worker):"));
+    assert_eq!(
+        vt.screen_text(100)
+            .iter()
+            .filter(|row| row.contains("session B worker"))
+            .count(),
+        1,
+        "only the session-B message may use session-B metadata"
+    );
+    assert!(vt.screen_contains(100, "session A body"));
+    assert!(vt.screen_contains(100, "session B body"));
+}
+
 #[test]
 fn show_messages_toggle_retroactively_hides_and_shows_history() {
     let (_term, handle, vt) = setup(80, 8);

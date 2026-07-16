@@ -18,6 +18,20 @@ remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
 work, and spend.
 
+## Agent display names
+
+Agent display/task names are presentation-only metadata, never routing or trust
+identity and never provider context or semantic message content. Local names are
+authoritative only within the session whose agent metadata supplied them; remote
+names are eligible only when carried by a typed peer endpoint. Message labels
+keep the stable id visible, escape controls, bidi/structural Unicode, delimiter
+characters, quotes, and backslashes, then apply byte and terminal-column bounds
+after escaping. Revisit these invariants whenever adding a new name source or
+using names outside UI presentation.
+See
+[`SPEC-tau-cli-agent-message-labels`](crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md)
+for the rendering and session-provenance behavior.
+
 ## Local IPC and external ingress
 
 Configured extension processes are trusted local executables. “Less-trusted

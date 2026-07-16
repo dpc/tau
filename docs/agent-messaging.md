@@ -33,6 +33,17 @@ Message from <sender> to <recipient>:
 <message>
 ```
 
+Agent endpoint identity always remains visible. When the CLI knows
+authoritative session metadata, it supplements either endpoint independently,
+for example `Message from reviewer-YiBh (research findings) to
+reviewer-VVSq (final review)`. Unknown agent endpoints and peers without an
+advertised name keep their existing id-only labels; the human endpoint remains
+the literal `user`. Names are escaped and bounded UI metadata; they do not enter
+the message body, change routing, or become identity authority. Historical
+blocks use the latest folded name metadata when re-rendered, while their
+immutable semantic message events remain unchanged. See
+[`SPEC-tau-cli-agent-message-labels`](../crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md).
+
 `/set show-messages` modes are:
 
 User-recipient messages are human-visible broadcasts: they always render fully in every attached UI's currently visible transcript, regardless of `/set show-messages`. Agent-to-agent message projections still obey `/set show-messages`:

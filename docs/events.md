@@ -446,13 +446,15 @@ harness/agent.
   senders, the receiving `recipient_id`, and `message`; user-recipient messages
   have no received projection. User-recipient sent projections are human-visible
   broadcasts that UIs always render fully in the currently visible transcript. UI
-  subscribers filter, summarize, or fully display agent-to-agent message
-  projections according to `/set show-messages`. Agent recipients are delivered
-  as hidden internal prompts; external senders render as `session/agent`. If a
-  side/delegate agent is about to finish, teardown waits until the message turn
-  has been dispatched and answered. Interceptors cannot drop or rewrite these
-  validated projections. See [agent-messaging.md](agent-messaging.md) for
-  model-facing tool examples.
+   subscribers filter, summarize, or fully display agent-to-agent message
+   projections according to `/set show-messages`. Agent recipients are delivered
+   as hidden internal prompts; external senders render as `session/agent`. If a
+   side/delegate agent is about to finish, teardown waits until the message turn
+   has been dispatched and answered. Interceptors cannot drop or rewrite these
+   validated projections. Agent display names are deliberately absent from these
+   semantic projection fields: UIs may supplement ids from authoritative folded
+   metadata without changing message content or routing identity. See
+   [agent-messaging.md](agent-messaging.md) for model-facing tool examples.
 - **`extension.event`** — Custom extension-defined event with an
   extension-owned dotted name and CBOR payload. The nested name must have
   non-empty category and call segments, and must not use reserved first-party

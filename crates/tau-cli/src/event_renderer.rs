@@ -42,6 +42,10 @@ const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
+/// Maximum rendered terminal columns for a supplemental agent message name.
+const AGENT_MESSAGE_NAME_MAX_COLUMNS: usize = 48;
+/// Maximum rendered UTF-8 bytes for a supplemental agent message name.
+const AGENT_MESSAGE_NAME_MAX_BYTES: usize = 192;
 
 fn timer_wakeup_ctx(ctx_id: Option<&str>) -> Option<(&str, &str)> {
     let rest = ctx_id?.strip_prefix(TIMER_WAKEUP_CTX_PREFIX)?;
@@ -110,7 +114,11 @@ pub(crate) struct EventRenderer {
     preserve_on_fresh_agent_switch: bool,
     /// Agent ids known to the UI for `/agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// Human-friendly display names keyed by agent id.
+    /// Session-scoped authoritative display names keyed by local agent id.
+    ///
+    /// Folded from `agent.started` and `agent.display_name_set`, retained
+    /// across unload, cleared on session-id changes, and never applied to
+    /// remote routes.
     agent_display_names: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Atomic per-UI navigation modes, live membership, and runtime states.
     agent_navigation: Arc<Mutex<AgentNavigation>>,
@@ -562,6 +570,8 @@ struct ToolBlockEntry {
 struct MessageBlockEntry {
     block_id: tau_cli_term::BlockId,
     event: Event,
+    /// Session whose metadata may supplement this immutable message event.
+    session_id: Option<tau_proto::SessionId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1533,6 +1543,7 @@ impl EventRenderer {
                 self.store_visible_agent_state();
                 let state = std::mem::take(&mut self.no_agent_ui_state);
                 self.restore_visible_agent_state(state);
+                self.rerender_visible_for_current_settings();
                 self.displayed_agent_id = None;
             }
             after_display_update();
@@ -2051,6 +2062,35 @@ impl EventRenderer {
             .unwrap_or_else(|| agent_id.to_owned())
     }
 
+    /// Builds a message-safe label from current local presentation metadata.
+    fn message_agent_display_label(&self, agent_id: &str, use_local_names: bool) -> String {
+        if !use_local_names {
+            return agent_id.to_owned();
+        }
+        let display_name = self
+            .agent_display_names
+            .lock()
+            .ok()
+            .and_then(|names| names.get(agent_id).cloned());
+        Self::agent_identity_with_name(agent_id, display_name.as_deref(), agent_id)
+    }
+
+    /// Combines an unambiguous routing identity with bounded presentation-only
+    /// metadata, suppressing names that contain the agent id.
+    fn agent_identity_with_name(
+        identity: &str,
+        display_name: Option<&str>,
+        agent_id: &str,
+    ) -> String {
+        display_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.contains(agent_id))
+            .map(Self::bounded_agent_message_name)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("{identity} ({name})"))
+            .unwrap_or_else(|| identity.to_owned())
+    }
+
     fn watched_by_status(&self, agent_id: &str) -> Option<String> {
         let watchers = self.agent_watchers.get(agent_id)?;
         let first = watchers.first()?;
@@ -2074,11 +2114,40 @@ impl EventRenderer {
     }
 
     fn remember_agent_display_name(&mut self, agent_id: &str, display_name: &str) {
+        let mut changed = false;
         if let Ok(mut names) = self.agent_display_names.lock() {
             let display_name = display_name.trim();
             if !display_name.is_empty() {
+                changed = names
+                    .get(agent_id)
+                    .is_none_or(|known| known != display_name);
                 names.insert(agent_id.to_owned(), display_name.to_owned());
             }
+        }
+        if changed {
+            self.rerender_message_history();
+        }
+    }
+
+    /// Clears presentation metadata whose authority is limited to one session.
+    fn clear_agent_display_names(&self) {
+        if let Ok(mut names) = self.agent_display_names.lock() {
+            names.clear();
+        }
+    }
+
+    /// Reprojects visible message blocks from semantic events and current UI
+    /// settings, including the latest session-scoped agent metadata.
+    fn rerender_message_history(&mut self) {
+        for entry in &self.message_history {
+            let use_local_names = entry.session_id == self.current_session_id;
+            self.handle.set_block(
+                entry.block_id,
+                self.render_agent_message_block_with_local_names(&entry.event, use_local_names),
+            );
+        }
+        if !self.message_history.is_empty() {
+            self.handle.redraw();
         }
     }
 
@@ -2606,12 +2675,7 @@ impl EventRenderer {
 
     fn rerender_visible_for_current_settings(&mut self) {
         use tau_themes::names;
-        for entry in &self.message_history {
-            self.handle.set_block(
-                entry.block_id,
-                self.render_agent_message_block(&entry.event),
-            );
-        }
+        self.rerender_message_history();
         for entry in &self.tool_history {
             self.handle.set_block(
                 entry.block_id,
@@ -2650,12 +2714,7 @@ impl EventRenderer {
             return;
         }
         self.show_messages = show_messages;
-        for entry in &self.message_history {
-            self.handle.set_block(
-                entry.block_id,
-                self.render_agent_message_block(&entry.event),
-            );
-        }
+        self.rerender_message_history();
         self.invalidate_for_retroactive_toggle();
         self.save_cli_state();
     }
@@ -2772,6 +2831,7 @@ impl EventRenderer {
         if let Ok(mut agents) = self.ephemeral_agents.lock() {
             agents.clear();
         }
+        self.clear_agent_display_names();
         self.clear_selected_agent();
         // A new session starts from the same append-in-place no-agent state as
         // process startup. Unlike explicit `/agent none`, there is no previous
@@ -4218,25 +4278,36 @@ impl EventRenderer {
         self.message_history.push(MessageBlockEntry {
             block_id,
             event: event.clone(),
+            session_id: self.current_session_id.clone(),
         });
         true
     }
 
     fn render_agent_message_block(&self, event: &Event) -> tau_cli_term::StyledBlock {
-        if let Some(summary) = Self::watch_turn_state_summary(event) {
+        self.render_agent_message_block_with_local_names(event, true)
+    }
+
+    fn render_agent_message_block_with_local_names(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> tau_cli_term::StyledBlock {
+        if let Some(summary) =
+            self.watch_turn_state_summary_with_local_names(event, use_local_names)
+        {
             return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
         }
         match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
             MessageRenderMode::Summary => self.submitted_plain_block(
                 tau_themes::names::SYSTEM_INFO,
-                Self::agent_message_summary(event),
+                self.agent_message_summary_with_local_names(event, use_local_names),
             ),
             MessageRenderMode::Full => self.submitted_plain_block(
                 tau_themes::names::SYSTEM_INFO,
                 format!(
                     "{}:\n{}",
-                    Self::agent_message_summary(event),
+                    self.agent_message_summary_with_local_names(event, use_local_names),
                     Self::agent_message_body(event)
                 ),
             ),
@@ -4246,12 +4317,21 @@ impl EventRenderer {
     /// Render structured watch lifecycle state as a compact status rather than
     /// attributing the harness-authored event as a message from the watched
     /// agent.
-    fn watch_turn_state_summary(event: &Event) -> Option<String> {
+    #[cfg(test)]
+    fn watch_turn_state_summary(&self, event: &Event) -> Option<String> {
+        self.watch_turn_state_summary_with_local_names(event, true)
+    }
+
+    fn watch_turn_state_summary_with_local_names(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> Option<String> {
         let Event::AgentMessageReceived(message) = event else {
             return None;
         };
         let state = message.watch_turn_state.as_ref()?;
-        let watched = Self::agent_message_received_sender_label(message);
+        let watched = self.agent_message_received_sender_label(message, use_local_names);
         Some(if state.initial {
             let state_label = match state.state {
                 tau_proto::AgentRuntimeState::Running => "running",
@@ -4267,15 +4347,24 @@ impl EventRenderer {
         })
     }
 
-    fn agent_message_summary(event: &Event) -> String {
+    #[cfg(test)]
+    fn agent_message_summary(&self, event: &Event) -> String {
+        self.agent_message_summary_with_local_names(event, true)
+    }
+
+    fn agent_message_summary_with_local_names(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> String {
         match event {
             Event::AgentMessageSent(message)
                 if message.kind == tau_proto::AgentMessageKind::WatchResponse =>
             {
                 format!(
                     "Response from {} to {}",
-                    message.sender_id,
-                    Self::agent_message_sent_recipient_display(message)
+                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
+                    self.agent_message_sent_recipient_display(message, use_local_names)
                 )
             }
             Event::AgentMessageSent(message)
@@ -4283,22 +4372,25 @@ impl EventRenderer {
             {
                 format!(
                     "Prompt to {} observed by {}",
-                    message.sender_id,
-                    Self::agent_message_sent_recipient_display(message)
+                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
+                    self.agent_message_sent_recipient_display(message, use_local_names)
                 )
             }
             Event::AgentMessageSent(message) => format!(
                 "Message from {} to {}",
-                message.sender_id,
-                Self::agent_message_sent_recipient_display(message)
+                self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
+                self.agent_message_sent_recipient_display(message, use_local_names)
             ),
             Event::AgentMessageReceived(message)
                 if message.kind == tau_proto::AgentMessageKind::WatchResponse =>
             {
                 format!(
                     "Response from {} to {}",
-                    Self::agent_message_received_sender_label(message),
-                    message.recipient_id
+                    self.agent_message_received_sender_label(message, use_local_names),
+                    self.message_agent_display_label(
+                        message.recipient_id.as_str(),
+                        use_local_names
+                    )
                 )
             }
             Event::AgentMessageReceived(message)
@@ -4306,14 +4398,17 @@ impl EventRenderer {
             {
                 format!(
                     "Prompt to {} observed by {}",
-                    Self::agent_message_received_sender_label(message),
-                    message.recipient_id
+                    self.agent_message_received_sender_label(message, use_local_names),
+                    self.message_agent_display_label(
+                        message.recipient_id.as_str(),
+                        use_local_names
+                    )
                 )
             }
             Event::AgentMessageReceived(message) => format!(
                 "Message from {} to {}",
-                Self::agent_message_received_sender_label(message),
-                message.recipient_id
+                self.agent_message_received_sender_label(message, use_local_names),
+                self.message_agent_display_label(message.recipient_id.as_str(), use_local_names)
             ),
             Event::AgentMessageIncoming(message) => {
                 Self::typed_message_summary(&message.envelope, &message.envelope.source, "received")
@@ -4350,13 +4445,20 @@ impl EventRenderer {
 
         match endpoint {
             tau_proto::MessageEndpoint::Agent {
+                session_id,
                 agent_id,
                 display_name,
-                ..
-            } => display_name
-                .as_deref()
-                .map(|value| Self::bounded_metadata(value, 80, 256))
-                .unwrap_or_else(|| agent_id.to_string()),
+            } => {
+                let identity = session_id.as_ref().map_or_else(
+                    || agent_id.to_string(),
+                    |session| format!("{session}/{agent_id}"),
+                );
+                Self::agent_identity_with_name(
+                    &identity,
+                    display_name.as_deref(),
+                    agent_id.as_str(),
+                )
+            }
             tau_proto::MessageEndpoint::User => "user".to_owned(),
             tau_proto::MessageEndpoint::External {
                 stable_id,
@@ -4400,6 +4502,32 @@ impl EventRenderer {
         Self::bounded_metadata_with(value, max_columns, max_bytes, |grapheme| {
             tau_proto::visible_escape_metadata(grapheme)
         })
+    }
+
+    /// Bounds a supplemental agent name after visibly escaping controls,
+    /// structural Unicode, and label delimiters.
+    fn bounded_agent_message_name(value: &str) -> String {
+        Self::bounded_metadata_with(
+            value,
+            AGENT_MESSAGE_NAME_MAX_COLUMNS,
+            AGENT_MESSAGE_NAME_MAX_BYTES,
+            |grapheme| {
+                use std::fmt::Write as _;
+
+                let mut escaped = String::new();
+                for character in grapheme.chars() {
+                    if tau_proto::requires_visible_escape(character) {
+                        escaped
+                            .push_str(&tau_proto::visible_escape_metadata(&character.to_string()));
+                    } else if matches!(character, '(' | ')' | '\\' | '"') {
+                        let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
+                    } else {
+                        escaped.push(character);
+                    }
+                }
+                escaped
+            },
+        )
     }
 
     fn bounded_quoted_metadata(value: &str, max_columns: usize, max_bytes: usize) -> String {
@@ -4518,9 +4646,15 @@ impl EventRenderer {
         }
     }
 
-    fn agent_message_sent_recipient_display(message: &tau_proto::AgentMessageSent) -> String {
+    fn agent_message_sent_recipient_display(
+        &self,
+        message: &tau_proto::AgentMessageSent,
+        use_local_names: bool,
+    ) -> String {
         match &message.recipient {
-            tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.to_string(),
+            tau_proto::AgentMessageRecipient::Agent { agent_id } => {
+                self.message_agent_display_label(agent_id.as_str(), use_local_names)
+            }
             tau_proto::AgentMessageRecipient::ExternalAgent {
                 session_id,
                 agent_id,
@@ -4531,12 +4665,15 @@ impl EventRenderer {
         }
     }
 
-    fn agent_message_received_sender_label(message: &tau_proto::AgentMessageReceived) -> String {
-        message
-            .sender_session_id
-            .as_ref()
-            .map(|session_id| format!("{session_id}/{}", message.sender_id))
-            .unwrap_or_else(|| message.sender_id.to_string())
+    fn agent_message_received_sender_label(
+        &self,
+        message: &tau_proto::AgentMessageReceived,
+        use_local_names: bool,
+    ) -> String {
+        message.sender_session_id.as_ref().map_or_else(
+            || self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
+            |session_id| format!("{session_id}/{}", message.sender_id),
+        )
     }
 
     fn is_user_broadcast_agent_message(event: &Event) -> bool {
@@ -4632,6 +4769,10 @@ impl EventRenderer {
     }
 
     fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
+        if self.current_session_id.as_ref() != Some(&started.session_id) {
+            self.clear_agent_display_names();
+            self.rerender_message_history();
+        }
         self.current_session_id = Some(started.session_id.clone());
         self.render_model_status();
     }

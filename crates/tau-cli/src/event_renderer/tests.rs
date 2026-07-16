@@ -53,7 +53,7 @@ fn external_message_rendering_is_always_full_and_typed() {
         MessageRenderMode::Full
     );
     assert_eq!(
-        super::EventRenderer::agent_message_summary(&event),
+        renderer_for_agent_id_tests().agent_message_summary(&event),
         "slack message received · U123 (Slack \"Alice\")"
     );
     assert_eq!(
@@ -76,7 +76,7 @@ fn external_message_rendering_is_always_full_and_typed() {
         },
     };
     assert_eq!(
-        super::EventRenderer::agent_message_summary(&edit),
+        renderer_for_agent_id_tests().agent_message_summary(&edit),
         "slack edit received · U123 (Slack \"Alice\") · updates msg-original"
     );
     assert_eq!(super::EventRenderer::agent_message_body(&edit), "corrected");
@@ -125,7 +125,7 @@ fn slack_reaction_rendering_preserves_actor_action_alias_and_exact_name() {
         MessageRenderMode::Summary
     );
     assert_eq!(
-        super::EventRenderer::agent_message_summary(&event),
+        renderer_for_agent_id_tests().agent_message_summary(&event),
         "slack reaction removed by U123 (Slack \"A\\\"lice\\u{202E}\"; alias dpc) · :thumbsup::skin-tone-6:"
     );
     assert_eq!(
@@ -716,10 +716,216 @@ fn show_messages_modes_map_user_and_agent_messages() {
 fn agent_message_summary_excludes_body() {
     let message = agent_message("agent-a", "agent-b", "secret payload");
 
-    let summary = super::EventRenderer::agent_message_summary(&message);
+    let summary = renderer_for_agent_id_tests().agent_message_summary(&message);
 
     assert_eq!(summary, "Message from agent-a to agent-b");
     assert!(!summary.contains("secret payload"));
+}
+
+/// Local message endpoints independently project authoritative restored agent
+/// names while keeping both routing ids visible.
+#[test]
+fn agent_message_summary_projects_known_names_independently() {
+    let message = agent_message("agent-a", "agent-b", "payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id("agent-a"),
+        parent_agent: None,
+        role: "researcher".to_owned(),
+        display_name: Some("something research".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a (something research) to agent-b"
+    );
+
+    renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id("agent-b"),
+        parent_agent: None,
+        role: "reviewer".to_owned(),
+        display_name: Some("something else something".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a (something research) to agent-b (something else something)"
+    );
+    renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: "session-1".into(),
+            agent_id: agent_id("agent-b"),
+        },
+    ));
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a (something research) to agent-b (something else something)",
+        "unloading does not discard durable presentation metadata"
+    );
+}
+
+/// Presentation metadata is visibly escaped, grapheme-safe, and bounded so a
+/// task name cannot forge terminal lines or make plain output unbounded.
+#[test]
+fn agent_message_names_are_sanitized_and_bounded() {
+    use unicode_width::UnicodeWidthStr as _;
+
+    let message = agent_message("agent-a", "agent-b", "payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("agent-a", "x)(\\\"");
+    let summary = renderer.agent_message_summary(&message);
+    assert!(summary.contains(r"agent-a (x\u{0029}\u{0028}\u{005C}\u{0022})"));
+
+    renderer
+        .remember_agent_display_name("agent-a", &format!("\n\u{1b}\u{202e}{}", "👩‍🚀".repeat(100)));
+    let summary = renderer.agent_message_summary(&message);
+    assert!(summary.contains(r"\u{001B}\u{202E}"));
+    assert!(summary.contains('…'));
+    assert!(!summary.contains('\n'));
+    assert!(!summary.contains('\u{1b}'));
+    assert!(summary.width() <= 96);
+}
+
+/// Names that already contain their routing id are omitted rather than
+/// duplicating or obscuring identity.
+#[test]
+fn agent_message_names_do_not_duplicate_agent_ids() {
+    let message = agent_message("agent-a", "agent-b", "payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("agent-a", "agent-a");
+    renderer.remember_agent_display_name("agent-b", "review agent-b task");
+
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a to agent-b"
+    );
+}
+
+/// Cross-session identities never borrow a same-spelled local agent's name;
+/// only presentation metadata explicitly advertised on a typed endpoint is
+/// eligible for a supplemental remote label.
+#[test]
+fn peer_message_names_require_endpoint_authority() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("agent-b", "local worker");
+    let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: "peer-message".into(),
+        sender_id: agent_id("agent-a"),
+        recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+            session_id: "remote-session".into(),
+            agent_id: agent_id("agent-b"),
+        },
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "payload".to_owned(),
+    });
+    assert_eq!(
+        renderer.agent_message_summary(&event),
+        "Message from agent-a to remote-session/agent-b"
+    );
+
+    let endpoint = tau_proto::MessageEndpoint::Agent {
+        session_id: Some("remote-session".into()),
+        agent_id: agent_id("agent-b"),
+        display_name: Some(r#"advertised) "worker\"#.to_owned()),
+    };
+    assert_eq!(
+        super::EventRenderer::message_endpoint_label("tau", &endpoint, false),
+        r#"remote-session/agent-b (advertised\u{0029} \u{0022}worker\u{005C})"#
+    );
+}
+
+/// Late authoritative name changes reproject presentation without mutating the
+/// immutable semantic message event stored for transcript history.
+#[test]
+fn late_agent_name_updates_reproject_message_history() {
+    let message = agent_message("agent-a", "agent-b", "semantic payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&message);
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a to agent-b"
+    );
+
+    renderer.handle(&tau_proto::Event::AgentDisplayNameSet(
+        tau_proto::AgentDisplayNameSet {
+            agent_id: agent_id("agent-b"),
+            display_name: "new task".to_owned(),
+        },
+    ));
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a to agent-b (new task)"
+    );
+    let stored = &renderer.message_history[0].event;
+    assert_eq!(stored, &message);
+    assert_eq!(
+        super::EventRenderer::agent_message_body(stored),
+        "semantic payload"
+    );
+}
+
+/// Watch content projections preserve their distinct response/prompt wording
+/// while using the same supplemental endpoint labels as explicit messages.
+#[test]
+fn watch_content_summaries_preserve_wording_with_names() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("worker", "research task");
+    renderer.remember_agent_display_name("manager", "coordination");
+    let cases = [
+        (
+            tau_proto::AgentMessageKind::WatchResponse,
+            "Response from worker (research task) to manager (coordination)",
+        ),
+        (
+            tau_proto::AgentMessageKind::WatchPrompt,
+            "Prompt to worker (research task) observed by manager (coordination)",
+        ),
+    ];
+    for (kind, expected) in cases {
+        let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: format!("watch-{kind:?}").into(),
+            sender_id: agent_id("worker"),
+            recipient: tau_proto::AgentMessageRecipient::Agent {
+                agent_id: agent_id("manager"),
+            },
+            kind,
+            message: "content".to_owned(),
+        });
+        assert_eq!(renderer.agent_message_summary(&event), expected);
+    }
+}
+
+/// A resumed different session must not inherit a same-spelled agent's local
+/// display name from the previously attached session.
+#[test]
+fn resumed_session_clears_agent_display_name_authority() {
+    let message = agent_message("agent-a", "agent-b", "payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: "session-a".into(),
+            reason: tau_proto::SessionStartReason::Initial,
+        },
+    ));
+    renderer.remember_agent_display_name("agent-b", "session A worker");
+    assert!(
+        renderer
+            .agent_message_summary(&message)
+            .contains("session A worker")
+    );
+
+    renderer.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: "session-b".into(),
+            reason: tau_proto::SessionStartReason::Resume,
+        },
+    ));
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from agent-a to agent-b"
+    );
 }
 
 /// Watch lifecycle records are harness-authored statuses, so the renderer must
@@ -745,7 +951,9 @@ fn watch_turn_state_renders_as_compact_typed_status() {
     });
 
     assert_eq!(
-        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        renderer_for_agent_id_tests()
+            .watch_turn_state_summary(&event)
+            .as_deref(),
         Some("researcher · turn started")
     );
 
@@ -755,7 +963,9 @@ fn watch_turn_state_renders_as_compact_typed_status() {
     let state = message.watch_turn_state.as_mut().expect("watch state");
     state.state = tau_proto::AgentRuntimeState::Idle;
     assert_eq!(
-        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        renderer_for_agent_id_tests()
+            .watch_turn_state_summary(&event)
+            .as_deref(),
         Some("researcher · turn stopped")
     );
 
@@ -765,7 +975,9 @@ fn watch_turn_state_renders_as_compact_typed_status() {
     let state = message.watch_turn_state.as_mut().expect("watch state");
     state.initial = true;
     assert_eq!(
-        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        renderer_for_agent_id_tests()
+            .watch_turn_state_summary(&event)
+            .as_deref(),
         Some("Watching researcher · idle")
     );
 
@@ -778,7 +990,9 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         .expect("watch state")
         .state = tau_proto::AgentRuntimeState::Running;
     assert_eq!(
-        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        renderer_for_agent_id_tests()
+            .watch_turn_state_summary(&event)
+            .as_deref(),
         Some("Watching researcher · running")
     );
 }
