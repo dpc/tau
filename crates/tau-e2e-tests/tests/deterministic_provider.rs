@@ -1,8 +1,25 @@
-use tau_e2e_tests::{DeterministicFixture, ScenarioV1};
-use tau_proto::{CborValue, ToolResultKind};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use tau_e2e_tests::{
+    DeterministicFixture, ScenarioActionV2, ScenarioLaneV2, ScenarioV1, ScenarioV2,
+};
+use tau_proto::{
+    CborValue, ClientKind, Event, EventName, EventSelector, HarnessInputMessage,
+    HarnessOutputMessage, Hello, ProviderFailureKind, Subscribe, ToolResultKind,
+};
+use tau_socket::{SocketPeer, SocketReceive};
+
+#[path = "deterministic_provider/daemon_support.rs"]
+mod daemon_support;
+
+use daemon_support::*;
 
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
+const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
 
 /// Proves the real supervised provider route preserves two append deltas and a
 /// complete durable final assistant response without any live provider.
@@ -74,7 +91,7 @@ fn deterministic_bad_config_fails_startup() -> Result<(), Box<dyn std::error::Er
         .expect_err("required provider must reject bad config before Ready");
     let diagnostic = error.to_string();
     assert!(
-        diagnostic.contains("scenario version must be 1"),
+        diagnostic.contains("ScenarioV1 version must be 1"),
         "unexpected startup diagnostic: {diagnostic}"
     );
     assert!(fixture.root().join("artifacts/scenario.json").is_file());
@@ -125,6 +142,336 @@ fn deterministic_prompt_mismatch_fails_closed() -> Result<(), Box<dyn std::error
     assert!(trace.lines().all(|line| line.len() <= 1024));
     assert!(fixture.assert_consumed().is_err());
     fixture.acknowledge_expected_failure();
+    Ok(())
+}
+
+/// Proves a typed terminal rejection does not prevent a later explicit user
+/// turn from succeeding; this is not provider retry coverage.
+#[test]
+fn deterministic_typed_error_then_later_success() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_typed_error_then_later_success",
+        &ScenarioV2::new(
+            "error-then-success",
+            vec![ScenarioLaneV2 {
+                ctx_id: "error-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::Error {
+                        user_text: "reject this request".to_owned(),
+                        failure_kind: ProviderFailureKind::RequestRejected,
+                        error: "synthetic rejection".to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: "try a later request".to_owned(),
+                        response: "later request succeeded".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("error-success");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "error-lane", "reject this request")?;
+    let first = recv_until_finished(&mut peer)?;
+    assert_eq!(first.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(
+        first.failure_kind,
+        Some(ProviderFailureKind::RequestRejected)
+    );
+    assert_eq!(first.error.as_deref(), Some("synthetic rejection"));
+    assert!(first.output_items.is_empty());
+    submit_prompt(
+        &mut peer,
+        &first.agent_id,
+        "later-success",
+        "try a later request",
+    )?;
+    let second = recv_until_finished(&mut peer)?;
+    assert_eq!(second.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+    assert_assistant(&second.output_items, "later request succeeded");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves exact prompt-id cancellation isolates two simultaneous holds, reaps
+/// both workers, and leaves an independent agent live.
+#[test]
+fn deterministic_exact_cancel_cleans_hold_and_preserves_liveness()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_exact_cancel_cleans_hold_and_preserves_liveness",
+        &ScenarioV2::new(
+            "cancel-then-success",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "cancel-a".to_owned(),
+                    actions: vec![ScenarioActionV2::HoldUntilCancel {
+                        user_text: "hold a".to_owned(),
+                        timeout_ms: 5_000,
+                    }],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "cancel-b".to_owned(),
+                    actions: vec![ScenarioActionV2::HoldUntilCancel {
+                        user_text: "hold b".to_owned(),
+                        timeout_ms: 5_000,
+                    }],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "after-cancel".to_owned(),
+                    actions: vec![ScenarioActionV2::Text {
+                        user_text: "continue after cancel".to_owned(),
+                        response: "still live".to_owned(),
+                    }],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("cancel");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "cancel-a", "hold a")?;
+    let created_a = recv_until_created(&mut peer, Some("cancel-a"))?;
+    let submitted_a = recv_until_submitted(&mut peer)?;
+    assert_eq!(created_a.agent_prompt_id, submitted_a.agent_prompt_id);
+    create_agent(&mut peer, "cancel-b", "hold b")?;
+    let created_b = recv_until_created(&mut peer, Some("cancel-b"))?;
+    let submitted_b = recv_until_submitted(&mut peer)?;
+    assert_eq!(created_b.agent_prompt_id, submitted_b.agent_prompt_id);
+    cancel_prompt(&mut peer, &created_a)?;
+    let terminated =
+        recv_until_cancel_ack_and_terminated(&mut peer, &created_a, &[&created_a, &created_b])?;
+    assert_eq!(terminated.agent_prompt_id, created_a.agent_prompt_id);
+    assert_eq!(
+        terminated.reason,
+        tau_proto::AgentPromptTerminationReason::Canceled
+    );
+    cancel_prompt(&mut peer, &created_b)?;
+    let terminated_b = recv_until_cancel_ack_and_terminated(&mut peer, &created_b, &[&created_b])?;
+    assert_eq!(terminated_b.agent_prompt_id, created_b.agent_prompt_id);
+    create_agent(&mut peer, "after-cancel", "continue after cancel")?;
+    let finished = recv_until_finished(&mut peer)?;
+    assert_assistant(&finished.output_items, "still live");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    let trace = fixture.trace()?;
+    assert_eq!(trace.matches("hold_canceled").count(), 2);
+    assert!(!trace.contains("hold_timeout"));
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves a provider-side hold has a hard deadline, its worker is reaped, and
+/// an independent later agent remains live.
+#[test]
+fn deterministic_hold_timeout_is_bounded_and_reaped_before_later_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_hold_timeout_is_bounded_and_reaped_before_later_work",
+        &ScenarioV2::new(
+            "timeout-then-success",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "timeout-lane".to_owned(),
+                    actions: vec![ScenarioActionV2::HoldUntilCancel {
+                        user_text: "time out".to_owned(),
+                        timeout_ms: 100,
+                    }],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "after-timeout".to_owned(),
+                    actions: vec![ScenarioActionV2::Text {
+                        user_text: "continue after timeout".to_owned(),
+                        response: "timeout cleaned".to_owned(),
+                    }],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("timeout");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "timeout-lane", "time out")?;
+    let timeout = recv_until_finished(&mut peer)?;
+    assert_eq!(timeout.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(timeout.failure_kind, Some(ProviderFailureKind::Unknown));
+    assert_eq!(
+        timeout.error.as_deref(),
+        Some("deterministic hold timed out")
+    );
+    create_agent(&mut peer, "after-timeout", "continue after timeout")?;
+    let later = recv_until_finished(&mut peer)?;
+    assert_assistant(&later.output_items, "timeout cleaned");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    let trace = fixture.trace()?;
+    assert_eq!(trace.matches("hold_timeout").count(), 1);
+    assert_eq!(trace.matches("hold_reaped").count(), 1);
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves both agents cross the barrier before either terminal response and
+/// each dynamic agent identity receives its lane-local response.
+#[test]
+fn deterministic_two_lane_barrier_isolates_concurrent_agents()
+-> Result<(), Box<dyn std::error::Error>> {
+    let lanes = ["lane-a", "lane-b"]
+        .into_iter()
+        .map(|lane| ScenarioLaneV2 {
+            ctx_id: lane.to_owned(),
+            actions: vec![ScenarioActionV2::BarrierText {
+                user_text: format!("prompt {lane}"),
+                barrier: "both".to_owned(),
+                participants: 2,
+                response: format!("response {lane}"),
+            }],
+        })
+        .collect();
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_two_lane_barrier_isolates_concurrent_agents",
+        &ScenarioV2::new("two-lane-barrier", lanes),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("barrier");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "lane-a", "prompt lane-a")?;
+    let created_a = recv_until_created(&mut peer, Some("lane-a"))?;
+    let submitted_a = recv_until_submitted(&mut peer)?;
+    assert_eq!(submitted_a.agent_prompt_id, created_a.agent_prompt_id);
+    create_agent(&mut peer, "lane-b", "prompt lane-b")?;
+    let created_b = recv_until_created(&mut peer, Some("lane-b"))?;
+    let submitted_b = recv_until_submitted(&mut peer)?;
+    assert_eq!(submitted_b.agent_prompt_id, created_b.agent_prompt_id);
+    let first = recv_until_finished(&mut peer)?;
+    let second = recv_until_finished(&mut peer)?;
+    let responses = [
+        (first.agent_id, assistant_text(&first.output_items)),
+        (second.agent_id, assistant_text(&second.output_items)),
+    ]
+    .into_iter()
+    .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        responses.get(&created_a.agent_id).map(String::as_str),
+        Some("response lane-a")
+    );
+    assert_eq!(
+        responses.get(&created_b.agent_id).map(String::as_str),
+        Some("response lane-b")
+    );
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves provider disconnect is daemon-fatal and produces one exit fact
+/// without provider respawn.
+#[test]
+fn deterministic_provider_disconnect_is_fatal_and_not_restarted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_provider_disconnect_is_fatal_and_not_restarted",
+        &ScenarioV2::new(
+            "disconnect",
+            vec![ScenarioLaneV2 {
+                ctx_id: "disconnect-lane".to_owned(),
+                actions: vec![ScenarioActionV2::Disconnect {
+                    user_text: "disconnect now".to_owned(),
+                    reason: "synthetic provider disconnect".to_owned(),
+                }],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("disconnect");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "disconnect-lane", "disconnect now")?;
+    let error = server
+        .finish()
+        .expect_err("provider disconnect must terminate daemon");
+    assert!(error.to_string().contains("provider disconnected"));
+    let events = fixture.durable_events()?;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::ExtensionExited(_)))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::ExtensionRestarting(_)))
+    );
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Proves a quiescent clean resume restores the same durable agent's immutable
+/// lane binding and cursor without consuming replay deliveries.
+#[test]
+fn deterministic_clean_resume_restores_fake_cursor_without_replay_consumption()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_clean_resume_restores_fake_cursor_without_replay_consumption",
+        &ScenarioV2::new(
+            "clean-resume",
+            vec![ScenarioLaneV2 {
+                ctx_id: "resume-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::Text {
+                        user_text: "before clean stop".to_owned(),
+                        response: "before".to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: "after clean resume".to_owned(),
+                        response: "after".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let first_agent = {
+        let socket = fixture.socket_path("resume-one");
+        let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+        let mut peer = connect_ui(&socket)?;
+        create_agent(&mut peer, "resume-lane", "before clean stop")?;
+        let created = recv_until_created(&mut peer, Some("resume-lane"))?;
+        let finished = recv_until_finished_for(&mut peer, &created.agent_prompt_id)?;
+        assert_assistant(&finished.output_items, "before");
+        disconnect_ui(&mut peer)?;
+        server.finish()?;
+        created.agent_id
+    };
+    let socket = fixture.socket_path("resume-two");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::Resumed);
+    let mut peer = connect_ui(&socket)?;
+    submit_prompt(
+        &mut peer,
+        &first_agent,
+        "fresh-ctx-must-not-rebind",
+        "after clean resume",
+    )?;
+    let created = recv_until_created(&mut peer, Some("fresh-ctx-must-not-rebind"))?;
+    assert_eq!(created.agent_id, first_agent);
+    let finished = recv_until_finished_for(&mut peer, &created.agent_prompt_id)?;
+    assert_assistant(&finished.output_items, "after");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    let trace = fixture.trace()?;
+    assert_eq!(trace.matches(" configured").count(), 2);
+    assert_eq!(trace.matches(" matched ").count(), 2);
+    fixture.assert_consumed()?;
     Ok(())
 }
 
@@ -219,8 +566,11 @@ fn assert_tool_provider_sequence(events: &[tau_proto::Event]) {
 
 #[derive(Debug)]
 enum ProviderLifecycle<'a> {
+    /// Provider accepted one exact prompt id.
     Submitted(&'a tau_proto::ProviderPromptSubmitted),
+    /// Provider emitted one streamed update for that prompt.
     Updated(&'a tau_proto::ProviderResponseUpdated),
+    /// Provider emitted one terminal response.
     Finished(&'a tau_proto::ProviderResponseFinished),
 }
 
@@ -283,6 +633,19 @@ fn assert_assistant(items: &[tau_proto::ContextItem], expected: &str) {
                 }]
             );
         }
+        other => panic!("unexpected assistant output: {other:?}"),
+    }
+}
+
+fn assistant_text(items: &[tau_proto::ContextItem]) -> String {
+    match items {
+        [tau_proto::ContextItem::Message(message)] => message
+            .content
+            .iter()
+            .map(|part| match part {
+                tau_proto::ContentPart::Text { text } => text.as_str(),
+            })
+            .collect(),
         other => panic!("unexpected assistant output: {other:?}"),
     }
 }

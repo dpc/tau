@@ -115,7 +115,10 @@ use crate::prompt::{
     render_effective_prompt_message, try_build_system_prompt_with_tool_template_context,
 };
 use crate::secrets::{ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets};
-use crate::settings::{Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn};
+use crate::settings::{
+    Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn,
+    load_harness_settings_without_environment_or_warn,
+};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 
 const RENDERED_PROMPT_PREVIEW_AGENT_ID: &str = "dev-preview-agent";
@@ -1642,6 +1645,8 @@ pub(crate) struct HarnessStartupPeers {
     /// Harness-owned tool handlers whose names must be reserved before
     /// extensions.
     pub(crate) internal_tool_handlers: InternalToolHandlers,
+    /// Whether startup and runtime settings ignore environment transports.
+    pub(crate) ignore_startup_environment: bool,
 }
 
 /// Output path used before an initial UI has been accepted by the normal bus.
@@ -1792,6 +1797,8 @@ pub struct Harness {
     /// Runtime state root for this harness. Extension-specific persistent
     /// directories are allocated below this path and sent in Configure.
     pub(crate) state_dir: PathBuf,
+    /// Whether runtime settings reloads ignore startup environment transports.
+    ignore_startup_environment: bool,
     /// Session membership store. Owns the folded loaded-agent set for each
     /// session id, either from the durable membership journal at
     /// `<state_dir>/sessions/<session_id>/events.cbor` or from the live
@@ -2441,6 +2448,8 @@ struct HarnessBaseParts {
     bus: EventBus,
     /// Runtime state directory for this harness.
     state_dir: PathBuf,
+    /// Whether harness settings ignore startup environment transports.
+    ignore_startup_environment: bool,
     /// Session membership store, with the eager session already loaded.
     store: SessionStore,
     /// Per-agent transcript store.
@@ -2528,6 +2537,8 @@ struct StartupHarnessParts {
     harness_settings: tau_config::settings::HarnessSettings,
     /// Startup role selection state.
     roles: StartupRoles,
+    /// Whether harness settings ignore startup environment transports.
+    ignore_startup_environment: bool,
 }
 
 /// One user-facing `/tree` prompt rewind anchor derived from durable prompt
@@ -2618,6 +2629,21 @@ fn ui_shell_provider_ids(
 }
 
 impl Harness {
+    /// Reload harness settings under the startup environment policy retained by
+    /// this harness instance.
+    pub(super) fn load_effective_harness_settings(
+        &self,
+    ) -> (
+        tau_config::settings::HarnessSettings,
+        Option<tau_config::settings::SettingsError>,
+    ) {
+        if self.ignore_startup_environment {
+            load_harness_settings_without_environment_or_warn(&self.dirs)
+        } else {
+            load_harness_settings_or_warn(&self.dirs)
+        }
+    }
+
     /// Enables the test-only echo tool explicitly for every configured role.
     #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn enable_echo_tool_for_tests(&mut self) {
@@ -2643,6 +2669,7 @@ impl Harness {
             action_registry: ActionRegistry::new(),
             internal_tool_handlers: Vec::new(),
             state_dir: parts.state_dir,
+            ignore_startup_environment: parts.ignore_startup_environment,
             store: parts.store,
             transport_ingress_locator: transport_ingress_locator::TransportIngressLocator::new(
                 parts.agent_store.agents_dir(),
@@ -2902,6 +2929,7 @@ impl Harness {
             rx,
             bus,
             state_dir: state_dir.clone(),
+            ignore_startup_environment: false,
             store,
             agent_store,
             session_persistence,
@@ -2999,6 +3027,37 @@ impl Harness {
             HarnessStartupPeers {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
+                ignore_startup_environment: false,
+            },
+            &mut initial_client_error_stream,
+        )
+        .map(|(harness, _)| harness)
+    }
+
+    /// Creates a configured harness while ignoring startup environment
+    /// transports for both config resolution and harness settings.
+    pub(crate) fn from_config_without_startup_environment(
+        config: &Config,
+        state_dir: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
+        eager_session_start_reason: tau_proto::SessionStartReason,
+        session_persistence: tau_core::SessionPersistenceMode,
+    ) -> Result<Self, HarnessError> {
+        let mut initial_client_error_stream = None;
+        Self::from_config_with_initial_client_policy(
+            config,
+            state_dir,
+            dirs,
+            eager_session_id,
+            HarnessSessionLaunch {
+                reason: eager_session_start_reason,
+                session_persistence,
+            },
+            HarnessStartupPeers {
+                initial_client: None,
+                internal_tool_handlers: Vec::new(),
+                ignore_startup_environment: true,
             },
             &mut initial_client_error_stream,
         )
@@ -3014,11 +3073,38 @@ impl Harness {
         startup_peers: HarnessStartupPeers,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
+        Self::from_config_with_initial_client_policy(
+            config,
+            state_dir,
+            dirs,
+            eager_session_id,
+            launch,
+            startup_peers,
+            initial_client_error_stream,
+        )
+    }
+
+    fn from_config_with_initial_client_policy(
+        config: &Config,
+        state_dir: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
+        launch: HarnessSessionLaunch,
+        startup_peers: HarnessStartupPeers,
+        initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
+    ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         let launch = launch.validate()?;
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
-        let (mut harness, startup) =
-            Self::build_configured_harness(config, state_dir, dirs, eager_session_id, launch)?;
+        let ignore_startup_environment = startup_peers.ignore_startup_environment;
+        let (mut harness, startup) = Self::build_configured_harness(
+            config,
+            state_dir,
+            dirs,
+            eager_session_id,
+            launch,
+            ignore_startup_environment,
+        )?;
         harness.install_internal_tool_handlers(startup_peers.internal_tool_handlers);
 
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
@@ -3076,6 +3162,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         launch: HarnessSessionLaunch,
+        ignore_startup_environment: bool,
     ) -> Result<(Self, ConfiguredHarnessStartup), HarnessError> {
         let startup_started_at = Instant::now();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
@@ -3087,6 +3174,7 @@ impl Harness {
                 dirs,
                 eager_session_id,
                 launch,
+                ignore_startup_environment,
             )?;
         Ok((
             harness,
@@ -3103,9 +3191,13 @@ impl Harness {
     fn resolve_startup_extension_secrets(
         config: &Config,
         state_dir: &Path,
+        ignore_startup_environment: bool,
     ) -> Result<ResolvedExtensionSecrets, HarnessError> {
-        let secret_sources =
-            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?;
+        let secret_sources = if ignore_startup_environment {
+            Default::default()
+        } else {
+            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?
+        };
         resolve_extension_secrets(config, state_dir, &secret_sources)
             .map_err(|error| HarnessError::Participant(error.to_string()))
     }
@@ -3117,6 +3209,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         launch: HarnessSessionLaunch,
+        ignore_startup_environment: bool,
     ) -> Result<
         (
             Self,
@@ -3134,9 +3227,17 @@ impl Harness {
         let (store, agent_store) =
             Self::open_startup_stores(&state_dir, &sessions_dir, launch.session_persistence)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
-        let extension_secrets = Self::resolve_startup_extension_secrets(config, &state_dir)?;
+        let extension_secrets = Self::resolve_startup_extension_secrets(
+            config,
+            &state_dir,
+            ignore_startup_environment,
+        )?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
-        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
+        let (harness_settings, harness_settings_error) = if ignore_startup_environment {
+            load_harness_settings_without_environment_or_warn(&dirs)
+        } else {
+            load_harness_settings_or_warn(&dirs)
+        };
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
@@ -3151,6 +3252,7 @@ impl Harness {
             launch,
             harness_settings,
             roles,
+            ignore_startup_environment,
         })?;
         harness.enabled_extension_names = config
             .extensions
@@ -3246,6 +3348,7 @@ impl Harness {
             rx,
             bus,
             state_dir: parts.state_dir,
+            ignore_startup_environment: parts.ignore_startup_environment,
             store: parts.store,
             agent_store: parts.agent_store,
             session_persistence: parts.launch.session_persistence,
@@ -9182,7 +9285,8 @@ impl Harness {
     fn handle_ui_role_delete(&mut self, role_name: String) -> Result<bool, HarnessError> {
         let was_selected = self.selected_role == role_name;
         let previous_override = self.role_overrides.remove(&role_name);
-        let configured_role = load_harness_settings_or_warn(&self.dirs)
+        let configured_role = self
+            .load_effective_harness_settings()
             .0
             .roles
             .get(&role_name)
@@ -13288,7 +13392,7 @@ impl Harness {
             }
             _ => None,
         };
-        let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
+        let (live_settings, _) = self.load_effective_harness_settings();
         self.publish_event(
             None,
             Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -20299,9 +20403,12 @@ impl Harness {
         // writer thread's shutdown sequence (send disconnect, close
         // stdin, wait/kill child). Walk extension spawn order so shutdown
         // honours spawn order.
-        for id in &self.extensions.order {
-            let _ = self.bus.disconnect(id);
-        }
+        let connected_at_shutdown = self
+            .extensions
+            .order
+            .iter()
+            .filter_map(|id| self.bus.disconnect(id).map(|_| id.clone()))
+            .collect::<HashSet<_>>();
 
         // Join in-process extension threads.
         let order = self.extensions.order.clone();
@@ -20316,7 +20423,9 @@ impl Harness {
                     .map_err(|_| HarnessError::ThreadJoin(name.clone()))?;
                 result.map_err(HarnessError::Participant)?;
             }
-            self.emit_extension_exited(&name);
+            if connected_at_shutdown.contains(id) {
+                self.emit_extension_exited(&name);
+            }
         }
         Ok(())
     }

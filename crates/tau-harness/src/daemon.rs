@@ -95,6 +95,19 @@ pub struct ServeOptions {
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
+    /// Ignore process-environment startup override transports.
+    ///
+    /// This is a narrow hermetic-test control. Normal daemon launches preserve
+    /// the default `false` behavior. Only config-resolving [`run_daemon`]
+    /// accepts it; pre-resolved and injected-provider entrypoints reject it.
+    #[builder(default)]
+    pub ignore_startup_environment: bool,
+    /// Exact allowed resolved extension instance names, when constrained.
+    ///
+    /// Validation happens before any configured extension process is spawned.
+    /// Pre-resolved entrypoints validate the set but reject the environment
+    /// bypass because their caller already owns configuration resolution.
+    pub allowed_extensions: Option<BTreeSet<tau_proto::ExtensionName>>,
     /// Persistence policy for session membership, metadata, debug event logs,
     /// per-session harness/extension stderr logs, and session-scoped extension
     /// data for this harness process.
@@ -113,6 +126,8 @@ impl Default for ServeOptions {
             exit_on_disconnect: false,
             session_status: SessionLaunchStatus::New,
             dirs: None,
+            ignore_startup_environment: false,
+            allowed_extensions: None,
             session_persistence: tau_core::SessionPersistenceMode::Durable,
         }
     }
@@ -124,6 +139,36 @@ fn validate_serve_options(options: &ServeOptions) -> Result<(), HarnessError> {
     {
         return Err(HarnessError::Participant(
             "ephemeral sessions cannot resume persisted session state".to_owned(),
+        ));
+    }
+    if options.ignore_startup_environment && options.allowed_extensions.is_none() {
+        return Err(HarnessError::Participant(
+            "ignore_startup_environment requires an exact allowed_extensions set".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pre_resolved_serve_options(
+    options: &ServeOptions,
+    config: &crate::settings::Config,
+) -> Result<(), HarnessError> {
+    validate_serve_options(options)?;
+    if options.ignore_startup_environment {
+        return Err(HarnessError::Participant(
+            "ignore_startup_environment requires the config-resolving run_daemon entrypoint"
+                .to_owned(),
+        ));
+    }
+    validate_allowed_extensions(config, options.allowed_extensions.as_ref())
+}
+
+#[cfg(any(test, feature = "echo-agent"))]
+fn validate_echo_serve_options(options: &ServeOptions) -> Result<(), HarnessError> {
+    validate_serve_options(options)?;
+    if options.ignore_startup_environment || options.allowed_extensions.is_some() {
+        return Err(HarnessError::Participant(
+            "hermetic extension controls are not supported by the injected echo daemon".to_owned(),
         ));
     }
     Ok(())
@@ -174,9 +219,12 @@ pub(crate) fn bind_listener(path: &Path) -> Result<SocketListener, HarnessError>
     SocketListener::bind(path).map_err(HarnessError::from)
 }
 
+/// Listener ownership variants used by the daemon accept forwarder.
 enum ListenerHandle {
+    /// Externally supplied listener whose path the daemon must not unlink.
     // Externally supplied by socket activation; the daemon must not unlink its path.
     SocketActivated(UnixListener),
+    /// Daemon-bound listener with identity-checked path cleanup.
     // Bound by this daemon; `SocketListener` owns identity-checked path cleanup.
     Bound(SocketListener),
 }
@@ -197,9 +245,12 @@ impl ListenerHandle {
     }
 }
 
+/// Owned wake channel and join handle for the daemon accept thread.
 struct ListenerForwarder {
+    /// Wake endpoint used to interrupt the accept poll during cleanup.
     // Owned wake endpoint used to interrupt the accept-loop poll during drop.
     wake_tx: UnixStream,
+    /// Accept thread that must be joined before listener teardown.
     // Accept-loop thread joined during `ListenerForwarder` drop.
     join: Option<thread::JoinHandle<()>>,
 }
@@ -217,13 +268,19 @@ impl Drop for ListenerForwarder {
     }
 }
 
+/// One readiness outcome from the accept forwarder's poll.
 enum ListenerForwarderReady {
+    /// The owned shutdown endpoint became ready.
     Wake,
+    /// The daemon listener has clients ready to accept.
     Accept,
 }
 
+/// Whether the accept-forwarder loop should continue.
 enum ListenerForwarderAction {
+    /// Continue polling or accepting.
     Continue,
+    /// Stop because shutdown or channel closure was observed.
     Stop,
 }
 
@@ -451,14 +508,25 @@ pub fn run_embedded_message_with_options(
     }
     .map_err(|error| HarnessError::Participant(error.to_string()))?;
     validate_allowed_extensions(&config, options.allowed_extensions.as_ref())?;
-    let mut harness = Harness::from_config(
-        &config,
-        &state_dir,
-        dirs,
-        session_id,
-        tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
-    )?;
+    let mut harness = if options.ignore_startup_environment {
+        Harness::from_config_without_startup_environment(
+            &config,
+            &state_dir,
+            dirs,
+            session_id,
+            tau_proto::SessionStartReason::Initial,
+            tau_core::SessionPersistenceMode::Durable,
+        )
+    } else {
+        Harness::from_config(
+            &config,
+            &state_dir,
+            dirs,
+            session_id,
+            tau_proto::SessionStartReason::Initial,
+            tau_core::SessionPersistenceMode::Durable,
+        )
+    }?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -611,8 +679,12 @@ pub fn run_daemon(
     let listener_handle = open_listener(&socket_path)?;
     let (config, dirs) = match options.dirs.clone() {
         Some(dirs) => {
-            let config = resolve_config_in(&dirs)
-                .map_err(|error| HarnessError::Participant(error.to_string()))?;
+            let config = if options.ignore_startup_environment {
+                crate::settings::resolve_config_in_without_environment(&dirs)
+            } else {
+                resolve_config_in(&dirs)
+            }
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
             (config, dirs)
         }
         None => {
@@ -620,19 +692,35 @@ pub fn run_daemon(
                 config_dir: Some(state_dir.join("config")),
                 state_dir: Some(state_dir.join("runtime")),
             };
-            let config = resolve_config(None)
-                .map_err(|error| HarnessError::Participant(error.to_string()))?;
+            let config = if options.ignore_startup_environment {
+                crate::settings::resolve_config_in_without_environment(&dirs)
+            } else {
+                resolve_config(None)
+            }
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
             (config, dirs)
         }
     };
-    let mut harness = Harness::from_config(
-        &config,
-        state_dir,
-        dirs,
-        eager_session_id,
-        session_start_reason(options.session_status),
-        options.session_persistence,
-    )?;
+    validate_allowed_extensions(&config, options.allowed_extensions.as_ref())?;
+    let mut harness = if options.ignore_startup_environment {
+        Harness::from_config_without_startup_environment(
+            &config,
+            state_dir,
+            dirs,
+            eager_session_id,
+            session_start_reason(options.session_status),
+            options.session_persistence,
+        )
+    } else {
+        Harness::from_config(
+            &config,
+            state_dir,
+            dirs,
+            eager_session_id,
+            session_start_reason(options.session_status),
+            options.session_persistence,
+        )
+    }?;
 
     let tx = harness.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
@@ -654,7 +742,7 @@ pub fn run_daemon_with_echo(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
-    validate_serve_options(&options)?;
+    validate_echo_serve_options(&options)?;
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
     }
@@ -698,7 +786,7 @@ pub fn run_daemon_with_config(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
-    validate_serve_options(&options)?;
+    validate_pre_resolved_serve_options(&options, config)?;
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
@@ -1134,7 +1222,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     initial_client: Option<InitialClient>,
     mut initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
 ) -> Result<(), HarnessError> {
-    validate_serve_options(&options)?;
+    validate_pre_resolved_serve_options(&options, config)?;
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let mut harness_paths = notify_startup_error(
@@ -1164,6 +1252,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
             HarnessStartupPeers {
                 initial_client,
                 internal_tool_handlers,
+                ignore_startup_environment: false,
             },
             &mut initial_client_error_stream,
         ),

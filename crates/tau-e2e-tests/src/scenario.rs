@@ -1,9 +1,9 @@
 //! Strict, versioned scenarios understood by the deterministic fake provider.
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ToolCallId, ToolName};
+use tau_proto::{ProviderFailureKind, ToolCallId, ToolName};
 
-/// Fully-qualified model published by every phase-one scenario.
+/// Fully-qualified model published by every deterministic scenario.
 pub const FAKE_MODEL_ID: &str = "fake/test";
 
 /// Version-one deterministic provider scenario.
@@ -16,6 +16,88 @@ pub struct ScenarioV1 {
     pub name: String,
     /// Exact FIFO turns expected from the harness.
     pub turns: Vec<ScenarioTurnV1>,
+}
+
+/// Version-two scenario with independent exact correlation lanes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioV2 {
+    /// Schema version. Must be two.
+    pub version: u8,
+    /// Stable diagnostic scenario name.
+    pub name: String,
+    /// Independently consumed lanes keyed by exact initial-prompt correlation
+    /// id.
+    pub lanes: Vec<ScenarioLaneV2>,
+}
+
+/// One independent provider lane.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioLaneV2 {
+    /// Exact `ctx_id` copied from the lane's initial UI submission.
+    pub ctx_id: String,
+    /// Exact ordered actions for this lane.
+    pub actions: Vec<ScenarioActionV2>,
+}
+
+/// One bounded provider action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScenarioActionV2 {
+    /// Complete normally with assistant text.
+    Text {
+        /// Exact latest user text.
+        user_text: String,
+        /// Complete assistant response.
+        response: String,
+    },
+    /// Complete with a typed terminal provider error.
+    Error {
+        /// Exact latest user text.
+        user_text: String,
+        /// Safe machine-readable failure classification.
+        failure_kind: ProviderFailureKind,
+        /// Bounded synthetic diagnostic.
+        error: String,
+    },
+    /// Remain pending until an exact prompt cancellation, with a hard timeout.
+    HoldUntilCancel {
+        /// Exact latest user text.
+        user_text: String,
+        /// Maximum hold duration before a typed timeout error is emitted.
+        timeout_ms: u64,
+    },
+    /// Deliberately disconnect the provider after accepting the prompt.
+    Disconnect {
+        /// Exact latest user text.
+        user_text: String,
+        /// Bounded synthetic disconnect reason.
+        reason: String,
+    },
+    /// Wait for all named barrier participants, then complete each lane.
+    BarrierText {
+        /// Exact latest user text.
+        user_text: String,
+        /// Shared bounded barrier name.
+        barrier: String,
+        /// Exact participant count.
+        participants: usize,
+        /// Lane-local assistant response.
+        response: String,
+    },
+}
+
+impl ScenarioV2 {
+    /// Creates a scenario from explicitly keyed lanes.
+    #[must_use]
+    pub fn new(name: impl Into<String>, lanes: Vec<ScenarioLaneV2>) -> Self {
+        Self {
+            version: 2,
+            name: name.into(),
+            lanes,
+        }
+    }
 }
 
 /// One expected prompt and its deterministic provider response.

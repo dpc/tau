@@ -235,10 +235,15 @@
               pname = "${projectName}-deterministic-e2e";
               cargoArtifacts = workspace;
               buildPhaseCargoCommand = ''
-                # Poison one ambient startup transport. The fixture must ignore
-                # it and still prove its exact extension allowlist.
+                # Poison every ambient startup transport. The fixture must ignore
+                # them (including runtime settings reloads and secret discovery)
+                # and still prove its exact extension allowlist.
                 export TAU_ENABLE_EXTENSIONS=core-shell
-                cargo nextest run --locked \
+                export TAU_EXTENSION_CLI_OVERRIDES='["EnableAll"]'
+                export TAU_ROLE_CLI_OVERRIDES='["DisableAll"]'
+                export TAU_HARNESS_CONFIG_OVERRIDES='[{"key":"agents.default_role","raw_value":"missing"}]'
+                export TAU_STARTUP_ROLE=missing
+                env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
                   -p tau-e2e-tests \
                   --test deterministic_provider \
                   --cargo-profile $CARGO_PROFILE \

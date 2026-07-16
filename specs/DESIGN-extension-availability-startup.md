@@ -9,8 +9,9 @@ without logging its raw value. `TAU_EXTENSION_CLI_OVERRIDES` remains unstable
 internal parent-child transport; parents clear inherited values and malformed
 transport is fatal.
 
-Deterministic embedded acceptance may explicitly bypass all ambient startup
-environment/CLI compatibility transports and require an exact resolved
-extension-name allowlist before spawn. This test-only policy is described by
+Deterministic embedded and daemon acceptance may explicitly bypass all ambient
+startup environment/CLI compatibility transports and require an exact resolved
+extension-name allowlist before spawn. The daemon retains that environment-free
+policy for runtime settings reloads. This test-only policy is described by
 [DESIGN-tau-e2e-deterministic-provider](../crates/tau-e2e-tests/specs/DESIGN-tau-e2e-deterministic-provider.md);
-normal interactive and daemon startup retain the ordered pipeline above.
+normal interactive and default daemon startup retain the ordered pipeline above.

@@ -252,3 +252,25 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
     assert!(reason.contains("harness startup failed"));
     assert!(reason.contains("marker write failed"));
 }
+
+/// Ensures pre-resolved entrypoints cannot silently accept the environment
+/// bypass and enforce any exact extension allowlist before construction.
+#[test]
+fn pre_resolved_daemon_rejects_environment_bypass_and_enforces_allowlist() {
+    let config = crate::settings::default_config();
+    let bypass = ServeOptions::builder()
+        .ignore_startup_environment(true)
+        .build();
+    assert!(validate_pre_resolved_serve_options(&bypass, &config).is_err());
+
+    let mismatch = ServeOptions::builder()
+        .allowed_extensions(std::collections::BTreeSet::from(["not-configured".into()]))
+        .build();
+    let error = validate_pre_resolved_serve_options(&mismatch, &config)
+        .expect_err("pre-resolved allowlist mismatch must fail before harness construction");
+    assert!(
+        error
+            .to_string()
+            .contains("resolved extensions differ from deterministic allowlist")
+    );
+}

@@ -3659,6 +3659,7 @@ dependencies = [
  "tau-ext-test-dummy",
  "tau-harness",
  "tau-proto",
+ "tau-socket",
  "tau-vcr",
  "tempfile",
 ]

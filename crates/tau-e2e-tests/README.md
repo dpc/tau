@@ -13,10 +13,14 @@ cargo nextest run -p tau-e2e-tests --test deterministic_provider
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
-through `tau-ext-test-dummy`, and startup rejection of invalid scenario config.
-The fixture retains its private artifact root on panic, including generated
-config/scenario, durable events, extension stderr, and the bounded semantic
-provider trace. See
+through `tau-ext-test-dummy`, typed errors followed by an explicit later turn,
+exact cancellation, bounded holds, fatal provider disconnect without restart,
+clean resume, concurrent lane isolation, and startup rejection of invalid
+scenario config.
+The fixture retains its private artifact root on panic, `run_turn` failure, or
+any daemon path that exits before exact consumption succeeds. Retained artifacts
+include generated config/scenario, durable events, extension/daemon stderr, and
+the bounded semantic provider trace. See
 [`DESIGN-tau-e2e-deterministic-provider`](specs/DESIGN-tau-e2e-deterministic-provider.md)
 for the coverage ceiling.
 

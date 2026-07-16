@@ -60,10 +60,13 @@ regression coverage. Reusable steps live in
 `tau-e2e-tests` has an always-on `DeterministicFixture` that launches the
 test-only `tau-e2e-fake-provider` by exact path through normal extension
 supervision. Its strict inline `ScenarioV1` drives synthetic streaming and a
-real deterministic `tau-ext-test-dummy` tool continuation without credentials,
-network, shell, sleeps, or a VCR gate. Panics and `run_turn` failures retain the
-private generated configuration, scenario, durable event log, extension stderr,
-and bounded semantic prompt trace.
+real deterministic `tau-ext-test-dummy` tool continuation. `ScenarioV2` adds
+bounded exact-correlation lanes for typed failures, cancellation/timeout,
+barriers, fatal disconnect, and quiescent same-agent restore. Embedded and
+test-only daemon paths require no credentials, network, shell, sleeps, or VCR
+gate. Panics, `run_turn` failures, and daemon exits before exact-consumption
+acknowledgement retain the private generated configuration, scenario, durable
+event log, extension stderr, and bounded semantic provider trace.
 
 This lane validates the harness/provider protocol boundary and headless durable
 flow. It does not validate provider-builtin, upstream ChatGPT lowering/parsing,
@@ -74,8 +77,11 @@ rendering; keep those tests in their owning layers.
 plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox
 denies network access independently of the fixture implementation.
 Focused fake-provider unit tests own strict Configure grammar, resource bounds,
-and diagnostic truncation; the subprocess E2Es own representative lifecycle,
-routing, streaming, mismatch, tool continuation, persistence, and shutdown.
+diagnostic truncation, malformed/mismatched checkpoint rejection, binding
+uniqueness, cursor bounds, and barrier structure; the subprocess E2Es own representative lifecycle,
+routing, streaming, mismatch, tool continuation, exact cancellation, bounded
+timeout, concurrent isolation, clean restore, fatal disconnect, persistence,
+and shutdown.
 
 Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.
 

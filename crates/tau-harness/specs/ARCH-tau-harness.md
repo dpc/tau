@@ -114,6 +114,12 @@ startup role is removed, startup fails rather than falling back silently.
 
 ## Daemon and provider reliability boundaries
 
+`ServeOptions` has opt-in hermetic-test controls that bypass ambient startup
+override transports and require an exact resolved extension-name set before any
+configured child is spawned. Defaults preserve normal daemon configuration.
+These controls constrain deterministic test composition; they are not an
+extension sandbox or production security policy.
+
 Configured extension children are trusted local executables with limited protocol
 authority, not hostile transport peers. The controlling boundary is linked from
 [`SECURITY.md`](../../../SECURITY.md) and

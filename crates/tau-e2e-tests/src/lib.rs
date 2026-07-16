@@ -13,7 +13,9 @@ pub mod scenario;
 use std::path::{Path, PathBuf};
 
 pub use deterministic_fixture::DeterministicFixture;
-pub use scenario::{FAKE_MODEL_ID, ScenarioTurnV1, ScenarioV1};
+pub use scenario::{
+    FAKE_MODEL_ID, ScenarioActionV2, ScenarioLaneV2, ScenarioTurnV1, ScenarioV1, ScenarioV2,
+};
 use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
 use tempfile::TempDir;
 

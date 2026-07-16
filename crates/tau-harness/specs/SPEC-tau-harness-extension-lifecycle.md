@@ -14,6 +14,11 @@ path-based shutdown races.
 
 ## Extension boundary
 
+One supervised extension instance publishes at most one `extension.exited`
+lifecycle fact. A disconnect handled before harness shutdown owns that fact;
+later shutdown joins/cleans the child without publishing a duplicate. A still
+connected child publishes its one exit fact during orderly shutdown.
+
 Extensions are less-trusted peers connected over the Tau protocol. They may
 publish ordinary events through `emit`, subscribe to committed events, register
 interceptors, provide tools/actions/context, and request extension-data file

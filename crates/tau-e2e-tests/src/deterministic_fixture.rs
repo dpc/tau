@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
 use tempfile::TempDir;
 
-use crate::{ScenarioV1, sanitize_name};
+use crate::{ScenarioV1, ScenarioV2, sanitize_name};
 
 /// Always-on hermetic fixture backed by supervised provider and tool
 /// subprocesses.
@@ -23,8 +23,10 @@ pub struct DeterministicFixture {
     harness_state_dir: PathBuf,
     /// Synthetic provider observation trace.
     trace_path: PathBuf,
-    /// Expected exact scenario turn count.
-    expected_turns: usize,
+    /// Expected exact scenario action count.
+    expected_actions: usize,
+    /// Number of independent lanes that must reach zero remaining actions.
+    expected_lanes: usize,
     /// Whether the deterministic dummy subprocess is configured.
     dummy_enabled: bool,
     /// Whether an operation failed and artifacts must be retained.
@@ -36,9 +38,54 @@ impl DeterministicFixture {
     ///
     /// The caller should pass `env!("CARGO_BIN_EXE_tau-e2e-fake-provider")`
     /// and, for tool scenarios, `env!("CARGO_BIN_EXE_tau-e2e-test-dummy")`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be validated or written.
     pub fn new(
         name: &str,
         scenario: &ScenarioV1,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            scenario.turns.len(),
+            1,
+            fake_provider_bin,
+            dummy_tool_bin,
+        )
+    }
+
+    /// Creates a multi-lane version-two fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, the exact provider binary,
+    /// generated configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_v2(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            None,
+        )
+    }
+
+    fn new_serialized(
+        name: &str,
+        scenario: serde_json::Value,
+        expected_actions: usize,
+        expected_lanes: usize,
         fake_provider_bin: impl AsRef<Path>,
         dummy_tool_bin: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -79,7 +126,7 @@ impl DeterministicFixture {
                 "require": true,
                 "cwd": artifacts_dir,
                 "config": {
-                    "scenario": scenario,
+                     "scenario": scenario,
                 },
             }),
         );
@@ -119,7 +166,7 @@ impl DeterministicFixture {
         std::fs::write(config_dir.join("harness.yaml"), &config_bytes)?;
         std::fs::write(
             artifacts_dir.join("scenario.json"),
-            serde_json::to_vec_pretty(scenario)?,
+            serde_json::to_vec_pretty(&scenario)?,
         )?;
         std::fs::write(artifacts_dir.join("harness-config.json"), config_bytes)?;
 
@@ -129,10 +176,39 @@ impl DeterministicFixture {
             state_dir,
             harness_state_dir,
             trace_path,
-            expected_turns: scenario.turns.len(),
+            expected_actions,
+            expected_lanes,
             dummy_enabled,
             failed: Cell::new(false),
         })
+    }
+
+    /// Marks externally orchestrated daemon work incomplete.
+    ///
+    /// This retains artifacts if the caller exits before a successful
+    /// [`Self::assert_consumed`] acknowledges clean completion.
+    pub fn mark_daemon_started(&self) {
+        self.failed.set(true);
+    }
+
+    /// Returns the durable harness state root.
+    #[must_use]
+    pub fn harness_state_dir(&self) -> &Path {
+        &self.harness_state_dir
+    }
+
+    /// Returns a private socket path for one daemon boot.
+    ///
+    /// The socket lives directly under the short temporary-directory path
+    /// rather than the descriptive artifact root so Unix `sockaddr_un` limits
+    /// cannot be exceeded by long test names.
+    #[must_use]
+    pub fn socket_path(&self, boot: &str) -> PathBuf {
+        self.tempdir
+            .as_ref()
+            .expect("fixture temporary directory is available before drop")
+            .path()
+            .join(format!("{}.sock", sanitize_name(boot)))
     }
 
     /// Runs one synthetic interaction and performs clean embedded shutdown.
@@ -187,26 +263,30 @@ impl DeterministicFixture {
         self.failed.set(false);
     }
 
-    /// Asserts that every exact scenario turn was consumed.
+    /// Asserts exact action/lane consumption and clears failure retention on
+    /// success.
     pub fn assert_consumed(&self) -> Result<(), Box<dyn std::error::Error>> {
         let trace = self.trace()?;
         let matched = trace
             .lines()
             .filter(|line| line.contains(" matched "))
             .count();
-        if matched != self.expected_turns
-            || !trace
+        if matched != self.expected_actions
+            || trace
                 .lines()
-                .last()
-                .is_some_and(|line| line.ends_with("remaining=0"))
+                .filter(|line| line.ends_with("remaining=0"))
+                .count()
+                != self.expected_lanes
+            || trace.contains("mismatch")
         {
             return Err(format!(
                 "scenario not exactly consumed: matched {matched}/{}; trace at {}",
-                self.expected_turns,
+                self.expected_actions,
                 self.trace_path.display()
             )
             .into());
         }
+        self.failed.set(false);
         Ok(())
     }
 

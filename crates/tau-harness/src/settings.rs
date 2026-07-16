@@ -514,16 +514,53 @@ pub(crate) fn load_harness_settings_or_warn(
 ) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
     let role_overrides = role_cli_overrides_from_env();
     let harness_config_overrides = harness_config_overrides_from_env().unwrap_or_default();
-    match tau_config::settings::load_harness_settings_with_cli_overrides_in(
+    load_harness_settings_with_overrides_or_warn(
         dirs,
         &role_overrides,
         &harness_config_overrides,
+        true,
+    )
+}
+
+/// Load harness settings without consulting any startup environment transport.
+///
+/// This preserves config-file loading and warning behavior for hermetic daemon
+/// fixtures while excluding role, harness-config, and startup-role overrides.
+/// The optional error is returned alongside built-in fallback settings exactly
+/// like [`load_harness_settings_or_warn`].
+pub(crate) fn load_harness_settings_without_environment_or_warn(
+    dirs: &tau_config::settings::TauDirs,
+) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
+    load_harness_settings_with_overrides_or_warn(dirs, &[], &[], false)
+}
+
+fn load_harness_settings_with_overrides_or_warn(
+    dirs: &tau_config::settings::TauDirs,
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+    apply_startup_environment: bool,
+) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
+    match tau_config::settings::load_harness_settings_with_cli_overrides_in(
+        dirs,
+        role_overrides,
+        harness_config_overrides,
     ) {
-        Ok(settings) => (apply_startup_role_override(settings), None),
+        Ok(settings) => (
+            if apply_startup_environment {
+                apply_startup_role_override(settings)
+            } else {
+                settings
+            },
+            None,
+        ),
         Err(error) => {
             eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
             (
-                apply_startup_role_override(HarnessSettings::built_in()),
+                if apply_startup_environment {
+                    apply_startup_role_override(HarnessSettings::built_in())
+                } else {
+                    HarnessSettings::built_in()
+                },
                 Some(error),
             )
         }
@@ -758,8 +795,8 @@ pub(crate) fn resolve_config_in(
 }
 
 /// Resolve one explicit directory layout without process-environment startup
-/// transports. Deterministic embedded callers use this to prevent ambient CLI
-/// compatibility variables from altering their generated configuration.
+/// transports. Deterministic embedded and daemon callers use this to prevent
+/// ambient CLI compatibility variables from altering generated configuration.
 pub(crate) fn resolve_config_in_without_environment(
     dirs: &tau_config::settings::TauDirs,
 ) -> Result<Config, Box<dyn std::error::Error>> {
