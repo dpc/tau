@@ -50,3 +50,14 @@ agent only after replay/context boundaries, and checks folded
 fresh relative edit. Its closed workdir/edit grammar, scratch layout, and canary
 do not turn advisory core-shell permissions into a sandbox or test directory
 locks.
+
+The cancellation/liveness gate is a third, independent headless boundary. Two
+durable agents bind to separate fake-provider lanes and hold exact prompt ids.
+The socket observer proves each targeted cancellation has one transient
+terminal, no accepted provider terminal, and no effect on the other hold. After
+both bounded workers acknowledge cancellation, the most recently selected
+agent reuses its immutable lane for a fresh successful prompt. Typed CBOR store
+reads prove exact prompt/checkpoint membership and the absence of canceled
+provider terminals; process-group and socket cleanup provide the final
+quiescence boundary. This gate has no PTY, core-shell, filesystem mutation, or
+cold-resume claim.

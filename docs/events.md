@@ -188,6 +188,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   context usage. It replaces the old delegation-specific progress stream.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
+  Canceling exact ordinary checkpointed inference also releases its runtime
+  dispatch ownership so a later prompt on the same agent can proceed;
+  standalone-compaction ownership remains governed by its durable recovery
+  contract, and late provider terminals for the canceled id remain discarded.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
   the next prompt prefix. Runtime/provider optimization state.
 - **`agent.compaction_triggered`** — Durable manual or harness-scheduled

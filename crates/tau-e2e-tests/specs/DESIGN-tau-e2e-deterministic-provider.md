@@ -65,9 +65,23 @@ subprocess. Its `ServeOptions` explicitly bypass ambient startup override
 transports and checks the same exact extension allowlist before spawning as the
 embedded fixture. Normal daemon defaults are unchanged.
 
+The mandatory cancellation gate uses exactly two V2 lane bindings. Each lane
+first consumes one bounded `HoldUntilCancel`; the second lane then consumes one
+ordinary text action on the same durable agent after both exact prompt ids have
+been canceled. The oracle requires one `agent.prompt_terminated` and one
+provider cancellation acknowledgement per held id, zero accepted or durable
+provider terminals for canceled ids, one successful terminal for the fresh id,
+exact scenario consumption, and no timeout trace. The harness clears matching
+ordinary-inference runtime `DispatchUncertain` ownership when cancellation
+terminalizes the live prompt so queued work on that agent can advance;
+standalone-compaction ownership is preserved. The cancellation terminal remains
+transient and late provider responses remain discarded. This proves
+warm-process liveness, not crash-exact cancellation persistence.
+
 This boundary validates extension supervision, CBOR lifecycle, model routing,
 prompt assembly, provider-event validation, one real tool continuation, typed
-terminal error projection, exact cancellation, bounded provider stalls, fatal
+terminal error projection, exact cancellation with same-agent post-cancel
+liveness, bounded provider stalls, fatal
 provider-disconnect handling without restart, lane isolation, durable session
 projection, clean restore/shutdown, and the spawned public terminal's completed
 tool projection across one quiescent cold resume. Sequential error then success is two

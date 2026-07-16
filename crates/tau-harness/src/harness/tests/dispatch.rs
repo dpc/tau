@@ -5427,6 +5427,8 @@ fn cancel_clears_active_wait_state() {
     h.shutdown().expect("shutdown");
 }
 
+/// Cancellation of exact ordinary inference releases its runtime checkpoint,
+/// emits one transient terminal, and discards a later provider response.
 #[test]
 fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     let td = TempDir::new().expect("tempdir");
@@ -5440,6 +5442,17 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .get_mut(&cid)
         .expect("conversation")
         .in_flight_prompt = Some(spid.clone());
+    h.agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
+        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: spid.clone(),
+        through: tau_proto::AgentHead::Root,
+        model: Some("test/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
+    };
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
@@ -5452,6 +5465,10 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
     assert!(h.agents[&cid].in_flight_prompt.is_none());
     assert!(h.agents[&cid].pending_cancel.is_none());
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
     assert!(h.canceled_prompts.contains(&spid));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -5496,6 +5513,101 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .count();
     assert_eq!(response_count_after, response_count_before);
     assert!(!h.canceled_prompts.contains(&spid));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A user cancellation must not erase standalone-compaction continuation
+/// ownership: that durable transaction requires its own terminal recovery path.
+#[test]
+fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-cancel-standalone-thinking".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-cancel-standalone").expect("valid id");
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent = h.agents.get_mut(&cid).expect("conversation");
+    agent.in_flight_prompt = Some(spid.clone());
+    agent.activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
+        owner: crate::agent::InferenceCheckpointOwner::Standalone {
+            id: transaction_id.clone(),
+        },
+        agent_prompt_id: spid.clone(),
+        through: tau_proto::AgentHead::Root,
+        model: Some("test/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
+    };
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+        agent_prompt_id: Some(spid.clone()),
+    });
+
+    assert!(matches!(
+        &h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone { id },
+            agent_prompt_id,
+            ..
+        } if id == &transaction_id && agent_prompt_id == &spid
+    ));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptTerminated(terminated)
+            if terminated.agent_prompt_id == spid
+                && terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancellation releases only the checkpoint owned by the canceled prompt id;
+/// an unrelated ordinary-inference checkpoint must remain fail-closed.
+#[test]
+fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = ensure_test_user_agent(&mut h);
+    let canceled_id: AgentPromptId = "sp-cancel-mismatched-thinking".into();
+    let owned_id: AgentPromptId = "sp-owned-by-other-dispatch".into();
+    seed_agent_thinking(&mut h, &cid, canceled_id.as_str());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent = h.agents.get_mut(&cid).expect("conversation");
+    agent.in_flight_prompt = Some(canceled_id.clone());
+    agent.activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
+        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: owned_id.clone(),
+        through: tau_proto::AgentHead::Root,
+        model: Some("test/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
+    };
+    h.prompt_agents.insert(canceled_id.clone(), cid.clone());
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+        agent_prompt_id: Some(canceled_id),
+    });
+
+    assert!(matches!(
+        &h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Inference,
+            agent_prompt_id,
+            ..
+        } if agent_prompt_id == &owned_id
+    ));
 
     h.shutdown().expect("shutdown");
 }

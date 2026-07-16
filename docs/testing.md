@@ -61,7 +61,8 @@ regression coverage. Reusable steps live in
 test-only `tau-e2e-fake-provider` by exact path through normal extension
 supervision. Its strict inline `ScenarioV1` drives synthetic streaming and a
 real deterministic `tau-ext-test-dummy` tool continuation. `ScenarioV2` adds
-bounded exact-correlation lanes for typed failures, cancellation/timeout,
+bounded exact-correlation lanes for typed failures, cancellation/timeout and
+same-agent post-cancel liveness,
 barriers, fatal disconnect, quiescent same-agent restore, and one closed
 `restart_test_dummy` call/result pair. Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
@@ -90,6 +91,14 @@ Unlike the PTY gate, the headless daemon has no post-EndTurn UI-idle frame.
 Gate 2 therefore defines quiescence as an exact correlated terminal response
 with complete durable tool facts followed by verified disappearance of its
 owned daemon/extension process group and Unix socket.
+
+The independent `cancellation_liveness` target is mandatory Gate 3. It uses two
+bounded provider lanes to prove exact cancellation isolation, one transient
+terminal per held prompt, no accepted or durable late terminal, and a fresh
+successful prompt on the second selected agent's same lane. Its warm-process
+quiescence boundary is that final EndTurn plus exact durable facts and reaped
+process group/socket; it makes no PTY, core-shell, or crash-exact cancellation
+persistence claim.
 
 `ci.deterministicE2eTests` is a mandatory selfci derivation. Its exact target
 plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox

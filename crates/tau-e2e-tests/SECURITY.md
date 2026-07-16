@@ -24,8 +24,13 @@ its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.
 Artifacts contain only synthetic fixture data but remain private by default.
 The harness owns supervised extension termination; a killable test-only child
 wrapper owns daemon process cleanup on early test failure. Daemon tests cover
-typed failure, cancellation/timeout, concurrency, fatal disconnect, and clean
-restore. Provider cursor and harness journal writes are not transactional, so
+typed failure, cancellation/timeout, same-agent post-cancel liveness,
+concurrency, fatal disconnect, and clean restore. The cancellation gate accepts
+only harness-minted prompt ids already held by its two bounded lanes; it cannot
+cancel arbitrary sessions or agents. Its same-agent continuation proves
+warm-process ordinary-inference liveness and late-terminal rejection, not
+crash-exact cancellation persistence or abandonment of standalone-compaction
+ownership. Provider cursor and harness journal writes are not transactional, so
 crash-exact replay is explicitly outside this boundary. The fixture does not
 claim broad terminal rendering or universal packaging.
 

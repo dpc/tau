@@ -243,11 +243,12 @@
                 export TAU_ROLE_CLI_OVERRIDES='["DisableAll"]'
                 export TAU_HARNESS_CONFIG_OVERRIDES='[{"key":"agents.default_role","raw_value":"missing"}]'
                 export TAU_STARTUP_ROLE=missing
-                 env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
-                   -p tau-e2e-tests \
-                   --test deterministic_provider \
-                   --cargo-profile $CARGO_PROFILE \
-                   --no-tests=fail
+                  env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
+                    -p tau-e2e-tests \
+                    --test deterministic_provider \
+                    --test cancellation_liveness \
+                    --cargo-profile $CARGO_PROFILE \
+                    --no-tests=fail
                  # The PTY gate must spawn the exact universal binary from this
                  # Cargo profile rather than discovering a user PATH entry.
                  export TAU_E2E_TAU_BIN="$PWD/target/$CARGO_PROFILE/tau"

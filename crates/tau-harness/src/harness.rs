@@ -10054,8 +10054,14 @@ impl Harness {
         }
     }
 
+    /// Terminalizes one live cancellation and rejects its eventual late
+    /// provider response.
+    ///
+    /// Only an exact ordinary-inference `DispatchUncertain` owner is released.
+    /// Mismatched prompt ids and standalone-compaction continuations retain
+    /// their distinct durable recovery obligations.
     fn finalize_canceled_in_flight_prompt(&mut self, cid: &AgentId) {
-        let Some((session_id, agent_prompt_id, originator)) =
+        let Some((session_id, canceled_prompt_id, originator)) =
             self.agents.get(cid).and_then(|conv| {
                 conv.in_flight_prompt.clone().map(|agent_prompt_id| {
                     (
@@ -10068,14 +10074,14 @@ impl Harness {
         else {
             return;
         };
-        self.cancel_running_compaction(cid, &agent_prompt_id);
-        self.canceled_prompts.insert(agent_prompt_id.clone());
-        self.prompt_operations.remove(&agent_prompt_id);
-        self.prompt_context_limits.remove(&agent_prompt_id);
-        self.prompt_semantic_output.remove(&agent_prompt_id);
+        self.cancel_running_compaction(cid, &canceled_prompt_id);
+        self.canceled_prompts.insert(canceled_prompt_id.clone());
+        self.prompt_operations.remove(&canceled_prompt_id);
+        self.prompt_context_limits.remove(&canceled_prompt_id);
+        self.prompt_semantic_output.remove(&canceled_prompt_id);
         self.publish_prompt_terminated(
             session_id,
-            agent_prompt_id,
+            canceled_prompt_id.clone(),
             AgentPromptTerminationReason::Canceled,
             originator,
         );
@@ -10083,6 +10089,16 @@ impl Harness {
             conv.pending_cancel = None;
             conv.pending_prompts.clear();
             conv.in_flight_prompt = None;
+            if matches!(
+                &conv.activation_dispatch,
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    owner: crate::agent::InferenceCheckpointOwner::Inference,
+                    agent_prompt_id,
+                    ..
+                } if agent_prompt_id == &canceled_prompt_id
+            ) {
+                conv.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            }
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
     }

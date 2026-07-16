@@ -10,6 +10,7 @@ access, shell, or VCR cassette is involved:
 
 ```sh
 cargo nextest run -p tau-e2e-tests --test deterministic_provider
+cargo nextest run -p tau-e2e-tests --test cancellation_liveness
 cargo build -p tau --bin tau
 cargo nextest run -p tau-e2e-tests --test core_resume
 TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_shell_resume
@@ -17,7 +18,8 @@ TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_
 
 The acceptance cases cover streaming/final text, a successful tool round
 through `tau-ext-test-dummy`, typed errors followed by an explicit later turn,
-exact cancellation, bounded holds, fatal provider disconnect without restart,
+exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
+provider disconnect without restart,
 clean resume, concurrent lane isolation, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
@@ -31,6 +33,10 @@ bundled `component ext-shell`, exposes only `workdir` and `edit`, and proves a
 canonical per-agent workdir plus a relative context-checked edit survive full
 daemon and extension replacement. Its scratch canary and exact-byte assertions
 are safety oracles, not a filesystem sandbox or directory-lock test.
+The independent headless `cancellation_liveness` gate holds two exact provider
+lanes, cancels each harness-minted prompt id once, and then completes a fresh
+prompt on the second selected agent's existing lane. It does not exercise PTY
+restore or core-shell.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

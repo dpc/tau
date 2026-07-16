@@ -106,6 +106,12 @@ blocked. Core validation and warm/cold replay regressions enforce these rules.
 Revisit them when adding any explicit abandon/rewind operation or changing
 compaction replay ownership.
 
+Ordinary-inference cancellation may release only the exact matching warm-process
+`DispatchUncertain` owner so later work on that agent can proceed. Its transient
+terminal and late-response rejection do not establish crash-exact cancellation
+persistence; standalone-compaction ownership remains covered by the durable
+rules above.
+
 ## Release build resource reliability
 
 The universal release binary's accepted build-time, memory, size, and runtime
