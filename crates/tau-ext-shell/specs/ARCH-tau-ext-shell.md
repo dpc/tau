@@ -41,9 +41,10 @@ authoritative and fail closed until an explicit absolute setter repairs them.
 
 Every tool invocation snapshots the committed workdir at admission. Relative
 resolution, command execution, and directory-lock setup retain that snapshot
-through queueing and lock waits. Call-level shell `cwd` remains an invocation-only
-override and never emits metadata. The persistent `workdir` read/set transaction
-is governed by
+through queueing and lock waits. Generic call-level `shell.cwd` and
+ChatGPT-facing `shell_command.workdir` remain invocation-only overrides and
+never emit metadata. The latter is distinct from the persistent top-level
+`workdir(path)` read/set transaction governed by
 [DESIGN-per-agent-extension-workdirs](../../../specs/DESIGN-per-agent-extension-workdirs.md).
 
 ## tau-client runtime boundary

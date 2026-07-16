@@ -16,9 +16,11 @@ requirement does not require wholesale Codex CLI emulation.
 Acceptance requires comparisons to be grounded in verified upstream source or
 behavior rather than assumptions. Compatible definitions and semantics must
 have regression coverage at the provider-visible boundary, while accepted
-differences must be identifiable in current documentation and tests. If
-upstream verification establishes a GPT shell call-level `cwd` argument, Tau
-must retain that argument as invocation-local state; using it must not
+differences must be identifiable in current documentation and tests. At the
+verified Codex CLI revision, both legacy `shell_command` and unified
+`exec_command` name their invocation-local directory argument `workdir`;
+`write_stdin` has no directory argument. Tau's corresponding advertised
+call-local argument must therefore be `workdir`, and using it must not
 persistently change the agent's remembered workdir.
 
 The selected implementation approach is recorded in

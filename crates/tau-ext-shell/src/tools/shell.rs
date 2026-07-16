@@ -104,6 +104,8 @@ pub(crate) enum CommandOutcome {
     Cancelled,
 }
 
+/// Generic-shell test adapter for the production cancellable execution path.
+#[cfg(test)]
 pub(crate) fn run_command_cancellable(
     call_id: &str,
     arguments: &CborValue,
@@ -113,12 +115,52 @@ pub(crate) fn run_command_cancellable(
     cancel_rx: Option<mpsc::Receiver<()>>,
     world: &mut ShellWorld,
 ) -> Result<CommandOutcome, ToolFailure> {
+    run_command_cancellable_for_tool(
+        ShellInvocation {
+            surface: crate::tools::ShellSurface::Generic,
+            call_id,
+            arguments,
+        },
+        shell_config,
+        command_mode,
+        enforce_ro_bind,
+        cancel_rx,
+        world,
+    )
+}
+
+/// Identity and arguments for one shell tool invocation.
+pub(crate) struct ShellInvocation<'a> {
+    /// Provider-facing shell surface selecting its argument dialect.
+    pub(crate) surface: crate::tools::ShellSurface,
+    /// Stable tool call id used by recording and replay.
+    pub(crate) call_id: &'a str,
+    /// Decoded function arguments for this invocation.
+    pub(crate) arguments: &'a CborValue,
+}
+
+/// Execute one shell tool call using that surface's directory argument.
+pub(crate) fn run_command_cancellable_for_tool(
+    invocation: ShellInvocation<'_>,
+    shell_config: &ShellConfig,
+    command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+    world: &mut ShellWorld,
+) -> Result<CommandOutcome, ToolFailure> {
+    let ShellInvocation {
+        surface,
+        call_id,
+        arguments,
+    } = invocation;
+    validate_surface_arguments(surface, arguments)?;
     if let Some(outcome) = world.replay_shell_outcome()? {
         return replay_shell_outcome(call_id, outcome, arguments, cancel_rx);
     }
 
     let started = std::time::Instant::now();
-    let outcome = run_command_live(
+    let outcome = run_command_live_for_surface(
+        surface,
         arguments,
         shell_config,
         command_mode,
@@ -138,6 +180,8 @@ pub(crate) fn run_command_cancellable(
     Ok(outcome)
 }
 
+/// Generic-shell test adapter for direct live process execution.
+#[cfg(test)]
 pub(crate) fn run_command_live(
     arguments: &CborValue,
     shell_config: &ShellConfig,
@@ -145,8 +189,29 @@ pub(crate) fn run_command_live(
     enforce_ro_bind: bool,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<CommandOutcome, ToolFailure> {
+    run_command_live_for_surface(
+        crate::tools::ShellSurface::Generic,
+        arguments,
+        shell_config,
+        command_mode,
+        enforce_ro_bind,
+        cancel_rx,
+    )
+}
+
+/// Run one live shell tool call using that surface's directory argument.
+pub(crate) fn run_command_live_for_surface(
+    surface: crate::tools::ShellSurface,
+    arguments: &CborValue,
+    shell_config: &ShellConfig,
+    command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<CommandOutcome, ToolFailure> {
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
-    let cwd = optional_argument_text(arguments, "cwd").map_err(ToolFailure::from)?;
+    validate_surface_arguments(surface, arguments)?;
+    let cwd = optional_argument_text(arguments, surface.directory_argument())
+        .map_err(ToolFailure::from)?;
     let display_mode = command_mode.display_label().unwrap_or_default();
     let (display_args, display_payload) = command_display(&command);
     let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
@@ -261,6 +326,24 @@ pub(crate) fn run_command_live(
         provider_content: Vec::new(),
         display,
     })))
+}
+
+fn validate_surface_arguments(
+    surface: crate::tools::ShellSurface,
+    arguments: &CborValue,
+) -> Result<(), ToolFailure> {
+    if surface == crate::tools::ShellSurface::ChatGpt
+        && optional_argument_text(arguments, "cwd")
+            .map_err(ToolFailure::from)?
+            .is_some()
+    {
+        return Err(ToolFailure::new(
+            "argument `cwd` is not supported by `shell_command`; use call-local `workdir`"
+                .to_owned(),
+        ));
+    }
+    optional_argument_text(arguments, surface.directory_argument()).map_err(ToolFailure::from)?;
+    Ok(())
 }
 
 fn replay_shell_outcome(
@@ -2386,6 +2469,65 @@ mod tests {
                 _ => None,
             })
             .expect("output field")
+    }
+
+    /// GPT surface validation must run before VCR replay so a cassette cannot
+    /// turn the removed legacy `cwd` spelling into a successful invocation.
+    #[test]
+    fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
+        let cassette_dir = tempfile::tempdir().expect("cassette directory");
+        let arguments = CborValue::Map(vec![
+            (
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("pwd".to_owned()),
+            ),
+            (
+                CborValue::Text("cwd".to_owned()),
+                CborValue::Text("/tmp".to_owned()),
+            ),
+        ]);
+        let record_config =
+            tau_vcr::VcrConfig::new(tau_vcr::VcrMode::RecordIfMissing, cassette_dir.path());
+        let mut recording = ShellWorld::for_tool(
+            crate::tools::GPT_SHELL_TOOL_NAME,
+            "legacy-gpt-cwd",
+            &arguments,
+            Some(record_config),
+        )
+        .expect("recording world");
+        recording.record_shell_outcome(WorldShellOutcome::Cancelled);
+        recording.finish().expect("finish recording");
+
+        let replay_config =
+            tau_vcr::VcrConfig::new(tau_vcr::VcrMode::ReplayOnly, cassette_dir.path());
+        let mut replay = ShellWorld::for_tool(
+            crate::tools::GPT_SHELL_TOOL_NAME,
+            "legacy-gpt-cwd",
+            &arguments,
+            Some(replay_config),
+        )
+        .expect("replay world");
+        let error = run_command_cancellable_for_tool(
+            ShellInvocation {
+                surface: crate::tools::ShellSurface::ChatGpt,
+                call_id: "legacy-gpt-cwd",
+                arguments: &arguments,
+            },
+            &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
+            false,
+            None,
+            &mut replay,
+        )
+        .expect_err("legacy cwd must fail before replay");
+        assert_eq!(
+            error.message,
+            "argument `cwd` is not supported by `shell_command`; use call-local `workdir`"
+        );
+        assert!(
+            replay.finish().is_err(),
+            "validation failure must not consume the recorded shell outcome"
+        );
     }
 
     /// Protects user shell clipping feedback for a single huge no-newline

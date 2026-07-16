@@ -32,8 +32,10 @@ exposure boundary.
 Workdir tests must cover absent-key process-cwd initialization, replay precedence,
 stale and malformed fail-closed state, committed setter completion, read-only
 status calls, admission snapshots, and concurrent-setter rejection. Both shell
-surfaces require full-dispatch regression coverage proving call-level `cwd`
-changes execution only and never emits persistent metadata.
+surfaces require full-dispatch regression coverage proving their respective
+call-level `cwd` and `workdir` arguments change execution only and never emit
+persistent metadata. Schema coverage must prove that `shell_command` advertises
+only `workdir`, and parser coverage must reject the removed GPT `cwd` spelling.
 Setter lifecycle coverage must verify the synchronous admission transition:
 validation, sole-setter reservation, awaiting-commit marking, and metadata
 emission run without scheduler or event-loop interleaving. State-level tests

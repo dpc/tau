@@ -1425,7 +1425,11 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
             let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
             Ok(vec![canonical_write_lock_dir(Path::new(&path))?])
         }
-        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => Ok(vec![canonical_shell_cwd(arguments)?]),
+        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => {
+            let surface = crate::tools::ShellSurface::for_tool_name(tool_name)
+                .expect("matched shell tool has a known surface");
+            Ok(vec![canonical_shell_cwd(surface, arguments)?])
+        }
         APPLY_PATCH_TOOL_NAME => Ok(crate::tools::apply_patch::lock_directories_in_dir(
             arguments, cwd,
         )?),
@@ -1567,10 +1571,15 @@ pub(crate) fn canonical_path_parent(path: &Path) -> Result<PathBuf, ToolFailure>
         .map_err(|message| ToolFailure::from(message).with_args(path.display().to_string()))
 }
 
-/// Canonical lock directory for a shell command's cwd argument.
-pub(crate) fn canonical_shell_cwd(arguments: &CborValue) -> Result<PathBuf, ToolFailure> {
+/// Canonical lock directory selected by a shell surface's call-local directory
+/// argument.
+pub(crate) fn canonical_shell_cwd(
+    surface: crate::tools::ShellSurface,
+    arguments: &CborValue,
+) -> Result<PathBuf, ToolFailure> {
+    let field = surface.directory_argument();
     let cwd =
-        crate::argument::optional_argument_text(arguments, "cwd").map_err(ToolFailure::from)?;
+        crate::argument::optional_argument_text(arguments, field).map_err(ToolFailure::from)?;
     let display_arg = cwd.clone().unwrap_or_else(|| ".".to_owned());
     let path = cwd
         .as_deref()

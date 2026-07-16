@@ -31,10 +31,10 @@ Every filesystem, shell, directory-lock, and user-shell invocation snapshots the
 last committed workdir at admission. Queueing, lock waiting, and later execution
 use that same path. Sibling calls in one provider batch have no causal ordering;
 a call depending on a successful workdir change must be made in a later turn.
-The GPT and generic shell call-level `cwd` arguments remain invocation-local
-overrides and must never mutate workdir metadata. Current Codex uses the
-call-local name `workdir`; Tau deliberately defers that advertised rename to
-`tau-agent-gj13`, as recorded by
+The generic shell's call-level `cwd` and the ChatGPT-facing
+`shell_command.workdir` remain invocation-local overrides and must never mutate
+workdir metadata. The latter follows current Codex spelling and is distinct
+from the top-level persistent `workdir(path)` tool, as recorded by
 [DESIGN-model-native-tool-surfaces](DESIGN-model-native-tool-surfaces.md).
 
 Dynamic prompt context reports only the current path/status associated with the

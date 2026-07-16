@@ -698,9 +698,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                     "type": "integer",
                     "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
                 },
-                "cwd": {
+                "workdir": {
                     "type": "string",
-                    "description": "Working directory for this invocation only. Relative paths resolve from this shell instance's remembered workdir; omission uses the remembered workdir. This does not change later calls; use workdir in an earlier turn to change later calls."
+                    "description": "Optional working directory for this shell_command invocation only. Relative paths resolve from this shell instance's remembered persistent workdir; omission uses that remembered workdir. This does not change later calls; use the separate top-level workdir(path) tool in an earlier turn to change later calls."
                 }
             },
             "required": ["command"],
@@ -1085,17 +1085,28 @@ fn rewrite_invoke_for_cwd(
         return invoke;
     }
     let field = match invoke.tool_name.as_str() {
-        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => "cwd",
+        SHELL_TOOL_NAME => crate::tools::ShellSurface::Generic.directory_argument(),
+        GPT_SHELL_TOOL_NAME => crate::tools::ShellSurface::ChatGpt.directory_argument(),
         READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME
         | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
         _ => return invoke,
     };
     let explicit_path = cbor_optional_text(&invoke.arguments, field);
+    if explicit_path.is_none() && cbor_has_field(&invoke.arguments, field) {
+        // Preserve malformed present values for the surface parser to reject.
+        return invoke;
+    }
     let Some(path) = explicit_path
         .clone()
         .or_else(|| matches!(field, "path").then(|| ".".to_owned()))
-        .or_else(|| (field == "cwd").then(|| base.display().to_string()))
+        .or_else(|| {
+            matches!(
+                invoke.tool_name.as_str(),
+                SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME
+            )
+            .then(|| base.display().to_string())
+        })
     else {
         return invoke;
     };
@@ -1118,7 +1129,7 @@ fn rewrite_invoke_for_cwd(
 }
 
 fn canonicalize_existing_dir_for_cwd_field(path: &Path, field: &str) -> Option<PathBuf> {
-    (field == "cwd" || field == "directory" || field == "path")
+    (field == "cwd" || field == "workdir" || field == "directory" || field == "path")
         .then(|| path.canonicalize().ok())
         .flatten()
         .filter(|path| path.is_dir())
@@ -1132,6 +1143,15 @@ fn cbor_optional_text(arguments: &CborValue, field: &str) -> Option<String> {
         (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.clone()),
         _ => None,
     })
+}
+
+fn cbor_has_field(arguments: &CborValue, field: &str) -> bool {
+    let CborValue::Map(entries) = arguments else {
+        return false;
+    };
+    entries
+        .iter()
+        .any(|(key, _)| matches!(key, CborValue::Text(key) if key == field))
 }
 
 fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
@@ -1945,9 +1965,13 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
             )),
         },
     )));
-    let result = crate::tools::shell::run_command_cancellable(
-        invoke.call_id.as_str(),
-        &invoke.arguments,
+    let result = crate::tools::shell::run_command_cancellable_for_tool(
+        crate::tools::shell::ShellInvocation {
+            surface: crate::tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
+                .expect("shell dispatch accepts only known shell tools"),
+            call_id: invoke.call_id.as_str(),
+            arguments: &invoke.arguments,
+        },
         &shell_config,
         shell_command_mode,
         enforce_ro_bind,

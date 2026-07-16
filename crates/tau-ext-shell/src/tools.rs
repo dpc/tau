@@ -33,6 +33,34 @@ pub const GREP_TOOL_NAME: &str = "grep";
 pub const FIND_TOOL_NAME: &str = "find";
 pub const LS_TOOL_NAME: &str = "ls";
 
+/// Provider-facing argument dialect for a shell execution surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShellSurface {
+    /// Tau's generic `shell` surface.
+    Generic,
+    /// ChatGPT/Codex-facing `shell_command` surface.
+    ChatGpt,
+}
+
+impl ShellSurface {
+    /// Resolve a known internal shell tool name to its surface.
+    pub(crate) fn for_tool_name(tool_name: &str) -> Option<Self> {
+        match tool_name {
+            SHELL_TOOL_NAME => Some(Self::Generic),
+            GPT_SHELL_TOOL_NAME => Some(Self::ChatGpt),
+            _ => None,
+        }
+    }
+
+    /// Return this surface's call-local directory argument.
+    pub(crate) const fn directory_argument(self) -> &'static str {
+        match self {
+            Self::Generic => "cwd",
+            Self::ChatGpt => "workdir",
+        }
+    }
+}
+
 /// Execute a tool and return the response event(s).
 pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWorld) -> Vec<Event> {
     #[cfg(any(test, feature = "echo-agent"))]

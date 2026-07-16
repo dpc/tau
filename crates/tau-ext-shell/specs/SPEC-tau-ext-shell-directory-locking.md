@@ -16,9 +16,10 @@ read-write commands and no access-mode chip is published for UI display. User
 `!` shell commands are UI commands rather than agent tool calls and do not
 participate in locking.
 
-The `workdir` setter changes the remembered workdir by emitting
+The top-level `workdir(path)` setter changes the remembered workdir by emitting
 `agent.metadata_set` and completing only after its committed echo. Explicit
-`cwd` arguments on shell tools are call-local and never update metadata.
+generic `shell.cwd` and ChatGPT-facing `shell_command.workdir` arguments are
+call-local and never update metadata.
 Relative paths for filesystem tools
 (`read`, `edit`, `find`, `grep`, `ls`, `apply_patch`, and `dir_lock`) are resolved
 against the admission-time remembered workdir before execution or automatic lock selection. Once automatic
@@ -88,8 +89,9 @@ before execution:
 - `apply_patch` parses the patch and locks all touched source and destination
   directories as one FIFO request.
 - `shell` and `gpt_shell` infer access mode rather than accepting an explicit mode.
-  A command whose canonical call-local `cwd`, or the agent's remembered workdir when
-  `cwd` is omitted, is covered by the caller's manual lock is read-write and takes
+  A command whose canonical call-local `cwd` (generic `shell`) or `workdir`
+  (`shell_command`), or the agent's remembered workdir when that argument is
+  omitted, is covered by the caller's manual lock is read-write and takes
   an automatic lock; otherwise it is read-only and skips update locking.
 
 Automatic locks last for the invocation and serialize with manual locks and other

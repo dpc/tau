@@ -2642,8 +2642,10 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
     writer.flush().expect("flush");
 }
 
+/// The two shell registrations must advertise only their respective
+/// provider-facing directory spellings and keep timeout schema differences.
 #[test]
-fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
+fn startup_registers_surface_specific_shell_workdir_schemas() {
     // The model-visible schema must advertise the implemented working-directory
     // argument and reject negative timeouts before invocation. Directory update
     // coordination is handled inside ext-shell when dir_lock is enabled, not by
@@ -2669,9 +2671,23 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let properties = &parameters["properties"];
             assert!(properties["mode"].is_null());
-            assert_eq!(properties["cwd"]["type"], serde_json::json!("string"));
             if register.tool.name == SHELL_TOOL_NAME {
+                assert_eq!(properties["cwd"]["type"], serde_json::json!("string"));
+                assert!(properties["workdir"].is_null());
                 assert_eq!(properties["timeout"]["minimum"], serde_json::json!(0));
+            } else {
+                assert_eq!(
+                    register.tool.model_visible_name.as_deref(),
+                    Some("shell_command")
+                );
+                assert_eq!(properties["workdir"]["type"], serde_json::json!("string"));
+                assert!(properties["cwd"].is_null());
+                assert!(
+                    properties["workdir"]["description"]
+                        .as_str()
+                        .expect("workdir description")
+                        .contains("top-level workdir(path) tool")
+                );
             }
             assert_eq!(parameters["required"], serde_json::json!(["command"]));
             found_shell |= register.tool.name == SHELL_TOOL_NAME;
@@ -7998,12 +8014,14 @@ fn explicit_shell_cwd_is_canonicalized_without_emitting_metadata() {
     );
 }
 
-/// Regression guard: executing a shell call with explicit cwd must not redirect
-/// later calls.
+/// Regression guard: generic `shell.cwd` and GPT `shell_command.workdir` remain
+/// call-local across full dispatch, including relative GPT resolution.
 #[test]
-fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
+fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
     let remembered = TempDir::new().expect("remembered");
     let override_dir = TempDir::new().expect("override");
+    let relative_override = remembered.path().join("relative-override");
+    fs::create_dir(&relative_override).expect("relative override");
     fs::write(remembered.path().join("remembered.txt"), "from-a\n").expect("remembered file");
     let agent_id = tau_proto::AgentId::parse("agent-call-local-cwd").expect("agent id");
     let (mut reader, mut writer) = spawn_extension();
@@ -8021,15 +8039,28 @@ fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
     let _ = reader.read_event().expect("context").expect("context");
 
     for tool_name in [SHELL_TOOL_NAME, GPT_SHELL_TOOL_NAME] {
-        for (suffix, cwd) in [
-            ("override", Some(override_dir.path())),
-            ("remembered-after", None),
-        ] {
+        let surface =
+            crate::tools::ShellSurface::for_tool_name(tool_name).expect("known shell surface");
+        let mut cases = vec![
+            (
+                "override",
+                Some(override_dir.path().display().to_string()),
+                override_dir.path(),
+            ),
+            ("remembered-after", None, remembered.path()),
+        ];
+        if surface == crate::tools::ShellSurface::ChatGpt {
+            cases.push((
+                "relative-override",
+                Some("relative-override".to_owned()),
+                relative_override.as_path(),
+            ));
+        }
+        for (suffix, directory_argument, expected) in cases {
             let call_id = format!("call-{tool_name}-{suffix}");
             let mut args = vec![("command", "pwd")];
-            let cwd_text = cwd.map(|path| path.display().to_string());
-            if let Some(cwd_text) = cwd_text.as_deref() {
-                args.push(("cwd", cwd_text));
+            if let Some(directory_argument) = directory_argument.as_deref() {
+                args.push((surface.directory_argument(), directory_argument));
             }
             writer
                 .write_event(&tool_started(
@@ -8043,17 +8074,16 @@ fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
             loop {
                 match reader.read_event().expect("read").expect("event") {
                     Event::AgentMetadataSet(metadata) => {
-                        panic!("call-local cwd emitted persistent metadata: {metadata:?}")
+                        panic!("call-local shell directory emitted metadata: {metadata:?}")
                     }
                     Event::AgentUserMessageInjected(notice) => {
-                        panic!("call-local cwd emitted persistent notice: {notice:?}")
+                        panic!("call-local shell directory emitted notice: {notice:?}")
                     }
                     Event::ToolResult(result) if result.call_id.as_str() == call_id => {
-                        let expected = cwd.unwrap_or_else(|| remembered.path());
                         let rendered = format!("{:?}", result.result);
                         assert!(
                             rendered.contains(expected.to_str().expect("UTF-8 path")),
-                            "shell result did not use expected cwd: {rendered}"
+                            "shell result did not use expected call-local directory: {rendered}"
                         );
                         break;
                     }
@@ -8074,7 +8104,7 @@ fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
     loop {
         match reader.read_event().expect("read").expect("event") {
             Event::AgentMetadataSet(metadata) => {
-                panic!("call-local cwd emitted persistent metadata: {metadata:?}")
+                panic!("call-local shell directory emitted metadata: {metadata:?}")
             }
             Event::ToolResult(result)
                 if result.call_id.as_str() == "call-read-remembered-after" =>
@@ -8085,6 +8115,147 @@ fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
             _ => {}
         }
     }
+}
+
+/// Regression guard: the removed GPT `cwd` spelling is not accepted as an
+/// unadvertised runtime compatibility alias.
+#[test]
+fn gpt_shell_does_not_accept_legacy_cwd_as_call_local_workdir() {
+    let legacy_override = TempDir::new().expect("legacy override");
+    let args = cbor_text_map(vec![
+        ("command", "pwd"),
+        ("cwd", &legacy_override.path().display().to_string()),
+    ]);
+
+    let error = crate::tools::shell::run_command_live_for_surface(
+        crate::tools::ShellSurface::ChatGpt,
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect_err("legacy cwd must be rejected");
+    assert_eq!(
+        error.message,
+        "argument `cwd` is not supported by `shell_command`; use call-local `workdir`"
+    );
+}
+
+/// Regression guard: a present non-string GPT `workdir` survives admission
+/// rewriting for parser rejection and cannot mutate persistent state.
+#[test]
+fn malformed_gpt_workdir_fails_without_side_effects_through_full_dispatch() {
+    let remembered = TempDir::new().expect("remembered");
+    let agent_id = tau_proto::AgentId::parse("agent-malformed-gpt-workdir").expect("agent id");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(remembered.path().display().to_string()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("seed workdir");
+    writer.flush().expect("flush seed");
+    let _ = reader.read_event().expect("context").expect("context");
+
+    writer
+        .write_event(&tool_started(
+            "call-malformed-gpt-workdir",
+            GPT_SHELL_TOOL_NAME,
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("command".to_owned()),
+                    CborValue::Text("pwd".to_owned()),
+                ),
+                (
+                    CborValue::Text("workdir".to_owned()),
+                    CborValue::Integer(1.into()),
+                ),
+            ]),
+            agent_id.as_str(),
+        ))
+        .expect("malformed GPT shell call");
+    writer.flush().expect("flush call");
+
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::AgentMetadataSet(metadata) => {
+                panic!("malformed call-local workdir emitted metadata: {metadata:?}")
+            }
+            Event::AgentUserMessageInjected(notice) => {
+                panic!("malformed call-local workdir emitted notice: {notice:?}")
+            }
+            Event::ToolError(error) if error.call_id.as_str() == "call-malformed-gpt-workdir" => {
+                assert_eq!(error.message, "argument `workdir` must be a string");
+                break;
+            }
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "call-malformed-gpt-workdir" =>
+            {
+                panic!("malformed workdir unexpectedly executed: {result:?}")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Regression guard: GPT lock inference follows the advertised `workdir`
+/// spelling so the frozen lock path and child process directory stay aligned.
+#[test]
+fn gpt_shell_workdir_selects_automatic_lock_directory() {
+    let workdir = TempDir::new().expect("workdir");
+    let arguments = cbor_text_map(vec![
+        ("command", "pwd"),
+        ("workdir", &workdir.path().display().to_string()),
+    ]);
+
+    let dirs = crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
+        GPT_SHELL_TOOL_NAME,
+        &arguments,
+        Path::new("/"),
+    )
+    .expect("GPT shell lock directory");
+    assert_eq!(
+        dirs,
+        vec![workdir.path().canonicalize().expect("canonical workdir")]
+    );
+}
+
+/// Relative GPT `workdir` admission must freeze one canonical path used by
+/// both later lock inference and command execution.
+#[test]
+fn relative_gpt_workdir_freezes_canonical_lock_path_at_admission() {
+    let remembered = TempDir::new().expect("remembered");
+    let child = remembered.path().join("child");
+    fs::create_dir(&child).expect("child");
+    let Event::ToolStarted(invoke) = tool_started(
+        "call-relative-gpt-workdir",
+        GPT_SHELL_TOOL_NAME,
+        cbor_text_map(vec![("command", "pwd"), ("workdir", "child")]),
+        "agent-relative-gpt-workdir",
+    ) else {
+        unreachable!();
+    };
+
+    let rewritten = rewrite_invoke_for_cwd(invoke, remembered.path());
+    let canonical = child.canonicalize().expect("canonical child");
+    assert_eq!(
+        optional_argument_text(&rewritten.arguments, "workdir").expect("workdir argument"),
+        Some(canonical.display().to_string())
+    );
+    assert_eq!(
+        crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
+            GPT_SHELL_TOOL_NAME,
+            &rewritten.arguments,
+            remembered.path(),
+        )
+        .expect("lock directory"),
+        vec![canonical]
+    );
 }
 
 /// Ensures omitted workdir path reads state without emitting a metadata

@@ -7,6 +7,49 @@ use tau_proto::{
 use super::*;
 use crate::common::LlmError;
 
+/// Golden compatibility guard for the exact ChatGPT Responses function
+/// envelope carrying Codex's call-local `workdir` spelling.
+#[test]
+fn shell_command_wire_definition_uses_only_call_local_workdir() {
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("gpt_shell"),
+        model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
+        description: Some("Run a shell command.".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "workdir": {"type": "string"}
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        })),
+        format: None,
+    };
+
+    assert_eq!(
+        convert_tool_definition(&tool),
+        serde_json::json!({
+            "type": "function",
+            "name": "shell_command",
+            "description": "Run a shell command.",
+            "strict": null,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                    "workdir": {"type": "string"}
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }
+        })
+    );
+}
+
 fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

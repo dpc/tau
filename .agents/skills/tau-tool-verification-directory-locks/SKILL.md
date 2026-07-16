@@ -12,8 +12,9 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Directory locking verification plan
 
-Shell `cwd` arguments are invocation-local. They may select lock inference and
-execution scope for that call but must never update remembered workdir metadata.
+Generic `shell.cwd` and ChatGPT-facing `shell_command.workdir` arguments are
+invocation-local. They may select lock inference and execution scope for that
+call but must never update remembered workdir metadata.
 
 Use this plan when asked to verify ext-shell directory locking, `dir_lock`, or the interaction between locking, filesystem mutation tools, same-owner shell coverage, backgrounding, `cancel`, and `wait`. Directory locking is optional and advisory. It is owned by `tau-ext-shell`, not the harness or `agent_start`.
 
@@ -57,7 +58,8 @@ Also verify same-owner reentry: while the original agent holds `root/a`, run a s
 Hold a manual lock on `root/a`. While it is held, run `read root/a/file.txt`,
 `grep` against `root/a`, `find` under `root/a`, and `ls root/a`. These should
 complete promptly and should not wait for unlock. From a different agent, also
-run a `shell`/`gpt_shell` command with `cwd: root/a` that would write a sentinel
+run a `shell` command with `cwd: root/a` and a `gpt_shell` command with
+`workdir: root/a` that would write a sentinel
 file. Current shell semantics infer this as read-only because the caller does
 not hold a matching manual lock, so it should not wait on Agent A's lock. If
 `enforce_ro_bind` is enabled and native read-only isolation is available, the
@@ -74,7 +76,7 @@ For each automatically locked filesystem mutation tool, hold the relevant manual
 
 * `edit`: lock the target file parent. Existing final symlinks should be followed to the real edited file. Missing-parent creates like `root/a/new/dir/file.txt` should wait on the deepest existing ancestor and then create parents after unlock.
 * `apply_patch`: use a patch that touches one file under `root/a` and one under `root/b`. If `root/a` is locked, neither change should be applied before the lock is granted. After unlock, both changes should appear together from the patch invocation. Separately, verify the patch safety cases from `tau-tool-verification-file-shell`: existing-file `Add File` and move-to-existing-destination failures preserve all affected files, while successful multi-file patches produce structured UI diffs for every changed UTF-8 file.
-* `shell` and `gpt_shell`: verify the current manual-lock coverage rule. Without a matching same-owner manual lock, commands are inferred read-only and should bypass another agent's update lock. With a matching same-owner manual lock on the canonical `cwd` or an ancestor, shell commands are covered by that owner's lock and should keep the lock active for abandonment/liveness purposes.
+* `shell` and `gpt_shell`: verify the current manual-lock coverage rule. Without a matching same-owner manual lock, commands are inferred read-only and should bypass another agent's update lock. With a matching same-owner manual lock on the canonical call-local `cwd` (`shell`) or `workdir` (`gpt_shell`), or an ancestor, shell commands are covered by that owner's lock and should keep the lock active for abandonment/liveness purposes.
 
 For `shell`, also verify the advisory limitation: a command with `cwd: other` that writes to an absolute path under `root/a` is not protected by a `root/a` manual lock unless the caller holds matching manual-lock coverage for the relevant command scope. Report this as expected advisory behavior, not a lock failure.
 

@@ -25,13 +25,16 @@ using provider metadata described by
 and neutral shell metadata described by
 [ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).
 
-The source audit at Codex revision `2f7d89b141` found that its legacy
-`shell_command` uses an invocation-local argument named `workdir`, not `cwd`.
-Tau intentionally retains its deployed `cwd` field in this change to avoid
-combining a model-facing rename with the workdir-state repair; `tau-agent-gj13`
-tracks that separately. Tau's `cwd` is invocation-local and must never update
-persistent per-agent workdir state. This is an explicit temporary product
-divergence rather than a claim of exact compatibility with that Codex revision.
+The source audit at Codex revision `2f7d89b141` found that both its legacy
+`shell_command` and unified `exec_command` use an invocation-local argument
+named `workdir`, while `write_stdin` has no directory argument. Tau's
+ChatGPT-facing `shell_command` therefore advertises only `workdir`: it does not
+advertise or accept a runtime-only legacy `cwd` alias. This call-local
+`shell_command.workdir` is distinct from Tau's top-level persistent
+`workdir(path)` tool and must never update per-agent workdir state. Omitting it
+uses the shell instance's remembered persistent workdir. Sibling calls in one
+provider batch retain no causal ordering, so a persistent setter must complete
+before a dependent call is made in a later turn.
 
 ## Rationale
 
