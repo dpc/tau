@@ -7410,6 +7410,102 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
     assert!(replay_vt.screen_contains(80, "wait 60m 1s timeout"));
 }
 
+/// Ensures canonical completed cold-replay facts fold directly to one terminal
+/// dummy-tool row and cannot be resurrected by later transcript activity.
+#[test]
+fn completed_dummy_tool_replay_is_terminal_idle_and_stays_terminal() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "opud-tool-prompt",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "opud-call".into(),
+            name: tau_proto::ToolName::new("restart_test_dummy"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some("{}".to_owned()),
+            responses_envelope: None,
+        })],
+    )));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "opud-call".into(),
+        tool_name: tau_proto::ToolName::new("restart_test_dummy"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("restart succeeded".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "opud-final-prompt",
+        vec![assistant_message_item("opud-tool-complete")],
+    )));
+    sync(&handle);
+    let row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("restart_test_dummy"))
+        .expect("terminal dummy row");
+    assert!(row.contains("ok"), "{row}");
+    assert!(!row.contains("pending"), "{row}");
+    assert_eq!(renderer.test_active_tool_count(), 0);
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "opud-later-prompt",
+        vec![assistant_message_item("later response")],
+    )));
+    sync(&handle);
+    assert_eq!(renderer.test_active_tool_count(), 0);
+    assert!(!vt.screen_contains(100, "restart_test_dummy 0s pending"));
+}
+
+/// Ensures an incomplete historical tool call repaired on resume is shown as
+/// explicitly uncertain/error rather than silently successful or left active.
+#[test]
+fn incomplete_dummy_tool_replay_is_repaired_honestly_and_not_active() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "opud-incomplete-prompt",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "opud-incomplete".into(),
+            name: tau_proto::ToolName::new("restart_test_dummy"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some("{}".to_owned()),
+            responses_envelope: None,
+        })],
+    )));
+    renderer.handle(&Event::ToolError(ToolError {
+        call_id: "opud-incomplete".into(),
+        tool_name: tau_proto::ToolName::new("restart_test_dummy"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "Interrupted during restart. Side effects may have occurred.".to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    }));
+    sync(&handle);
+    let row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("restart_test_dummy"))
+        .expect("repaired dummy row");
+    assert!(row.contains("err"), "{row}");
+    assert!(!row.contains(" ok"), "{row}");
+    assert!(!row.contains("pending"), "{row}");
+    assert_eq!(renderer.test_active_tool_count(), 0);
+}
+
 /// A running tool call remains visibly pending until its result arrives.
 #[test]
 fn running_tool_call_shows_ellipsis_until_result() {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ScenarioLaneV2;
 
 /// Ensures strict Configure decoding rejects undeclared control fields.
 #[test]
@@ -78,6 +79,183 @@ fn validation_bounds_and_matches_deltas() {
         .validate()
         .is_err()
     );
+}
+
+/// Ensures durable V2 accepts only one adjacent, exactly correlated
+/// `restart_test_dummy` call/result pair rather than arbitrary tools.
+#[test]
+fn v2_dummy_tool_actions_require_an_adjacent_matching_pair() {
+    let pair = ScenarioV2::new(
+        "dummy-pair",
+        vec![ScenarioLaneV2 {
+            ctx_id: "lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "before".to_owned(),
+                    call_id: "call".into(),
+                },
+                ScenarioActionV2::DummyToolResult {
+                    user_text: "before".to_owned(),
+                    call_id: "call".into(),
+                    response: "complete".to_owned(),
+                },
+            ],
+        }],
+    );
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(pair.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let mut mismatched = pair.clone();
+    let ScenarioActionV2::DummyToolResult { call_id, .. } = &mut mismatched.lanes[0].actions[1]
+    else {
+        unreachable!()
+    };
+    *call_id = "other".into();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(mismatched)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut unpaired = pair;
+    unpaired.lanes[0].actions.pop();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(unpaired)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut repeated = ScenarioV2::new(
+        "repeated-dummy-pair",
+        vec![ScenarioLaneV2 {
+            ctx_id: "lane".to_owned(),
+            actions: Vec::new(),
+        }],
+    );
+    for call_id in ["first", "second"] {
+        repeated.lanes[0]
+            .actions
+            .push(ScenarioActionV2::DummyToolCall {
+                user_text: "before".to_owned(),
+                call_id: call_id.into(),
+            });
+        repeated.lanes[0]
+            .actions
+            .push(ScenarioActionV2::DummyToolResult {
+                user_text: "before".to_owned(),
+                call_id: call_id.into(),
+                response: "complete".to_owned(),
+            });
+    }
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(repeated.clone())
+        }
+        .validate()
+        .is_err()
+    );
+    let ScenarioActionV2::DummyToolCall { call_id, .. } = &mut repeated.lanes[0].actions[2] else {
+        unreachable!()
+    };
+    *call_id = "first".into();
+    let ScenarioActionV2::DummyToolResult { call_id, .. } = &mut repeated.lanes[0].actions[3]
+    else {
+        unreachable!()
+    };
+    *call_id = "first".into();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(repeated)
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+/// Ensures a dummy schema mismatch is rejected before any durable cursor or
+/// agent-lane binding can be advanced.
+#[test]
+fn v2_dummy_mismatch_leaves_cursor_and_binding_unconsumed() {
+    let action = ScenarioActionV2::DummyToolCall {
+        user_text: "before".to_owned(),
+        call_id: "call".into(),
+    };
+    let scenario = v2_action(action.clone());
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![0];
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let checkpoint = tempdir.path().join("cursor.json");
+    state.checkpoint = Some(checkpoint.clone());
+    let mut prompt = tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-test-0".into(),
+        agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
+        session_id: "session".into(),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext {
+            blocks: vec![tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: "before".to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                },
+            )],
+        },
+        tools: Vec::new(),
+        tools_ref: None,
+        model: FAKE_MODEL_ID.into(),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: Some("lane".to_owned()),
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    };
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 0, &prompt, &action)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [0]);
+    assert!(state.agent_lanes.is_empty());
+    assert!(!checkpoint.exists());
+
+    prompt.tools = vec![tau_proto::ToolDefinition {
+        name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
+        model_visible_name: None,
+        description: None,
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        })),
+        format: None,
+    }];
+    state
+        .validate_and_commit_v2_action(0, 0, &prompt, &action)
+        .expect("corrected prompt consumes once");
+    assert_eq!(state.lane_cursors, [1]);
+    assert_eq!(state.agent_lanes.get(&prompt.agent_id), Some(&0));
+    let bytes = std::fs::read(&checkpoint).expect("checkpoint committed");
+    let saved: CursorCheckpoint = serde_json::from_slice(&bytes).expect("checkpoint decodes");
+    assert_eq!(saved.cursors, [1]);
+    assert_eq!(saved.agent_lanes.len(), 1);
 }
 
 /// Ensures serialized scenario bytes and tool-call identity bounds fail closed.

@@ -10,6 +10,8 @@ access, shell, or VCR cassette is involved:
 
 ```sh
 cargo nextest run -p tau-e2e-tests --test deterministic_provider
+cargo build -p tau --bin tau
+cargo nextest run -p tau-e2e-tests --test core_resume
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
@@ -17,6 +19,12 @@ through `tau-ext-test-dummy`, typed errors followed by an explicit later turn,
 exact cancellation, bounded holds, fatal provider disconnect without restart,
 clean resume, concurrent lane isolation, and startup rejection of invalid
 scenario config.
+The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
+under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
+with explicit `tau -r <session-id>`, and checks the actual VT projection never
+repaints the completed row as pending. A replay-aware side UI observer and typed
+CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
+stable identity, unchanged durable prefix, and one fresh same-agent prompt.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

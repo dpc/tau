@@ -7,12 +7,14 @@
 //! user permissions. See `ARCH-tau-e2e-tests` and the crate `SECURITY.md`.
 
 mod deterministic_fixture;
+mod durable_snapshot;
 pub mod fake_provider;
 pub mod scenario;
 
 use std::path::{Path, PathBuf};
 
 pub use deterministic_fixture::DeterministicFixture;
+pub use durable_snapshot::DurableSnapshot;
 pub use scenario::{
     FAKE_MODEL_ID, ScenarioActionV2, ScenarioLaneV2, ScenarioTurnV1, ScenarioV1, ScenarioV2,
 };

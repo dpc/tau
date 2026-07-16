@@ -163,6 +163,24 @@ pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMe
     })
 }
 
+/// Builds the production chat subscription without replaying transient tool
+/// admission state that would briefly resurrect already-terminal calls.
+pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
+    let live_selectors = chat_subscription_selectors();
+    let historical_selectors = live_selectors
+        .iter()
+        .filter(|selector| {
+            **selector != EventSelector::Exact(EventName::TOOL_REQUEST)
+                && **selector != EventSelector::Exact(EventName::TOOL_STARTED)
+        })
+        .cloned()
+        .collect();
+    HarnessInputMessage::Subscribe(Subscribe {
+        historical_selectors,
+        live_selectors,
+    })
+}
+
 pub(crate) fn send_hello(
     writer: &mut UiOutputWriter,
     client_name: impl Into<tau_proto::ExtensionName>,

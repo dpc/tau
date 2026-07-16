@@ -870,7 +870,7 @@ pub(crate) fn run_chat(
     send_handshake_frame(
         &writer,
         &mut read_stream,
-        &crate::ui_client::subscribe_message(crate::ui_client::chat_subscription_selectors()),
+        &crate::ui_client::chat_subscribe_message(),
     )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 

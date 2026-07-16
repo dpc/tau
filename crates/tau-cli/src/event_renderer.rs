@@ -1401,6 +1401,13 @@ impl EventRenderer {
         self.tool_timer = Some(timer);
     }
 
+    /// Returns test-only generic tool bookkeeping without exposing a production
+    /// inspection side channel.
+    #[cfg(test)]
+    pub(crate) fn test_active_tool_count(&self) -> usize {
+        self.tool_calls.len()
+    }
+
     pub(crate) fn set_draft_retargeter(
         &mut self,
         handle: Arc<(Mutex<DraftSlot>, Condvar)>,

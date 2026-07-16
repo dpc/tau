@@ -29,4 +29,13 @@ cancellation, fatal provider disconnect, concurrent lane isolation, clean
 restore, durable projection, and headless shutdown. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, universal-binary
-packaging, or terminal rendering.
+packaging, or broad terminal rendering.
+
+The Unix-only core-resume gate is the deterministic fixture's public-UI boundary.
+It runs the exact built universal `tau` under a fixed real PTY, while the fake
+provider and built-in test dummy remain supervised subprocesses. Boot A reaches a
+durable terminal dummy result and is fully reaped; Boot B uses explicit
+`tau -r <session-id>`. A bounded VT model is authoritative for the user-visible
+terminal row, a replay-aware side UI peer is authoritative for delivery ordering
+and replay boundaries, and typed `SessionStore`/`AgentStore` reads are
+authoritative for membership and transcript prefix/suffix integrity.

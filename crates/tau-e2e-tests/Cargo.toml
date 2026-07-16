@@ -15,14 +15,24 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+fs2.workspace = true
 image.workspace = true
+nix = { version = "0.29", default-features = false, features = [
+  "fs",
+  "poll",
+  "process",
+  "signal",
+  "term",
+] }
 serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true
+tau-core.workspace = true
 tau-ext-test-dummy.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true
 tau-vcr.workspace = true
 tempfile.workspace = true
+vt100.workspace = true

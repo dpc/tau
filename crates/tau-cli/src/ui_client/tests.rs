@@ -97,3 +97,26 @@ fn chat_subscription_uses_no_prefix_selectors() {
     assert_eq!(subscription.historical_selectors, selectors);
     assert_eq!(subscription.live_selectors, selectors);
 }
+
+/// Ensures cold chat replay cannot paint a completed historical tool as newly
+/// pending while preserving the same admission events for future live calls.
+#[test]
+fn chat_subscription_excludes_transient_tool_admission_only_from_history() {
+    let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    for event in [EventName::TOOL_REQUEST, EventName::TOOL_STARTED] {
+        let selector = EventSelector::Exact(event);
+        assert!(!subscription.historical_selectors.contains(&selector));
+        assert!(subscription.live_selectors.contains(&selector));
+    }
+    for event in [
+        EventName::PROVIDER_RESPONSE_FINISHED,
+        EventName::TOOL_RESULT,
+        EventName::TOOL_ERROR,
+    ] {
+        let selector = EventSelector::Exact(event);
+        assert!(subscription.historical_selectors.contains(&selector));
+        assert!(subscription.live_selectors.contains(&selector));
+    }
+}

@@ -57,6 +57,7 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
     Ok(())
 }
 
+/// Validates the closed version-two lane grammar and its resource bounds.
 pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     if scenario.version != 2 {
         return Err(ClientError::handler("ScenarioV2 version must be 2"));
@@ -73,6 +74,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     }
     let mut ids = std::collections::HashSet::new();
     let mut barriers: HashMap<&str, (usize, std::collections::HashSet<&str>)> = HashMap::new();
+    let mut dummy_call_ids = std::collections::HashSet::new();
     for lane in &scenario.lanes {
         if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
             return Err(ClientError::handler(
@@ -82,8 +84,40 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         if lane.actions.is_empty() || lane.actions.len() > MAX_TURNS {
             return Err(ClientError::handler("lane must contain 1..=8 actions"));
         }
-        for action in &lane.actions {
+        for (action_index, action) in lane.actions.iter().enumerate() {
             match action {
+                ScenarioActionV2::DummyToolCall { call_id, .. }
+                    if !dummy_call_ids.insert(call_id.as_str())
+                        || dummy_call_ids.len() > 1
+                        || call_id.is_empty()
+                        || call_id.len() > 256
+                        || !matches!(
+                            lane.actions.get(action_index + 1),
+                            Some(ScenarioActionV2::DummyToolResult {
+                                call_id: result_id,
+                                ..
+                            }) if result_id == call_id
+                        ) =>
+                {
+                    return Err(ClientError::handler(
+                        "scenario requires exactly one unique bounded dummy call/result pair",
+                    ));
+                }
+                ScenarioActionV2::DummyToolResult { call_id, .. }
+                    if call_id.is_empty()
+                        || call_id.len() > 256
+                        || !matches!(
+                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                            Some(ScenarioActionV2::DummyToolCall {
+                                call_id: request_id,
+                                ..
+                            }) if request_id == call_id
+                        ) =>
+                {
+                    return Err(ClientError::handler(
+                        "dummy tool result must have a 1..=256 byte id and matching prior call",
+                    ));
+                }
                 ScenarioActionV2::HoldUntilCancel { timeout_ms, .. }
                     if !(100..=10_000).contains(timeout_ms) =>
                 {

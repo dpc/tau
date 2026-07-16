@@ -18,7 +18,7 @@ use tau_proto::{
     CborValue, ClientKind, ContentPart, ContextItem, ContextRecoveryDisposition, ContextRole,
     Effort, Event, EventName, InputModality, MessageItem, ProviderModelInfo, ProviderModelsUpdated,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseTextDelta,
-    ProviderResponseUpdated, ProviderStopReason, ThinkingSummary, ToolCallItem, ToolType,
+    ProviderResponseUpdated, ProviderStopReason, ThinkingSummary, ToolCallItem, ToolName, ToolType,
     Verbosity,
 };
 use validation::{validate_v1, validate_v2};
@@ -389,14 +389,13 @@ impl FakeState {
                 .ok_or_else(|| {
                     ClientError::handler("scenario first mismatch: unknown lane ctx_id")
                 })?
+        } else if self.v2()?.lanes.len() == 1 {
+            0
         } else {
-            *self.agent_lanes.get(&prompt.agent_id).ok_or_else(|| {
-                ClientError::handler("scenario first mismatch: continuation has no bound lane")
-            })?
+            return Err(ClientError::handler(
+                "scenario first mismatch: initial prompt without ctx_id requires one lane",
+            ));
         };
-        self.agent_lanes
-            .entry(prompt.agent_id.clone())
-            .or_insert(lane_index);
         let cursor = self.lane_cursors.get(lane_index).copied().unwrap_or(0);
         let (action, action_count, lane_id) = {
             let scenario = self.v2()?;
@@ -412,7 +411,7 @@ impl FakeState {
                 "scenario first mismatch: lane {lane_id} already consumed"
             )));
         };
-        self.require_v2_user_text(prompt, action.user_text())?;
+        self.validate_and_commit_v2_action(lane_index, cursor, prompt, &action)?;
         self.trace(&format!(
             "lane={lane_id} action={cursor} prompt_id={}",
             prompt.agent_prompt_id
@@ -421,8 +420,6 @@ impl FakeState {
             agent_prompt_id: prompt.agent_prompt_id.clone(),
             originator: prompt.originator.clone(),
         }))?;
-        self.lane_cursors[lane_index] += 1;
-        self.persist_cursors()?;
         self.trace(&format!(
             "lane={lane_id} action={cursor} matched remaining={}",
             action_count - self.lane_cursors[lane_index]
@@ -430,6 +427,31 @@ impl FakeState {
 
         match action {
             ScenarioActionV2::Text { response, .. } => {
+                handle.emit(Event::ProviderResponseFinished(finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
+            ScenarioActionV2::DummyToolCall { call_id, .. } => {
+                let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
+                handle.emit(Event::ProviderResponseFinished(finished(
+                    prompt,
+                    vec![ContextItem::ToolCall(ToolCallItem {
+                        call_id,
+                        name: tool_name,
+                        tool_type: ToolType::Function,
+                        arguments: CborValue::Map(Vec::new()),
+                        raw_arguments_json: Some("{}".to_owned()),
+                        responses_envelope: None,
+                    })],
+                    ProviderStopReason::ToolCalls,
+                )))
+            }
+            ScenarioActionV2::DummyToolResult {
+                call_id, response, ..
+            } => {
+                let _ = call_id;
                 handle.emit(Event::ProviderResponseFinished(finished(
                     prompt,
                     vec![assistant_message(response)],
@@ -623,6 +645,67 @@ impl FakeState {
         self.require_user_text(0, prompt, expected)
     }
 
+    fn validate_v2_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
+            ScenarioActionV2::DummyToolCall { .. } => {
+                let tool_name = tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME;
+                let expected_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                });
+                if prompt.tools.len() != 1
+                    || prompt.tools[0].name.as_str() != tool_name
+                    || prompt.tools[0].tool_type != ToolType::Function
+                    || prompt.tools[0].parameters.as_ref() != Some(&expected_schema)
+                {
+                    return Err(self.mismatch(cursor, "dummy tool snapshot mismatch"));
+                }
+            }
+            ScenarioActionV2::DummyToolResult { call_id, .. } => {
+                let results = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if results.len() != 1
+                    || results[0].call_id != *call_id
+                    || results[0].tool_type != ToolType::Function
+                    || results[0].status != tau_proto::ToolResultStatus::Success
+                    || results[0].output.body != "restart succeeded"
+                {
+                    return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn validate_and_commit_v2_action(
+        &mut self,
+        lane_index: usize,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        self.require_v2_user_text(prompt, action.user_text())?;
+        self.validate_v2_action(cursor, prompt, action)?;
+        self.agent_lanes
+            .entry(prompt.agent_id.clone())
+            .or_insert(lane_index);
+        self.lane_cursors[lane_index] += 1;
+        self.persist_cursors()
+    }
+
     fn persist_cursors(&self) -> ClientResult<()> {
         let Some(path) = &self.checkpoint else {
             return Ok(());
@@ -738,6 +821,8 @@ impl ScenarioActionV2 {
     fn user_text(&self) -> &str {
         match self {
             Self::Text { user_text, .. }
+            | Self::DummyToolCall { user_text, .. }
+            | Self::DummyToolResult { user_text, .. }
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }

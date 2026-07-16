@@ -3651,17 +3651,21 @@ dependencies = [
 name = "tau-e2e-tests"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "image",
+ "nix",
  "serde",
  "serde_json",
  "tau-client",
  "tau-config",
+ "tau-core",
  "tau-ext-test-dummy",
  "tau-harness",
  "tau-proto",
  "tau-socket",
  "tau-vcr",
  "tempfile",
+ "vt100",
 ]
 
 [[package]]

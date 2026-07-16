@@ -33,10 +33,14 @@ it does not scrub the ordinary child OS environment.
 eight exact `ctx_id` lanes with independent bounded cursors. It supports typed
 terminal errors, exact cancellation holds with hard timeouts, deliberate
 disconnect, and named barriers whose participants must all submit before any
-lane completes. A barrier is the lane's sole action, appears once per distinct
+lane completes. It also has one narrow adjacent action pair for the allowlisted
+`restart_test_dummy` empty-argument call and exact successful result; arbitrary
+tool names, arguments, and results remain outside the grammar. A barrier is the lane's sole action, appears once per distinct
 participant lane, and has one consistent bounded participant count, preventing
-same-lane and cyclic barrier plans. Initial `ctx_id` binds an agent to one lane; continuations
-cannot change that binding. The fake subscribes only to live prompt/cancel
+same-lane and cyclic barrier plans. Initial `ctx_id` binds an agent to one lane.
+The public terminal UI supplies no initial `ctx_id`, so an unbound first prompt
+may select the sole configured lane; multi-lane scenarios still require an exact
+`ctx_id`. Continuations cannot change that binding. The fake subscribes only to live prompt/cancel
 traffic, so restored event replay cannot consume actions.
 
 V2 cursors and immutable agent-to-lane bindings are atomically checkpointed in
@@ -56,10 +60,11 @@ This boundary validates extension supervision, CBOR lifecycle, model routing,
 prompt assembly, provider-event validation, one real tool continuation, typed
 terminal error projection, exact cancellation, bounded provider stalls, fatal
 provider-disconnect handling without restart, lane isolation, durable session
-projection, and clean restore/shutdown. Sequential error then success is two
+projection, clean restore/shutdown, and the spawned public terminal's completed
+tool projection across one quiescent cold resume. Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,
 production retry scheduling, crash-exact replay, universal packaging, or
-terminal rendering. Live/VCR and transcript-replay fixtures remain separate.
+broad terminal rendering fidelity. Live/VCR and transcript-replay fixtures remain separate.
 
 Refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).

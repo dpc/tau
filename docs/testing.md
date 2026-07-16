@@ -62,16 +62,23 @@ test-only `tau-e2e-fake-provider` by exact path through normal extension
 supervision. Its strict inline `ScenarioV1` drives synthetic streaming and a
 real deterministic `tau-ext-test-dummy` tool continuation. `ScenarioV2` adds
 bounded exact-correlation lanes for typed failures, cancellation/timeout,
-barriers, fatal disconnect, and quiescent same-agent restore. Embedded and
+barriers, fatal disconnect, quiescent same-agent restore, and one closed
+`restart_test_dummy` call/result pair. Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption
 acknowledgement retain the private generated configuration, scenario, durable
 event log, extension stderr, and bounded semantic provider trace.
 
-This lane validates the harness/provider protocol boundary and headless durable
-flow. It does not validate provider-builtin, upstream ChatGPT lowering/parsing,
-WebSocket behavior, production retries, universal packaging, or terminal
-rendering; keep those tests in their owning layers.
+The Unix-only `core_resume` target additionally launches the exact universal
+Tau binary under a fixed PTY for a fresh boot and explicit
+`tau -r <session-id>` boot. Its VT model checks the completed dummy row is always
+terminal throughout Boot B historical restoration and the fresh resumed turn;
+Boot A is allowed to show the ordinary live pending state before completion.
+A side UI observer preserves replay metadata and typed CBOR
+store reads prove identity and prefix/suffix durability. This is one narrow
+known-bug terminal projection gate, not broad rendering fidelity. The lane does
+not validate provider-builtin, upstream ChatGPT lowering/parsing, WebSocket
+behavior, production retries, or crash-exact replay.
 
 `ci.deterministicE2eTests` is a mandatory selfci derivation. Its exact target
 plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox

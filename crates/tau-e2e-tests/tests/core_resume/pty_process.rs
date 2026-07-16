@@ -1,0 +1,639 @@
+//! Fixed-size Unix PTY child with bounded VT capture and process-group cleanup.
+
+#![cfg(unix)]
+
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use nix::poll::{PollFd, PollFlags, poll};
+use nix::pty::{Winsize, openpty};
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::unistd::Pid;
+
+const COLS: u16 = 120;
+const ROWS: u16 = 40;
+const MAX_RAW_BYTES: usize = 256 * 1024;
+const MAX_FRAMES: usize = 512;
+
+/// Shared bounded terminal observations produced by the PTY reader.
+struct Capture {
+    /// Bounded raw PTY suffix for failure diagnostics.
+    raw: Vec<u8>,
+    /// Normalized semantic frames in observation order.
+    frames: VecDeque<String>,
+    /// Latest VT parser state.
+    parser: vt100::Parser,
+    /// Whether the PTY reader reached EOF.
+    closed: bool,
+    /// First forbidden historical pending/progress tool row, retained forever.
+    tool_violation: Option<String>,
+    /// Whether completed historical tool activity is forbidden for this boot.
+    tool_latch_armed: bool,
+}
+
+/// Test-only synchronization at one exact post-read/pre-processing boundary.
+#[cfg(test)]
+struct ReaderHook {
+    /// One-based read number that must block.
+    target_read: usize,
+    /// Count of completed kernel reads.
+    reads: AtomicUsize,
+    /// Notification that target read bytes are present in memory.
+    captured: mpsc::SyncSender<()>,
+    /// Notification after one read's continuous artifacts are fully written.
+    artifact_written: mpsc::SyncSender<usize>,
+    /// Release sent after the test raises cooperative stop.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+/// One exact Tau process attached to a real pseudo-terminal.
+pub(super) struct PtyProcess {
+    /// Spawned Tau child, which is also the private process-group leader.
+    child: Option<Child>,
+    /// Writable clone of the PTY master.
+    writer: Option<File>,
+    /// Shared captured terminal state and wakeup generation.
+    capture: Arc<(Mutex<Capture>, Condvar)>,
+    /// Reader worker joined after the child process tree is gone.
+    reader: Option<thread::JoinHandle<()>>,
+    /// Bounded notification that the reader worker reached EOF.
+    reader_done: mpsc::Receiver<()>,
+    /// Cooperative bounded stop for the poll-based PTY reader.
+    reader_stop: Arc<AtomicBool>,
+}
+
+impl PtyProcess {
+    /// Spawns `command` in a fresh session with fixed terminal dimensions.
+    pub(super) fn spawn(
+        mut command: Command,
+        tool_latch_armed: bool,
+        artifacts: Option<(PathBuf, PathBuf)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let pty = openpty(
+            Some(&Winsize {
+                ws_row: ROWS,
+                ws_col: COLS,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            }),
+            None,
+        )?;
+        let master = File::from(pty.master);
+        let slave = File::from(pty.slave);
+        command
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        // SAFETY: `setsid` and `ioctl(TIOCSCTTY)` are async-signal-safe, use
+        // only the already-installed PTY stdin descriptor, and run before exec.
+        #[allow(unsafe_code)]
+        unsafe {
+            command.pre_exec(move || {
+                if nix::libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn()?;
+        let writer = master.try_clone()?;
+        let capture = Arc::new((
+            Mutex::new(Capture {
+                raw: Vec::new(),
+                frames: VecDeque::new(),
+                parser: vt100::Parser::new(ROWS, COLS, 2_000),
+                closed: false,
+                tool_violation: None,
+                tool_latch_armed,
+            }),
+            Condvar::new(),
+        ));
+        let reader_capture = Arc::clone(&capture);
+        let (reader_finished, reader_done) = mpsc::channel();
+        let reader_stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&reader_stop);
+        let reader = thread::spawn(move || {
+            read_pty(master, &reader_capture, &stop, artifacts.as_ref(), None);
+            let _ = reader_finished.send(());
+        });
+        Ok(Self {
+            child: Some(child),
+            writer: Some(writer),
+            capture,
+            reader: Some(reader),
+            reader_done,
+            reader_stop,
+        })
+    }
+
+    /// Sends one submitted terminal line.
+    pub(super) fn send_line(&mut self, line: &str) -> Result<(), std::io::Error> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("PTY writer closed"))?;
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\r")?;
+        writer.flush()
+    }
+
+    /// Waits until the normalized current screen contains `needle`.
+    pub(super) fn wait_for(
+        &self,
+        needle: &str,
+        deadline: Instant,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            let frame = normalized_screen(&capture.parser);
+            if frame.contains(needle) {
+                return Ok(frame);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err(format!(
+                    "timed out waiting for terminal `{needle}`; last frame:\n{frame}"
+                )
+                .into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
+    /// Waits for the real empty editable prompt with the VT cursor on its row.
+    pub(super) fn wait_ready(
+        &self,
+        deadline: Instant,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            let frame = normalized_screen(&capture.parser);
+            if prompt_ready(&capture.parser) {
+                return Ok(frame);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err(format!(
+                    "timed out waiting for editable terminal prompt; last frame:\n{frame}"
+                )
+                .into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
+    /// Fails if any byte-wise VT state ever showed the completed dummy call as
+    /// pending or progress, even when later output replaced it in the same
+    /// read.
+    pub(super) fn require_no_tool_violation(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        if let Some(row) = &capture.tool_violation {
+            return Err(format!("completed tool transiently became active: {row}").into());
+        }
+        Ok(())
+    }
+
+    /// Atomically verifies and disarms the Boot-B historical-tool monitor after
+    /// the fresh turn has reached terminal VT readiness.
+    pub(super) fn finish_tool_monitoring(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        if let Some(row) = &capture.tool_violation {
+            return Err(format!("completed tool transiently became active: {row}").into());
+        }
+        capture.tool_latch_armed = false;
+        Ok(())
+    }
+
+    /// Returns the bounded raw terminal suffix for retained diagnostics.
+    pub(super) fn raw(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(self
+            .capture
+            .0
+            .lock()
+            .map_err(|_| "PTY capture poisoned")?
+            .raw
+            .clone())
+    }
+
+    /// Requests `/quit`, then reaps the whole owned process tree within bounds.
+    pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.send_line("/quit")?;
+        let status = self.reap(Duration::from_secs(3))?;
+        if !status.success() {
+            return Err(format!("Tau PTY process exited with {status}").into());
+        }
+        Ok(())
+    }
+
+    /// Reaps the child, escalating to process-group termination on deadline.
+    fn reap(
+        &mut self,
+        graceful: Duration,
+    ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+        self.reader_stop.store(true, Ordering::Release);
+        let child = self.child.as_mut().ok_or("PTY child already reaped")?;
+        let pgid = Pid::from_raw(child.id() as i32);
+        let first_deadline = Instant::now() + graceful;
+        let mut status = None;
+        while Instant::now() < first_deadline {
+            status = status.or(child.try_wait()?);
+            if status.is_some() && !process_group_exists(pgid) {
+                break;
+            }
+            thread::yield_now();
+        }
+        if process_group_exists(pgid) {
+            let _ = killpg(pgid, Signal::SIGTERM);
+            let term_deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < term_deadline && process_group_exists(pgid) {
+                status = status.or(child.try_wait()?);
+                thread::yield_now();
+            }
+        }
+        if process_group_exists(pgid) {
+            let _ = killpg(pgid, Signal::SIGKILL);
+            let kill_deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < kill_deadline && process_group_exists(pgid) {
+                status = status.or(child.try_wait()?);
+                thread::yield_now();
+            }
+        }
+        if process_group_exists(pgid) {
+            return Err("PTY process group survived SIGKILL deadline".into());
+        }
+        let status = match status {
+            Some(status) => status,
+            None => child.wait()?,
+        };
+        self.child.take();
+        self.writer.take();
+        if self
+            .reader_done
+            .recv_timeout(Duration::from_secs(1))
+            .is_err()
+        {
+            self.reader.take();
+            return Err("PTY reader did not close within cleanup deadline".into());
+        }
+        if let Some(reader) = self.reader.take() {
+            reader.join().map_err(|_| "PTY reader panicked")?;
+        }
+        Ok(status)
+    }
+}
+
+impl Drop for PtyProcess {
+    fn drop(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        let _ = self.reap(Duration::ZERO);
+    }
+}
+
+fn read_pty(
+    mut master: File,
+    capture: &Arc<(Mutex<Capture>, Condvar)>,
+    stop: &AtomicBool,
+    artifacts: Option<&(PathBuf, PathBuf)>,
+    #[cfg(test)] hook: Option<&ReaderHook>,
+) {
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let ready = {
+            let mut descriptors = [PollFd::new(
+                master.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            )];
+            match poll(&mut descriptors, 100_u16) {
+                Ok(0) => continue,
+                Ok(_) => descriptors[0].revents().unwrap_or_else(PollFlags::empty),
+                Err(_) => break,
+            }
+        };
+        if ready.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
+            break;
+        }
+        match master.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let (lock, wake) = &**capture;
+                let Ok(mut capture) = lock.lock() else {
+                    return;
+                };
+                capture.raw.extend_from_slice(&buffer[..read]);
+                if capture.raw.len() > MAX_RAW_BYTES {
+                    let excess = capture.raw.len() - MAX_RAW_BYTES;
+                    capture.raw.drain(..excess);
+                }
+                #[cfg(test)]
+                let read_number = hook.map(|hook| hook.reads.fetch_add(1, Ordering::AcqRel) + 1);
+                #[cfg(test)]
+                if let Some(hook) = hook
+                    && read_number == Some(hook.target_read)
+                {
+                    let _ = hook.captured.send(());
+                    let _ = hook
+                        .release
+                        .lock()
+                        .map_err(|_| ())
+                        .and_then(|release| release.recv().map_err(|_| ()));
+                }
+                let complete = process_capture_bytes(&mut capture, &buffer[..read], |_: usize| {
+                    stop.load(Ordering::Acquire)
+                });
+                if !complete {
+                    wake.notify_all();
+                    break;
+                }
+                let frame = normalized_screen(&capture.parser);
+                if capture.frames.back() != Some(&frame) {
+                    capture.frames.push_back(frame.clone());
+                    if capture.frames.len() > MAX_FRAMES {
+                        capture.frames.pop_front();
+                    }
+                }
+                if let Some((raw_path, frame_path)) = artifacts {
+                    let _ = std::fs::write(raw_path, &capture.raw);
+                    let _ = std::fs::write(frame_path, frame.as_bytes());
+                }
+                #[cfg(test)]
+                if let (Some(hook), Some(read_number)) = (hook, read_number) {
+                    let _ = hook.artifact_written.send(read_number);
+                }
+                wake.notify_all();
+            }
+        }
+    }
+    let (lock, wake) = &**capture;
+    if let Ok(mut capture) = lock.lock() {
+        capture.closed = true;
+        wake.notify_all();
+    }
+}
+
+fn process_capture_bytes(
+    capture: &mut Capture,
+    bytes: &[u8],
+    mut should_stop: impl FnMut(usize) -> bool,
+) -> bool {
+    for (index, byte) in bytes.iter().enumerate() {
+        if should_stop(index) {
+            return false;
+        }
+        if byte.is_ascii_control() {
+            latch_tool_violation(capture);
+        }
+        capture.parser.process(std::slice::from_ref(byte));
+        if index % 64 == 63 || index + 1 == bytes.len() || matches!(*byte, b'\r' | b'\n') {
+            latch_tool_violation(capture);
+        }
+    }
+    true
+}
+
+fn latch_tool_violation(capture: &mut Capture) {
+    if capture.tool_latch_armed
+        && capture.tool_violation.is_none()
+        && let Some(row) = normalized_screen(&capture.parser)
+            .lines()
+            .find(|line| line.contains("restart_test_dummy"))
+        && (row.contains("pending") || row.contains('…'))
+    {
+        capture.tool_violation = Some(row.to_owned());
+    }
+}
+
+fn normalized_screen(parser: &vt100::Parser) -> String {
+    parser
+        .screen()
+        .contents()
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn prompt_ready(parser: &vt100::Parser) -> bool {
+    let (cursor_row, _) = parser.screen().cursor_position();
+    parser
+        .screen()
+        .contents()
+        .lines()
+        .enumerate()
+        .any(|(row, line)| {
+            row as u16 == cursor_row
+                && line.contains("Write a message to main...")
+                && !line.contains("pending")
+        })
+}
+
+fn process_group_exists(pgid: Pid) -> bool {
+    match kill(Pid::from_raw(-pgid.as_raw()), None) {
+        Ok(()) | Err(nix::errno::Errno::EPERM) => true,
+        Err(nix::errno::Errno::ESRCH) => false,
+        Err(_) => true,
+    }
+}
+
+/// Ensures the sticky oracle catches a pending-to-ok repaint even when both
+/// frames arrive in one kernel read.
+#[test]
+fn bytewise_capture_latches_pending_before_same_read_terminal_repaint() {
+    let mut capture = Capture {
+        raw: Vec::new(),
+        frames: VecDeque::new(),
+        parser: vt100::Parser::new(ROWS, COLS, 10),
+        closed: false,
+        tool_violation: None,
+        tool_latch_armed: true,
+    };
+    process_capture_bytes(
+        &mut capture,
+        b"restart_test_dummy pending\r\x1b[2Krestart_test_dummy ok",
+        |_| false,
+    );
+    assert!(capture.tool_violation.is_some());
+    assert!(normalized_screen(&capture.parser).contains("restart_test_dummy ok"));
+}
+
+/// Ensures cursor-repositioning C0 controls cannot erase a pending state before
+/// the sticky VT oracle observes it.
+#[test]
+fn bytewise_capture_latches_pending_before_backspace_overwrite() {
+    let mut capture = Capture {
+        raw: Vec::new(),
+        frames: VecDeque::new(),
+        parser: vt100::Parser::new(ROWS, COLS, 10),
+        closed: false,
+        tool_violation: None,
+        tool_latch_armed: true,
+    };
+    process_capture_bytes(
+        &mut capture,
+        b"restart_test_dummy pending\x08\x08\x08\x08\x08\x08\x08ok     ",
+        |_| false,
+    );
+    assert!(capture.tool_violation.is_some());
+}
+
+/// Ensures an armed near-max chunk honors a cooperative mid-chunk stop while
+/// retaining the already-observed violation and bounded raw diagnostic.
+#[test]
+fn armed_capture_stops_mid_chunk_without_losing_prior_violation() {
+    let mut capture = Capture {
+        raw: Vec::new(),
+        frames: VecDeque::new(),
+        parser: vt100::Parser::new(ROWS, COLS, 10),
+        closed: false,
+        tool_violation: None,
+        tool_latch_armed: true,
+    };
+    let mut bytes = b"restart_test_dummy pending\r".to_vec();
+    bytes.resize(MAX_RAW_BYTES, b'x');
+    capture.raw.extend_from_slice(&bytes);
+    let stop_at = b"restart_test_dummy pending\r".len() + 128;
+    let started = Instant::now();
+    let complete = process_capture_bytes(&mut capture, &bytes, |index| index >= stop_at);
+    assert!(!complete);
+    assert!(capture.tool_violation.is_some());
+    assert_eq!(capture.raw.len(), MAX_RAW_BYTES);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// Ensures the real reader thread acknowledges stop within bounds without
+/// rewriting the last valid continuous artifact after a large queued chunk.
+#[test]
+fn reader_thread_stop_preserves_last_pre_stop_artifact() {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: ROWS,
+            ws_col: COLS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .expect("open pty");
+    let master = File::from(pty.master);
+    let mut slave = File::from(pty.slave);
+    let capture = Arc::new((
+        Mutex::new(Capture {
+            raw: Vec::new(),
+            frames: VecDeque::new(),
+            parser: vt100::Parser::new(ROWS, COLS, 10),
+            closed: false,
+            tool_violation: None,
+            tool_latch_armed: true,
+        }),
+        Condvar::new(),
+    ));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let raw_path = tempdir.path().join("raw");
+    let frame_path = tempdir.path().join("frame");
+    let artifacts = (raw_path.clone(), frame_path.clone());
+    let reader_capture = Arc::clone(&capture);
+    let reader_stop = Arc::clone(&stop);
+    let (done_tx, done_rx) = mpsc::channel();
+    let (captured_tx, captured_rx) = mpsc::sync_channel(0);
+    let (artifact_tx, artifact_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let hook = Arc::new(ReaderHook {
+        target_read: 2,
+        reads: AtomicUsize::new(0),
+        captured: captured_tx,
+        artifact_written: artifact_tx,
+        release: Mutex::new(release_rx),
+    });
+    let reader_hook = Arc::clone(&hook);
+    let reader = thread::spawn(move || {
+        read_pty(
+            master,
+            &reader_capture,
+            &reader_stop,
+            Some(&artifacts),
+            Some(&reader_hook),
+        );
+        let _ = done_tx.send(());
+    });
+
+    slave.write_all(b"last-valid-frame").expect("seed output");
+    slave.flush().expect("flush seed");
+    assert_eq!(
+        artifact_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("seed artifact completion"),
+        1
+    );
+    let raw_before = std::fs::read(&raw_path).expect("pre-stop raw artifact");
+    let frame_before = std::fs::read(&frame_path).expect("pre-stop frame artifact");
+    slave
+        .write_all(&vec![b'x'; 8 * 1024])
+        .expect("queue large chunk");
+    captured_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reader captured queued chunk");
+    stop.store(true, Ordering::Release);
+    release_tx.send(()).expect("release reader");
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("bounded reader acknowledgement");
+    reader.join().expect("reader join");
+    let captured = capture.0.lock().expect("capture");
+    assert!(captured.raw.len() > raw_before.len());
+    assert!(captured.raw.contains(&b'x'));
+    assert_eq!(std::fs::read(&raw_path).expect("raw artifact"), raw_before);
+    assert_eq!(
+        std::fs::read(&frame_path).expect("frame artifact"),
+        frame_before
+    );
+}
+
+/// Ensures cleanup does not stop at a successfully exited leader and escalates
+/// against a surviving same-session descendant that ignores SIGTERM.
+#[test]
+fn cleanup_reaps_descendant_after_process_group_leader_exits() {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(
+        "trap '' HUP TERM; \
+         (trap '' HUP TERM; printf descendant-ready; while :; do :; done) & \
+         exit 0",
+    );
+    let mut process =
+        PtyProcess::spawn(command, false, None).expect("spawn adversarial process group");
+    process
+        .wait_for("descendant-ready", Instant::now() + Duration::from_secs(1))
+        .expect("descendant readiness");
+    let started = Instant::now();
+    let status = process
+        .reap(Duration::from_millis(20))
+        .expect("bounded group cleanup");
+    assert!(status.success());
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(started.elapsed() < Duration::from_secs(3));
+}

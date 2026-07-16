@@ -35,7 +35,8 @@ pub struct ScenarioV2 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioLaneV2 {
-    /// Exact `ctx_id` copied from the lane's initial UI submission.
+    /// Exact `ctx_id` copied from the lane's initial UI submission. A one-lane
+    /// public-PTY scenario may bind its first agent when the UI supplies no id.
     pub ctx_id: String,
     /// Exact ordered actions for this lane.
     pub actions: Vec<ScenarioActionV2>,
@@ -50,6 +51,22 @@ pub enum ScenarioActionV2 {
         /// Exact latest user text.
         user_text: String,
         /// Complete assistant response.
+        response: String,
+    },
+    /// Request the one allowlisted no-side-effect dummy tool.
+    DummyToolCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+    },
+    /// Accept the correlated successful dummy result and finish with text.
+    DummyToolResult {
+        /// Exact latest user text retained in the provider continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant response after the tool result.
         response: String,
     },
     /// Complete with a typed terminal provider error.
