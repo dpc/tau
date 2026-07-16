@@ -31,6 +31,11 @@ function job_cargo() {
   if ! nix build -L .#ci.vcrTests ; then
     selfci step fail
   fi
+
+  selfci step start "deterministic provider E2E"
+  if ! nix build -L .#ci.deterministicE2eTests ; then
+    selfci step fail
+  fi
 }
 
 function job_site() {

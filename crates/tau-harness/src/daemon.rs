@@ -4,6 +4,7 @@
 //! Listener cancellation follows
 //! `DESIGN-tau-harness-reactive-listener-shutdown`.
 
+use std::collections::BTreeSet;
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -153,6 +154,11 @@ pub struct EmbeddedOptions {
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
+    /// Ignore all process-environment startup override transports.
+    #[builder(default)]
+    pub ignore_startup_environment: bool,
+    /// Exact allowed resolved extension instance names, when constrained.
+    pub allowed_extensions: Option<BTreeSet<tau_proto::ExtensionName>>,
 }
 
 /// Binds a daemon-owned listener using tau-socket safe stale-path handling.
@@ -429,22 +435,22 @@ pub fn run_embedded_message_with_options(
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
-    let (config, dirs) = match options.dirs {
-        Some(dirs) => {
-            let config = resolve_config_in(&dirs)
-                .map_err(|error| HarnessError::Participant(error.to_string()))?;
-            (config, dirs)
-        }
-        None => {
-            let dirs = tau_config::settings::TauDirs {
-                config_dir: Some(state_dir.join("config")),
-                state_dir: Some(state_dir.join("runtime")),
-            };
-            let config = resolve_config(None)
-                .map_err(|error| HarnessError::Participant(error.to_string()))?;
-            (config, dirs)
-        }
-    };
+    let explicit_dirs = options.dirs.is_some();
+    let dirs = options
+        .dirs
+        .unwrap_or_else(|| tau_config::settings::TauDirs {
+            config_dir: Some(state_dir.join("config")),
+            state_dir: Some(state_dir.join("runtime")),
+        });
+    let config = if options.ignore_startup_environment {
+        crate::settings::resolve_config_in_without_environment(&dirs)
+    } else if explicit_dirs {
+        resolve_config_in(&dirs)
+    } else {
+        resolve_config(None)
+    }
+    .map_err(|error| HarnessError::Participant(error.to_string()))?;
+    validate_allowed_extensions(&config, options.allowed_extensions.as_ref())?;
     let mut harness = Harness::from_config(
         &config,
         &state_dir,
@@ -463,6 +469,27 @@ pub fn run_embedded_message_with_options(
     harness.shutdown()?;
     outcome.lifecycle_messages = harness.lifecycle_messages.clone();
     Ok(outcome)
+}
+
+fn validate_allowed_extensions(
+    config: &crate::settings::Config,
+    allowed: Option<&BTreeSet<tau_proto::ExtensionName>>,
+) -> Result<(), HarnessError> {
+    let Some(allowed) = allowed else {
+        return Ok(());
+    };
+    let actual = config
+        .extensions
+        .keys()
+        .cloned()
+        .map(tau_proto::ExtensionName::from)
+        .collect::<BTreeSet<_>>();
+    if &actual != allowed {
+        return Err(HarnessError::Participant(format!(
+            "resolved extensions differ from deterministic allowlist: expected {allowed:?}, got {actual:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Like [`run_embedded_message_with_trace`] but uses the echo provider and

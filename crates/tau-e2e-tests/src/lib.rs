@@ -1,16 +1,19 @@
-//! Fixtures for Tau's multiprocess VCR end-to-end tests.
+//! Fixtures for Tau's deterministic and VCR multiprocess end-to-end tests.
 //!
-//! These helpers are opt-in integration fixtures, not hermetic unit-test
-//! sandboxes. They run a trusted local `tau` binary, use the user's normal
-//! provider authentication store through the provider extension, and let the
-//! shell extension execute commands with the user's permissions. The fixture
-//! isolates Tau harness/config/session state for the test turn, but
-//! deliberately does not rewrite process-wide XDG environment variables.
-//! The fixture's trust and cassette boundaries are summarized in
-//! `ARCH-tau-e2e-tests`.
+//! [`DeterministicFixture`] is always-on, uses only exact test subprocesses and
+//! synthetic inputs below a private root, and ignores ambient Tau startup
+//! overrides. [`VcrFixture`] is opt-in and non-hermetic: it uses a trusted
+//! local `tau`, normal provider authentication, and the shell extension with
+//! user permissions. See `ARCH-tau-e2e-tests` and the crate `SECURITY.md`.
+
+mod deterministic_fixture;
+pub mod fake_provider;
+pub mod scenario;
 
 use std::path::{Path, PathBuf};
 
+pub use deterministic_fixture::DeterministicFixture;
+pub use scenario::{FAKE_MODEL_ID, ScenarioTurnV1, ScenarioV1};
 use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
 use tempfile::TempDir;
 
@@ -244,7 +247,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|ch| match ch {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,

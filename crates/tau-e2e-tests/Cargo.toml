@@ -16,8 +16,11 @@ workspace = true
 
 [dependencies]
 image.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tau-client.workspace = true
 tau-config.workspace = true
+tau-ext-test-dummy.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true
 tau-vcr.workspace = true

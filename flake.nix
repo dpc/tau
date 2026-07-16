@@ -229,6 +229,27 @@
               doCheck = false;
             };
 
+            # Always-on fake-provider acceptance. Nix's build sandbox denies
+            # Internet access; the exact filter and no-tests policy prevent skips.
+            deterministicE2eTests = craneLib.mkCargoDerivation {
+              pname = "${projectName}-deterministic-e2e";
+              cargoArtifacts = workspace;
+              buildPhaseCargoCommand = ''
+                # Poison one ambient startup transport. The fixture must ignore
+                # it and still prove its exact extension allowlist.
+                export TAU_ENABLE_EXTENSIONS=core-shell
+                cargo nextest run --locked \
+                  -p tau-e2e-tests \
+                  --test deterministic_provider \
+                  --cargo-profile $CARGO_PROFILE \
+                  --no-tests=fail
+                mkdir -p "$out"
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ pkgs.cargo-nextest ];
+              doCheck = false;
+            };
+
             clippy = craneLib.cargoClippy {
               cargoArtifacts = workspaceDeps;
               cargoClippyExtraArgs = "-- -D warnings";
@@ -496,6 +517,7 @@
             workspace
             clippy
             tests
+            deterministicE2eTests
             vcrTests
             workspaceCcov
             testsCcov

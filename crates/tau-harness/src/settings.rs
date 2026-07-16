@@ -757,6 +757,22 @@ pub(crate) fn resolve_config_in(
     resolve_config_in_with_extension_cli_overrides(dirs, &[])
 }
 
+/// Resolve one explicit directory layout without process-environment startup
+/// transports. Deterministic embedded callers use this to prevent ambient CLI
+/// compatibility variables from altering their generated configuration.
+pub(crate) fn resolve_config_in_without_environment(
+    dirs: &tau_config::settings::TauDirs,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let settings = tau_config::settings::load_harness_settings_in(dirs)?;
+    let resolved_extensions = resolve_extensions_with_environment_and_cli_overrides(
+        &settings,
+        builtin_extensions(),
+        &[],
+        &[],
+    )?;
+    Ok(config_from_resolved_extensions(resolved_extensions))
+}
+
 fn resolve_config_in_with_extension_cli_overrides(
     dirs: &tau_config::settings::TauDirs,
     extension_overrides: &[ExtensionCliOverride],
@@ -780,7 +796,11 @@ fn resolve_config_in_with_extension_cli_overrides(
         &environment_names,
         extension_overrides,
     )?;
-    Ok(Config {
+    Ok(config_from_resolved_extensions(resolved_extensions))
+}
+
+fn config_from_resolved_extensions(resolved_extensions: ResolvedExtensions) -> Config {
+    Config {
         core: CoreConfig {
             mode: CoreMode::Embedded,
         },
@@ -790,7 +810,7 @@ fn resolve_config_in_with_extension_cli_overrides(
             .map(|extension| (extension.name.clone(), extension))
             .collect(),
         extension_startup_diagnostics: resolved_extensions.diagnostics,
-    })
+    }
 }
 
 #[cfg(test)]

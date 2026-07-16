@@ -55,6 +55,28 @@ regression coverage. Reusable steps live in
 
 ## Provider response streaming tests
 
+### Deterministic full-harness provider acceptance
+
+`tau-e2e-tests` has an always-on `DeterministicFixture` that launches the
+test-only `tau-e2e-fake-provider` by exact path through normal extension
+supervision. Its strict inline `ScenarioV1` drives synthetic streaming and a
+real deterministic `tau-ext-test-dummy` tool continuation without credentials,
+network, shell, sleeps, or a VCR gate. Panics and `run_turn` failures retain the
+private generated configuration, scenario, durable event log, extension stderr,
+and bounded semantic prompt trace.
+
+This lane validates the harness/provider protocol boundary and headless durable
+flow. It does not validate provider-builtin, upstream ChatGPT lowering/parsing,
+WebSocket behavior, production retries, universal packaging, or terminal
+rendering; keep those tests in their owning layers.
+
+`ci.deterministicE2eTests` is a mandatory selfci derivation. Its exact target
+plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox
+denies network access independently of the fixture implementation.
+Focused fake-provider unit tests own strict Configure grammar, resource bounds,
+and diagnostic truncation; the subprocess E2Es own representative lifecycle,
+routing, streaming, mismatch, tool continuation, persistence, and shutdown.
+
 Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.
 
 Provider streaming tests must also assert response/progress rate-limit boundaries: non-terminal `provider.response_updated` frames for one prompt publish the first non-empty streamed output sample promptly, suppress empty zero-byte idle samples until the first one-second deadline, batch later non-terminal samples to at most one per second, allow stats-only/no-byte samples as valid liveness updates once due, preserve suppressed visible deltas, and allow a terminal flush to publish the final batched suffix immediately before `provider.response_finished`. Previous/current response-stat assertions should prove that `previous` equals the last emitted provider sample, not an internal suppressed calculation. Tests should also prove response bytes are recorded at the backend transport receive boundary before semantic parsing.

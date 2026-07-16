@@ -3,6 +3,8 @@
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
+The distinct deterministic and live/VCR test-fixture boundaries are documented
+in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
 Authenticated ChatGPT quota acquisition and its credential-free lifecycle are
 documented in
 [`tau-provider-chatgpt/SECURITY.md`](crates/tau-provider-chatgpt/SECURITY.md)

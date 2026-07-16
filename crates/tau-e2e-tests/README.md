@@ -1,8 +1,26 @@
 # tau-e2e-tests
 
-Opt-in end-to-end tests for real Tau turns under VCR recording or replay.
+Hermetic deterministic end-to-end tests and separate opt-in VCR tests.
 
-## Running
+## Deterministic provider tests
+
+The default workspace test run executes a test-only fake provider as a real
+supervised subprocess. No environment opt-in, provider credential, network
+access, shell, or VCR cassette is involved:
+
+```sh
+cargo nextest run -p tau-e2e-tests --test deterministic_provider
+```
+
+The acceptance cases cover streaming/final text, a successful tool round
+through `tau-ext-test-dummy`, and startup rejection of invalid scenario config.
+The fixture retains its private artifact root on panic, including generated
+config/scenario, durable events, extension stderr, and the bounded semantic
+provider trace. See
+[`DESIGN-tau-e2e-deterministic-provider`](specs/DESIGN-tau-e2e-deterministic-provider.md)
+for the coverage ceiling.
+
+## VCR tests
 
 Required for active E2E runs:
 
