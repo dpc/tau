@@ -91,9 +91,9 @@ See [agent messaging](docs/agent-messaging.md),
 
 ## Tools, project context, and policy
 
-The shell extension provides the everyday filesystem, command, patch, search,
-and image-inspection tools used for coding. It remembers a per-agent working
-directory. Optional advisory directory locks coordinate mutations by concurrent
+Each configured shell extension instance provides everyday filesystem, command,
+patch, search, and image-inspection tools and remembers an independent per-agent
+workdir. Optional advisory directory locks coordinate mutations by concurrent
 agents and can enforce read-only isolation for inferred read-only shell calls.
 
 Tau discovers layered `AGENTS.md` instructions and reusable skills from project,

@@ -2826,11 +2826,15 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     .expect("intercept registration");
 
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
+    h.session_loaded_agents.insert(agent_id.clone());
     let key = tau_proto::AgentMetadataKey::new("ext_core-shell_cwd");
     let set = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
         key: key.clone(),
         value: CborValue::Text("/tmp".to_owned()),
+        mutation_id: Some(
+            tau_proto::AgentMetadataMutationId::parse("mutation-1").expect("mutation id"),
+        ),
         inheritable: true,
     });
     h.publish_event(None, set.clone());
@@ -2840,10 +2844,48 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     h.handle_extension_event(
         "metadata-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
+            action: InterceptAction::Pass(Some(Box::new(Event::AgentMetadataSet(
+                tau_proto::AgentMetadataSet {
+                    agent_id: tau_proto::AgentId::parse("rewritten-agent").expect("agent id"),
+                    key: tau_proto::AgentMetadataKey::new("rewritten-key"),
+                    value: CborValue::Text("/rewritten".to_owned()),
+                    mutation_id: None,
+                    inheritable: false,
+                },
+            )))),
         })),
     )
     .expect("pass set");
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentMetadataSet(committed)
+            if committed.value == CborValue::Text("/rewritten".to_owned())
+                && committed.agent_id == agent_id
+                && committed.key == key
+                && committed.inheritable
+                && committed.mutation_id.as_ref().is_some_and(|id| id.as_str() == "mutation-1")
+    )));
+
+    interceptor.lock().expect("events").clear();
+    let must_pass = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: key.clone(),
+        value: CborValue::Text("/must-pass".to_owned()),
+        mutation_id: Some(
+            tau_proto::AgentMetadataMutationId::parse("mutation-2").expect("mutation id"),
+        ),
+        inheritable: true,
+    });
+    h.publish_event(None, must_pass.clone());
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "metadata-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop tokened set");
+    assert!(event_log_events(&h).contains(&must_pass));
 
     interceptor.lock().expect("events").clear();
     let unset = Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset { agent_id, key });
@@ -2853,6 +2895,267 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     assert!(!transient, "metadata unset must be durable by default");
 
     h.shutdown().expect("shutdown");
+}
+
+/// Interceptors may rewrite progress payloads, but shell correlation/target
+/// identity remains canonical and validated terminal delivery is immutable and
+/// must-pass.
+#[test]
+fn shell_command_interception_preserves_identity_and_terminal_delivery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "shell-interceptor");
+    h.handle_extension_event(
+        "shell-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::SHELL_COMMAND_PROGRESS),
+                EventSelector::Exact(tau_proto::EventName::SHELL_COMMAND_FINISHED),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+
+    let agent_id = tau_proto::AgentId::parse("shell-agent").expect("agent id");
+    let progress = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+        command_id: "shell-progress".into(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: "original".to_owned(),
+        target_agent_id: Some(agent_id.clone()),
+    });
+    h.publish_event(None, progress.clone());
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "shell-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandProgress(
+                tau_proto::ShellCommandProgress {
+                    command_id: "redirected".into(),
+                    stream: tau_proto::ShellStream::Stderr,
+                    chunk: "rewritten".to_owned(),
+                    target_agent_id: Some(
+                        tau_proto::AgentId::parse("redirected-agent").expect("agent id"),
+                    ),
+                },
+            )))),
+        })),
+    )
+    .expect("rewrite progress");
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ShellCommandProgress(committed)
+            if committed.command_id.as_str() == "shell-progress"
+                && committed.target_agent_id.as_ref() == Some(&agent_id)
+                && committed.chunk == "rewritten"
+                && committed.stream == tau_proto::ShellStream::Stderr
+    )));
+
+    interceptor.lock().expect("events").clear();
+    let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+        command_id: "shell-finished".into(),
+        session_id: "s1".into(),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: Some(agent_id.clone()),
+        output: "original".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    });
+    h.publish_event(None, finished.clone());
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "shell-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandFinished(
+                tau_proto::ShellCommandFinished {
+                    command_id: "redirected".into(),
+                    session_id: "other-session".into(),
+                    command: "malicious".to_owned(),
+                    include_in_context: true,
+                    target_agent_id: Some(
+                        tau_proto::AgentId::parse("redirected-agent").expect("agent id"),
+                    ),
+                    output: "rewritten".to_owned(),
+                    exit_code: Some(7),
+                    cancelled: true,
+                },
+            )))),
+        })),
+    )
+    .expect("rewrite terminal");
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ShellCommandFinished(committed)
+            if committed.command_id.as_str() == "shell-finished"
+                && committed.session_id.as_str() == "s1"
+                && committed.command == "pwd"
+                && !committed.include_in_context
+                && committed.target_agent_id.as_ref() == Some(&agent_id)
+                && committed.output == "original"
+                && committed.exit_code == Some(0)
+                && !committed.cancelled
+    )));
+
+    interceptor.lock().expect("events").clear();
+    let must_pass = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+        command_id: "shell-must-pass".into(),
+        session_id: "s1".into(),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: Some(agent_id),
+        output: "must pass".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    });
+    h.publish_event(None, must_pass.clone());
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "shell-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop terminal");
+    assert!(event_log_events(&h).contains(&must_pass));
+}
+
+/// A UI shell id remains reserved while its immutable terminal is parked in
+/// interception, then becomes reusable only after that terminal commits.
+#[test]
+fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "shell-terminal-interceptor");
+    h.handle_extension_event(
+        "shell-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SHELL_COMMAND_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let ui = connect_test_client(&mut h, "shell-terminal-ui", tau_proto::ClientKind::Ui);
+    h.bus
+        .set_subscriptions(
+            "shell-terminal-ui",
+            Vec::new(),
+            vec![EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND)],
+        )
+        .expect("subscribe ui");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    let command = tau_proto::UiShellCommand {
+        session_id: h.current_session_id.clone(),
+        command_id: "parked-ui-id".into(),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: Some(agent_id.clone()),
+    };
+    h.handle_ui_shell_command("ui", command.clone());
+    let provider_id = super::super::ui_shell_provider_ids(&h.registry)
+        .into_iter()
+        .next()
+        .expect("shell provider");
+    let first_route = h
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("first route")
+        .clone();
+    let terminal = tau_proto::ShellCommandFinished {
+        command_id: first_route.as_protocol_id().clone(),
+        session_id: command.session_id.clone(),
+        command: command.command.clone(),
+        include_in_context: false,
+        target_agent_id: Some(agent_id.clone()),
+        output: "first".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    };
+    h.handle_extension_shell_event(provider_id.as_str(), Event::ShellCommandFinished(terminal));
+    let _ = intercepted_payload(&interceptor);
+    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.active_ui_shell_command_ids.contains(&command.command_id));
+
+    h.handle_ui_shell_command("ui", command.clone());
+    assert!(h.pending_ui_shell_commands.is_empty());
+    assert_eq!(
+        ui.lock()
+            .expect("ui sink")
+            .iter()
+            .filter(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::UiShellCommand(projected))
+                    if projected.command_id == command.command_id
+            ))
+            .count(),
+        1,
+        "parked terminal keeps same-id reuse from reaching the UI"
+    );
+
+    h.handle_extension_event(
+        "shell-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("must-pass terminal");
+    assert!(!h.active_ui_shell_command_ids.contains(&command.command_id));
+
+    h.handle_ui_shell_command("ui", command.clone());
+    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    assert_eq!(
+        ui.lock()
+            .expect("ui sink")
+            .iter()
+            .filter(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::UiShellCommand(projected))
+                    if projected.command_id == command.command_id
+            ))
+            .count(),
+        2
+    );
+
+    let second_route = h
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("second route")
+        .clone();
+    h.handle_extension_shell_event(
+        provider_id.as_str(),
+        Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+            command_id: second_route.as_protocol_id().clone(),
+            session_id: command.session_id,
+            command: command.command,
+            include_in_context: false,
+            target_agent_id: Some(agent_id),
+            output: "second".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+        }),
+    );
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "shell-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit second terminal");
+    assert!(
+        !h.active_ui_shell_command_ids
+            .contains(&tau_proto::ShellCommandId::new("parked-ui-id"))
+    );
 }
 
 #[test]
@@ -2877,6 +3180,7 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
         agent_id: agent_id.clone(),
         key: tau_proto::AgentMetadataKey::new("valid"),
         value: CborValue::Text("ok".to_owned()),
+        mutation_id: None,
         inheritable: true,
     });
     h.publish_event(None, original.clone());
@@ -2884,6 +3188,7 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
         agent_id,
         key: tau_proto::AgentMetadataKey::new("too-large"),
         value: CborValue::Bytes(vec![0; tau_proto::MAX_AGENT_METADATA_VALUE_BYTES + 1]),
+        mutation_id: None,
         inheritable: true,
     });
     h.handle_extension_event(

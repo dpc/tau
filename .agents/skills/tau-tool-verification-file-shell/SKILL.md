@@ -12,6 +12,11 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Tool-specific guidelines
 
+When verifying `shell` or model-visible `shell_command`, test an explicit
+call-level `cwd` followed by an omitted-`cwd` call. The first call must execute
+in its override, while the second must use the unchanged per-instance workdir;
+no agent metadata mutation or persistent workdir notice may be emitted.
+
 `read_image` accepts exactly one PNG, JPEG, or WebP path, an optional
 `mode: high | overview`, and an optional `{x,y,width,height}` region; it has no
 multi-image or original-detail form. Bare calls and explicit high calls must

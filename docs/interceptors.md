@@ -102,9 +102,10 @@ publishes the original event instead. Current default must-pass events include
 user input and prompt lifecycle facts; agent response facts
 (`provider.response_finished`); terminal tool completion facts (`tool.result`,
 `tool.error`, `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
-`tool.background_result`, and `tool.background_error`); session lifecycle facts;
-durable session membership facts; `agent.started`; and harness-owned agent
-message projections. Treat
+`tool.background_result`, and `tool.background_error`); validated user-shell
+terminal facts (`shell.command_finished`); session lifecycle facts; durable
+session membership facts; `agent.started`; and harness-owned agent message
+projections. Treat
 `crates/tau-harness/src/harness/interception.rs` as the source of truth for that
 list. Individual harness call sites can also mark a publish as must-pass, as
 mandatory warning/critical `harness.notice` diagnostics do.
@@ -127,7 +128,8 @@ replacements are also rejected to preserve immutable facts. For mandatory
 warning/critical `harness.notice` diagnostics, immutable prompt lifecycle facts,
 `provider.response_finished`, terminal tool completion facts, session
 lifecycle/membership facts, `agent.started`, and harness-owned agent message
-projections, the harness publishes the original event instead. For mutable
+projections, and `shell.command_finished`, the harness publishes the original
+event instead. For mutable
 prompt text events, replacements may edit text but cannot change routing identity
 fields such as agent id or prompt metadata. The original
 transient metadata is preserved.

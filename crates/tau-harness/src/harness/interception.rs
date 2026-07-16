@@ -162,6 +162,9 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::TOOL_CANCELLED,
     EventName::TOOL_BACKGROUND_RESULT,
     EventName::TOOL_BACKGROUND_ERROR,
+    // A validated user-shell terminal consumes the harness's pending route.
+    // Dropping it would leave every attached UI waiting forever.
+    EventName::SHELL_COMMAND_FINISHED,
 ];
 
 fn mandatory_harness_notice(event: &Event) -> bool {
@@ -183,6 +186,37 @@ fn sanitize_harness_notice_replacement(original: &Event, replacement: &mut Event
         replacement.kind.clone_from(&original.kind);
         replacement.level = original.level;
         replacement.always_show = original.always_show;
+    }
+}
+
+fn preserve_agent_metadata_mutation_id(original: &Event, replacement: &mut Event) {
+    let (Event::AgentMetadataSet(original), Event::AgentMetadataSet(replacement)) =
+        (original, replacement)
+    else {
+        return;
+    };
+    if original.mutation_id.is_some() {
+        replacement.agent_id = original.agent_id.clone();
+        replacement.key = original.key.clone();
+        replacement.inheritable = original.inheritable;
+    }
+    replacement.mutation_id = original.mutation_id.clone();
+}
+
+fn preserve_shell_command_identity(original: &Event, replacement: &mut Event) {
+    match (original, replacement) {
+        (Event::ShellCommandProgress(original), Event::ShellCommandProgress(replacement)) => {
+            replacement.command_id = original.command_id.clone();
+            replacement.target_agent_id = original.target_agent_id.clone();
+        }
+        (Event::ShellCommandFinished(original), Event::ShellCommandFinished(replacement)) => {
+            replacement.command_id = original.command_id.clone();
+            replacement.session_id = original.session_id.clone();
+            replacement.command.clone_from(&original.command);
+            replacement.include_in_context = original.include_in_context;
+            replacement.target_agent_id = original.target_agent_id.clone();
+        }
+        _ => {}
     }
 }
 
@@ -214,6 +248,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ToolCancelled(_)
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
+            | Event::ShellCommandFinished(_)
     ) && original != replacement
 }
 
@@ -832,6 +867,8 @@ impl Harness {
                     Some(original_event)
                 } else {
                     sanitize_harness_notice_replacement(&original_event, &mut new_event);
+                    preserve_agent_metadata_mutation_id(&original_event, &mut new_event);
+                    preserve_shell_command_identity(&original_event, &mut new_event);
                     if mutable_prompt_routing_identity_was_modified(&original_event, &new_event) {
                         tracing::warn!(
                             target: "tau_harness::interception",
@@ -873,7 +910,11 @@ impl Harness {
                     None
                 } else {
                     let must_pass_default = event_must_pass_by_default(&event_name)
-                        || mandatory_harness_notice(&original_event);
+                        || mandatory_harness_notice(&original_event)
+                        || matches!(
+                            &original_event,
+                            Event::AgentMetadataSet(set) if set.mutation_id.is_some()
+                        );
                     if must_pass || must_pass_default {
                         tracing::warn!(
                             target: "tau_harness::interception",

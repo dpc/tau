@@ -59,7 +59,7 @@ Message sent
 
 ## Send to another agent
 
-Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as shell cwd is copied from the parent. Its initial display name comes from the supplied task name; parent/child topology is tracked separately rather than encoded in the name. The child prompt's `agent_id` template variable matches the returned `sub_agent_id`. The `agent_start` tool completes immediately with `self_agent_id` and `sub_agent_id` metadata, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
+Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as each shell instance's workdir is copied from the parent. Its initial display name comes from the supplied task name; parent/child topology is tracked separately rather than encoded in the name. The child prompt's `agent_id` template variable matches the returned `sub_agent_id`. The `agent_start` tool completes immediately with `self_agent_id` and `sub_agent_id` metadata, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
 
 ```text
 tau_internal: true

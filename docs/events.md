@@ -207,9 +207,14 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   name; UIs use it when rendering agent chips and history.
 - **`agent.metadata_set`** / **`agent.metadata_unset`** — Durable,
   interceptable per-agent metadata updates. Keys are strings, values are
-  arbitrary CBOR capped at 64 KiB, and `metadata_set` carries an `inheritable`
+  arbitrary CBOR capped at 64 KiB, and `metadata_set` carries an optional opaque
+  mutation correlation id plus an `inheritable`
   flag copied to child agents at creation time. Extensions use these facts for
-  extension-visible state such as `ext_core-shell_cwd`.
+  extension-visible state such as `ext_core-shell_cwd`. A set carrying a
+  mutation id is a live commit acknowledgement: interception may rewrite its
+  value, but cannot drop it or change its agent, key, correlation id, or
+  inheritance flag. Durable state and replay omit the transient mutation id, so
+  replay can reconstruct current metadata without impersonating a live commit.
 - **`agent.started`** — Creation fact for an agent. Durable agents write it to
   their event log; ephemeral agents replay it from memory only. It carries
   optional `parent_agent`; inheritable metadata from that parent is copied into
@@ -527,6 +532,30 @@ intent.
 Emitted by `tau-ext-shell` (or any extension implementing `!`/`!!`
 commands) in response to a `ui.shell_command`.
 
+The harness routes each request point-to-point to exactly one registered generic
+shell instance. Zero instances fail the command; multiple instances fail as
+ambiguous until an explicit selection mechanism exists. Targetless commands are
+resolved to one current-session user agent before delivery, and stale-session
+commands fail without execution. The originating command is projected to all
+attached UIs so progress and the single terminal result have a display block.
+The selected extension snapshots that target agent's per-instance workdir at
+admission. The harness records the selected provider and canonical request
+identity. It accepts progress and exactly one terminal event only from that
+provider with matching immutable fields; stale, duplicate, non-owner, or altered
+events are discarded. Provider disconnect and session shutdown consume pending
+routes with a harness-owned terminal failure. UI command ids must be non-empty,
+at most 256 bytes, and unique while in flight; invalid or concurrent duplicate
+ids are rejected before projection. For provider execution, the harness replaces
+the UI id with a fresh internal route id and maps accepted progress/terminal
+events back to the UI id. A completed UI id may therefore be reused without a
+delayed provider event attaching to its newer route. The UI id remains reserved
+until its mapped or harness-owned terminal finishes interception and commits, so
+a parked older terminal cannot finalize a newly projected block.
+Interception may rewrite progress chunk/stream payload fields, but
+progress/terminal correlation and target identity remain harness-owned. A
+validated terminal is immutable and must-pass so its UI projection and optional
+transcript injection cannot diverge.
+
 - **`shell.command_progress`** — A chunk of stdout/stderr from a running
   user-initiated shell command, correlated by `command_id`. Transient.
 - **`shell.command_finished`** — A user-initiated shell command exited
@@ -534,10 +563,8 @@ commands) in response to a `ui.shell_command`.
   and `include_in_context` flag from the originating request, plus the
   truncated combined output, exit code, and `cancelled` flag. When
   `include_in_context` is set, the harness injects the output only into the
-  validated target agent for that session. A wrong-session, unknown, or
-  non-live target is ignored; targetless output goes to the unambiguous current
-  user agent, creating one if needed, and ambiguous targetless candidates are
-  refused.
+  harness-recorded target agent for that session after provider and identity
+  validation.
 
 ## Term (terminal-output side effects)
 

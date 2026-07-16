@@ -1,8 +1,4 @@
-use std::path::PathBuf;
-
-use tau_proto::{
-    AgentInitialMetadata, CborValue, Event, PromptMessageClass, PromptOriginator, UiCreateAgent,
-};
+use tau_proto::{Event, PromptMessageClass, PromptOriginator, UiCreateAgent};
 
 /// Default role used when the UI submits a prompt without an explicit selected
 /// role from session state.
@@ -30,26 +26,13 @@ pub(crate) fn create_user_agent_prompt(
         session_id: session_id.into(),
         role: role.into(),
         model_override: options.model_override,
-        metadata: shell_cwd_metadata(),
+        metadata: Vec::new(),
         initial_prompt: Some(prompt.into()),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
         ctx_id: None,
         ephemeral: options.ephemeral,
     })
-}
-
-pub(crate) fn shell_cwd_metadata() -> Vec<AgentInitialMetadata> {
-    vec![AgentInitialMetadata {
-        key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-        value: CborValue::Text(
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .display()
-                .to_string(),
-        ),
-        inheritable: true,
-    }]
 }
 
 #[cfg(test)]
@@ -99,5 +82,9 @@ mod tests {
         };
 
         assert!(req.ephemeral);
+        assert!(
+            req.metadata.is_empty(),
+            "the UI must not seed any shell instance from its own filesystem namespace"
+        );
     }
 }

@@ -465,8 +465,15 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
     writer.flush().expect("flush invocation");
     let result = loop {
         let event = reader.read_event().expect("read").expect("result");
-        if let Event::ToolResult(result) = event {
-            break result;
+        match event {
+            Event::ToolResult(result) => break result,
+            Event::AgentMetadataSet(metadata) => {
+                panic!("workdir read emitted metadata: {metadata:?}")
+            }
+            Event::AgentUserMessageInjected(notice) => {
+                panic!("workdir read emitted persistent-change notice: {notice:?}")
+            }
+            _ => {}
         }
     };
     assert_eq!(result.tool_name.as_str(), "work_echo");
@@ -607,6 +614,43 @@ fn ui_shell_command(command_id: &str, command: &str) -> Event {
     })
 }
 
+/// A targeted `!`/`!!` command snapshots that agent's committed instance
+/// workdir.
+#[test]
+fn targeted_user_shell_runs_from_agent_workdir() {
+    let workdir = TempDir::new().expect("workdir");
+    let agent_id = tau_proto::AgentId::parse("agent-user-shell-workdir").expect("agent id");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(workdir.path().display().to_string()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("seed workdir");
+    writer.flush().expect("flush seed");
+    let _ = reader.read_event().expect("context").expect("context");
+    writer
+        .write_event(&Event::UiShellCommand(tau_proto::UiShellCommand {
+            session_id: "session-1".into(),
+            command_id: "ui-targeted-pwd".into(),
+            command: "pwd".to_owned(),
+            include_in_context: false,
+            target_agent_id: Some(agent_id),
+        }))
+        .expect("targeted user shell");
+    writer.flush().expect("flush command");
+    let finished = wait_for_user_shell_finished(&mut reader, "ui-targeted-pwd");
+    assert!(
+        finished
+            .output
+            .contains(workdir.path().to_str().expect("UTF-8 path"))
+    );
+}
+
 /// Consumes startup events (tool registers). The hello/subscribe/ready
 /// messages are filtered out by the test-side `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
@@ -731,7 +775,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         GREP_TOOL_NAME,
         FIND_TOOL_NAME,
         LS_TOOL_NAME,
-        CD_TOOL_NAME,
+        WORKDIR_TOOL_NAME,
         SHELL_TOOL_NAME,
         GPT_SHELL_TOOL_NAME,
     ] {
@@ -964,7 +1008,7 @@ fn startup_registers_schema_valid_tool_examples() {
         GREP_TOOL_NAME,
         FIND_TOOL_NAME,
         LS_TOOL_NAME,
-        CD_TOOL_NAME,
+        WORKDIR_TOOL_NAME,
         SHELL_TOOL_NAME,
         GPT_SHELL_TOOL_NAME,
     ] {
@@ -1646,8 +1690,10 @@ fn disconnect_cancels_active_dir_lock_waiter_before_scheduler_join() {
         .expect("extension run should succeed");
 }
 
+/// A full-dispatch mutation waiting on a directory lock must retain the workdir
+/// captured at admission even when metadata commits a different path meanwhile.
 #[test]
-fn locked_apply_patch_uses_cwd_frozen_at_lock_selection() {
+fn locked_apply_patch_uses_workdir_frozen_at_admission() {
     let tempdir = TempDir::new().expect("tempdir");
     let cwd_a = tempdir.path().join("a");
     let cwd_b = tempdir.path().join("b");
@@ -1665,6 +1711,7 @@ fn locked_apply_patch_uses_cwd_frozen_at_lock_selection() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(cwd_a.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("seed cwd");
@@ -1722,6 +1769,7 @@ fn locked_apply_patch_uses_cwd_frozen_at_lock_selection() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(cwd_b.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("move cwd while waiting");
@@ -1795,6 +1843,7 @@ fn shell_without_manual_lock_does_not_wait_for_update_lock() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(cwd_a.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("seed cwd");
@@ -2638,8 +2687,22 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
     writer.flush().expect("flush");
 }
 
+/// The persistent workdir tool must expose one optional path, so an empty
+/// object remains the provider-visible read operation.
 #[test]
-fn startup_registers_shell_cwd_prompt_fragment() {
+fn workdir_schema_keeps_path_optional() {
+    let tool = registered_tool_specs(false)
+        .into_iter()
+        .find(|tool| tool.name.as_str() == WORKDIR_TOOL_NAME)
+        .expect("workdir tool");
+    let parameters = tool.parameters.expect("workdir parameters");
+    assert!(parameters.get("required").is_none());
+    assert_eq!(parameters["properties"]["path"]["type"], "string");
+    assert_eq!(parameters["properties"]["path"]["minLength"], 1);
+}
+
+#[test]
+fn startup_registers_shell_workdir_prompt_fragment() {
     // The cwd prompt prose is owned by the shell extension, not an individual
     // tool, so it remains available even when shell tools are disabled.
     let (mut reader, mut writer) = spawn_extension();
@@ -2660,7 +2723,7 @@ fn startup_registers_shell_cwd_prompt_fragment() {
                 found_context_provider = true;
             }
             Event::ExtPromptFragmentPublish(publish) => {
-                assert_eq!(publish.fragment.name, "shell.cwd");
+                assert_eq!(publish.fragment.name, "shell.workdir");
                 assert_eq!(
                     publish.fragment.priority,
                     tau_proto::PromptPriority::new(900)
@@ -2670,7 +2733,7 @@ fn startup_registers_shell_cwd_prompt_fragment() {
                         .fragment
                         .template
                         .as_str()
-                        .contains("agent_context.cwd")
+                        .contains("agent_context.workdir")
                 );
                 found_fragment = true;
             }
@@ -2727,16 +2790,15 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         metadata.agent_id.clone(),
         PathBuf::from(cwd.display().to_string()),
     );
-    let context = cwd_context_event(metadata.agent_id, &cwd);
+    let context = cwd_context_event(metadata.agent_id, &cwd, &cwd_state);
     let Event::ExtAgentContextPublish(publish) = context else {
         panic!("expected cwd agent context publish");
     };
     assert_eq!(publish.agent_id.as_ref(), "agent-1");
-    assert_eq!(publish.key.as_ref(), "cwd");
-    assert_eq!(
-        publish.value.0,
-        serde_json::Value::String(cwd.display().to_string())
-    );
+    assert_eq!(publish.key.as_ref(), "workdir");
+    assert_eq!(publish.value.0["path"], cwd.display().to_string());
+    assert_eq!(publish.value.0["label"], "default");
+    assert_eq!(publish.value.0["status"], "available");
 }
 
 #[test]
@@ -3210,7 +3272,7 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
     loop {
         let event = reader.read_event().expect("read").expect("context event");
         match event {
-            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "cwd" => {
+            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "workdir" => {
                 saw_cwd_context = true;
             }
             Event::ExtensionContextReady(ready) => {
@@ -6342,6 +6404,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
         crate::config::ShellConfig::default(),
         &output,
         cancel_rx,
+        std::env::current_dir().expect("current dir"),
     );
     let elapsed = started.elapsed();
     assert!(
@@ -7841,16 +7904,67 @@ fn run_ls_lists_directory_contents() {
     assert!(output.contains("src/"));
 }
 
+/// Configured instance identity, not a process id or prefix, namespaces
+/// metadata.
 #[test]
-fn configure_instance_name_changes_cwd_metadata_key() {
+fn configure_instance_name_changes_workdir_metadata_key() {
     let cwd_state = CwdState::new();
     assert_eq!(cwd_state.key().as_str(), "ext_core-shell_cwd");
     cwd_state.set_instance_name("project-shell".to_owned());
     assert_eq!(cwd_state.key().as_str(), "ext_project-shell_cwd");
 }
 
+/// Two configured shell instances keep independent metadata namespaces and
+/// publish distinct prefix-associated context contributions for the same agent.
 #[test]
-fn explicit_shell_cwd_emits_metadata_without_precommitting_remembered_cwd() {
+fn two_shell_instance_workdirs_are_independent_and_prefix_associated() {
+    let agent_id = tau_proto::AgentId::parse("agent-two-shells").expect("agent id");
+    let first_dir = TempDir::new().expect("first");
+    let second_dir = TempDir::new().expect("second");
+    let first = CwdState::new();
+    first.set_instance_name("core-shell".to_owned());
+    first.set_context_label(None);
+    first.set(
+        agent_id.clone(),
+        first_dir.path().canonicalize().expect("first canonical"),
+    );
+    let second = CwdState::new();
+    second.set_instance_name("prod-shell".to_owned());
+    let prod = tau_proto::ToolNamePrefix::parse("prod").expect("prefix");
+    second.set_context_label(Some(&prod));
+    second.set(
+        agent_id.clone(),
+        second_dir.path().canonicalize().expect("second canonical"),
+    );
+    assert_ne!(first.key(), second.key());
+    let Event::ExtAgentContextPublish(first_context) = cwd_context_event(
+        agent_id.clone(),
+        &first.get(&agent_id).expect("first path"),
+        &first,
+    ) else {
+        unreachable!()
+    };
+    let Event::ExtAgentContextPublish(second_context) = cwd_context_event(
+        agent_id,
+        &second
+            .get(&tau_proto::AgentId::parse("agent-two-shells").expect("agent id"))
+            .expect("second path"),
+        &second,
+    ) else {
+        unreachable!()
+    };
+    assert_eq!(first_context.value.0["label"], "default");
+    assert_eq!(second_context.value.0["label"], "prod");
+    assert_ne!(
+        first_context.value.0["path"],
+        second_context.value.0["path"]
+    );
+}
+
+/// Regression guard: a call-local shell cwd must never mutate durable workdir
+/// metadata.
+#[test]
+fn explicit_shell_cwd_is_canonicalized_without_emitting_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let original = TempDir::new().expect("original cwd");
     let agent_id = tau_proto::AgentId::parse("agent-cwd-explicit").expect("agent id");
@@ -7859,7 +7973,6 @@ fn explicit_shell_cwd_emits_metadata_without_precommitting_remembered_cwd() {
         agent_id.clone(),
         original.path().canonicalize().expect("original"),
     );
-    let (tx, rx) = std::sync::mpsc::channel();
     let Event::ToolStarted(invoke) = tool_started(
         "call-cwd",
         SHELL_TOOL_NAME,
@@ -7872,31 +7985,219 @@ fn explicit_shell_cwd_emits_metadata_without_precommitting_remembered_cwd() {
         unreachable!();
     };
 
-    let output = Output::channel(tx);
-    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &output);
+    let base = cwd_state.get_or_default(&agent_id).expect("remembered cwd");
+    let rewritten = rewrite_invoke_for_cwd(invoke, &base);
     let canonical = temp.path().canonicalize().expect("canonical cwd");
     assert_eq!(
-        cwd_state.get_or_default(&agent_id),
+        cwd_state.get_or_default(&agent_id).expect("remembered cwd"),
         original.path().canonicalize().expect("original")
     );
     assert_eq!(
         optional_argument_text(&rewritten.arguments, "cwd").expect("cwd arg"),
         Some(canonical.display().to_string())
     );
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("metadata event") else {
-        panic!("expected metadata emit");
-    };
-    let Event::AgentMetadataSet(set) = *emit.event else {
-        panic!("expected metadata set");
-    };
-    assert_eq!(set.agent_id, agent_id);
-    assert_eq!(set.key.as_str(), "ext_core-shell_cwd");
-    assert_eq!(set.value, CborValue::Text(canonical.display().to_string()));
-    assert!(set.inheritable);
 }
 
+/// Regression guard: executing a shell call with explicit cwd must not redirect
+/// later calls.
 #[test]
-fn relative_path_tools_use_remembered_cwd() {
+fn explicit_shell_cwd_remains_call_local_across_full_dispatch() {
+    let remembered = TempDir::new().expect("remembered");
+    let override_dir = TempDir::new().expect("override");
+    fs::write(remembered.path().join("remembered.txt"), "from-a\n").expect("remembered file");
+    let agent_id = tau_proto::AgentId::parse("agent-call-local-cwd").expect("agent id");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(remembered.path().display().to_string()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("seed workdir");
+    writer.flush().expect("flush seed");
+    let _ = reader.read_event().expect("context").expect("context");
+
+    for tool_name in [SHELL_TOOL_NAME, GPT_SHELL_TOOL_NAME] {
+        for (suffix, cwd) in [
+            ("override", Some(override_dir.path())),
+            ("remembered-after", None),
+        ] {
+            let call_id = format!("call-{tool_name}-{suffix}");
+            let mut args = vec![("command", "pwd")];
+            let cwd_text = cwd.map(|path| path.display().to_string());
+            if let Some(cwd_text) = cwd_text.as_deref() {
+                args.push(("cwd", cwd_text));
+            }
+            writer
+                .write_event(&tool_started(
+                    &call_id,
+                    tool_name,
+                    cbor_text_map(args),
+                    agent_id.as_str(),
+                ))
+                .expect("shell call");
+            writer.flush().expect("flush shell call");
+            loop {
+                match reader.read_event().expect("read").expect("event") {
+                    Event::AgentMetadataSet(metadata) => {
+                        panic!("call-local cwd emitted persistent metadata: {metadata:?}")
+                    }
+                    Event::AgentUserMessageInjected(notice) => {
+                        panic!("call-local cwd emitted persistent notice: {notice:?}")
+                    }
+                    Event::ToolResult(result) if result.call_id.as_str() == call_id => {
+                        let expected = cwd.unwrap_or_else(|| remembered.path());
+                        let rendered = format!("{:?}", result.result);
+                        assert!(
+                            rendered.contains(expected.to_str().expect("UTF-8 path")),
+                            "shell result did not use expected cwd: {rendered}"
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    writer
+        .write_event(&tool_started(
+            "call-read-remembered-after",
+            READ_TOOL_NAME,
+            cbor_text_map(vec![("path", "remembered.txt")]),
+            agent_id.as_str(),
+        ))
+        .expect("read remembered file");
+    writer.flush().expect("flush read");
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::AgentMetadataSet(metadata) => {
+                panic!("call-local cwd emitted persistent metadata: {metadata:?}")
+            }
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "call-read-remembered-after" =>
+            {
+                assert!(format!("{:?}", result.result).contains("from-a"));
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Ensures omitted workdir path reads state without emitting a metadata
+/// transaction.
+#[test]
+fn workdir_without_path_reports_current_status_without_mutation() {
+    let remembered = TempDir::new().expect("remembered");
+    let agent_id = tau_proto::AgentId::parse("agent-workdir-read").expect("agent id");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(remembered.path().display().to_string()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("seed workdir");
+    writer.flush().expect("flush seed");
+    let _ = reader.read_event().expect("context").expect("context");
+    writer
+        .write_event(&tool_started(
+            "call-workdir-read",
+            WORKDIR_TOOL_NAME,
+            CborValue::Map(Vec::new()),
+            agent_id.as_str(),
+        ))
+        .expect("workdir read");
+    writer.flush().expect("flush read");
+    let result = loop {
+        let event = reader.read_event().expect("read").expect("result");
+        match event {
+            Event::ToolResult(result) => break result,
+            Event::AgentMetadataSet(metadata) => {
+                panic!("workdir read emitted metadata: {metadata:?}")
+            }
+            Event::AgentUserMessageInjected(notice) => {
+                panic!("workdir read emitted persistent-change notice: {notice:?}")
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        tau_proto::cbor_text_field(&result.result, "path"),
+        Some(remembered.path().display().to_string())
+    );
+    assert_eq!(
+        tau_proto::cbor_text_field(&result.result, "status"),
+        Some("available".to_owned())
+    );
+}
+
+/// Malformed present metadata must fail closed while an absolute setter remains
+/// a repair path.
+#[test]
+fn absolute_workdir_setter_repairs_malformed_metadata() {
+    let repaired = TempDir::new().expect("repair directory");
+    let agent_id = tau_proto::AgentId::parse("agent-workdir-repair").expect("agent id");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(".".to_owned()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("malformed metadata");
+    writer.flush().expect("flush malformed");
+    let context = reader.read_event().expect("read").expect("invalid context");
+    assert!(matches!(
+        context,
+        Event::ExtAgentContextPublish(publish) if publish.value.0["status"] == "invalid"
+    ));
+
+    writer
+        .write_event(&tool_started(
+            "call-workdir-repair",
+            WORKDIR_TOOL_NAME,
+            cbor_text_map(vec![(
+                "path",
+                repaired.path().to_str().expect("UTF-8 path"),
+            )]),
+            agent_id.as_str(),
+        ))
+        .expect("absolute repair");
+    writer.flush().expect("flush repair");
+    let metadata = loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::AgentMetadataSet(metadata) => break metadata,
+            Event::ToolResult(result) => panic!("repair completed before commit: {result:?}"),
+            _ => {}
+        }
+    };
+    writer
+        .write_event(&Event::AgentMetadataSet(metadata))
+        .expect("commit repair");
+    writer.flush().expect("flush commit");
+    loop {
+        if matches!(
+            reader.read_event().expect("read").expect("event"),
+            Event::ToolResult(result) if result.call_id.as_str() == "call-workdir-repair"
+        ) {
+            break;
+        }
+    }
+}
+
+/// Relative filesystem paths resolve from the immutable admitted workdir.
+#[test]
+fn relative_path_tools_use_admission_workdir() {
     let temp = TempDir::new().expect("tempdir");
     let subdir = temp.path().join("src");
     std::fs::create_dir(&subdir).expect("create src");
@@ -7906,8 +8207,6 @@ fn relative_path_tools_use_remembered_cwd() {
         agent_id.clone(),
         temp.path().canonicalize().expect("canonical temp"),
     );
-    let (tx, _rx) = std::sync::mpsc::channel();
-    let output = Output::channel(tx);
     let Event::ToolStarted(invoke) = tool_started(
         "call-find",
         FIND_TOOL_NAME,
@@ -7917,7 +8216,8 @@ fn relative_path_tools_use_remembered_cwd() {
         unreachable!();
     };
 
-    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &output);
+    let base = cwd_state.get_or_default(&agent_id).expect("remembered cwd");
+    let rewritten = rewrite_invoke_for_cwd(invoke, &base);
     assert_eq!(
         optional_argument_text(&rewritten.arguments, "path").expect("path arg"),
         Some(
@@ -7930,8 +8230,9 @@ fn relative_path_tools_use_remembered_cwd() {
     );
 }
 
+/// A setter remains pending until the requested canonical value is committed.
 #[test]
-fn cd_waits_for_committed_metadata_before_notice_and_result() {
+fn workdir_setter_waits_for_committed_metadata_before_notice_and_result() {
     let temp = TempDir::new().expect("tempdir");
     let start = temp.path().join("start");
     let next = temp.path().join("next");
@@ -7946,6 +8247,7 @@ fn cd_waits_for_committed_metadata_before_notice_and_result() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(start.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("seed cwd");
@@ -7955,7 +8257,7 @@ fn cd_waits_for_committed_metadata_before_notice_and_result() {
     writer
         .write_event(&tool_started(
             "call-cd-order",
-            CD_TOOL_NAME,
+            WORKDIR_TOOL_NAME,
             cbor_text_map(vec![("path", next.to_str().expect("utf8"))]),
             agent_id.as_str(),
         ))
@@ -7985,7 +8287,7 @@ fn cd_waits_for_committed_metadata_before_notice_and_result() {
     writer.flush().expect("flush commit");
 
     let context = reader.read_event().expect("read context").expect("context");
-    assert!(matches!(context, Event::ExtAgentContextPublish(p) if p.key.as_ref() == "cwd"));
+    assert!(matches!(context, Event::ExtAgentContextPublish(p) if p.key.as_ref() == "workdir"));
     let notice = reader.read_event().expect("read notice").expect("notice");
     let Event::AgentUserMessageInjected(notice) = notice else {
         panic!("expected cwd notice");
@@ -8003,8 +8305,9 @@ fn cd_waits_for_committed_metadata_before_notice_and_result() {
     writer.flush().expect("flush");
 }
 
+/// One agent and instance may have only one outstanding persistent setter.
 #[test]
-fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
+fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
     let temp = TempDir::new().expect("tempdir");
     let start = temp.path().join("start");
     let one = temp.path().join("one");
@@ -8021,6 +8324,7 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(start.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("seed cwd");
@@ -8030,7 +8334,7 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
     writer
         .write_event(&tool_started(
             "call-cd-one",
-            CD_TOOL_NAME,
+            WORKDIR_TOOL_NAME,
             cbor_text_map(vec![("path", one.to_str().expect("utf8"))]),
             agent_id.as_str(),
         ))
@@ -8047,7 +8351,7 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
     writer
         .write_event(&tool_started(
             "call-cd-two",
-            CD_TOOL_NAME,
+            WORKDIR_TOOL_NAME,
             cbor_text_map(vec![("path", two.to_str().expect("utf8"))]),
             agent_id.as_str(),
         ))
@@ -8056,7 +8360,7 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
     loop {
         match reader.read_event().expect("read").expect("event") {
             Event::ToolError(error) if error.call_id.as_str() == "call-cd-two" => {
-                assert!(error.message.contains("cwd change is already pending"));
+                assert!(error.message.contains("workdir change is already pending"));
                 break;
             }
             Event::AgentMetadataSet(metadata) => {
@@ -8089,7 +8393,7 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
 /// Replayed `session.agent_loaded` catch-up snapshots must rebuild cwd context
 /// and emit readiness for already-loaded agents without running live tools.
 #[test]
-fn replayed_session_agent_loaded_restores_cwd_context_and_ready() {
+fn replayed_session_agent_loaded_restores_workdir_context_and_ready() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
     let agent_id = tau_proto::AgentId::parse("agent-replay-cwd").expect("agent id");
@@ -8102,6 +8406,7 @@ fn replayed_session_agent_loaded_restores_cwd_context_and_ready() {
                 agent_id: agent_id.clone(),
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: CborValue::Text(cwd.display().to_string()),
+                mutation_id: None,
                 inheritable: true,
             }),
         ))
@@ -8132,10 +8437,10 @@ fn replayed_session_agent_loaded_restores_cwd_context_and_ready() {
         let event = reader.read_event().expect("read").expect("event");
         match event {
             Event::ExtAgentContextPublish(publish)
-                if publish.agent_id == agent_id && publish.key.as_ref() == "cwd" =>
+                if publish.agent_id == agent_id && publish.key.as_ref() == "workdir" =>
             {
                 assert_eq!(
-                    publish.value.0,
+                    publish.value.0["path"],
                     serde_json::json!(cwd.display().to_string())
                 );
                 saw_context = true;
@@ -8157,7 +8462,7 @@ fn replayed_session_agent_loaded_restores_cwd_context_and_ready() {
 /// A live existing-agent load must wait for replayed cwd metadata before
 /// publishing cwd context or falling back to process-default cwd metadata.
 #[test]
-fn live_loaded_existing_agent_uses_replayed_cwd_before_ready() {
+fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
     let agent_id = tau_proto::AgentId::parse("agent-live-replay-cwd").expect("agent id");
@@ -8177,6 +8482,7 @@ fn live_loaded_existing_agent_uses_replayed_cwd_before_ready() {
                 agent_id: agent_id.clone(),
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: CborValue::Text(stored_cwd.display().to_string()),
+                mutation_id: None,
                 inheritable: true,
             }),
         ))
@@ -8200,10 +8506,10 @@ fn live_loaded_existing_agent_uses_replayed_cwd_before_ready() {
                 panic!("default cwd metadata emitted before stored cwd replay: {metadata:?}");
             }
             Event::ExtAgentContextPublish(publish)
-                if publish.agent_id == agent_id && publish.key.as_ref() == "cwd" =>
+                if publish.agent_id == agent_id && publish.key.as_ref() == "workdir" =>
             {
                 assert_eq!(
-                    publish.value.0,
+                    publish.value.0["path"],
                     serde_json::json!(stored_cwd.display().to_string())
                 );
                 saw_context = true;
@@ -8226,7 +8532,7 @@ fn live_loaded_existing_agent_uses_replayed_cwd_before_ready() {
 /// metadata after the per-agent replay boundary, preserving new-agent
 /// initialization.
 #[test]
-fn live_loaded_agent_defaults_cwd_after_replay_boundary_without_metadata() {
+fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
     let agent_id = tau_proto::AgentId::parse("agent-live-default-cwd").expect("agent id");
@@ -8268,7 +8574,7 @@ fn live_loaded_agent_defaults_cwd_after_replay_boundary_without_metadata() {
 /// An errored per-agent replay boundary must fail closed: shell must not invent
 /// default cwd metadata or publish readiness when restore failed.
 #[test]
-fn live_loaded_agent_does_not_default_cwd_after_replay_error() {
+fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
     let agent_id = tau_proto::AgentId::parse("agent-live-error-cwd").expect("agent id");
@@ -8289,6 +8595,7 @@ fn live_loaded_agent_does_not_default_cwd_after_replay_error() {
                 agent_id: agent_id.clone(),
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: CborValue::Text("/tmp/restored-before-error".to_owned()),
+                mutation_id: None,
                 inheritable: true,
             }),
             true,
@@ -8322,11 +8629,52 @@ fn live_loaded_agent_does_not_default_cwd_after_replay_error() {
             _ => {}
         }
     }
+    runtime
+        .handle_event(
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text("/tmp/late".to_owned()),
+                mutation_id: None,
+                inheritable: true,
+            }),
+            false,
+        )
+        .expect("late metadata");
+    runtime
+        .handle_event(
+            Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            }),
+            false,
+        )
+        .expect("late unset");
+    runtime
+        .handle_event(
+            Event::UiShellCommand(tau_proto::UiShellCommand {
+                session_id: "s1".into(),
+                command_id: "replay-failed-shell".into(),
+                command: "pwd".to_owned(),
+                include_in_context: false,
+                target_agent_id: Some(agent_id),
+            }),
+            false,
+        )
+        .expect("replay-failed command is a local failure");
+    let failure = rx.recv().expect("replay-failed terminal result");
+    assert!(matches!(
+        failure,
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+                if finished.output.contains("replay failed"))
+    ));
     runtime.final_shutdown();
 }
 
+/// Malformed live metadata publishes invalid status before context readiness.
 #[test]
-fn malformed_cwd_metadata_does_not_wedge_context_ready() {
+fn malformed_workdir_metadata_does_not_wedge_context_ready() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
     let agent_id = tau_proto::AgentId::parse("agent-bad-cwd").expect("agent id");
@@ -8358,6 +8706,7 @@ fn malformed_cwd_metadata_does_not_wedge_context_ready() {
             agent_id: agent_id.clone(),
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Bool(true),
+            mutation_id: None,
             inheritable: true,
         }))
         .expect("bad metadata");
@@ -8367,7 +8716,7 @@ fn malformed_cwd_metadata_does_not_wedge_context_ready() {
     loop {
         let event = reader.read_event().expect("read").expect("event");
         match event {
-            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "cwd" => {
+            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "workdir" => {
                 saw_context = true;
             }
             Event::ExtensionContextReady(ready) => {

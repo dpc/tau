@@ -10,7 +10,6 @@ use tau_proto::{
 use crate::display::{ToolFailure, ToolOutput};
 
 pub(crate) mod apply_patch;
-pub(crate) mod cd;
 pub(crate) mod edit;
 pub(crate) mod find;
 pub(crate) mod grep;
@@ -18,6 +17,7 @@ pub(crate) mod ls;
 pub(crate) mod read;
 pub(crate) mod read_image;
 pub(crate) mod shell;
+pub(crate) mod workdir;
 pub(crate) mod world;
 
 #[cfg(any(test, feature = "echo-agent"))]
@@ -27,7 +27,7 @@ pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 pub const SHELL_TOOL_NAME: &str = "shell";
-pub const CD_TOOL_NAME: &str = "cd";
+pub const WORKDIR_TOOL_NAME: &str = "workdir";
 pub const GPT_SHELL_TOOL_NAME: &str = "gpt_shell";
 pub const GREP_TOOL_NAME: &str = "grep";
 pub const FIND_TOOL_NAME: &str = "find";
@@ -54,13 +54,8 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
         })];
     }
 
-    if invoke.tool_name == CD_TOOL_NAME {
-        return wrap_pure(invoke, world, |arguments, _world| {
-            let cwd =
-                std::env::current_dir().map_err(|error| ToolFailure::from(error.to_string()))?;
-            let path = cd::target_dir(arguments, &cwd)?;
-            Ok(cd::output(&path))
-        });
+    if invoke.tool_name == WORKDIR_TOOL_NAME {
+        unreachable!("workdir is dispatched through the metadata transaction path");
     }
 
     if invoke.tool_name == READ_TOOL_NAME {

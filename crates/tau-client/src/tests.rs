@@ -1036,6 +1036,7 @@ fn metadata_set() -> Event {
         agent_id: agent_id(),
         key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
         value: CborValue::Text("/tmp".to_owned()),
+        mutation_id: None,
         inheritable: true,
     })
 }

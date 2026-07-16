@@ -2266,6 +2266,10 @@ pub struct AgentMetadataSet {
     pub key: AgentMetadataKey,
     /// Arbitrary CBOR metadata value.
     pub value: CborValue,
+    /// Optional opaque mutation correlation echoed unchanged with the committed
+    /// fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_id: Option<crate::AgentMetadataMutationId>,
     /// Whether this key is copied to newly-created child agents.
     #[serde(default, skip_serializing_if = "is_false")]
     pub inheritable: bool,
@@ -2282,6 +2286,8 @@ pub struct AgentMetadataUnset {
 
 pub const MAX_AGENT_METADATA_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_AGENT_METADATA_KEY_BYTES: usize = 256;
+/// Maximum opaque metadata mutation-correlation identifier size.
+pub const MAX_AGENT_METADATA_MUTATION_ID_BYTES: usize = crate::AGENT_METADATA_MUTATION_ID_MAX_BYTES;
 
 /// Durable fact that updates an agent's human-friendly display name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3237,6 +3243,8 @@ pub enum ShellStream {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiShellCommand {
     pub session_id: SessionId,
+    /// UI lifecycle correlation id. The harness accepts 1..=256 UTF-8 bytes
+    /// and requires uniqueness until the terminal event commits.
     pub command_id: crate::ShellCommandId,
     pub command: String,
     pub include_in_context: bool,
@@ -3248,6 +3256,10 @@ pub struct UiShellCommand {
 
 /// A chunk of output from a running user-initiated shell command.
 /// Correlated to the request by `command_id`.
+///
+/// The selected provider echoes the opaque command id received from the
+/// harness; the harness maps that provider route id back to the UI lifecycle id
+/// before publishing this event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandProgress {
     pub command_id: crate::ShellCommandId,
@@ -3261,10 +3273,12 @@ pub struct ShellCommandProgress {
 
 /// A user-initiated shell command completed (exited or was cancelled).
 ///
-/// The extension echoes `command`, `session_id`, and
-/// `include_in_context` back from the originating `UiShellCommand`
-/// so the harness can act on the finished event without bookkeeping
-/// a per-command_id map.
+/// The extension echoes `command`, `session_id`, `include_in_context`, and the
+/// resolved target from the originating `UiShellCommand`. The harness validates
+/// those immutable fields and the event source against its pending-command
+/// route before accepting one terminal event. The provider also echoes the
+/// opaque harness route id it received; the harness maps that id back to the UI
+/// lifecycle id before publishing the immutable, must-pass terminal event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandFinished {
     pub command_id: crate::ShellCommandId,

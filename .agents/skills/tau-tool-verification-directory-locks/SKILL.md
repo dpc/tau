@@ -12,6 +12,9 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Directory locking verification plan
 
+Shell `cwd` arguments are invocation-local. They may select lock inference and
+execution scope for that call but must never update remembered workdir metadata.
+
 Use this plan when asked to verify ext-shell directory locking, `dir_lock`, or the interaction between locking, filesystem mutation tools, same-owner shell coverage, backgrounding, `cancel`, and `wait`. Directory locking is optional and advisory. It is owned by `tau-ext-shell`, not the harness or `agent_start`.
 
 Create a fresh scratch tree in `/tmp`, such as `/tmp/tau-dir-lock-verification.*`, with at least these directories: `root/a`, `root/a/child`, `root/b`, and `other`. Put small files in `root/a/file.txt` and `root/b/file.txt`. Use unique nonces in file contents and messages. Never run destructive shell commands outside the scratch tree.
@@ -132,4 +135,3 @@ Report concise but complete findings:
 * Whether abandoned-lock liveness errors used `error: dir_lock_abandoned`, structured details headers for `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, and an explanatory `output` payload, and whether active same-owner tools suppressed the abandoned-lock error.
 * Whether delegate final-answer, agent unload, and session shutdown released manual locks.
 * Any advisory-shell caveat observed, especially commands writing outside their locked `cwd` or into a locked directory from another `cwd`.
-

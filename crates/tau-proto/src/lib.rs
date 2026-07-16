@@ -282,6 +282,56 @@ string_newtype!(/// Agent-scoped context key published by an extension.
     AgentContextKey);
 string_newtype!(/// Durable agent metadata key visible to extensions.
     AgentMetadataKey);
+/// Maximum encoded bytes in a metadata mutation correlation id.
+pub const AGENT_METADATA_MUTATION_ID_MAX_BYTES: usize = 256;
+
+/// Opaque bounded correlation identity for one metadata mutation.
+#[derive(
+    Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentMetadataMutationId(String);
+
+impl AgentMetadataMutationId {
+    /// Parse a non-empty correlation id within the protocol byte bound.
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidAgentMetadataMutationId> {
+        let value = value.into();
+        if value.is_empty() || AGENT_METADATA_MUTATION_ID_MAX_BYTES < value.len() {
+            return Err(InvalidAgentMetadataMutationId);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the encoded correlation id.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for AgentMetadataMutationId {
+    type Error = InvalidAgentMetadataMutationId;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<AgentMetadataMutationId> for String {
+    fn from(value: AgentMetadataMutationId) -> Self {
+        value.0
+    }
+}
+
+/// Invalid empty or oversized metadata mutation id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidAgentMetadataMutationId;
+
+impl std::fmt::Display for InvalidAgentMetadataMutationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("metadata mutation id must contain 1..=256 bytes")
+    }
+}
+
+impl std::error::Error for InvalidAgentMetadataMutationId {}
 // ProviderName / ModelName / ModelId are defined manually below — they
 // validate at construction (no '/', non-empty, etc.) so the rest of
 // the codebase can stop re-parsing `"provider/model"` strings.

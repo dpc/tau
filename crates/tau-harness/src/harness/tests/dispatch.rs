@@ -2,8 +2,8 @@ use super::*;
 use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::{
-    BackgroundCompletionPromptMode, PendingTool, background_completion_prompt,
-    extension_disconnected_background_tool_call_error_message,
+    BackgroundCompletionPromptMode, MAX_UI_SHELL_COMMAND_ID_BYTES, PendingTool,
+    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
@@ -419,6 +419,591 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     }));
 
     h.shutdown().expect("shutdown");
+}
+
+/// Multiple shell instances publish one shared coalescing fragment rather than
+/// rendering every prefix-associated workdir once per instance.
+#[test]
+fn duplicate_shell_workdir_fragments_are_coalesced_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    h.extension_prompt_fragments.clear();
+    let fragment = tau_proto::PromptFragment::new(
+        "shell.workdir",
+        tau_proto::PromptPriority::new(900),
+        "{{#each agent_context.workdir}}{{value.label}}={{value.path}}{{/each}}",
+    );
+    h.extension_prompt_fragments.insert(
+        "shell-a".into(),
+        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment.clone())]),
+    );
+    h.extension_prompt_fragments.insert(
+        "shell-b".into(),
+        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
+    );
+    let fragments = h.gather_prompt_fragments();
+    assert_eq!(
+        fragments
+            .iter()
+            .filter(|fragment| fragment.name == "shell.workdir")
+            .count(),
+        1
+    );
+}
+
+/// UI shell routing rejects zero and multiple execution owners before target
+/// creation/delivery, while one owner accepts point-to-point execution.
+#[test]
+fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
+    fn command(agent_id: tau_proto::AgentId, id: &str) -> tau_proto::UiShellCommand {
+        tau_proto::UiShellCommand {
+            session_id: "s1".into(),
+            command_id: id.into(),
+            command: "pwd".to_owned(),
+            include_in_context: false,
+            target_agent_id: Some(agent_id),
+        }
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    let mut stale = command(agent_id.clone(), "stale");
+    stale.session_id = "old-session".into();
+    h.handle_ui_shell_command("ui", stale);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(
+                |event| matches!(event, Event::ShellCommandFinished(finished)
+            if finished.command_id.as_str() == "stale"
+                && finished.output.contains("stale session"))
+            )
+            .count(),
+        1
+    );
+    h.handle_ui_shell_command("ui", command(agent_id.clone(), "one"));
+    assert!(!event_log_events(&h).iter().any(
+        |event| matches!(event, Event::ShellCommandFinished(finished) if finished.command_id.as_str() == "one")
+    ));
+
+    h.registry.register(
+        "extra-shell",
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new("extra_shell"),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:exec:generic")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    h.handle_ui_shell_command("ui", command(agent_id.clone(), "many"));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(
+                |event| matches!(event, Event::ShellCommandFinished(finished)
+            if finished.command_id.as_str() == "many"
+                && finished.output.contains("multiple"))
+            )
+            .count(),
+        1
+    );
+
+    let providers = super::super::ui_shell_provider_ids(&h.registry);
+    for provider in providers {
+        h.registry.unregister_connection(provider.as_str());
+    }
+    h.handle_ui_shell_command("ui", command(agent_id, "zero"));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(
+                |event| matches!(event, Event::ShellCommandFinished(finished)
+            if finished.command_id.as_str() == "zero"
+                && finished.output.contains("no shell"))
+            )
+            .count(),
+        1
+    );
+
+    h.registry.register(
+        "lost-shell",
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new("lost_shell"),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:exec:generic")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    let target = ensure_test_user_agent(&mut h);
+    let target = crate::parse_agent_id(
+        h.agents[&target]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    h.handle_ui_shell_command("ui", command(target, "delivery-lost"));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(
+                |event| matches!(event, Event::ShellCommandFinished(finished)
+                if finished.command_id.as_str() == "delivery-lost"
+                    && finished.output.contains("unavailable"))
+            )
+            .count(),
+        1
+    );
+}
+
+/// The exact-one user-shell route delivers one concrete-target command only to
+/// the selected provider connection.
+#[test]
+fn ui_shell_route_is_point_to_point_with_resolved_target() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    for provider in super::super::ui_shell_provider_ids(&h.registry) {
+        h.registry.unregister_connection(provider.as_str());
+    }
+    let sink = connect_test_tool(&mut h, "shell-provider");
+    let decoy = connect_test_tool(&mut h, "shell-decoy");
+    h.bus
+        .set_subscriptions(
+            "shell-provider",
+            Vec::new(),
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::UI_SHELL_COMMAND,
+            )],
+        )
+        .expect("subscribe shell provider");
+    h.bus
+        .set_subscriptions(
+            "shell-decoy",
+            Vec::new(),
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::UI_SHELL_COMMAND,
+            )],
+        )
+        .expect("subscribe shell decoy");
+    let ui_a = connect_test_client(&mut h, "shell-ui-a", tau_proto::ClientKind::Ui);
+    let ui_b = connect_test_client(&mut h, "shell-ui-b", tau_proto::ClientKind::Ui);
+    for ui in ["shell-ui-a", "shell-ui-b"] {
+        h.bus
+            .set_subscriptions(
+                ui,
+                Vec::new(),
+                vec![tau_proto::EventSelector::Exact(
+                    tau_proto::EventName::UI_SHELL_COMMAND,
+                )],
+            )
+            .expect("subscribe ui projection");
+    }
+    h.registry.register(
+        "shell-provider",
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new("shell"),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:exec:generic")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    h.handle_ui_shell_command(
+        "ui",
+        tau_proto::UiShellCommand {
+            session_id: "s1".into(),
+            command_id: "routed-shell".into(),
+            command: "pwd".to_owned(),
+            include_in_context: false,
+            target_agent_id: None,
+        },
+    );
+    let events = sink.lock().expect("sink");
+    let commands = events
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame))
+        .filter_map(|event| match event {
+            Event::UiShellCommand(command) => Some(command),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].target_agent_id.as_ref(), Some(&agent_id));
+    assert!(
+        decoy
+            .lock()
+            .expect("decoy sink")
+            .iter()
+            .all(|routed| !matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::UiShellCommand(_))
+            ))
+    );
+    for ui in [&ui_a, &ui_b] {
+        assert_eq!(
+            ui.lock()
+                .expect("ui sink")
+                .iter()
+                .filter(|routed| matches!(
+                    peel_inner_event(&routed.frame),
+                    Some(Event::UiShellCommand(command))
+                        if command.command_id.as_str() == "routed-shell"
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+fn configure_test_ui_shell_provider(
+    h: &mut Harness,
+    connection_id: &str,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    for provider in super::super::ui_shell_provider_ids(&h.registry) {
+        h.registry.unregister_connection(provider.as_str());
+    }
+    let sink = connect_test_tool(h, connection_id);
+    h.bus
+        .set_subscriptions(
+            connection_id,
+            Vec::new(),
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::UI_SHELL_COMMAND,
+            )],
+        )
+        .expect("subscribe shell provider");
+    h.registry.register(
+        connection_id,
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new("shell"),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:exec:generic")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    sink
+}
+
+fn routed_ui_shell_command(
+    h: &mut Harness,
+    command_id: &str,
+    include_in_context: bool,
+) -> tau_proto::UiShellCommand {
+    let cid = ensure_test_user_agent(h);
+    let agent_id = crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    let command = tau_proto::UiShellCommand {
+        session_id: h.current_session_id.clone(),
+        command_id: command_id.into(),
+        command: "pwd".to_owned(),
+        include_in_context,
+        target_agent_id: Some(agent_id),
+    };
+    h.handle_ui_shell_command("ui", command.clone());
+    command
+}
+
+/// User-shell events are accepted only from the selected provider with the
+/// harness-owned immutable request identity, and terminal events are one-shot.
+#[test]
+fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let owner = configure_test_ui_shell_provider(&mut h, "shell-owner");
+    connect_test_tool(&mut h, "shell-non-owner");
+    let ui = connect_test_client(&mut h, "shell-owner-ui", tau_proto::ClientKind::Ui);
+    h.bus
+        .set_subscriptions(
+            "shell-owner-ui",
+            Vec::new(),
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::UI_SHELL_COMMAND,
+            )],
+        )
+        .expect("subscribe shell ui");
+    let command = routed_ui_shell_command(&mut h, "owned-shell", true);
+    h.handle_ui_shell_command("ui", command.clone());
+    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    let first_route_id = h
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("first provider route")
+        .clone();
+    let target_agent_id = command.target_agent_id.clone();
+
+    let progress = tau_proto::ShellCommandProgress {
+        command_id: first_route_id.as_protocol_id().clone(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: "forged".to_owned(),
+        target_agent_id: target_agent_id.clone(),
+    };
+    h.handle_extension_shell_event(
+        "shell-non-owner",
+        Event::ShellCommandProgress(progress.clone()),
+    );
+    let mut altered_progress = progress;
+    altered_progress.target_agent_id = Some(crate::parse_agent_id("other_agent"));
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandProgress(altered_progress));
+    assert!(!event_log_events(&h).iter().any(
+        |event| matches!(event, Event::ShellCommandProgress(progress)
+            if progress.command_id == command.command_id)
+    ));
+    h.handle_extension_shell_event(
+        "shell-owner",
+        Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+            command_id: first_route_id.as_protocol_id().clone(),
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "mapped".to_owned(),
+            target_agent_id: target_agent_id.clone(),
+        }),
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ShellCommandProgress(progress)
+            if progress.command_id == command.command_id
+                && progress.chunk == "mapped"
+    )));
+
+    let finished = tau_proto::ShellCommandFinished {
+        command_id: first_route_id.as_protocol_id().clone(),
+        session_id: command.session_id.clone(),
+        command: command.command.clone(),
+        include_in_context: command.include_in_context,
+        target_agent_id,
+        output: "trusted".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    };
+    h.handle_extension_shell_event(
+        "shell-non-owner",
+        Event::ShellCommandFinished(finished.clone()),
+    );
+    let mut altered_finished = finished.clone();
+    altered_finished.include_in_context = false;
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(altered_finished));
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::ShellCommandFinished(done)
+            if done.command_id == command.command_id))
+    );
+
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+                if done.command_id == command.command_id))
+            .count(),
+        1
+    );
+
+    h.handle_ui_shell_command("ui", command.clone());
+    let mut empty = command.clone();
+    empty.command_id = "".into();
+    h.handle_ui_shell_command("ui", empty);
+    let mut oversized = command.clone();
+    oversized.command_id = "x".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES + 1).into();
+    h.handle_ui_shell_command("ui", oversized);
+    let second_route_id = h
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("second provider route")
+        .clone();
+    assert_ne!(first_route_id, second_route_id);
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
+    assert_eq!(
+        h.pending_ui_shell_commands.len(),
+        1,
+        "late first-route terminal must not consume the reused UI id's route"
+    );
+    let mut second_finished = finished;
+    second_finished.command_id = second_route_id.as_protocol_id().clone();
+    second_finished.output = "second".to_owned();
+    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(second_finished));
+    assert!(h.pending_ui_shell_commands.is_empty());
+    let provider_ids = owner
+        .lock()
+        .expect("owner sink")
+        .iter()
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::UiShellCommand(routed)) => Some(routed.command_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        provider_ids.len(),
+        2,
+        "in-flight duplicates and invalid ids must not reach the provider"
+    );
+    assert!(provider_ids.iter().all(|id| id != &command.command_id));
+    assert_ne!(provider_ids[0], provider_ids[1]);
+    assert_eq!(
+        ui.lock()
+            .expect("ui sink")
+            .iter()
+            .filter(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::UiShellCommand(routed))
+                    if routed.command_id == command.command_id
+            ))
+            .count(),
+        2,
+        "completed id reuse is a new UI lifecycle; in-flight/invalid ids are not projected"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+                if done.command_id == command.command_id))
+            .count(),
+        2,
+        "each internal route maps exactly one terminal back to the reused UI id"
+    );
+}
+
+/// UI shell correlation accepts the documented 256-byte boundary and rejects
+/// empty or 257-byte ids before either UI projection or provider delivery.
+#[test]
+fn ui_shell_command_id_bounds_apply_before_projection() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let provider = configure_test_ui_shell_provider(&mut h, "bounded-shell-owner");
+    let ui = connect_test_client(&mut h, "bounded-shell-ui", tau_proto::ClientKind::Ui);
+    h.bus
+        .set_subscriptions(
+            "bounded-shell-ui",
+            Vec::new(),
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::UI_SHELL_COMMAND,
+            )],
+        )
+        .expect("subscribe ui");
+    let cid = ensure_test_user_agent(&mut h);
+    let target_agent_id = Some(crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    ));
+    let session_id = h.current_session_id.clone();
+    let command = |id: String| tau_proto::UiShellCommand {
+        session_id: session_id.clone(),
+        command_id: id.into(),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: target_agent_id.clone(),
+    };
+    let accepted_id = "a".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES);
+    h.handle_ui_shell_command("ui", command(accepted_id.clone()));
+    h.handle_ui_shell_command("ui", command(String::new()));
+    h.handle_ui_shell_command("ui", command("x".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES + 1)));
+
+    let provider_commands = provider
+        .lock()
+        .expect("provider sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::UiShellCommand(_))
+            )
+        })
+        .count();
+    assert_eq!(provider_commands, 1);
+    let projected = ui
+        .lock()
+        .expect("ui sink")
+        .iter()
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::UiShellCommand(command)) => Some(command.command_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected, vec![tau_proto::ShellCommandId::new(accepted_id)]);
+    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    h.handle_disconnect("bounded-shell-owner");
+    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.active_ui_shell_command_ids.is_empty());
+}
+
+/// Disconnect and session shutdown clear pending user-shell ownership and emit
+/// one harness-owned terminal failure rather than leaving the UI pending.
+#[test]
+fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    configure_test_ui_shell_provider(&mut h, "shell-owner");
+    let disconnected = routed_ui_shell_command(&mut h, "disconnect-shell", false);
+    h.handle_disconnect("shell-owner");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+            if done.command_id == disconnected.command_id
+                && done.output.contains("disconnected")))
+            .count(),
+        1
+    );
+    assert!(h.pending_ui_shell_commands.is_empty());
+
+    configure_test_ui_shell_provider(&mut h, "replacement-shell");
+    let shutdown = routed_ui_shell_command(&mut h, "shutdown-shell", false);
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ShellCommandFinished(done)
+            if done.command_id == shutdown.command_id
+                && done.output.contains("session shut down")))
+            .count(),
+        1
+    );
+    assert!(h.pending_ui_shell_commands.is_empty());
 }
 
 #[test]
@@ -21149,6 +21734,7 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
         agent_id: agent_id.clone(),
         key: tau_proto::AgentMetadataKey::new("ok"),
         value: CborValue::Text("value".to_owned()),
+        mutation_id: None,
         inheritable: false,
     };
     h.validate_agent_metadata_set(&valid)
@@ -21203,6 +21789,7 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
         agent_id: agent_id.clone(),
         key: reserved_key.clone(),
         value: CborValue::Bool(false),
+        mutation_id: None,
         inheritable: false,
     };
     assert!(
@@ -21258,6 +21845,7 @@ fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
                 agent_id: parent.clone(),
                 key,
                 value: CborValue::Text(value.to_owned()),
+                mutation_id: None,
                 inheritable,
             }),
         );

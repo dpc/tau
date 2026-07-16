@@ -1,7 +1,7 @@
 //! Filesystem and shell tool extension.
 //!
 //! Provides `read`, `edit`, `apply_patch`, `dir_lock`, `grep`, `find`, `ls`,
-//! `shell`, and `gpt_shell` tools.
+//! `workdir`, `shell`, and `gpt_shell` tools.
 //!
 //! The `echo` tool is available under `cfg(test)` or the
 //! `echo-agent` cargo feature for harness-side echo-agent tests.
@@ -41,7 +41,7 @@ mod tests;
 
 use crate::agents::{ancestor_dirs, discover_session_agents_files};
 use crate::config::{ExtConfig, ShellConfig};
-use crate::cwd_state::CwdState;
+use crate::cwd_state::{CwdState, WorkdirSnapshot};
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
 use crate::runtime::ShellRuntime;
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
@@ -49,8 +49,8 @@ use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
-    APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
-    GREP_TOOL_NAME, LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME,
+    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
+    LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, WORKDIR_TOOL_NAME,
     execute_tool,
 };
 
@@ -592,21 +592,25 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             subcommand: None,
         }],
     };
-    let cd_tool = ToolSpec {
-        name: tau_proto::ToolName::new(CD_TOOL_NAME),
+    let workdir_tool = ToolSpec {
+        name: tau_proto::ToolName::new(WORKDIR_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Change the remembered working directory for this shell extension instance.".to_owned(),
+            "Read or change the durable workdir for this shell extension instance. Omit `path` \
+             to read the current path and availability. A provided path is resolved from the \
+             last committed workdir, validated, canonicalized, and persisted. Do not combine a \
+             workdir change with shell or filesystem calls that rely on the new directory; wait \
+             for this result and make dependent calls in a later turn."
+                .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": { "path": { "type": "string", "description": "Directory to switch to" } },
-            "required": ["path"],
+            "properties": { "path": { "type": "string", "minLength": 1, "description": "Optional directory to persist as this instance's workdir" } },
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:cd"]),
+        tags: tool_tags(&["shell:workdir"]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -652,7 +656,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory for the command"
+                    "description": "Working directory for this invocation only. Relative paths resolve from this shell instance's remembered workdir; omission uses the remembered workdir. This does not change later calls; use workdir in an earlier turn to change later calls."
                 }
             },
             "required": ["command"],
@@ -696,7 +700,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory for the command"
+                    "description": "Working directory for this invocation only. Relative paths resolve from this shell instance's remembered workdir; omission uses the remembered workdir. This does not change later calls; use workdir in an earlier turn to change later calls."
                 }
             },
             "required": ["command"],
@@ -726,7 +730,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         grep_tool,
         find_tool,
         ls_tool,
-        cd_tool,
+        workdir_tool,
         shell_tool,
         gpt_shell_tool,
     ];
@@ -821,7 +825,7 @@ impl tau_client::TauExtension for ShellExtension {
         builder
             .register_context_provider()
             .register_session_context_provider()
-            .publish_prompt_fragment(shell_cwd_prompt_fragment())
+            .publish_prompt_fragment(shell_workdir_prompt_fragment())
             .publish_actions(shell_action_schema())
             .on_live::<tau_proto::ToolCancelRequest>(|cx| {
                 cx.state
@@ -893,8 +897,11 @@ impl tau_client::TauExtension for ShellExtension {
             })
             .configure_raw(|cx| {
                 let cfg = cx.parse_config::<ExtConfig>()?;
-                cx.state
-                    .apply_config(cx.configure.instance_name.clone(), cfg)
+                cx.state.apply_config(
+                    cx.configure.instance_name.clone(),
+                    cx.configure.tool_prefix.clone(),
+                    cfg,
+                )
             })
             .ready_message("filesystem and shell tools ready");
     }
@@ -1072,13 +1079,11 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
 
 fn rewrite_invoke_for_cwd(
     mut invoke: tau_proto::ToolStarted,
-    cwd_state: &CwdState,
-    tx: &Output,
+    base: &Path,
 ) -> tau_proto::ToolStarted {
-    if invoke.tool_name == CD_TOOL_NAME {
+    if invoke.tool_name == WORKDIR_TOOL_NAME {
         return invoke;
     }
-    let base = cwd_state.get_or_default(&invoke.agent_id);
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => "cwd",
         READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME
@@ -1101,17 +1106,6 @@ fn rewrite_invoke_for_cwd(
         base.join(path)
     };
     if let Some(canonical) = canonicalize_existing_dir_for_cwd_field(&absolute, field) {
-        if field == "cwd" && explicit_path.is_some() {
-            cwd_state.set_pending_notice(invoke.agent_id.clone(), canonical.clone());
-            let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-                tau_proto::AgentMetadataSet {
-                    agent_id: invoke.agent_id.clone(),
-                    key: cwd_state.key(),
-                    value: CborValue::Text(canonical.display().to_string()),
-                    inheritable: true,
-                },
-            )));
-        }
         set_cbor_text_field(
             &mut invoke.arguments,
             field,
@@ -1166,6 +1160,99 @@ fn schedule_tool_started(
     let wire_invoke = invoke.clone();
     let tx = tx.scoped_tool(local_tool_name.clone(), invoke.tool_name.clone());
     invoke.tool_name = local_tool_name.clone();
+    let workdir_snapshot = cwd_state.snapshot(&invoke.agent_id).map_err(|message| {
+        Box::new((
+            wire_invoke.clone(),
+            crate::display::ToolFailure::new(message),
+        ))
+    })?;
+    if matches!(workdir_snapshot, WorkdirSnapshot::Invalid) && invoke.tool_name != WORKDIR_TOOL_NAME
+    {
+        return Err(Box::new((
+            wire_invoke,
+            crate::display::ToolFailure::new(
+                "remembered workdir metadata is invalid; repair it with an absolute workdir path",
+            ),
+        )));
+    }
+    if matches!(workdir_snapshot, WorkdirSnapshot::ReplayFailed) {
+        return Err(Box::new((
+            wire_invoke,
+            crate::display::ToolFailure::new(
+                "workdir replay failed for this agent; reload the agent before retrying",
+            ),
+        )));
+    }
+    if matches!(workdir_snapshot, WorkdirSnapshot::Invalid) {
+        let requested = cbor_optional_text(&invoke.arguments, "path");
+        if !requested
+            .as_deref()
+            .is_none_or(|path| Path::new(path).is_absolute())
+        {
+            return Err(Box::new((
+                wire_invoke,
+                crate::display::ToolFailure::new(
+                    "remembered workdir metadata is invalid; repair it with an absolute workdir path",
+                ),
+            )));
+        }
+    }
+    let invoke = match &workdir_snapshot {
+        WorkdirSnapshot::Valid(cwd) => rewrite_invoke_for_cwd(invoke, cwd),
+        WorkdirSnapshot::Invalid => invoke,
+        WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
+    };
+    if invoke.tool_name == WORKDIR_TOOL_NAME
+        && cbor_optional_text(&invoke.arguments, "path").is_some()
+    {
+        let base = match &workdir_snapshot {
+            WorkdirSnapshot::Valid(path) => Some(path.as_path()),
+            WorkdirSnapshot::Invalid => None,
+            WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
+        };
+        let path = crate::tools::workdir::target_dir(&invoke.arguments, base)
+            .map_err(|failure| Box::new((wire_invoke.clone(), failure)))?;
+        cwd_state
+            .start_pending_workdir_result(
+                invoke.agent_id.clone(),
+                path,
+                wire_invoke.clone(),
+                None,
+            )
+            .map_err(|_| {
+                Box::new((
+                    wire_invoke.clone(),
+                    crate::display::ToolFailure::new(
+                        "another workdir change is already pending for this agent and shell instance",
+                    ),
+                ))
+            })?;
+        cwd_state.mark_pending_workdir_awaiting_echo(&invoke.agent_id, &wire_invoke.call_id);
+        let path = cwd_state
+            .pending_workdir_target(&invoke.agent_id, &wire_invoke.call_id)
+            .expect("newly reserved workdir target");
+        let mutation_id =
+            cwd_state.pending_workdir_mutation_id(&invoke.agent_id, &wire_invoke.call_id);
+        if tx
+            .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
+                tau_proto::AgentMetadataSet {
+                    agent_id: invoke.agent_id,
+                    key: cwd_state.key(),
+                    value: CborValue::Text(path.display().to_string()),
+                    mutation_id,
+                    inheritable: true,
+                },
+            )))
+            .is_err()
+        {
+            cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
+            return Err(Box::new((
+                wire_invoke,
+                crate::display::ToolFailure::new("failed to request workdir metadata commit"),
+            )));
+        }
+        return Ok(());
+    }
     let priority = priority_for_tool(&invoke, &config);
     let meta = WorkMeta {
         call_id: Some(invoke.call_id.clone()),
@@ -1175,9 +1262,9 @@ fn schedule_tool_started(
     };
     let tx_for_job = tx.clone();
     let invoke_for_error = wire_invoke;
+    let cwd_state_for_error = cwd_state.clone();
     scheduler
         .enqueue(priority, meta, move || {
-            let invoke = rewrite_invoke_for_cwd(invoke, &cwd_state, &tx_for_job);
             if invoke.tool_name == DIR_LOCK_TOOL_NAME {
                 crate::dir_lock::dispatch_dir_lock_tool(
                     invoke,
@@ -1188,31 +1275,45 @@ fn schedule_tool_started(
             } else if config.dir_lock.enable && is_dir_lock_update_tool(invoke.tool_name.as_str()) {
                 dispatch_locked_tool_invoke(
                     invoke,
-                    config.shell,
-                    &tx_for_job,
-                    &running_calls,
+                    ToolDispatchContext {
+                        shell_config: config.shell,
+                        tx: tx_for_job,
+                        running_calls,
+                        enforce_ro_bind: config.dir_lock.enforce_ro_bind,
+                        cwd_state: cwd_state.clone(),
+                    },
                     &lock_manager,
-                    config.dir_lock.enforce_ro_bind,
-                    cwd_state.clone(),
+                    match &workdir_snapshot {
+                        WorkdirSnapshot::Valid(cwd) => cwd.clone(),
+                        WorkdirSnapshot::Invalid => {
+                            unreachable!("only workdir admits invalid state")
+                        }
+                        WorkdirSnapshot::ReplayFailed => {
+                            unreachable!("replay failures return above")
+                        }
+                    },
                 );
             } else {
                 dispatch_tool_invoke(
                     invoke,
-                    config.shell,
-                    &tx_for_job,
-                    &running_calls,
+                    ToolDispatchContext {
+                        shell_config: config.shell,
+                        tx: tx_for_job,
+                        running_calls,
+                        enforce_ro_bind: config.dir_lock.enforce_ro_bind,
+                        cwd_state: cwd_state.clone(),
+                    },
                     None,
                     config
                         .dir_lock
                         .enable
                         .then_some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
-                    config.dir_lock.enforce_ro_bind,
-                    cwd_state.clone(),
-                    None,
+                    workdir_snapshot.clone(),
                 );
             }
         })
         .map_err(|error| {
+            cwd_state_for_error.take_pending_workdir_by_call(&invoke_for_error.call_id);
             Box::new((
                 invoke_for_error,
                 crate::display::ToolFailure::new(error.message),
@@ -1220,15 +1321,37 @@ fn schedule_tool_started(
         })
 }
 
+/// Frozen resources needed to enqueue one UI shell command.
+struct UiShellScheduleContext<'a> {
+    /// Scheduler that owns the queued command.
+    scheduler: &'a WorkScheduler,
+    /// Extension output used to publish command events.
+    tx: &'a Output,
+    /// Shell execution policy captured at admission.
+    shell_config: ShellConfig,
+    /// Cancellation senders for commands currently executing.
+    running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
+    /// Lifecycle generation shared with shutdown handling.
+    shutdown_generation: Arc<AtomicU64>,
+    /// Lifecycle generation captured when the command was admitted.
+    scheduled_generation: u64,
+    /// Canonical workdir captured when the command was admitted.
+    cwd: PathBuf,
+}
+
 fn schedule_ui_shell_command(
     cmd: tau_proto::UiShellCommand,
-    scheduler: &WorkScheduler,
-    tx: &Output,
-    shell_config: ShellConfig,
-    running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
-    shutdown_generation: Arc<AtomicU64>,
-    scheduled_generation: u64,
+    context: UiShellScheduleContext<'_>,
 ) -> Result<(), Box<(tau_proto::UiShellCommand, String)>> {
+    let UiShellScheduleContext {
+        scheduler,
+        tx,
+        shell_config,
+        running_ui_commands,
+        shutdown_generation,
+        scheduled_generation,
+        cwd,
+    } = context;
     let meta = WorkMeta {
         call_id: None,
         tool_name: None,
@@ -1253,6 +1376,7 @@ fn schedule_ui_shell_command(
                 shell_config,
                 &tx_for_job,
                 cancel_rx,
+                cwd,
             );
             running_ui_commands
                 .lock()
@@ -1337,16 +1461,33 @@ fn saturating_add_capped(lhs: usize, rhs: usize, cap: usize) -> usize {
     lhs.saturating_add(rhs).min(cap)
 }
 
+/// Frozen resources shared by one model tool dispatch.
+struct ToolDispatchContext {
+    /// Shell execution policy captured at admission.
+    shell_config: ShellConfig,
+    /// Extension output used to publish tool events.
+    tx: Output,
+    /// Cancellation senders for tool calls currently executing.
+    running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    /// Whether read-only shell workdirs must be bind-mounted.
+    enforce_ro_bind: bool,
+    /// Per-instance workdir state used by the persistent workdir tool.
+    cwd_state: CwdState,
+}
+
 fn dispatch_locked_tool_invoke(
     invoke: tau_proto::ToolStarted,
-    shell_config: ShellConfig,
-    tx: &Output,
-    running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    context: ToolDispatchContext,
     lock_manager: &DirLockManager,
-    enforce_ro_bind: bool,
-    cwd_state: CwdState,
+    cwd: PathBuf,
 ) {
-    let cwd = cwd_state.get_or_default(&invoke.agent_id);
+    let ToolDispatchContext {
+        shell_config,
+        tx,
+        running_calls,
+        enforce_ro_bind,
+        cwd_state,
+    } = context;
     let dirs = match crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
         invoke.tool_name.as_str(),
         &invoke.arguments,
@@ -1354,7 +1495,7 @@ fn dispatch_locked_tool_invoke(
     ) {
         Ok(dirs) => crate::dir_lock::normalize_lock_dirs(dirs),
         Err(error) => {
-            send_tool_failure(invoke, error, tx);
+            send_tool_failure(invoke, error, &tx);
             return;
         }
     };
@@ -1394,14 +1535,16 @@ fn dispatch_locked_tool_invoke(
         Err(crate::dir_lock::LockAcquireError::NotCovered) => {
             dispatch_tool_invoke(
                 invoke,
-                shell_config,
-                tx,
-                running_calls,
+                ToolDispatchContext {
+                    shell_config,
+                    tx,
+                    running_calls,
+                    enforce_ro_bind,
+                    cwd_state,
+                },
                 None,
                 Some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
-                enforce_ro_bind,
-                cwd_state,
-                Some(cwd),
+                WorkdirSnapshot::Valid(cwd),
             );
             return;
         }
@@ -1416,7 +1559,7 @@ fn dispatch_locked_tool_invoke(
             return;
         }
         Err(crate::dir_lock::LockAcquireError::Abandoned(lock)) => {
-            send_tool_failure(invoke, lock.tool_failure(), tx);
+            send_tool_failure(invoke, lock.tool_failure(), &tx);
             return;
         }
         Err(crate::dir_lock::LockAcquireError::SelfConflict { dir }) => {
@@ -1426,7 +1569,7 @@ fn dispatch_locked_tool_invoke(
                     "automatic directory lock is outside your manual lock coverage: {}",
                     dir.display()
                 )),
-                tx,
+                &tx,
             );
             return;
         }
@@ -1434,7 +1577,7 @@ fn dispatch_locked_tool_invoke(
             send_tool_failure(
                 invoke,
                 crate::display::ToolFailure::new(format!("dir_lock backend error: {message}")),
-                tx,
+                &tx,
             );
             return;
         }
@@ -1444,14 +1587,16 @@ fn dispatch_locked_tool_invoke(
         reported_lock_wait_duration_seconds(lock_wait_started.elapsed());
     dispatch_tool_invoke(
         invoke,
-        shell_config,
-        tx,
-        running_calls,
+        ToolDispatchContext {
+            shell_config,
+            tx,
+            running_calls,
+            enforce_ro_bind,
+            cwd_state,
+        },
         lock_wait_duration_seconds,
         shell_command_mode,
-        enforce_ro_bind,
-        cwd_state,
-        Some(cwd),
+        WorkdirSnapshot::Valid(cwd),
     );
     drop(guard);
 }
@@ -1562,51 +1707,62 @@ fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
 }
 
 /// Execute a single tool invocation and send the response event(s).
-#[allow(clippy::too_many_arguments)]
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
-    shell_config: ShellConfig,
-    tx: &Output,
-    running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    context: ToolDispatchContext,
     lock_wait_duration_seconds: Option<u64>,
     shell_command_mode: Option<ShellCommandMode>,
-    enforce_ro_bind: bool,
-    cwd_state: CwdState,
-    frozen_cwd: Option<PathBuf>,
+    workdir_snapshot: WorkdirSnapshot,
 ) {
-    if invoke.tool_name == CD_TOOL_NAME {
-        let base = cwd_state.get_or_default(&invoke.agent_id);
-        let agent_id = invoke.agent_id.clone();
-        match crate::tools::cd::target_dir(&invoke.arguments, &base) {
-            Ok(path) => match cwd_state.start_pending_cd_result(
-                agent_id.clone(),
-                path.clone(),
-                invoke,
-                lock_wait_duration_seconds,
-            ) {
-                Ok(()) => {
-                    cwd_state.set_pending_notice(agent_id.clone(), path.clone());
-                    let metadata = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
-                        agent_id,
-                        key: cwd_state.key(),
-                        value: CborValue::Text(path.display().to_string()),
-                        inheritable: true,
-                    });
-                    let _ = tx.send(HarnessInputMessage::emit(metadata));
-                }
-                Err(invoke) => send_tool_failure(
-                    *invoke,
-                    crate::display::ToolFailure::new(
-                        "another cwd change is already pending for this agent",
-                    ),
-                    tx,
-                ),
-            },
-            Err(failure) => send_tool_failure(invoke, failure, tx),
+    let ToolDispatchContext {
+        shell_config,
+        tx,
+        running_calls,
+        enforce_ro_bind,
+        cwd_state,
+    } = context;
+    if invoke.tool_name == WORKDIR_TOOL_NAME {
+        if cbor_optional_text(&invoke.arguments, "path").is_none() {
+            let output = crate::tools::workdir::status_output(match &workdir_snapshot {
+                WorkdirSnapshot::Valid(path) => Some(path.as_path()),
+                WorkdirSnapshot::Invalid => None,
+                WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
+            });
+            let _ = tx.send(HarnessInputMessage::emit(Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
+                result: output.result,
+                provider_content: output.provider_content,
+                kind: ToolResultKind::Final,
+                display: Some(output.display),
+                originator: invoke.originator,
+            })));
+            return;
         }
+        let agent_id = invoke.agent_id.clone();
+        if let Some(path) = cwd_state.pending_workdir_target(&agent_id, &invoke.call_id) {
+            if cwd_state.mark_pending_workdir_awaiting_echo(&agent_id, &invoke.call_id) {
+                let metadata = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                    agent_id,
+                    key: cwd_state.key(),
+                    value: CborValue::Text(path.display().to_string()),
+                    mutation_id: None,
+                    inheritable: true,
+                });
+                let _ = tx.send(HarnessInputMessage::emit(metadata));
+            }
+            return;
+        }
+        // Every setter is reserved and validated at admission. A missing
+        // reservation means cancellation or lifecycle cleanup won the race.
         return;
     }
-    let tool_cwd = frozen_cwd.unwrap_or_else(|| cwd_state.get_or_default(&invoke.agent_id));
+    let tool_cwd = match workdir_snapshot {
+        WorkdirSnapshot::Valid(cwd) => cwd,
+        WorkdirSnapshot::Invalid => unreachable!("non-workdir calls reject invalid state"),
+        WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
+    };
     let vcr_config = tau_vcr::VcrConfig::from_env();
     let world = match crate::tools::world::ShellWorld::for_tool_in_dir(
         invoke.tool_name.as_str(),
@@ -1640,8 +1796,8 @@ fn dispatch_tool_invoke(
         dispatch_cancellable_shell_tool(CancellableShellDispatch {
             invoke,
             shell_config,
-            tx,
-            running_calls,
+            tx: &tx,
+            running_calls: &running_calls,
             lock_wait_duration_seconds,
             shell_command_mode: shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
             enforce_ro_bind,
@@ -1653,8 +1809,8 @@ fn dispatch_tool_invoke(
     if invoke.tool_name == GREP_TOOL_NAME || invoke.tool_name == FIND_TOOL_NAME {
         dispatch_cancellable_non_shell_tool(
             invoke,
-            tx,
-            running_calls,
+            &tx,
+            &running_calls,
             lock_wait_duration_seconds,
             world,
         );
@@ -1875,16 +2031,19 @@ fn apply_started_cwd_metadata(
     is_replay: bool,
 ) {
     for item in started.metadata {
-        if item.key == cwd_state.key()
-            && let CborValue::Text(path) = item.value
-        {
-            let cwd = PathBuf::from(path);
-            cwd_state.set(started.agent_id.clone(), cwd.clone());
-            if !is_replay {
-                let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-                    started.agent_id.clone(),
-                    &cwd,
-                )));
+        if item.key == cwd_state.key() {
+            if let CborValue::Text(path) = item.value {
+                let cwd = PathBuf::from(path);
+                if cwd_state.set_metadata_text(started.agent_id.clone(), cwd.clone()) && !is_replay
+                {
+                    let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                        started.agent_id.clone(),
+                        &cwd,
+                        cwd_state,
+                    )));
+                }
+            } else {
+                cwd_state.set_invalid(started.agent_id.clone());
             }
         }
     }
@@ -1904,6 +2063,7 @@ fn dispatch_session_agent_loaded(
         let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
             loaded.agent_id.clone(),
             &cwd,
+            cwd_state,
         )));
         let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
             ExtensionContextReady {
@@ -1915,22 +2075,46 @@ fn dispatch_session_agent_loaded(
     }
 
     cwd_state.set_pending_ready(loaded.agent_id.clone(), loaded.session_id);
-    let cwd = CwdState::process_default();
+    let Ok(cwd) = cwd_state.process_default() else {
+        return;
+    };
     let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
         tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,
             key: cwd_state.key(),
             value: CborValue::Text(cwd.display().to_string()),
+            mutation_id: None,
             inheritable: true,
         },
     )));
 }
 
-fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
+fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path, cwd_state: &CwdState) -> Event {
+    let status = if cwd.is_dir() {
+        "available"
+    } else {
+        "unavailable"
+    };
     Event::ExtAgentContextPublish(ExtAgentContextPublish {
         agent_id,
-        key: AgentContextKey::new("cwd"),
-        value: AgentContextValue(serde_json::Value::String(cwd.display().to_string())),
+        key: AgentContextKey::new("workdir"),
+        value: AgentContextValue(serde_json::json!({
+            "label": cwd_state.context_label(),
+            "path": cwd.display().to_string(),
+            "status": status,
+        })),
+    })
+}
+
+fn invalid_cwd_context_event(agent_id: tau_proto::AgentId, cwd_state: &CwdState) -> Event {
+    Event::ExtAgentContextPublish(ExtAgentContextPublish {
+        agent_id,
+        key: AgentContextKey::new("workdir"),
+        value: AgentContextValue(serde_json::json!({
+            "label": cwd_state.context_label(),
+            "path": "<invalid>",
+            "status": "invalid",
+        })),
     })
 }
 
@@ -1953,7 +2137,7 @@ fn is_shell_tool(name: &str) -> bool {
             | GREP_TOOL_NAME
             | FIND_TOOL_NAME
             | LS_TOOL_NAME
-            | CD_TOOL_NAME
+            | WORKDIR_TOOL_NAME
             | SHELL_TOOL_NAME
             | GPT_SHELL_TOOL_NAME
             | DIR_LOCK_TOOL_NAME
@@ -2021,13 +2205,13 @@ fn build_session_started_events(_started: SessionStarted) -> Vec<Event> {
     events
 }
 
-fn shell_cwd_prompt_fragment() -> PromptFragment {
+fn shell_workdir_prompt_fragment() -> PromptFragment {
     PromptFragment::new(
-        "shell.cwd",
+        "shell.workdir",
         PromptPriority::new(900),
         PromptContent::new(
-            "{{#each agent_context.cwd}}{{#if @first}}Current working directory: \
-             {{value}}{{/if}}{{/each}}",
+            "{{#if agent_context.workdir}}{{#each agent_context.workdir}}Workdir \
+             ({{value.label}}): {{value.path}} [{{value.status}}]\n{{/each}}{{/if}}",
         ),
     )
 }

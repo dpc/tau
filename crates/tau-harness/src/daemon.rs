@@ -763,16 +763,7 @@ fn daemon_message_create_agent(session_id: &str, message: &str, ctx_id: &str) ->
         session_id: session_id.into(),
         role: "engineer".to_owned(),
         model_override: None,
-        metadata: vec![tau_proto::AgentInitialMetadata {
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-            value: tau_proto::CborValue::Text(
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .display()
-                    .to_string(),
-            ),
-            inheritable: true,
-        }],
+        metadata: Vec::new(),
         initial_prompt: Some(message.to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,

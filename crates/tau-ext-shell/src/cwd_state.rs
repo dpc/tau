@@ -1,41 +1,108 @@
-//! Per-agent remembered cwd state for the shell extension.
+//! Per-agent remembered workdir state for one shell extension instance.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-struct PendingCdResult {
+/// One authoritative cached metadata value for an agent.
+#[derive(Clone)]
+enum WorkdirValue {
+    /// Structurally valid absolute path text, whether currently available or
+    /// stale.
+    Valid(PathBuf),
+    /// Present metadata that cannot safely be interpreted as an absolute path.
+    Invalid,
+    /// Replay failed, so absence versus durable state is unknown.
+    ReplayFailed,
+}
+
+/// Atomic admission-time view used throughout one invocation.
+#[derive(Clone)]
+pub(crate) enum WorkdirSnapshot {
+    /// Absolute committed path, including a currently stale path.
+    Valid(PathBuf),
+    /// Present metadata whose path representation is structurally invalid.
+    Invalid,
+    /// Replay failed and no operation may infer or repair state in this
+    /// lifecycle.
+    ReplayFailed,
+}
+
+/// One setter awaiting its matching committed metadata event.
+struct PendingWorkdirResult {
+    /// Opaque request token that must round-trip with the committed metadata
+    /// fact.
+    mutation_id: tau_proto::AgentMetadataMutationId,
+    /// Canonical path requested by the setter.
     expected_cwd: PathBuf,
+    /// Original tool call retained until the commit boundary.
     invoke: tau_proto::ToolStarted,
+    /// Lock wait metadata retained for the terminal event.
     lock_wait_duration_seconds: Option<u64>,
+    /// Whether the metadata request has been emitted.
+    awaiting_echo: bool,
+    /// Cancellation requested after emission, terminalized only on commit.
+    cancel_requested: bool,
 }
 
-pub(crate) struct CompletedPendingCd {
+/// Terminal data retained while a setter waits for committed metadata.
+pub(crate) struct CompletedPendingWorkdir {
+    /// Original invocation completed after the metadata linearization point.
     pub(crate) invoke: tau_proto::ToolStarted,
+    /// Optional directory-lock wait duration preserved for the terminal event.
     pub(crate) lock_wait_duration_seconds: Option<u64>,
+    /// Whether the committed path equals the setter's requested canonical path.
     pub(crate) matched_request: bool,
+    /// Whether cancellation was requested after metadata emission.
+    pub(crate) cancel_requested: bool,
 }
 
+/// Cloneable, instance-scoped cache of committed per-agent workdirs and pending
+/// transactions.
 #[derive(Clone)]
 pub(crate) struct CwdState {
+    /// Configured extension instance name used only for durable metadata
+    /// identity.
     instance_name: Arc<Mutex<String>>,
-    cwd_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PathBuf>>>,
+    /// Model-visible prefix label used only for dynamic prompt association.
+    context_label: Arc<Mutex<String>>,
+    /// Validated process cwd frozen after startup configuration.
+    process_startup_cwd: Arc<Mutex<Result<PathBuf, String>>>,
+    /// Atomic committed value cache; valid and invalid states share one lock.
+    workdir_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, WorkdirValue>>>,
+    /// Loaded agents waiting for initial context publication and readiness.
     pending_ready_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, tau_proto::SessionId>>>,
-    pending_notice_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PathBuf>>>,
-    pending_cd_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PendingCdResult>>>,
+    /// At most one pending setter transaction per agent for this instance.
+    pending_workdir_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PendingWorkdirResult>>>,
+    /// Process-local monotonic source for bounded opaque mutation ids.
+    next_mutation_id: Arc<AtomicU64>,
+    /// Randomized per-process salt preventing mutation-token prediction.
+    mutation_id_salt: u64,
 }
 
 impl CwdState {
+    /// Create state with the current process cwd captured as the provisional
+    /// fallback.
     pub(crate) fn new() -> Self {
         Self {
             instance_name: Arc::new(Mutex::new("core-shell".to_owned())),
-            cwd_by_agent: Arc::new(Mutex::new(HashMap::new())),
+            context_label: Arc::new(Mutex::new("default".to_owned())),
+            process_startup_cwd: Arc::new(Mutex::new(Self::read_process_startup_cwd())),
+            workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_ready_by_agent: Arc::new(Mutex::new(HashMap::new())),
-            pending_notice_by_agent: Arc::new(Mutex::new(HashMap::new())),
-            pending_cd_by_agent: Arc::new(Mutex::new(HashMap::new())),
+            pending_workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
+            next_mutation_id: Arc::new(AtomicU64::new(1)),
+            mutation_id_salt: {
+                let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                hasher.write_u64(0);
+                hasher.finish()
+            },
         }
     }
 
+    /// Set the configured instance identity before runtime events begin.
     pub(crate) fn set_instance_name(&self, name: String) {
         *self
             .instance_name
@@ -43,6 +110,24 @@ impl CwdState {
             .expect("cwd instance lock poisoned") = name;
     }
 
+    /// Set the model-visible prefix association used by prompt context.
+    pub(crate) fn set_context_label(&self, prefix: Option<&tau_proto::ToolNamePrefix>) {
+        *self
+            .context_label
+            .lock()
+            .expect("workdir context label lock poisoned") =
+            prefix.map_or_else(|| "default".to_owned(), |prefix| prefix.as_str().to_owned());
+    }
+
+    /// Return the prompt label for this configured instance.
+    pub(crate) fn context_label(&self) -> String {
+        self.context_label
+            .lock()
+            .expect("workdir context label lock poisoned")
+            .clone()
+    }
+
+    /// Derive this instance's durable metadata key.
     pub(crate) fn key(&self) -> tau_proto::AgentMetadataKey {
         let name = self
             .instance_name
@@ -52,36 +137,159 @@ impl CwdState {
         tau_proto::AgentMetadataKey::new(format!("ext_{name}_cwd"))
     }
 
+    /// Return a valid committed path, excluding missing or malformed state.
     pub(crate) fn get(&self, agent_id: &tau_proto::AgentId) -> Option<PathBuf> {
-        self.cwd_by_agent
+        self.workdir_by_agent
             .lock()
-            .expect("cwd map lock poisoned")
+            .expect("workdir map lock poisoned")
+            .get(agent_id)
+            .and_then(|value| match value {
+                WorkdirValue::Valid(path) => Some(path.clone()),
+                WorkdirValue::Invalid => None,
+                WorkdirValue::ReplayFailed => None,
+            })
+    }
+
+    fn read_process_startup_cwd() -> Result<PathBuf, String> {
+        let cwd = std::env::current_dir().map_err(|error| {
+            format!("failed to read ext-shell process working directory: {error}")
+        })?;
+        let cwd = cwd.canonicalize().map_err(|error| {
+            format!(
+                "failed to canonicalize ext-shell process working directory {}: {error}",
+                cwd.display()
+            )
+        })?;
+        if !cwd.is_dir() {
+            return Err(format!(
+                "ext-shell process working directory is not a directory: {}",
+                cwd.display()
+            ));
+        }
+        Ok(cwd)
+    }
+
+    /// Freeze the validated process cwd after all startup cwd configuration.
+    pub(crate) fn freeze_process_startup_cwd(&self) -> Result<(), String> {
+        let cwd = Self::read_process_startup_cwd();
+        *self
+            .process_startup_cwd
+            .lock()
+            .expect("process startup cwd lock poisoned") = cwd.clone();
+        cwd.map(|_| ())
+    }
+
+    /// Return the frozen process-startup missing-key fallback.
+    pub(crate) fn process_default(&self) -> Result<PathBuf, String> {
+        self.process_startup_cwd
+            .lock()
+            .expect("process startup cwd lock poisoned")
+            .clone()
+    }
+
+    /// Atomically snapshot valid, invalid, or absent committed workdir state.
+    pub(crate) fn get_or_default(&self, agent_id: &tau_proto::AgentId) -> Result<PathBuf, String> {
+        match self.snapshot(agent_id)? {
+            WorkdirSnapshot::Valid(path) => Ok(path),
+            WorkdirSnapshot::Invalid => Err(
+                "remembered workdir metadata is invalid; repair it with an absolute workdir path"
+                    .to_owned(),
+            ),
+            WorkdirSnapshot::ReplayFailed => Err(
+                "workdir replay failed for this agent; reload the agent before retrying".to_owned(),
+            ),
+        }
+    }
+
+    /// Atomically capture valid, invalid, or absent state for one invocation.
+    pub(crate) fn snapshot(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Result<WorkdirSnapshot, String> {
+        match self
+            .workdir_by_agent
+            .lock()
+            .expect("workdir map lock poisoned")
             .get(agent_id)
             .cloned()
+        {
+            Some(WorkdirValue::Valid(path)) => Ok(WorkdirSnapshot::Valid(path)),
+            Some(WorkdirValue::Invalid) => Ok(WorkdirSnapshot::Invalid),
+            Some(WorkdirValue::ReplayFailed) => Ok(WorkdirSnapshot::ReplayFailed),
+            None => self.process_default().map(WorkdirSnapshot::Valid),
+        }
     }
 
-    pub(crate) fn process_default() -> PathBuf {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    }
-
-    pub(crate) fn get_or_default(&self, agent_id: &tau_proto::AgentId) -> PathBuf {
-        self.get(agent_id).unwrap_or_else(Self::process_default)
-    }
-
+    /// Cache one known-valid committed absolute path.
     pub(crate) fn set(&self, agent_id: tau_proto::AgentId, cwd: PathBuf) {
-        self.cwd_by_agent
+        self.workdir_by_agent
             .lock()
-            .expect("cwd map lock poisoned")
-            .insert(agent_id, cwd);
+            .expect("workdir map lock poisoned")
+            .insert(agent_id, WorkdirValue::Valid(cwd));
     }
 
+    /// Fold text metadata only when it is a structurally safe absolute path.
+    ///
+    /// Availability is deliberately not required: stale absolute values remain
+    /// authoritative so operations fail in place rather than silently falling
+    /// back.
+    pub(crate) fn set_metadata_text(&self, agent_id: tau_proto::AgentId, cwd: PathBuf) -> bool {
+        if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+            self.set_invalid(agent_id);
+            return false;
+        }
+        self.set(agent_id, cwd);
+        true
+    }
+
+    /// Remove this instance's cached value for an unloaded agent.
     pub(crate) fn unset(&self, agent_id: &tau_proto::AgentId) {
-        self.cwd_by_agent
+        self.workdir_by_agent
             .lock()
-            .expect("cwd map lock poisoned")
+            .expect("workdir map lock poisoned")
             .remove(agent_id);
     }
 
+    /// Mark present metadata as structurally invalid without synthesizing
+    /// fallback.
+    pub(crate) fn set_invalid(&self, agent_id: tau_proto::AgentId) {
+        self.workdir_by_agent
+            .lock()
+            .expect("workdir map lock poisoned")
+            .insert(agent_id, WorkdirValue::Invalid);
+    }
+
+    /// Mark replay as failed so missing durable state cannot be inferred.
+    pub(crate) fn set_replay_failed(&self, agent_id: tau_proto::AgentId) {
+        self.workdir_by_agent
+            .lock()
+            .expect("workdir map lock poisoned")
+            .insert(agent_id, WorkdirValue::ReplayFailed);
+    }
+
+    /// Report whether present committed metadata is structurally invalid.
+    pub(crate) fn is_invalid(&self, agent_id: &tau_proto::AgentId) -> bool {
+        matches!(
+            self.workdir_by_agent
+                .lock()
+                .expect("workdir map lock poisoned")
+                .get(agent_id),
+            Some(WorkdirValue::Invalid)
+        )
+    }
+
+    /// Report whether failed replay has latched this agent closed.
+    pub(crate) fn is_replay_failed(&self, agent_id: &tau_proto::AgentId) -> bool {
+        matches!(
+            self.workdir_by_agent
+                .lock()
+                .expect("workdir map lock poisoned")
+                .get(agent_id),
+            Some(WorkdirValue::ReplayFailed)
+        )
+    }
+
+    /// Remember an agent whose initial context waits for replay completion.
     pub(crate) fn set_pending_ready(
         &self,
         agent_id: tau_proto::AgentId,
@@ -93,6 +301,7 @@ impl CwdState {
             .insert(agent_id, session_id);
     }
 
+    /// Consume pending context readiness after context publication.
     pub(crate) fn take_pending_ready(
         &self,
         agent_id: &tau_proto::AgentId,
@@ -103,6 +312,7 @@ impl CwdState {
             .remove(agent_id)
     }
 
+    /// Read pending context readiness without consuming it.
     pub(crate) fn pending_ready(
         &self,
         agent_id: &tau_proto::AgentId,
@@ -114,21 +324,9 @@ impl CwdState {
             .cloned()
     }
 
-    pub(crate) fn set_pending_notice(&self, agent_id: tau_proto::AgentId, cwd: PathBuf) {
-        self.pending_notice_by_agent
-            .lock()
-            .expect("cwd notice map lock poisoned")
-            .insert(agent_id, cwd);
-    }
-
-    pub(crate) fn take_pending_notice(&self, agent_id: &tau_proto::AgentId) -> Option<PathBuf> {
-        self.pending_notice_by_agent
-            .lock()
-            .expect("cwd notice map lock poisoned")
-            .remove(agent_id)
-    }
-
-    pub(crate) fn start_pending_cd_result(
+    /// Atomically install the sole pending setter transaction for this instance
+    /// and agent.
+    pub(crate) fn start_pending_workdir_result(
         &self,
         agent_id: tau_proto::AgentId,
         expected_cwd: PathBuf,
@@ -136,53 +334,200 @@ impl CwdState {
         lock_wait_duration_seconds: Option<u64>,
     ) -> Result<(), Box<tau_proto::ToolStarted>> {
         let mut pending = self
-            .pending_cd_by_agent
+            .pending_workdir_by_agent
             .lock()
-            .expect("cwd cd map lock poisoned");
+            .expect("workdir setter map lock poisoned");
         if pending.contains_key(&agent_id) {
             return Err(Box::new(invoke));
         }
         pending.insert(
             agent_id,
-            PendingCdResult {
+            PendingWorkdirResult {
+                mutation_id: {
+                    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                    hasher.write_u64(self.mutation_id_salt);
+                    hasher.write_u64(self.next_mutation_id.fetch_add(1, Ordering::Relaxed));
+                    tau_proto::AgentMetadataMutationId::parse(format!(
+                        "ext-shell-workdir-{:016x}",
+                        hasher.finish()
+                    ))
+                    .expect("fixed-size mutation id is valid")
+                },
                 expected_cwd,
                 invoke,
                 lock_wait_duration_seconds,
+                awaiting_echo: false,
+                cancel_requested: false,
             },
         );
         Ok(())
     }
 
-    pub(crate) fn take_committed_pending_cd_result(
+    /// Return the bounded correlation id reserved for an exact setter call.
+    pub(crate) fn pending_workdir_mutation_id(
+        &self,
+        agent_id: &tau_proto::AgentId,
+        call_id: &tau_proto::ToolCallId,
+    ) -> Option<tau_proto::AgentMetadataMutationId> {
+        self.pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned")
+            .get(agent_id)
+            .filter(|pending| &pending.invoke.call_id == call_id)
+            .map(|pending| pending.mutation_id.clone())
+    }
+
+    /// Move an admitted setter from its non-interleavable internal reservation
+    /// to awaiting its commit echo.
+    pub(crate) fn mark_pending_workdir_awaiting_echo(
+        &self,
+        agent_id: &tau_proto::AgentId,
+        call_id: &tau_proto::ToolCallId,
+    ) -> bool {
+        let mut pending = self
+            .pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned");
+        let Some(pending) = pending.get_mut(agent_id) else {
+            return false;
+        };
+        if &pending.invoke.call_id != call_id {
+            return false;
+        }
+        pending.awaiting_echo = true;
+        true
+    }
+
+    /// Return the admission-validated canonical target reserved for a call.
+    pub(crate) fn pending_workdir_target(
+        &self,
+        agent_id: &tau_proto::AgentId,
+        call_id: &tau_proto::ToolCallId,
+    ) -> Option<PathBuf> {
+        self.pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned")
+            .get(agent_id)
+            .filter(|pending| &pending.invoke.call_id == call_id)
+            .map(|pending| pending.expected_cwd.clone())
+    }
+
+    /// Consume a pending setter at a committed text-metadata linearization
+    /// point.
+    pub(crate) fn take_committed_pending_workdir_result(
         &self,
         agent_id: &tau_proto::AgentId,
         committed_cwd: &PathBuf,
-    ) -> Option<CompletedPendingCd> {
-        let pending = self
-            .pending_cd_by_agent
+        mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
+    ) -> Option<CompletedPendingWorkdir> {
+        let mut pending_by_agent = self
+            .pending_workdir_by_agent
             .lock()
-            .expect("cwd cd map lock poisoned")
-            .remove(agent_id)?;
-        Some(CompletedPendingCd {
+            .expect("workdir setter map lock poisoned");
+        let pending = pending_by_agent.get(agent_id)?;
+        if !pending.awaiting_echo || mutation_id != Some(&pending.mutation_id) {
+            return None;
+        }
+        let pending = pending_by_agent.remove(agent_id)?;
+        Some(CompletedPendingWorkdir {
             matched_request: pending.expected_cwd == *committed_cwd,
+            cancel_requested: pending.cancel_requested,
             invoke: pending.invoke,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
 
-    pub(crate) fn take_pending_cd_result(
+    /// Consume an awaiting setter whose correlated commit carries no usable
+    /// path.
+    pub(crate) fn take_correlated_pending_workdir_result(
         &self,
         agent_id: &tau_proto::AgentId,
-    ) -> Option<CompletedPendingCd> {
-        let pending = self
-            .pending_cd_by_agent
+        mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
+    ) -> Option<CompletedPendingWorkdir> {
+        let mut pending_by_agent = self
+            .pending_workdir_by_agent
             .lock()
-            .expect("cwd cd map lock poisoned")
-            .remove(agent_id)?;
-        Some(CompletedPendingCd {
+            .expect("workdir setter map lock poisoned");
+        let pending = pending_by_agent.get(agent_id)?;
+        if !pending.awaiting_echo || mutation_id != Some(&pending.mutation_id) {
+            return None;
+        }
+        let pending = pending_by_agent.remove(agent_id)?;
+        Some(CompletedPendingWorkdir {
             matched_request: false,
+            cancel_requested: pending.cancel_requested,
             invoke: pending.invoke,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
+    }
+
+    /// Consume a pending setter because it can no longer complete successfully.
+    pub(crate) fn take_pending_workdir_result(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Option<CompletedPendingWorkdir> {
+        let pending = self
+            .pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned")
+            .remove(agent_id)?;
+        Some(CompletedPendingWorkdir {
+            matched_request: false,
+            cancel_requested: pending.cancel_requested,
+            invoke: pending.invoke,
+            lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
+        })
+    }
+
+    /// Remove a pending setter by tool call id for cancellation.
+    pub(crate) fn take_pending_workdir_by_call(
+        &self,
+        call_id: &tau_proto::ToolCallId,
+    ) -> Option<CompletedPendingWorkdir> {
+        let mut pending = self
+            .pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned");
+        let agent_id = pending.iter().find_map(|(agent_id, item)| {
+            (&item.invoke.call_id == call_id).then(|| agent_id.clone())
+        })?;
+        let pending = pending.remove(&agent_id)?;
+        Some(CompletedPendingWorkdir {
+            matched_request: false,
+            cancel_requested: pending.cancel_requested,
+            invoke: pending.invoke,
+            lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
+        })
+    }
+
+    /// Drain every setter still waiting for metadata commit during shutdown.
+    pub(crate) fn take_all_pending_workdirs(&self) -> Vec<CompletedPendingWorkdir> {
+        self.pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned")
+            .drain()
+            .map(|(_, pending)| CompletedPendingWorkdir {
+                matched_request: false,
+                cancel_requested: pending.cancel_requested,
+                invoke: pending.invoke,
+                lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
+            })
+            .collect()
+    }
+
+    /// Mark an emitted setter for cancellation at its eventual commit boundary.
+    pub(crate) fn request_pending_workdir_cancel(&self, call_id: &tau_proto::ToolCallId) -> bool {
+        let mut pending = self
+            .pending_workdir_by_agent
+            .lock()
+            .expect("workdir setter map lock poisoned");
+        let Some(item) = pending
+            .values_mut()
+            .find(|item| &item.invoke.call_id == call_id && item.awaiting_echo)
+        else {
+            return false;
+        };
+        item.cancel_requested = true;
+        true
     }
 }

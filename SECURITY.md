@@ -33,6 +33,12 @@ operating-system error/source chain. They never retain or render command
 arguments, full extension configuration, environment values, or resolved secret
 values. Re-check this contract whenever extension spawn configuration or
 startup/respawn logging changes.
+Per-agent shell-instance workdirs are committed coordination state, not an
+access-control boundary. Paths are interpreted only by the configured extension
+instance that owns them. Malformed or unavailable remembered paths fail closed
+until explicitly repaired, and user-shell routing failures remain local command
+failures rather than changing extension authority. Directory locks remain
+advisory coordination.
 Robust framing and cleanup improvements are welcome when scoped, but unrelated
 features must not be expanded into slowloris, connection-flood, or sandbox
 hardening without an approved threat-model design.

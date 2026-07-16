@@ -1,7 +1,7 @@
 //! Runtime state and reader-loop dispatch after the ext-shell handshake.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -11,10 +11,11 @@ use tau_proto::{
 use tracing::debug;
 
 use super::{
-    apply_started_cwd_metadata, apply_working_directory, cwd_context_event, cwd_notice_event,
-    dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
-    dispatch_session_started, is_shell_tool, schedule_tool_started, schedule_ui_shell_command,
-    send_tool_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
+    UiShellScheduleContext, apply_started_cwd_metadata, apply_working_directory, cwd_context_event,
+    cwd_notice_event, dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
+    dispatch_session_started, invalid_cwd_context_event, is_shell_tool, schedule_tool_started,
+    schedule_ui_shell_command, send_tool_failure, send_ui_shell_saturated_failure,
+    with_lock_wait_duration,
 };
 use crate::Output;
 use crate::config::ExtConfig;
@@ -89,6 +90,7 @@ impl ShellRuntime {
         for cancel_tx in running_ui {
             let _ = cancel_tx.send(());
         }
+        self.cwd_state.take_all_pending_workdirs();
     }
 
     pub(super) fn final_shutdown(&mut self) {
@@ -99,6 +101,7 @@ impl ShellRuntime {
     pub(super) fn apply_config(
         &mut self,
         instance_name: Option<tau_proto::ExtensionName>,
+        tool_prefix: Option<tau_proto::ToolNamePrefix>,
         mut cfg: ExtConfig,
     ) -> tau_client::ClientResult<()> {
         if cfg.working_directory.is_none() {
@@ -108,9 +111,13 @@ impl ShellRuntime {
             self.cwd_state
                 .set_instance_name(instance_name.as_str().to_owned());
         }
+        self.cwd_state.set_context_label(tool_prefix.as_ref());
         if let Err(message) = apply_working_directory(&self.config, &cfg, self.runtime_started) {
             return Err(tau_client::ClientError::handler(message));
         }
+        self.cwd_state
+            .freeze_process_startup_cwd()
+            .map_err(tau_client::ClientError::handler)?;
         if let Err(message) = self.lock_manager.configure(&cfg.dir_lock) {
             return Err(tau_client::ClientError::handler(message));
         }
@@ -222,8 +229,8 @@ impl ShellRuntime {
         }
         self.cwd_state.unset(&unloaded.agent_id);
         self.cwd_state.take_pending_ready(&unloaded.agent_id);
-        self.cwd_state.take_pending_notice(&unloaded.agent_id);
-        self.cwd_state.take_pending_cd_result(&unloaded.agent_id);
+        self.cwd_state
+            .take_pending_workdir_result(&unloaded.agent_id);
         self.start_agent_owners
             .retain(|_, agent_id| agent_id != &unloaded.agent_id);
     }
@@ -232,10 +239,18 @@ impl ShellRuntime {
         if set.key != self.cwd_state.key() {
             return;
         }
+        if self.cwd_state.is_replay_failed(&set.agent_id) {
+            return;
+        }
         if let CborValue::Text(path) = set.value {
-            self.handle_text_cwd_metadata_set(set.agent_id, PathBuf::from(path), is_replay);
+            self.handle_text_cwd_metadata_set(
+                set.agent_id,
+                PathBuf::from(path),
+                set.mutation_id.as_ref(),
+                is_replay,
+            );
         } else {
-            self.handle_invalid_cwd_metadata_set(set.agent_id, is_replay);
+            self.handle_invalid_cwd_metadata_set(set.agent_id, set.mutation_id.as_ref(), is_replay);
         }
     }
 
@@ -243,51 +258,65 @@ impl ShellRuntime {
         &mut self,
         agent_id: tau_proto::AgentId,
         cwd: PathBuf,
+        mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
         is_replay: bool,
     ) {
-        self.cwd_state.set(agent_id.clone(), cwd.clone());
+        if !self
+            .cwd_state
+            .set_metadata_text(agent_id.clone(), cwd.clone())
+        {
+            self.handle_invalid_cwd_metadata_set(agent_id, mutation_id, is_replay);
+            return;
+        }
         if is_replay {
             return;
         }
         let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
             agent_id.clone(),
             &cwd,
+            &self.cwd_state,
         )));
-        if self.cwd_state.take_pending_notice(&agent_id).is_some() {
+        let pending_workdir =
+            self.cwd_state
+                .take_committed_pending_workdir_result(&agent_id, &cwd, mutation_id);
+        if pending_workdir.is_some() {
             let _ = self.tx.send(HarnessInputMessage::emit(cwd_notice_event(
                 agent_id.clone(),
                 &cwd,
             )));
         }
-        self.complete_pending_cd_after_text_metadata(&agent_id, &cwd);
+        self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd);
         self.publish_ready_if_pending(agent_id);
     }
 
-    fn complete_pending_cd_after_text_metadata(
+    fn complete_pending_workdir_after_text_metadata(
         &self,
-        agent_id: &tau_proto::AgentId,
-        cwd: &PathBuf,
+        pending_workdir: Option<crate::cwd_state::CompletedPendingWorkdir>,
+        cwd: &Path,
     ) {
-        if let Some(pending_cd) = self
-            .cwd_state
-            .take_committed_pending_cd_result(agent_id, cwd)
-        {
-            let event = if pending_cd.matched_request {
-                let output = crate::tools::cd::output(cwd);
+        if let Some(pending_workdir) = pending_workdir {
+            let event = if pending_workdir.cancel_requested {
+                Event::ToolCancelled(tau_proto::ToolCancelled {
+                    call_id: pending_workdir.invoke.call_id,
+                    tool_name: pending_workdir.invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                })
+            } else if pending_workdir.matched_request {
+                let output = crate::tools::workdir::output(cwd);
                 Event::ToolResult(ToolResult {
-                    call_id: pending_cd.invoke.call_id,
-                    tool_name: pending_cd.invoke.tool_name,
+                    call_id: pending_workdir.invoke.call_id,
+                    tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     result: output.result,
                     provider_content: Vec::new(),
                     kind: ToolResultKind::Final,
                     display: Some(output.display),
-                    originator: pending_cd.invoke.originator,
+                    originator: pending_workdir.invoke.originator,
                 })
             } else {
                 Event::ToolError(tau_proto::ToolError {
-                    call_id: pending_cd.invoke.call_id,
-                    tool_name: pending_cd.invoke.tool_name,
+                    call_id: pending_workdir.invoke.call_id,
+                    tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     message: format!(
                         "committed cwd metadata did not match requested cwd; cwd changed to {}",
@@ -295,32 +324,43 @@ impl ShellRuntime {
                     ),
                     details: None,
                     display: None,
-                    originator: pending_cd.invoke.originator,
+                    originator: pending_workdir.invoke.originator,
                 })
             };
             let _ = self
                 .tx
                 .send(HarnessInputMessage::emit(with_lock_wait_duration(
                     event,
-                    pending_cd.lock_wait_duration_seconds,
+                    pending_workdir.lock_wait_duration_seconds,
                 )));
         }
     }
 
-    fn handle_invalid_cwd_metadata_set(&mut self, agent_id: tau_proto::AgentId, is_replay: bool) {
+    fn handle_invalid_cwd_metadata_set(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
+        is_replay: bool,
+    ) {
+        self.cwd_state.set_invalid(agent_id.clone());
         if is_replay {
             return;
         }
-        let cwd = self.cwd_state.get_or_default(&agent_id);
-        let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
-            agent_id.clone(),
-            &cwd,
-        )));
-        self.cwd_state.take_pending_notice(&agent_id);
-        self.complete_pending_cd_with_error(
-            &agent_id,
-            "committed cwd metadata value is not text; cwd unchanged",
-        );
+        let _ = self
+            .tx
+            .send(HarnessInputMessage::emit(invalid_cwd_context_event(
+                agent_id.clone(),
+                &self.cwd_state,
+            )));
+        if let Some(pending) = self
+            .cwd_state
+            .take_correlated_pending_workdir_result(&agent_id, mutation_id)
+        {
+            self.send_pending_workdir_error(
+                pending,
+                "committed workdir metadata is malformed; workdir setter was superseded",
+            );
+        }
         self.publish_ready_if_pending(agent_id);
     }
 
@@ -332,41 +372,51 @@ impl ShellRuntime {
         if unset.key != self.cwd_state.key() {
             return;
         }
+        if self.cwd_state.is_replay_failed(&unset.agent_id) {
+            return;
+        }
         self.cwd_state.unset(&unset.agent_id);
         if is_replay {
             return;
         }
-        let cwd = self.cwd_state.get_or_default(&unset.agent_id);
-        let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
-            unset.agent_id.clone(),
-            &cwd,
-        )));
-        self.cwd_state.take_pending_notice(&unset.agent_id);
-        self.complete_pending_cd_with_error(
-            &unset.agent_id,
-            "committed cwd metadata was unset; cwd reverted to the process default",
-        );
-        self.publish_ready_if_pending(unset.agent_id);
+        if let Ok(cwd) = self.cwd_state.process_default() {
+            let _ = self
+                .tx
+                .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
+                    tau_proto::AgentMetadataSet {
+                        agent_id: unset.agent_id,
+                        key: self.cwd_state.key(),
+                        value: CborValue::Text(cwd.display().to_string()),
+                        mutation_id: None,
+                        inheritable: true,
+                    },
+                )));
+        }
     }
 
-    fn complete_pending_cd_with_error(&self, agent_id: &tau_proto::AgentId, message: &str) {
-        if let Some(pending_cd) = self.cwd_state.take_pending_cd_result(agent_id) {
-            let event = Event::ToolError(tau_proto::ToolError {
-                call_id: pending_cd.invoke.call_id,
-                tool_name: pending_cd.invoke.tool_name,
+    fn send_pending_workdir_error(
+        &self,
+        pending: crate::cwd_state::CompletedPendingWorkdir,
+        message: &str,
+    ) {
+        let event = if pending.cancel_requested {
+            Event::ToolCancelled(tau_proto::ToolCancelled {
+                call_id: pending.invoke.call_id,
+                tool_name: pending.invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
+            })
+        } else {
+            Event::ToolError(tau_proto::ToolError {
+                call_id: pending.invoke.call_id,
+                tool_name: pending.invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
                 message: message.to_owned(),
                 details: None,
                 display: None,
-                originator: pending_cd.invoke.originator,
-            });
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit(with_lock_wait_duration(
-                    event,
-                    pending_cd.lock_wait_duration_seconds,
-                )));
-        }
+                originator: pending.invoke.originator,
+            })
+        };
+        let _ = self.tx.send(HarnessInputMessage::emit(event));
     }
 
     fn publish_ready_if_pending(&self, agent_id: tau_proto::AgentId) {
@@ -388,17 +438,32 @@ impl ShellRuntime {
         };
         if done.error.is_some() {
             self.cwd_state.take_pending_ready(&done.agent_id);
+            self.cwd_state.set_replay_failed(done.agent_id);
             return;
         }
         if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
             let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
                 done.agent_id.clone(),
                 &cwd,
+                &self.cwd_state,
             )));
             self.publish_ready_if_pending(done.agent_id);
             return;
         }
-        let cwd = CwdState::process_default();
+        if self.cwd_state.is_invalid(&done.agent_id) {
+            let _ = self
+                .tx
+                .send(HarnessInputMessage::emit(invalid_cwd_context_event(
+                    done.agent_id.clone(),
+                    &self.cwd_state,
+                )));
+            self.publish_ready_if_pending(done.agent_id);
+            return;
+        }
+        let Ok(cwd) = self.cwd_state.process_default() else {
+            self.cwd_state.take_pending_ready(&done.agent_id);
+            return;
+        };
         let _ = self
             .tx
             .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
@@ -406,6 +471,7 @@ impl ShellRuntime {
                     agent_id: done.agent_id.clone(),
                     key: self.cwd_state.key(),
                     value: CborValue::Text(cwd.display().to_string()),
+                    mutation_id: None,
                     inheritable: true,
                 },
             )));
@@ -432,7 +498,16 @@ impl ShellRuntime {
             .as_ref()
             .is_some_and(|scheduler| scheduler.cancel_queued_call(&request.target_call_id))
         {
+            self.cwd_state
+                .take_pending_workdir_by_call(&request.target_call_id);
             debug!(call_id = %request.target_call_id, "cancellation requested for queued shell work");
+            return;
+        }
+        if self
+            .cwd_state
+            .request_pending_workdir_cancel(&request.target_call_id)
+        {
+            debug!(call_id = %request.target_call_id, "workdir cancellation deferred to metadata commit");
             return;
         }
         let cancel_tx = self
@@ -460,14 +535,40 @@ impl ShellRuntime {
         &self,
         cmd: tau_proto::UiShellCommand,
     ) -> tau_client::ClientResult<()> {
+        if cmd
+            .target_agent_id
+            .as_ref()
+            .is_some_and(|agent_id| self.cwd_state.pending_ready(agent_id).is_some())
+        {
+            send_ui_shell_saturated_failure(
+                cmd,
+                "workdir replay is not complete for the target agent".to_owned(),
+                &self.tx,
+            );
+            return Ok(());
+        }
+        let cwd = match cmd.target_agent_id.as_ref() {
+            Some(agent_id) => self.cwd_state.get_or_default(agent_id),
+            None => self.cwd_state.process_default(),
+        };
+        let cwd = match cwd {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                send_ui_shell_saturated_failure(cmd, message, &self.tx);
+                return Ok(());
+            }
+        };
         if let Err(error) = schedule_ui_shell_command(
             cmd,
-            self.scheduler()?,
-            &self.tx,
-            self.config.shell.clone(),
-            Arc::clone(&self.running_ui_commands),
-            Arc::clone(&self.shutdown_generation),
-            self.shutdown_generation.load(Ordering::SeqCst),
+            UiShellScheduleContext {
+                scheduler: self.scheduler()?,
+                tx: &self.tx,
+                shell_config: self.config.shell.clone(),
+                running_ui_commands: Arc::clone(&self.running_ui_commands),
+                shutdown_generation: Arc::clone(&self.shutdown_generation),
+                scheduled_generation: self.shutdown_generation.load(Ordering::SeqCst),
+                cwd,
+            },
         ) {
             let (cmd, message) = *error;
             send_ui_shell_saturated_failure(cmd, message, &self.tx);
@@ -540,6 +641,7 @@ mod tests {
                     agent_id: agent_id.clone(),
                     key: runtime.cwd_state.key(),
                     value: CborValue::Text(cwd.display().to_string()),
+                    mutation_id: None,
                     inheritable: true,
                 }),
                 true,
@@ -578,7 +680,7 @@ mod tests {
         assert!(matches!(
             context.event.as_ref(),
             Event::ExtAgentContextPublish(publish)
-                if publish.agent_id == agent_id && publish.key.as_ref() == "cwd"
+                if publish.agent_id == agent_id && publish.key.as_ref() == "workdir"
         ));
         let HarnessInputMessage::Emit(ready) = rx.recv().expect("context ready") else {
             panic!("expected context ready");
@@ -588,6 +690,283 @@ mod tests {
             Event::ExtensionContextReady(ready)
                 if ready.agent_id == agent_id && ready.session_id == "session-1"
         ));
+    }
+
+    /// Malformed restored workdir metadata is present state, not an absent key
+    /// that may be overwritten by the process-startup fallback.
+    #[test]
+    fn malformed_replayed_workdir_is_retained_without_default_seeding() {
+        let (tx, rx) = mpsc::channel();
+        let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-invalid-workdir").expect("agent id");
+        runtime
+            .handle_event(
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    session_id: "session-1".into(),
+                    agent_id: agent_id.clone(),
+                    ephemeral: false,
+                }),
+                false,
+            )
+            .expect("load");
+        runtime
+            .handle_event(
+                Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                    agent_id: agent_id.clone(),
+                    key: runtime.cwd_state.key(),
+                    value: CborValue::Bool(true),
+                    mutation_id: None,
+                    inheritable: true,
+                }),
+                true,
+            )
+            .expect("replay malformed metadata");
+        runtime
+            .handle_event(
+                Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+                    agent_id: agent_id.clone(),
+                    session_id: Some("session-1".into()),
+                    error: None,
+                }),
+                false,
+            )
+            .expect("complete replay");
+
+        let first = rx.recv().expect("invalid context");
+        assert!(matches!(
+            first,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ExtAgentContextPublish(publish)
+                    if publish.key.as_ref() == "workdir"
+                        && publish.value.0["status"] == "invalid")
+        ));
+        let second = rx.recv().expect("ready");
+        assert!(matches!(
+            second,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ExtensionContextReady(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "malformed replay must not synthesize default metadata"
+        );
+    }
+
+    /// Invalid remembered metadata fails one user shell command without killing
+    /// the extension runtime needed for an absolute workdir repair.
+    #[test]
+    fn invalid_workdir_user_shell_failure_is_command_local() {
+        let (tx, rx) = mpsc::channel();
+        let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-invalid-user-shell").expect("agent id");
+        runtime.cwd_state.set_invalid(agent_id.clone());
+        runtime
+            .handle_ui_shell_command(tau_proto::UiShellCommand {
+                session_id: "session-1".into(),
+                command_id: "command-1".into(),
+                command: "pwd".to_owned(),
+                include_in_context: false,
+                target_agent_id: Some(agent_id),
+            })
+            .expect("command-local failure");
+        let event = rx.recv().expect("terminal user shell failure");
+        assert!(matches!(
+            event,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+                    if finished.command_id.as_str() == "command-1"
+                        && finished.output.contains("invalid"))
+        ));
+        assert!(runtime.scheduler.is_some(), "runtime must remain usable");
+    }
+
+    /// User shell work must not use process fallback while durable workdir
+    /// replay is still establishing whether the instance key is present.
+    #[test]
+    fn user_shell_before_workdir_replay_fails_without_spawning() {
+        let (tx, rx) = mpsc::channel();
+        let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-replay-pending-shell").expect("agent id");
+        runtime
+            .cwd_state
+            .set_pending_ready(agent_id.clone(), "session-1".into());
+        runtime
+            .handle_ui_shell_command(tau_proto::UiShellCommand {
+                session_id: "session-1".into(),
+                command_id: "command-pending".into(),
+                command: "touch must-not-exist".to_owned(),
+                include_in_context: false,
+                target_agent_id: Some(agent_id),
+            })
+            .expect("command-local failure");
+        let event = rx.recv().expect("terminal failure");
+        assert!(matches!(
+            event,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+                    if finished.output.contains("replay is not complete"))
+        ));
+    }
+
+    /// Runtime shutdown clears setters awaiting lifecycle completion; the
+    /// harness owns terminalizing calls when the extension/session ends.
+    #[test]
+    fn shutdown_clears_reserved_workdir_setter_without_extension_terminal() {
+        let (tx, rx) = mpsc::channel();
+        let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-reserved-setter").expect("agent id");
+        let invoke = tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("reserved-setter"),
+            tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: agent_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        };
+        runtime
+            .cwd_state
+            .start_pending_workdir_result(agent_id, PathBuf::from("/tmp"), invoke, None)
+            .expect("reserve setter");
+        runtime.shutdown();
+        assert!(rx.try_recv().is_err());
+        assert!(
+            runtime
+                .cwd_state
+                .take_pending_workdir_by_call(&tau_proto::ToolCallId::new("reserved-setter"))
+                .is_none()
+        );
+    }
+
+    /// The non-interleavable pre-emission state and unrelated commits cannot
+    /// consume a setter; only its matching canonical echo reaches the terminal
+    /// boundary.
+    #[test]
+    fn workdir_reservation_commit_phase_is_linearized() {
+        let (tx, _rx) = mpsc::channel();
+        let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-linearized-setter").expect("agent id");
+        let invoke = tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("x".repeat(1024)),
+            tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: agent_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        };
+        let expected = PathBuf::from("/expected");
+        runtime
+            .cwd_state
+            .start_pending_workdir_result(agent_id.clone(), expected, invoke.clone(), None)
+            .expect("reserve");
+        let mutation_id = runtime
+            .cwd_state
+            .pending_workdir_mutation_id(&agent_id, &invoke.call_id)
+            .expect("mutation id");
+        assert!(mutation_id.as_str().len() <= tau_proto::MAX_AGENT_METADATA_MUTATION_ID_BYTES);
+        assert!(
+            runtime
+                .cwd_state
+                .take_committed_pending_workdir_result(
+                    &agent_id,
+                    &PathBuf::from("/pre-emission"),
+                    Some(&mutation_id),
+                )
+                .is_none()
+        );
+        assert!(
+            runtime
+                .cwd_state
+                .mark_pending_workdir_awaiting_echo(&agent_id, &invoke.call_id)
+        );
+        assert!(
+            runtime
+                .cwd_state
+                .take_committed_pending_workdir_result(
+                    &agent_id,
+                    &PathBuf::from("/superseding"),
+                    None,
+                )
+                .is_none(),
+            "unrelated commit must not consume the setter"
+        );
+        assert!(
+            runtime
+                .cwd_state
+                .take_committed_pending_workdir_result(
+                    &agent_id,
+                    &PathBuf::from("/expected"),
+                    None,
+                )
+                .is_none(),
+            "same-value external commit must not impersonate the setter echo"
+        );
+        let completed = runtime
+            .cwd_state
+            .take_committed_pending_workdir_result(
+                &agent_id,
+                &PathBuf::from("/expected"),
+                Some(&mutation_id),
+            )
+            .expect("matching echo consumes setter");
+        assert!(completed.matched_request);
+    }
+
+    /// Awaiting-echo cancellation stays attached to the transaction and emits
+    /// exactly one cancellation when its correlated commit arrives.
+    #[test]
+    fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
+        let (tx, rx) = mpsc::channel();
+        let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+        let agent_id = tau_proto::AgentId::parse("agent-cancel-setter").expect("agent id");
+        let invoke = tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("cancel-setter"),
+            tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: agent_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        };
+        runtime
+            .cwd_state
+            .start_pending_workdir_result(
+                agent_id.clone(),
+                PathBuf::from("/tmp"),
+                invoke.clone(),
+                None,
+            )
+            .expect("reserve");
+        let mutation_id = runtime
+            .cwd_state
+            .pending_workdir_mutation_id(&agent_id, &invoke.call_id)
+            .expect("mutation id");
+        assert!(
+            runtime
+                .cwd_state
+                .mark_pending_workdir_awaiting_echo(&agent_id, &invoke.call_id)
+        );
+        runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+            target_call_id: invoke.call_id.clone(),
+        });
+        runtime.handle_agent_metadata_set(
+            tau_proto::AgentMetadataSet {
+                agent_id,
+                key: runtime.cwd_state.key(),
+                value: CborValue::Text("/tmp".to_owned()),
+                mutation_id: Some(mutation_id),
+                inheritable: true,
+            },
+            false,
+        );
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|message| matches!(
+                    message,
+                    HarnessInputMessage::Emit(emit)
+                        if matches!(emit.event.as_ref(), Event::ToolCancelled(cancelled)
+                            if cancelled.call_id.as_str() == "cancel-setter")
+                ))
+                .count(),
+            1
+        );
     }
 
     /// Ensures a session-level shutdown cleans shell-owned state without

@@ -5,9 +5,10 @@ use super::*;
 use crate::agent::PendingPrompt;
 use crate::extension::{ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process};
 use crate::harness::{
-    PendingTool, PromptFragmentSource, extension_disconnected_tool_call_error_message,
-    prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
-    tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
+    PendingTool, PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
+    extension_disconnected_tool_call_error_message, prompt_snapshot_tool_error_message,
+    tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
+    unavailable_tool_error_message, validate_protocol_version,
 };
 
 fn context_text(item: &ContextItem) -> Option<&str> {
@@ -3221,6 +3222,19 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
     h.initial_extension_tool_preflight_complete = false;
     connect_handshaking_tool(&mut h, "operational-owner");
     connect_handshaking_tool(&mut h, "activation-blocker");
+    h.pending_ui_shell_commands.insert(
+        UiShellRouteId::new("startup-shell".into()),
+        PendingUiShellCommand {
+            provider_id: "operational-owner".into(),
+            command: tau_proto::UiShellCommand {
+                command_id: "startup-shell".into(),
+                session_id: "s1".into(),
+                command: "printf held".to_owned(),
+                include_in_context: false,
+                target_agent_id: None,
+            },
+        },
+    );
 
     h.handle_extension_event(
         "operational-owner",

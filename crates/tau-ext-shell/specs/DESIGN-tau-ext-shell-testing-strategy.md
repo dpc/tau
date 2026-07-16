@@ -29,6 +29,22 @@ the ordering of startup publications before `Ready`, because the extension uses
 tau-client helpers for startup and dispatch while preserving a narrow event
 exposure boundary.
 
+Workdir tests must cover absent-key process-cwd initialization, replay precedence,
+stale and malformed fail-closed state, committed setter completion, read-only
+status calls, admission snapshots, and concurrent-setter rejection. Both shell
+surfaces require full-dispatch regression coverage proving call-level `cwd`
+changes execution only and never emits persistent metadata.
+Setter lifecycle coverage must verify the synchronous admission transition:
+validation, sole-setter reservation, awaiting-commit marking, and metadata
+emission run without scheduler or event-loop interleaving. State-level tests
+must still prove that a commit cannot consume the internal pre-emission state.
+Runtime tests cover cancellation while awaiting commit, shutdown cleanup, and
+matching versus superseding committed values.
+Harness boundary tests should cover zero, one, and multiple user-shell providers,
+stale-session rejection, concrete target propagation, point-to-point execution,
+multi-UI projection, delivery loss, bounded client command ids, internal route-id
+mapping and delayed-event rejection, and exactly one terminal result.
+
 Provider-owned invocation examples are protocol metadata and must be validated
 with `tau_core::validate_tool_examples` in registration tests. Custom/freeform
 tools are not fully checked by JSON-schema validation, so keep separate semantic

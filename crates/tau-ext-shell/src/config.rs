@@ -10,8 +10,8 @@ use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ExtConfig {
     /// Current working directory the extension switches to after receiving its
-    /// startup configuration. Relative paths used by ext-shell tools are
-    /// resolved from this directory unless a per-call cwd overrides them.
+    /// startup configuration. After configuration it becomes the frozen
+    /// missing-key fallback for per-agent instance workdirs.
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) shell: ShellConfig,
     pub(crate) dir_lock: DirLockConfig,

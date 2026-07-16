@@ -183,6 +183,7 @@ impl Harness {
                                 agent_id: agent_id.clone(),
                                 key: key.clone(),
                                 value: entry.value.clone(),
+                                mutation_id: None,
                                 inheritable: entry.inheritable,
                             })
                         })
@@ -342,6 +343,7 @@ impl Harness {
                                 agent_id: agent_id.clone(),
                                 key: key.clone(),
                                 value: entry.value.clone(),
+                                mutation_id: None,
                                 inheritable: entry.inheritable,
                             })
                         })

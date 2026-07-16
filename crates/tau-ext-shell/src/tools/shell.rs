@@ -1,5 +1,6 @@
 //! `shell` tool and user-initiated `!`/`!!` command dispatch.
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use tau_proto::{
@@ -347,8 +348,10 @@ pub(crate) fn dispatch_user_shell_command(
     shell_config: ShellConfig,
     tx: &Output,
     cancel_rx: mpsc::Receiver<()>,
+    cwd: PathBuf,
 ) {
-    let child = match shell_config.spawn_isolated(&cmd.command, None, false, false) {
+    let cwd = cwd.display().to_string();
+    let child = match shell_config.spawn_isolated(&cmd.command, Some(&cwd), false, false) {
         Ok(child) => child,
         Err(err) => {
             send_user_shell_finished(

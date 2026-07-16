@@ -742,6 +742,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
                 agent_id: agent_id.clone(),
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: CborValue::Text("/tmp/live-load-cwd".to_owned()),
+                mutation_id: None,
                 inheritable: true,
             }),
         )
@@ -1875,6 +1876,7 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
                     key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                     value: CborValue::Text("/first".to_owned()),
+                    mutation_id: None,
                     inheritable: true,
                 }),
             )
@@ -1887,6 +1889,10 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
                     key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                     value: CborValue::Text("/latest".to_owned()),
+                    mutation_id: Some(
+                        tau_proto::AgentMetadataMutationId::parse("durable-live-token")
+                            .expect("mutation id"),
+                    ),
                     inheritable: true,
                 }),
             )
@@ -1923,6 +1929,7 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
                     if set.agent_id.as_str() == "agent-replay-meta"
                         && set.key.as_str() == "ext_core-shell_cwd"
                         && set.value == CborValue::Text("/latest".to_owned())
+                        && set.mutation_id.is_none()
             )
         })
         .expect("latest metadata replayed");

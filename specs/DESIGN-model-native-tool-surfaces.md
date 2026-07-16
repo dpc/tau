@@ -25,14 +25,13 @@ using provider metadata described by
 and neutral shell metadata described by
 [ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).
 
-For the current workdir refinement, if source verification confirms that the
-Codex GPT shell surface has a call-level `cwd`, Tau retains the corresponding
-top-level argument but treats it as invocation-local. It must not update
-persistent per-agent workdir state. The current shell implementation instead
-persists an explicit `cwd`, as documented by
-[SPEC-tau-ext-shell-directory-locking](../crates/tau-ext-shell/specs/SPEC-tau-ext-shell-directory-locking.md);
-this known divergence is tracked in `tau-agent-80v9`. Exact upstream schema and
-semantics remain subject to that verification and are not asserted here.
+The source audit at Codex revision `2f7d89b141` found that its legacy
+`shell_command` uses an invocation-local argument named `workdir`, not `cwd`.
+Tau intentionally retains its deployed `cwd` field in this change to avoid
+combining a model-facing rename with the workdir-state repair; `tau-agent-gj13`
+tracks that separately. Tau's `cwd` is invocation-local and must never update
+persistent per-agent workdir state. This is an explicit temporary product
+divergence rather than a claim of exact compatibility with that Codex revision.
 
 ## Rationale
 

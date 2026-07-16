@@ -16,11 +16,12 @@ read-write commands and no access-mode chip is published for UI display. User
 `!` shell commands are UI commands rather than agent tool calls and do not
 participate in locking.
 
-The `cd` tool changes the remembered cwd by emitting `agent.metadata_set` and a
-model-visible `agent.user_message_injected` notice. Explicit `cwd` arguments on shell
-tools also emit metadata and update remembered cwd. Relative paths for filesystem tools
+The `workdir` setter changes the remembered workdir by emitting
+`agent.metadata_set` and completing only after its committed echo. Explicit
+`cwd` arguments on shell tools are call-local and never update metadata.
+Relative paths for filesystem tools
 (`read`, `edit`, `find`, `grep`, `ls`, `apply_patch`, and `dir_lock`) are resolved
-against the remembered cwd before execution or automatic lock selection. Once automatic
+against the admission-time remembered workdir before execution or automatic lock selection. Once automatic
 lock selection begins, the invocation carries the same cwd snapshot through lock waiting
 and execution, even if committed cwd metadata changes before the lock is granted. This
 keeps locks, shell execution, and patch paths aligned without calling `chdir(2)` in the
@@ -87,7 +88,7 @@ before execution:
 - `apply_patch` parses the patch and locks all touched source and destination
   directories as one FIFO request.
 - `shell` and `gpt_shell` infer access mode rather than accepting an explicit mode.
-  A command whose canonical explicit `cwd`, or the agent's remembered cwd when
+  A command whose canonical call-local `cwd`, or the agent's remembered workdir when
   `cwd` is omitted, is covered by the caller's manual lock is read-write and takes
   an automatic lock; otherwise it is read-only and skips update locking.
 

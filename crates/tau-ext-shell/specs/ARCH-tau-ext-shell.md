@@ -22,19 +22,29 @@ therefore drives request/context accounting; generic display metadata contains
 safe source/oriented/region/output geometry, profile, patches, format, and byte
 count without bytes.
 
-## Per-agent cwd metadata
+## Per-agent instance workdir metadata
 
-The extension instance name from `configure.instance_name` defines the cwd
+The extension instance name from `configure.instance_name` defines the workdir
 metadata key: `ext_<instance>_cwd`. The built-in core shell instance therefore
 uses `ext_core-shell_cwd`. If multiple shell instances are configured, each uses
 its own instance-derived key and keeps an independent cwd map.
 
-Committed `agent.metadata_set` / `agent.metadata_unset` events are the source of
-truth. The extension updates its in-memory `CwdState` only after seeing those
-events, publishes fresh `agent_context.cwd` after each committed change, and
+An absent key initializes from the validated process cwd frozen after startup
+configuration. The CLI and harness do not seed a built-in instance or copy paths
+between namespaces. Committed `agent.metadata_set` / `agent.metadata_unset`
+events are the source of truth. The extension updates its in-memory cache only
+after seeing those events, publishes fresh `agent_context.workdir` after each committed change, and
 emits `extension.context_ready` only after publishing the initial cwd context for
 a loaded agent. Metadata values are inheritable so child agents start in the
-parent's remembered cwd.
+parent's remembered workdir. Stored stale or malformed values remain
+authoritative and fail closed until an explicit absolute setter repairs them.
+
+Every tool invocation snapshots the committed workdir at admission. Relative
+resolution, command execution, and directory-lock setup retain that snapshot
+through queueing and lock waits. Call-level shell `cwd` remains an invocation-only
+override and never emits metadata. The persistent `workdir` read/set transaction
+is governed by
+[DESIGN-per-agent-extension-workdirs](../../../specs/DESIGN-per-agent-extension-workdirs.md).
 
 ## tau-client runtime boundary
 
@@ -78,9 +88,9 @@ manual runtime be finished so the protocol writer can flush and join.
 
 `tau-ext-shell` tags tools with neutral capability metadata such as
 `shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
-`shell:exec:shell_command`, and `shell:cd`. The extension must not decide which
+`shell:exec:shell_command`, and `shell:workdir`. The extension must not decide which
 model gets which
-surface; the harness interprets these tags together with provider-published
+surface; `workdir` carries `shell:workdir`. The harness interprets these tags together with provider-published
 model tags and role configuration.
 
 ## Skill and instruction discovery

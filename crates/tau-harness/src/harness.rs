@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rand::SeedableRng as _;
 use rand::rngs::StdRng;
+use rand::{RngCore as _, SeedableRng as _};
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
     DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
@@ -1733,6 +1733,38 @@ fn watch_category_for_retry(
     }
 }
 
+/// Harness-owned identity and selected provider for an in-flight UI shell
+/// command.
+#[derive(Clone)]
+struct PendingUiShellCommand {
+    /// Extension connection selected for point-to-point execution.
+    provider_id: tau_proto::ConnectionId,
+    /// Canonical request after the harness resolves its target agent.
+    command: tau_proto::UiShellCommand,
+}
+
+/// Harness-private provider execution identity for one UI shell route.
+///
+/// The wire protocol reuses `ShellCommandId`, so conversion is confined to the
+/// provider boundary while harness state keeps UI and execution identities
+/// distinct.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct UiShellRouteId(tau_proto::ShellCommandId);
+
+impl UiShellRouteId {
+    /// Wrap an opaque provider-side protocol id.
+    fn new(value: tau_proto::ShellCommandId) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the protocol id sent to and echoed by the selected provider.
+    fn as_protocol_id(&self) -> &tau_proto::ShellCommandId {
+        &self.0
+    }
+}
+
+const MAX_UI_SHELL_COMMAND_ID_BYTES: usize = 256;
+
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -1798,6 +1830,10 @@ pub struct Harness {
     /// to stabilize generated agent ids. Advanced on each agent creation so
     /// one harness does not mint the same random candidate repeatedly.
     agent_id_rng: StdRng,
+    /// Independent random stream for opaque provider-side UI-shell route ids.
+    /// Keeping it separate prevents shell traffic from changing later agent
+    /// ids.
+    ui_shell_route_rng: StdRng,
     /// `call_id` → owning agent for every tool call currently
     /// in flight. Used to attribute incoming `ToolResult` / `ToolError`
     /// / `ToolProgress` events back to the originating conversation.
@@ -1819,6 +1855,12 @@ pub struct Harness {
     /// right provider.
     pub(crate) pending_tool_providers:
         std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
+    /// Harness-private provider route id → selected provider and canonical UI
+    /// request identity for commands awaiting a terminal extension event.
+    pending_ui_shell_commands: HashMap<UiShellRouteId, PendingUiShellCommand>,
+    /// UI command ids reserved from admission through terminal event commit.
+    /// This stays bounded by routed or interception-pending commands.
+    active_ui_shell_command_ids: HashSet<tau_proto::ShellCommandId>,
     /// Source-bound transport capabilities for the active session.
     transport_capabilities: HashMap<String, Vec<TransportCapability>>,
     /// Process-monotonic transport capability registration identity.
@@ -2557,6 +2599,24 @@ fn format_agent_head(head: AgentHead) -> String {
     }
 }
 
+fn ui_shell_provider_ids(
+    registry: &tau_core::ToolRegistry,
+) -> std::collections::HashSet<tau_proto::ConnectionId> {
+    registry
+        .all_tool_providers()
+        .into_iter()
+        .filter(|provider| {
+            provider.kind == tau_core::ToolProviderKind::Extension
+                && provider
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == "shell:exec:generic")
+        })
+        .map(|provider| provider.connection_id.clone())
+        .collect()
+}
+
 impl Harness {
     /// Enables the test-only echo tool explicitly for every configured role.
     #[cfg(any(test, feature = "echo-agent"))]
@@ -2594,11 +2654,14 @@ impl Harness {
             current_session_generation: 0,
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
+            ui_shell_route_rng: StdRng::from_entropy(),
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
             completed_tool_calls: HashSet::new(),
             completed_tool_agents: HashMap::new(),
             pending_tool_providers: HashMap::new(),
+            pending_ui_shell_commands: HashMap::new(),
+            active_ui_shell_command_ids: HashSet::new(),
             transport_capabilities: HashMap::new(),
             next_transport_capability_epoch: 1,
             transport_reply_routes: HashMap::new(),
@@ -4294,6 +4357,10 @@ impl Harness {
                     .publish_from_excluding_kinds(source, observer_frame, &[ClientKind::Ui]);
         } else {
             let _ = self.bus.publish_from(source, observer_frame);
+        }
+        if let Event::ShellCommandFinished(finished) = &event {
+            self.active_ui_shell_command_ids
+                .remove(&finished.command_id);
         }
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
@@ -8081,12 +8148,67 @@ impl Harness {
 
     fn handle_extension_shell_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
         match event {
-            Event::ShellCommandProgress(progress) => {
-                // Pass-through: the UI renders chunks as they arrive.
+            Event::ShellCommandProgress(mut progress) => {
+                let route_id = UiShellRouteId::new(progress.command_id.clone());
+                let Some(pending) = self.pending_ui_shell_commands.get(&route_id) else {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        command_id = %progress.command_id,
+                        source_id,
+                        "discarding stale or unknown shell command progress"
+                    );
+                    return None;
+                };
+                if pending.provider_id.as_str() != source_id
+                    || progress.target_agent_id != pending.command.target_agent_id
+                {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        command_id = %progress.command_id,
+                        source_id,
+                        expected_provider = %pending.provider_id,
+                        "discarding shell command progress with invalid ownership or identity"
+                    );
+                    return None;
+                }
+                progress.command_id = pending.command.command_id.clone();
+                progress.target_agent_id = pending.command.target_agent_id.clone();
                 self.publish_event(Some(source_id), Event::ShellCommandProgress(progress));
                 None
             }
-            Event::ShellCommandFinished(finished) => {
+            Event::ShellCommandFinished(mut finished) => {
+                let route_id = UiShellRouteId::new(finished.command_id.clone());
+                let Some(pending) = self.pending_ui_shell_commands.get(&route_id).cloned() else {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        command_id = %finished.command_id,
+                        source_id,
+                        "discarding stale or duplicate shell command completion"
+                    );
+                    return None;
+                };
+                let command = &pending.command;
+                if pending.provider_id.as_str() != source_id
+                    || finished.session_id != command.session_id
+                    || finished.command != command.command
+                    || finished.include_in_context != command.include_in_context
+                    || finished.target_agent_id != command.target_agent_id
+                {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        command_id = %finished.command_id,
+                        source_id,
+                        expected_provider = %pending.provider_id,
+                        "discarding shell command completion with invalid ownership or identity"
+                    );
+                    return None;
+                }
+                self.pending_ui_shell_commands.remove(&route_id);
+                finished.command_id = command.command_id.clone();
+                finished.session_id = command.session_id.clone();
+                finished.command.clone_from(&command.command);
+                finished.include_in_context = command.include_in_context;
+                finished.target_agent_id = command.target_agent_id.clone();
                 // Publish first so the UI finalizes its render block regardless
                 // of whether we inject into history.
                 self.publish_event(
@@ -8593,6 +8715,10 @@ impl Harness {
             Event::ActionInvoke(invoke) => self
                 .handle_action_invoke(client_id, invoke)
                 .map(|keep_going| (keep_going, None)),
+            Event::UiShellCommand(command) => {
+                self.handle_ui_shell_command(client_id, command);
+                Ok((true, None))
+            }
             Event::ActionSchemaPublished(_) | Event::ActionResult(_) | Event::ActionError(_) => {
                 Ok((true, None))
             }
@@ -8632,6 +8758,140 @@ impl Harness {
             }
             other => Ok((true, Some(other))),
         }
+    }
+
+    fn next_ui_shell_route_id(&mut self) -> UiShellRouteId {
+        loop {
+            let route_id = UiShellRouteId::new(tau_proto::ShellCommandId::new(format!(
+                "harness-shell-{:016x}{:016x}",
+                self.ui_shell_route_rng.next_u64(),
+                self.ui_shell_route_rng.next_u64()
+            )));
+            if !self.pending_ui_shell_commands.contains_key(&route_id) {
+                return route_id;
+            }
+        }
+    }
+
+    fn handle_ui_shell_command(&mut self, client_id: &str, mut command: tau_proto::UiShellCommand) {
+        let command_id_len = command.command_id.as_str().len();
+        if command_id_len == 0 || command_id_len > MAX_UI_SHELL_COMMAND_ID_BYTES {
+            self.emit_info("discarding empty or oversized shell command id");
+            return;
+        }
+        if self
+            .active_ui_shell_command_ids
+            .contains(&command.command_id)
+        {
+            self.emit_info("discarding duplicate in-flight shell command id");
+            return;
+        }
+        self.active_ui_shell_command_ids
+            .insert(command.command_id.clone());
+        for ui in self
+            .bus
+            .connections()
+            .into_iter()
+            .filter(|connection| connection.kind == ClientKind::Ui)
+        {
+            let _ = self.bus.send_to(
+                ui.id.as_str(),
+                Some(client_id),
+                HarnessOutputMessage::deliver(Event::UiShellCommand(command.clone())),
+            );
+        }
+        if command.session_id != self.current_session_id {
+            self.finish_unroutable_ui_shell(command, "the shell command targets a stale session");
+            return;
+        }
+        let providers = ui_shell_provider_ids(&self.registry);
+        if providers.len() != 1 {
+            let reason = if providers.is_empty() {
+                "no shell extension instance is available"
+            } else {
+                "multiple shell extension instances are available; select one explicitly before using ! or !!"
+            };
+            self.finish_unroutable_ui_shell(command, reason);
+            return;
+        }
+        let target_agent_id = if let Some(agent_id) = command.target_agent_id.as_ref() {
+            self.agent_routes
+                .get(agent_id.as_str())
+                .and_then(|cid| self.agents.get(cid))
+                .filter(|conversation| {
+                    conversation.session_id == command.session_id && !conversation.terminating
+                })
+                .and_then(|conversation| conversation.agent_id.as_deref())
+                .map(crate::parse_agent_id)
+        } else {
+            self.default_shell_output_target_agent()
+                .map(|(_, agent_id)| agent_id)
+        };
+        let Some(target_agent_id) = target_agent_id else {
+            self.finish_unroutable_ui_shell(command, "no unambiguous target agent is available");
+            return;
+        };
+        command.target_agent_id = Some(target_agent_id);
+        let provider = providers.into_iter().next().expect("one provider");
+        let route_id = self.next_ui_shell_route_id();
+        let mut provider_command = command.clone();
+        provider_command.command_id = route_id.as_protocol_id().clone();
+        let delivered = self.bus.send_to(
+            provider.as_str(),
+            Some(client_id),
+            HarnessOutputMessage::deliver(Event::UiShellCommand(provider_command)),
+        );
+        if delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
+            self.pending_ui_shell_commands.insert(
+                route_id,
+                PendingUiShellCommand {
+                    provider_id: provider,
+                    command,
+                },
+            );
+            return;
+        }
+        self.finish_unroutable_ui_shell(
+            command,
+            "the selected shell extension instance became unavailable",
+        );
+    }
+
+    fn fail_pending_ui_shell_commands_for_provider(&mut self, provider_id: &str, reason: &str) {
+        let failed = self
+            .pending_ui_shell_commands
+            .iter()
+            .filter(|(_, pending)| pending.provider_id.as_str() == provider_id)
+            .map(|(command_id, _)| command_id.clone())
+            .collect::<Vec<_>>();
+        for command_id in failed {
+            if let Some(pending) = self.pending_ui_shell_commands.remove(&command_id) {
+                self.finish_unroutable_ui_shell(pending.command, reason);
+            }
+        }
+    }
+
+    fn fail_all_pending_ui_shell_commands(&mut self, reason: &str) {
+        let pending = std::mem::take(&mut self.pending_ui_shell_commands);
+        for (_, pending) in pending {
+            self.finish_unroutable_ui_shell(pending.command, reason);
+        }
+    }
+
+    fn finish_unroutable_ui_shell(&mut self, command: tau_proto::UiShellCommand, reason: &str) {
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+                command_id: command.command_id,
+                session_id: command.session_id,
+                command: command.command,
+                include_in_context: command.include_in_context,
+                target_agent_id: command.target_agent_id,
+                output: reason.to_owned(),
+                exit_code: None,
+                cancelled: false,
+            }),
+        );
     }
 
     fn handle_ui_debug_event_stats_request(
@@ -10155,6 +10415,10 @@ impl Harness {
         }
         self.pending_retry_prompts
             .retain(|_, pending| pending.requester_client_id.as_str() != connection_id);
+        self.fail_pending_ui_shell_commands_for_provider(
+            connection_id,
+            "the shell extension instance disconnected before the command completed",
+        );
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id.as_str() != connection_id);
@@ -11516,6 +11780,13 @@ impl Harness {
     ) -> Result<(), String> {
         self.validate_agent_metadata_target(&set.agent_id)?;
         self.validate_agent_metadata_key(&set.key)?;
+        if set
+            .mutation_id
+            .as_ref()
+            .is_some_and(|id| tau_proto::MAX_AGENT_METADATA_MUTATION_ID_BYTES < id.as_str().len())
+        {
+            return Err("agent metadata mutation id exceeds maximum size".to_owned());
+        }
         let value_bytes = tau_proto::encode_message_to_vec(&set.value)
             .map_err(|error| format!("failed to measure agent metadata value: {error}"))?;
         if tau_proto::MAX_AGENT_METADATA_VALUE_BYTES < value_bytes.len() {
@@ -11738,7 +12009,7 @@ impl Harness {
     /// cache/tool-choice details, but neither copies parent transcript
     /// nodes. When an explicit or derived parent agent is known, only
     /// metadata entries marked inheritable are copied to the child (for
-    /// example the shell extension's remembered cwd).
+    /// example a shell extension instance's remembered workdir).
     fn start_agent_request(
         &mut self,
         pending: PendingStartAgentRequest,
@@ -13741,6 +14012,9 @@ impl Harness {
         self.publish_event(
             None,
             Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
+        );
+        self.fail_all_pending_ui_shell_commands(
+            "the session shut down before the shell command completed",
         );
 
         // A rollover is terminal for controls correlated to the old session.
@@ -16081,6 +16355,7 @@ impl Harness {
                         agent_id: agent_id_proto.clone(),
                         key,
                         value: entry.value,
+                        mutation_id: None,
                         inheritable: entry.inheritable,
                     }),
                     false,
@@ -16748,6 +17023,21 @@ impl Harness {
                     })
             })
             .collect();
+        let mut saw_shell_workdir_fragment = false;
+        fragments.retain(|sourced| {
+            let PromptFragmentSource::Extension { .. } = &sourced.source else {
+                return true;
+            };
+            if sourced.fragment.name != "shell.workdir" {
+                return true;
+            }
+            if saw_shell_workdir_fragment {
+                false
+            } else {
+                saw_shell_workdir_fragment = true;
+                true
+            }
+        });
         if let Some(role) = self.available_roles.get(role_name) {
             fragments.extend(
                 role.prompt_fragments

@@ -15,7 +15,7 @@ tool_policy:
         - shell:edit:apply_patch
         - shell:read:image
         - shell:exec:shell_command
-        - shell:cd
+        - shell:workdir
         - shell:lock
 agents:
   default_role: engineer

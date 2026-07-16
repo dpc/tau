@@ -40,6 +40,24 @@ fn tagged_tool(name: &str, enabled_by_default: bool, tags: &[&str]) -> ToolSpec 
     }
 }
 
+/// UI shell routing counts configured generic-shell owners exactly once,
+/// independently of prefixes and unrelated tools.
+#[test]
+fn ui_shell_provider_discovery_distinguishes_zero_one_and_two_instances() {
+    let mut registry = tau_core::ToolRegistry::new();
+    assert!(super::ui_shell_provider_ids(&registry).is_empty());
+    registry.register(
+        "shell-a",
+        tagged_tool("shell", true, &["shell:exec:generic"]),
+    );
+    assert_eq!(super::ui_shell_provider_ids(&registry).len(), 1);
+    registry.register(
+        "shell-b",
+        tagged_tool("prod_shell", true, &["shell:exec:generic"]),
+    );
+    assert_eq!(super::ui_shell_provider_ids(&registry).len(), 2);
+}
+
 fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
     ProviderModelInfo {
         id: model.clone(),
@@ -98,7 +116,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
             true,
             &["shell:read", "provider-content:image"],
         ),
-        tagged_tool("cd", true, &["shell:cd"]),
+        tagged_tool("workdir", true, &["shell:workdir"]),
         tagged_tool("dir_lock", true, &["shell:lock"]),
     ] {
         harness.registry.register_with_prompt_fragment(
@@ -186,7 +204,7 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         "shell",
         "gpt_shell",
         "read",
-        "cd",
+        "workdir",
         "dir_lock",
         "compact",
         "agent_compact",
@@ -344,7 +362,7 @@ fn chatgpt_model_gets_promoted_shell_alternatives() {
 
     assert!(tools.contains(&"apply_patch".to_owned()));
     assert!(tools.contains(&"gpt_shell".to_owned()));
-    assert!(tools.contains(&"cd".to_owned()));
+    assert!(tools.contains(&"workdir".to_owned()));
     assert!(tools.contains(&"dir_lock".to_owned()));
     assert!(!tools.contains(&"read".to_owned()));
     assert!(!tools.contains(&"edit".to_owned()));
@@ -449,7 +467,7 @@ fn custom_policy_rule_disables_and_enables_tool_tags() {
   "rules": {
     "custom.shell-cwd-only": {
       "disable_tool_tags": ["shell:*"],
-      "enable_tool_tags": ["shell:cd"]
+      "enable_tool_tags": ["shell:workdir"]
     }
   }
 }"#,
@@ -458,7 +476,7 @@ fn custom_policy_rule_disables_and_enables_tool_tags() {
 
     let tools = effective_tool_names(&policy.harness);
 
-    assert_eq!(tools, vec!["cd".to_owned()]);
+    assert_eq!(tools, vec!["workdir".to_owned()]);
 }
 
 /// Ensures role-level tag operations run after global policy and before
@@ -467,15 +485,15 @@ fn custom_policy_rule_disables_and_enables_tool_tags() {
 fn role_tool_tags_run_after_policy_before_groups_and_tools() {
     let role = AgentRole {
         disable_tool_tags: serde_json::from_str(r#"["shell:*"]"#).expect("tag pattern parses"),
-        enable_tool_tags: serde_json::from_str(r#"["shell:cd"]"#).expect("tag pattern parses"),
+        enable_tool_tags: serde_json::from_str(r#"["shell:workdir"]"#).expect("tag pattern parses"),
         disable_tool_groups: vec![ToolGroupName::new("shell")],
-        enable_tools: vec![ToolName::new("cd")],
+        enable_tools: vec![ToolName::new("workdir")],
         ..AgentRole::default()
     };
     let policy = policy_harness(&["shell:chatgpt"], role);
     let tools = effective_tool_names(&policy.harness);
 
-    assert_eq!(tools, vec!["cd".to_owned()]);
+    assert_eq!(tools, vec!["workdir".to_owned()]);
 }
 
 /// Ensures prompt-owned tool lookup uses the advertised snapshot rather than

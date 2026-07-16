@@ -24,7 +24,7 @@ change winner selection.
 
 Extensions and providers publish metadata only: tools declare neutral `ToolTag`s
 (such as `shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
-`shell:exec:shell_command`, and `shell:cd`) and providers publish model
+`shell:exec:shell_command`, and `shell:workdir`) and providers publish model
 `ModelTag`s (such as `shell:chatgpt`). The harness owns all matching policy.
 
 Tool enablement starts from each extension's `enabled_by_default`, then matching
@@ -32,7 +32,7 @@ harness `tool_policy.rules` run deterministically by `(priority, rule name)`,
 with each rule applying `disable_tool_tags` before `enable_tool_tags`. Built-in
 and user policy share the same evaluator; the built-in `builtin.chatgpt-shell`
 rule disables `shell:*` for ChatGPT-tagged models and re-enables apply-patch,
-shell-command, cd, and directory-lock tools.
+shell-command, workdir, and directory-lock tools.
 
 Role precedence is broad-to-specific and runs after global policy: optional
 `tools` allow-list base, `disable_tool_tags`, `enable_tool_tags`,

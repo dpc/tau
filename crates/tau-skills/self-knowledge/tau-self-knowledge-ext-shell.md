@@ -17,8 +17,8 @@ Model-visible tools:
 - `read_image` — reads one local PNG, JPEG, or WebP under the same filesystem authority as `read`, validates and re-encodes it under strict byte/dimension/pixel/decoded-memory limits, strips source metadata, and returns bounded high-detail typed image content. Bare calls keep the 2048-side/2,500-patch high profile. Explicit experimental `mode: "overview"` uses 1024-side/600-patch local preparation for coarse inspection only. An optional half-open `region` uses EXIF-oriented source pixels and crops before profile resizing. It is visible only when the exact provider route publishes native image tool-result support (initially GPT-5.6 ChatGPT Responses). Generic UI/debug output shows source/oriented/region/output geometry, profile, patches, format, and byte count, never pixels or base64.
 - `edit` — applies context-checked line-oriented replacements. `newText` fully replaces the 1-based half-open `start_line`..`end_line_exclusive` range; `start_line` is included and `end_line_exclusive` is excluded. Empty insertion ranges use `start_line == end_line_exclusive`, such as `1..<1` for top-of-file insertion or `total_lines + 1 ..< total_lines + 1` for EOF append. Each edit has a `context_line` that matches the original content of `start_line`; use an empty `context_line` when `start_line` is the append slot past the end of the file. Non-empty `newText` with no trailing line ending is normalized into a full line; explicit line endings are preserved, so callers can create mixed endings. Context mismatches report `context_line_number` as the requested `start_line`. The agent-visible result is minimal status only; the UI receives a separate structured diff payload for changed UTF-8 files, including inline changed-token segments.
 - `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It carries the neutral `shell:edit:apply_patch` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
-- `shell` — runs `sh -c`-style commands with optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. It is the generic shell execution alternative. It no longer accepts an explicit `ro` / `rw` argument.
-- `cd` — changes the shell extension's remembered working directory for the current agent. The cwd is also stored as inheritable agent metadata using the extension instance key (for the built-in shell, `ext_core-shell_cwd`). It carries `shell:cd` and remains available under the built-in ChatGPT shell policy.
+- `shell` — runs `sh -c`-style commands with optional call-local `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. Its `cwd` never changes remembered state. It is the generic shell execution alternative.
+- `workdir` — with no path, reads this shell instance's current per-agent path/status; with a path, validates, canonicalizes, commits, and persistently changes it. State uses inheritable instance-scoped metadata (for the built-in shell, `ext_core-shell_cwd`). Dependent shell/filesystem calls belong in a later turn after a setter succeeds. It carries `shell:workdir`.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It carries the neutral `shell:exec:shell_command` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
 - `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
 - `find` — ignore-aware glob file search with escaped control characters in paths, invalid-UTF-8 path markers, and `limit` capped at 2000 results.
@@ -26,6 +26,17 @@ Model-visible tools:
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.
+
+Every filesystem, shell, lock, and user `!`/`!!` invocation snapshots its
+instance workdir at admission. Queued or lock-waiting work does not drift after
+a later workdir commit. Stale remembered paths are retained and fail closed;
+use an absolute `workdir` setter to repair them. Each configured ext-shell
+instance initializes only a missing metadata key from its frozen actual process
+startup cwd and remains independent of other instances.
+
+User `!`/`!!` commands are routed to exactly one generic shell instance. They
+fail without execution when none is available, when several are ambiguous, or
+when the target session/agent workdir is not ready.
 
 `tau-ext-shell` runs tool work through a bounded priority scheduler. Short bursts can queue instead of failing immediately when workers are busy; queued model tool calls can be canceled before they start; user `!` shell work and control-sensitive `dir_lock` calls have higher-priority lanes than bulk model work. If bounded queue or queued-argument budgets are exhausted, the tool reports a clear backpressure error instead of spawning unbounded threads.
 
@@ -88,4 +99,4 @@ extensions: {
 }
 ```
 
-`working_directory` changes the extension process cwd only during startup config; late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.
+`working_directory` changes the extension process cwd only during startup config and therefore its missing-key fallback; it never overrides restored per-agent state. Late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.

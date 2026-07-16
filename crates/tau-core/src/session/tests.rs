@@ -1261,6 +1261,7 @@ fn metadata_set_unset_fold_without_transcript_nodes() {
         agent_id: agent_id.clone(),
         key: key.clone(),
         value: tau_proto::CborValue::Text("/tmp".to_owned()),
+        mutation_id: None,
         inheritable: true,
     }));
     assert!(tree.nodes().is_empty());
@@ -1290,6 +1291,7 @@ fn inheritable_metadata_filters_non_inheritable_entries() {
             agent_id: agent_id.clone(),
             key,
             value: tau_proto::CborValue::Bool(true),
+            mutation_id: None,
             inheritable,
         }));
     }
@@ -1460,6 +1462,7 @@ fn validate_event_rejects_mismatched_metadata_with_generic_diagnostic() {
                 agent_id: other_agent_id(),
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: tau_proto::CborValue::Text("/tmp".to_owned()),
+                mutation_id: None,
                 inheritable: true,
             }),
         ),

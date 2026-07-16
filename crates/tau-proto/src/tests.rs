@@ -1,5 +1,17 @@
 use super::*;
 
+/// Metadata mutation ids enforce their byte bound at construction and serde
+/// boundaries so a committed correlation cannot be silently rejected later.
+#[test]
+fn metadata_mutation_id_rejects_empty_and_oversized_values() {
+    assert!(AgentMetadataMutationId::parse("").is_err());
+    let oversized = "x".repeat(AGENT_METADATA_MUTATION_ID_MAX_BYTES + 1);
+    assert!(AgentMetadataMutationId::parse(oversized.clone()).is_err());
+    assert!(
+        serde_json::from_value::<AgentMetadataMutationId>(serde_json::json!(oversized)).is_err()
+    );
+}
+
 /// Prefix syntax rejects ambiguous separators and non-provider-safe bytes.
 #[test]
 fn tool_prefix_validation_is_segmented_ascii() {
@@ -836,6 +848,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             key: "cwd".into(),
             value: CborValue::Text("/tmp".to_owned()),
+            mutation_id: None,
             inheritable: true,
         }),
         Event::AgentMetadataUnset(AgentMetadataUnset {
@@ -3354,6 +3367,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             agent_id: agent_id("worker"),
             key: AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text("/tmp".to_owned()),
+            mutation_id: None,
             inheritable: true,
         }),
         Event::AgentMetadataUnset(AgentMetadataUnset {
