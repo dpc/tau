@@ -36,3 +36,7 @@ as an incidental fix.
 This gate keeps persistence recovery guarantees and extension compatibility,
 authority, and trust decisions reviewable in isolation. The cost of an explicit
 small design change is preferred over hidden cross-component drift.
+
+The confirmed extension-published message-fact interface and persistence
+application is recorded by
+[DESIGN-extension-published-message-facts](DESIGN-extension-published-message-facts.md).
