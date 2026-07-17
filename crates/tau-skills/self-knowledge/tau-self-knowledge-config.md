@@ -113,7 +113,12 @@ agents:
   display_name_template: "{{{{role_group}}}}: {{{{task_name}}}}"
 ```
 
-The built-in ID template is `{{{{random_alphanumeric 6}}}}`; the built-in display-name template is `{{{{#if task_name_present}}}}{{{{role}}}}: {{{{task_name}}}}{{{{else}}}}{{{{role}}}}{{{{/if}}}}`. Both template types are rendered with Handlebars in strict mode.
+The built-in ID template is `{{{{random_alphanumeric 6}}}}`; the built-in
+display-name template is
+`{{{{#if task_name_present}}}}{{{{task_name}}}}{{{{/if}}}}`. Thus a manually
+created agent has no initial display name, while an explicit task name is kept
+without adding its role. Both template types are rendered with Handlebars in
+strict mode.
 
 ID templates receive:
 
@@ -128,12 +133,12 @@ Display-name templates additionally receive:
 - `task_name_present` — true when `task_name` is available. `taskNamePresent` is also available as a camelCase alias.
 Rendered IDs must use only ASCII letters, digits, `_`, or `-`, and must fit Tau's agent ID length limit. If a configured ID template fails to render, renders an invalid ID, or keeps colliding, Tau warns and falls back to the built-in random template. If a configured display-name template fails to render or renders empty, Tau warns when appropriate and falls back to the request display name when one exists.
 
-Delegated children started through the built-in `agent_start` tool use the task
-title as their leading display label. When the parent agent is known, Tau appends
-a creation-time parent snapshot in the form
-`<task title>; child of <parent-agent-id> <parent-display-name>`. The configured
-display-name template is used as the fallback label only when the request has no
-task title.
+Delegated children started through the built-in `agent_start` tool use the exact
+task title as their display name. Parent relationships remain separate metadata
+and are not embedded in names. `/name` and `/agent name` set an explicit durable
+display name even when it equals the agent's role. Persisted display-name facts
+remain authoritative on replay, including role-derived defaults written by
+older Tau versions; Tau does not guess whether such an old value was explicit.
 
 ## Providers
 

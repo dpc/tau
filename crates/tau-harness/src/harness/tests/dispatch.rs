@@ -16100,6 +16100,123 @@ fn tool_backed_start_agent_display_name_does_not_include_parent_lineage() {
     h.shutdown().expect("shutdown");
 }
 
+/// A manually created agent has no explicit task or `/name`, so the durable
+/// start fact must not synthesize its role as presentation metadata.
+#[test]
+fn manually_created_agent_has_no_default_display_name() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.agent_id.as_str() == cid.as_str() => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("manual agent start fact");
+
+    assert_eq!(started.role, "engineer-junior");
+    assert_eq!(started.display_name, None);
+    let conversation = h.agents.get(&cid).expect("manual agent conversation");
+    assert!(conversation.display_name.is_none());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Explicit names remain authoritative even when their text equals the agent's
+/// role, and restoration must not mistake them for an old synthesized default.
+#[test]
+fn explicit_display_name_equal_to_role_survives_restore() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+        let agent_id = crate::parse_agent_id(cid.as_str());
+
+        h.handle_ui_set_agent_display_name(tau_proto::UiSetAgentDisplayName {
+            session_id: h.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            display_name: "engineer-junior".to_owned(),
+        })
+        .expect("set explicit display name");
+        assert_eq!(
+            h.agents
+                .get(&cid)
+                .and_then(|conversation| conversation.display_name.as_deref()),
+            Some("engineer-junior")
+        );
+        h.shutdown().expect("shutdown");
+        agent_id
+    };
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cid = resumed
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("restored agent route");
+    assert_eq!(
+        resumed
+            .agents
+            .get(cid)
+            .and_then(|conversation| conversation.display_name.as_deref()),
+        Some("engineer-junior")
+    );
+
+    resumed.shutdown().expect("shutdown");
+}
+
+/// A role-derived name written by a custom template is durable data. Resuming
+/// under the newer built-in template must preserve it rather than guessing that
+/// text equal to a role was synthetic.
+#[test]
+fn custom_role_display_name_survives_restore_under_built_in_template() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.agent_display_name_template = Some("{{role}}".to_owned());
+        let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+        let started = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentStarted(started) if started.agent_id.as_str() == cid.as_str() => {
+                    Some(started)
+                }
+                _ => None,
+            })
+            .expect("custom-template agent start fact");
+        assert_eq!(started.display_name.as_deref(), Some("engineer-junior"));
+        h.shutdown().expect("shutdown");
+        started.agent_id
+    };
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume under built-in template");
+    let cid = resumed
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("restored agent route");
+    assert_eq!(
+        resumed
+            .agents
+            .get(cid)
+            .expect("restored agent conversation")
+            .display_name
+            .as_deref(),
+        Some("engineer-junior")
+    );
+
+    resumed.shutdown().expect("shutdown");
+}
+
 /// A wait that is already blocked on a tool call must be released even when the
 /// terminal event is a harness-synthesized routing error instead of a provider
 /// response. Otherwise `wait` can hang forever after unavailable-tool paths.

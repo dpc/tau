@@ -803,11 +803,16 @@ fn minting_agent_ids_reject_display_name_only_template_fields() {
     ));
 }
 
+/// For newly created agents, the real built-in template must render no name
+/// when the request supplies no explicit task.
 #[test]
-fn agent_template_uses_role_when_task_name_is_absent() {
+fn built_in_agent_template_omits_display_name_when_task_name_is_absent() {
     let mut rng = super::deterministic_agent_id_rng();
+    let template = tau_config::settings::HarnessSettings::built_in()
+        .agent_display_name_template
+        .expect("built-in display-name template");
     let rendered = super::render_agent_template(
-        "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}",
+        &template,
         "engineer-senior",
         "engineer",
         "engineer-Ab12",
@@ -817,7 +822,7 @@ fn agent_template_uses_role_when_task_name_is_absent() {
     )
     .expect("render");
 
-    assert_eq!(rendered, "engineer-senior");
+    assert!(rendered.is_empty());
 }
 
 #[test]
@@ -924,6 +929,8 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
     )));
 }
 
+/// Bundled self-knowledge must quote the effective configuration defaults so
+/// agents do not advise users based on stale templates.
 #[test]
 fn render_self_knowledge_config_content_inserts_config_defaults() {
     let rendered = crate::harness::render_self_knowledge_config_content();
@@ -935,10 +942,7 @@ fn render_self_knowledge_config_content_inserts_config_defaults() {
     assert!(rendered.contains("show_thinking: true"));
     assert!(rendered.contains("{{role}}-{{random_alphanumeric 4}}"));
     assert!(rendered.contains("{{role_group}}: {{task_name}}"));
-    assert!(
-        rendered
-            .contains("{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}")
-    );
+    assert!(rendered.contains("{{#if task_name_present}}{{task_name}}{{/if}}"));
 }
 
 #[test]

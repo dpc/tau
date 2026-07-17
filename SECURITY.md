@@ -28,6 +28,10 @@ keep the stable id visible, escape controls, bidi/structural Unicode, delimiter
 characters, quotes, and backslashes, then apply byte and terminal-column bounds
 after escaping. Revisit these invariants whenever adding a new name source or
 using names outside UI presentation.
+For newly created agents, the built-in default leaves agents without an
+explicit task or rename unnamed. Operator-configured templates may still
+generate names, and durable display-name facts remain authoritative on replay
+even when an older generated name is indistinguishable from an explicit one.
 See
 [`SPEC-tau-cli-agent-message-labels`](crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md)
 for the rendering and session-provenance behavior.

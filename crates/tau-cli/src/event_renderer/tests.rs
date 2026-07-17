@@ -466,6 +466,36 @@ fn agent_message_summary_excludes_body() {
     assert!(!summary.contains("secret payload"));
 }
 
+/// An explicitly named sender keeps its supplemental label even when that name
+/// equals its operational role, while a manually created unnamed target is
+/// rendered as its routing id without parentheses.
+#[test]
+fn agent_message_summary_omits_name_for_unnamed_target() {
+    let message = agent_message("named-sender", "manual-target", "payload");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id("named-sender"),
+        parent_agent: None,
+        role: "engineer".to_owned(),
+        display_name: Some("engineer".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id("manual-target"),
+        parent_agent: None,
+        role: "engineer-junior".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+
+    assert_eq!(
+        renderer.agent_message_summary(&message),
+        "Message from named-sender (engineer) to manual-target"
+    );
+}
+
 /// Local message endpoints independently project authoritative restored agent
 /// names while keeping both routing ids visible.
 #[test]

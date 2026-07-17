@@ -4833,6 +4833,8 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     assert!(!status_row.contains("@engineer_abc"));
 }
 
+/// An authoritative display name remains supplemental and visible when its text
+/// equals the operational role; equality must not be treated as synthetic.
 #[test]
 fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     let (_term, handle, vt) = setup(100, 24);
@@ -4850,7 +4852,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         parent_agent: None,
         agent_id: agent_id("engineer-junior_b"),
         role: "engineer-junior".to_owned(),
-        display_name: Some("sleep 6".to_owned()),
+        display_name: Some("engineer-junior".to_owned()),
         metadata: Vec::new(),
         ephemeral: false,
     }));
@@ -4869,8 +4871,51 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         .into_iter()
         .find(|row| row.contains("&s1"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @engineer-junior_b (sleep 6)"));
-    assert!(!status_row.contains("@sleep 6 (engineer-junior_b)"));
+    assert!(status_row.starts_with("&s1 @engineer-junior_b (engineer-junior)"));
+    assert!(!status_row.contains("@engineer-junior (engineer-junior_b)"));
+}
+
+/// A selected agent without an explicit display name must not show its role as
+/// a synthesized parenthetical in the status bar.
+#[test]
+fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::New,
+    }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("engineer-junior_b"),
+        role: "engineer-junior".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "hello".into(),
+        agent_id: agent_id("engineer-junior_b"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("&s1"))
+        .expect("status row after agent selection");
+    assert!(status_row.starts_with("&s1 @engineer-junior_b"));
+    assert!(!status_row.contains("(engineer-junior)"));
+    assert!(!status_row.contains("@engineer-junior_b ("));
 }
 
 #[test]

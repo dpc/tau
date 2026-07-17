@@ -20,7 +20,9 @@ tool_policy:
 agents:
   default_role: engineer
   id_template: "{{random_alphanumeric 6}}"
-  display_name_template: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"
+  # Only an explicit task supplies an initial display name. Persisted names,
+  # including role-derived names written by older versions, remain authoritative.
+  display_name_template: "{{#if task_name_present}}{{task_name}}{{/if}}"
   role_groups:
     engineer:
       prompt_fragments:

@@ -2,11 +2,14 @@
 
 ## Topology and endpoint lifecycle
 
-Agent display names are human-facing labels, not topology metadata. They may come from a
-user-supplied topic, role/template rendering, or an explicit rename, but they must not
-encode parent/child lineage or watcher relationships. Topology and observation state
-belong in protocol facts instead, so the same agent label remains stable wherever the
-agent is referenced.
+Agent display names are human-facing labels, not topology metadata. For newly
+created agents, the built-in default leaves agents without an explicit task or
+rename unnamed, while operator-configured templates may still generate labels
+from roles or other template context. Persisted names remain authoritative,
+including older role-derived defaults that cannot be distinguished from
+explicit values. Names must not encode parent/child lineage or watcher
+relationships. Topology and observation state belong in protocol facts instead,
+so the same agent label remains stable wherever the agent is referenced.
 
 Session-local watch state is represented by authoritative `agent.watches_updated`
 snapshots keyed by watcher. The harness maintains the forward watch set and reverse
