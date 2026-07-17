@@ -1300,9 +1300,9 @@ fn inheritable_metadata_filters_non_inheritable_entries() {
     assert!(!inherited.contains_key(&local_key));
 }
 
-/// Ensures provider tool-call rounds fold only after every terminal result
-/// arrives, preserving the original model call order rather than result arrival
-/// order.
+/// Ensures provider tool-call rounds fold only after every terminal result,
+/// preserving model call order and then flushing envelopes/message facts in one
+/// arrival-ordered pending-input FIFO.
 #[test]
 fn provider_tool_round_waits_for_all_terminal_results() {
     let agent_id = agent_id();
@@ -1359,6 +1359,21 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         "message must wait until the tool result preserves provider adjacency"
     );
     assert!(
+        tree.record_committed_message_fact(
+            Box::new(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::User,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "<tau_message event=\"delivered\">later</tau_message>".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+            PersistedAgentEventSeq::new(7),
+        )
+        .is_none(),
+        "generic message fact must share the tool-adjacent pending input queue"
+    );
+    assert!(
         tree.apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolResult(tau_proto::ToolResult {
@@ -1390,13 +1405,29 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             }),
         )
         .expect("final terminal result should close the round");
-    let final_node = tree.node(final_node_id).expect("message node should exist");
+    let final_node = tree
+        .node(final_node_id)
+        .expect("message-fact node should exist");
     assert!(matches!(
         final_node.entry,
+        AgentEntry::MessageFact {
+            durable_event_seq,
+            ..
+        } if durable_event_seq == PersistedAgentEventSeq::new(7)
+    ));
+    let envelope_node = tree
+        .node(final_node.parent_id.expect("fact follows envelope"))
+        .expect("envelope node should exist");
+    assert!(matches!(
+        envelope_node.entry,
         AgentEntry::MessageEnvelope { .. }
     ));
     let tool_results_node = tree
-        .node(final_node.parent_id.expect("message follows tool results"))
+        .node(
+            envelope_node
+                .parent_id
+                .expect("envelope follows tool results"),
+        )
         .expect("tool results node should exist");
     assert_eq!(tool_results_node.parent_id, Some(assistant_node_id));
 

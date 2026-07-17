@@ -210,6 +210,14 @@ pub fn format_session_entry(entry: &AgentEntry) -> String {
             format!("{event_name}: {message}")
         }
         AgentEntry::MessageEnvelope { item } => item.render_provider_text(),
+        AgentEntry::MessageFact { item, .. } => item
+            .content
+            .iter()
+            .map(|part| match part {
+                tau_proto::ContentPart::Text { text } => text.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         AgentEntry::Compaction {
             replacement_window, ..
         } => {

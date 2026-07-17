@@ -597,10 +597,11 @@ impl AgentStore {
 
     /// Append one message fact before any semantic projection consumes it.
     ///
-    /// Unlike [`Self::append_agent_event_at`], this path deliberately performs
-    /// no [`AgentTree`] semantic validation or fold. The exact fact becomes the
-    /// canonical record first; a post-commit consumer may derive transcript
-    /// state later but cannot veto or replace the appended record.
+    /// Unlike [`Self::append_agent_event_at`], this path performs no transcript
+    /// validation before append. The exact fact becomes the canonical record
+    /// first; only afterward does the deterministic post-commit consumer derive
+    /// a transcript node (or skip an unprojectable fact), so projection cannot
+    /// veto or replace the record.
     ///
     /// # Errors
     ///
@@ -650,7 +651,7 @@ impl AgentStore {
         let record = PersistedAgentEvent {
             seq,
             source,
-            event,
+            event: event.clone(),
             parent: AgentEventParent::InheritHead,
             recorded_at,
         };
@@ -659,10 +660,15 @@ impl AgentStore {
         } else {
             self.ephemeral_events.entry(aid).or_default().push(record);
         }
+        let folded_node_id = tau_proto::project_message_fact(&event)
+            .and_then(Result::ok)
+            .and_then(|projection| {
+                tree.record_committed_message_fact(Box::new(projection.item), seq)
+            });
         tree.advance_next_event_seq();
         Ok(AgentAppendOutcome {
             seq,
-            folded_node_id: None,
+            folded_node_id,
         })
     }
 

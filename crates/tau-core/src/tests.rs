@@ -989,10 +989,10 @@ fn session_store_persists_membership_facts() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// Raw agent message-fact append persists before semantic fold and remains
-/// replayable without creating a transcript node.
+/// Raw append persists first, then derives the same transcript projection live
+/// and after durable replay.
 #[test]
-fn agent_store_raw_message_fact_append_is_unfolded_and_replayable() {
+fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
     let agents_dir = temp_dir("agent-raw-message");
     let fact = delivered_message_fact("agent-1", "m1");
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
@@ -1001,14 +1001,14 @@ fn agent_store_raw_message_fact_append_is_unfolded_and_replayable() {
         .append_agent_message_fact_at("agent-1", None, fact.clone(), tau_proto::UnixMicros::now())
         .expect("append raw message fact");
     assert_eq!(outcome.seq.get(), 0);
-    assert_eq!(outcome.folded_node_id, None);
-    assert!(
-        store
-            .agent("agent-1")
-            .expect("loaded agent")
-            .nodes()
-            .is_empty()
+    assert!(outcome.folded_node_id.is_some());
+    assert_eq!(
+        store.agent("agent-1").expect("loaded agent").nodes().len(),
+        1
     );
+    let live_projection = store.agent("agent-1").expect("loaded agent").nodes()[0]
+        .entry
+        .clone();
     assert_eq!(
         store.agent_events("agent-1").expect("agent events")[0].event,
         fact
@@ -1026,7 +1026,11 @@ fn agent_store_raw_message_fact_append_is_unfolded_and_replayable() {
             .expect("replayed agent")
             .nodes()
             .len(),
-        1
+        2
+    );
+    assert_eq!(
+        reopened.agent("agent-1").expect("replayed agent").nodes()[0].entry,
+        live_projection
     );
 
     let _ = std::fs::remove_dir_all(agents_dir);

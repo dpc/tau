@@ -288,6 +288,290 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     );
 }
 
+/// Valid incoming facts fold and wake exactly once after commit, while sent and
+/// universally invalid facts never activate inference.
+#[test]
+fn live_message_fact_projection_activates_only_valid_incoming_facts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create target");
+    let agent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("target agent");
+    assert!(h.agent_routes.contains_key(agent_id.as_str()));
+    let delivered = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("bridge"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "u1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+    let prompts_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+        .count();
+    h.commit_message_fact(None, delivered);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before + 1,
+        "valid incoming fact should request one inference activation"
+    );
+    assert!(matches!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("projected tree")
+            .nodes()
+            .last()
+            .map(|node| &node.entry),
+        Some(tau_core::AgentEntry::MessageFact { .. })
+    ));
+    let projected_prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("message fact activation prompt");
+    assert!(
+        projected_prompt
+            .system_prompt
+            .contains("<tau_message> elements are committed extension-published message facts.")
+    );
+    assert!(projected_prompt.context.blocks.iter().any(|block| {
+        matches!(
+            block,
+            tau_proto::ContextBlock::UserInput(input)
+                if input.items.iter().any(|item| matches!(
+                    item,
+                    tau_proto::ContextItem::Message(message)
+                        if message.role == tau_proto::ContextRole::User
+                            && matches!(
+                                message.content.first(),
+                                Some(tau_proto::ContentPart::Text { text })
+                                    if text.contains("<tau_message event=\"delivered\"")
+                            )
+                ))
+        )
+    }));
+
+    h.commit_message_fact(
+        None,
+        Event::MessageSent(tau_proto::MessageSent::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m2"),
+            None,
+            None,
+            "reply",
+        )),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before + 1,
+        "sent fact must not add an activation"
+    );
+
+    h.commit_message_fact(
+        None,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m3"),
+            tau_proto::MessageParty {
+                stable_id: String::new(),
+                display_name: None,
+            },
+            None,
+            "invalid party",
+        )),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before + 1,
+        "unprojectable fact must not add an activation"
+    );
+
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .cloned()
+        .expect("target conversation");
+    h.agents.get_mut(&cid).expect("target runtime").terminating = true;
+    h.commit_message_fact(
+        None,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m4"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+            },
+            None,
+            "arrived while terminating",
+        )),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before + 1,
+        "terminating target must retain the projection without waking"
+    );
+    assert!(matches!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("terminating target tree")
+            .nodes()
+            .last()
+            .map(|node| &node.entry),
+        Some(tau_core::AgentEntry::MessageFact { .. })
+    ));
+}
+
+/// A live incoming fact committed during an open tool round stays pending until
+/// terminal placement, then produces exactly one prompt after the tool result.
+#[test]
+fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    seed_assistant_tool_round(&mut h, &cid, &[("call-1", "shell")]);
+    let prompts_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+        .count();
+
+    h.commit_message_fact(
+        None,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m1"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+            },
+            None,
+            "after tool",
+        )),
+    );
+
+    assert!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .nodes()
+            .iter()
+            .all(|node| !matches!(node.entry, tau_core::AgentEntry::MessageFact { .. })),
+        "fact projection must remain pending while tool adjacency is open"
+    );
+    assert!(matches!(
+        h.agents[&cid].pending_message_wakes.front(),
+        Some(crate::agent::PendingMessageWake {
+            source: crate::agent::PendingMessageWakeSource::MessageFact { .. },
+            node_id: None,
+        })
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before
+    );
+
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }),
+    );
+    h.maybe_complete_agent_turn_for(&cid, "call-1");
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before + 1,
+        "terminal placement must release exactly one fact activation"
+    );
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("fact activation prompt");
+    let items = prompt.context.flatten();
+    let tool_index = items
+        .iter()
+        .rposition(|item| matches!(item, ContextItem::ToolResult(_)))
+        .expect("terminal tool result");
+    let fact_index = items
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item,
+                ContextItem::Message(message)
+                    if matches!(
+                        message.content.first(),
+                        Some(ContentPart::Text { text })
+                            if text.contains("<tau_message event=\"delivered\"")
+                    )
+            )
+        })
+        .expect("projected fact");
+    assert!(fact_index > tool_index);
+    h.shutdown().expect("shutdown");
+}
+
 /// A known non-runnable agent selected only by existing store metadata receives
 /// its message fact in the agent journal rather than session fallback.
 #[test]
@@ -324,6 +608,99 @@ fn known_offline_agent_message_fact_uses_agent_journal() {
             .iter()
             .all(|record| record.event.name().category() != &tau_proto::EventCategory::Message)
     );
+    assert!(matches!(
+        h.agent_store
+            .agent("offline-agent")
+            .expect("offline transcript")
+            .nodes()
+            .last()
+            .map(|node| &node.entry),
+        Some(tau_core::AgentEntry::MessageFact { .. })
+    ));
+    assert!(
+        event_log_events(&h).iter().all(|event| !matches!(
+            event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_id.as_str() == "offline-agent"
+        )),
+        "unloaded target must not wake"
+    );
+}
+
+/// Cold replay reconstructs an offline agent's fact projection without
+/// synthesizing a model activation.
+#[test]
+fn agent_message_fact_replay_projects_without_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("offline-agent").expect("agent id");
+    let live_projection = {
+        let mut h = quiet_provider_harness(&state_dir).expect("start");
+        h.agent_store
+            .record_agent_meta(agent_id.as_str())
+            .expect("reserve offline agent");
+        h.store
+            .append_session_event(
+                "s1",
+                None,
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    session_id: "s1".into(),
+                    agent_id: agent_id.clone(),
+                    ephemeral: false,
+                }),
+            )
+            .expect("seed membership");
+        h.commit_message_fact(
+            None,
+            Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::new("bridge"),
+                tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+                tau_proto::MessageFactId::new("m1"),
+                tau_proto::MessageParty {
+                    stable_id: "u1".to_owned(),
+                    display_name: None,
+                },
+                None,
+                "persisted message",
+            )),
+        );
+        let projection = h
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("live transcript")
+            .nodes()
+            .last()
+            .expect("live fact node")
+            .entry
+            .clone();
+        h.shutdown().expect("shutdown");
+        projection
+    };
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    resumed
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("load replayed agent journal");
+    let replayed_projection = resumed
+        .agent_store
+        .agent(agent_id.as_str())
+        .expect("replayed transcript")
+        .nodes()
+        .last()
+        .expect("replayed fact node")
+        .entry
+        .clone();
+    assert_eq!(replayed_projection, live_projection);
+    assert!(
+        event_log_events(&resumed).iter().all(|event| !matches!(
+            event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id
+        )),
+        "journal replay must not synthesize a model activation"
+    );
+    resumed.shutdown().expect("shutdown");
 }
 
 /// Current-session membership is sufficient to select an agent journal even

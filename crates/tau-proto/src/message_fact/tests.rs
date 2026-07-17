@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    EXTENSION_NAME_MAX_BYTES, Event, HarnessInputMessage, MessageExtensionData,
+    CborValue, EXTENSION_NAME_MAX_BYTES, Event, HarnessInputMessage, MessageExtensionData,
     decode_harness_input_from_slice, encode_message_to_vec,
 };
 
@@ -82,6 +82,289 @@ fn constructors_default_required_extension_data_to_null() {
             HarnessInputMessage::emit(fact)
         );
     }
+}
+
+/// Every fact projects to the generic boundary with its specified role and
+/// activation behavior, without resolving operation references.
+#[test]
+fn all_message_facts_project_with_generic_roles_and_escaping() {
+    let publisher = MessagePublisherId::new("bridge-main");
+    let agent = MessageAgentTarget::new("agent-1");
+    let target = MessageFactRef {
+        publisher_extension_id: publisher.clone(),
+        message_id: MessageFactId::new("m<&1"),
+    };
+    let party = MessageParty {
+        stable_id: "u\"1".to_owned(),
+        display_name: Some("Ali\u{202e}ce".to_owned()),
+    };
+    let conversation = Some(MessageConversation {
+        stable_id: "c1".to_owned(),
+        display_name: Some("Gen&eral".to_owned()),
+    });
+    let mut delivered = MessageDelivered::new(
+        publisher.clone(),
+        agent.clone(),
+        MessageFactId::new("m1"),
+        party.clone(),
+        conversation.clone(),
+        "<hello>",
+    );
+    delivered.extension_data =
+        MessageExtensionData::new(CborValue::Text("opaque sentinel".to_owned()))
+            .expect("bounded opaque data");
+    let facts = [
+        Event::MessageDelivered(delivered),
+        Event::MessageEdited(MessageEdited::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            Some(party.clone()),
+            conversation.clone(),
+            "edited",
+        )),
+        Event::MessageDeleted(MessageDeleted::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            Some(party.clone()),
+            conversation.clone(),
+        )),
+        Event::MessageReactionAdded(MessageReactionAdded::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            Some(party.clone()),
+            conversation.clone(),
+            "👍",
+        )),
+        Event::MessageReactionRemoved(MessageReactionRemoved::new(
+            publisher.clone(),
+            agent.clone(),
+            target,
+            Some(party),
+            conversation,
+            "👍",
+        )),
+        Event::MessageSent(MessageSent::new(
+            publisher,
+            agent,
+            MessageFactId::new("m2"),
+            Some(MessageParty {
+                stable_id: "recipient-1".to_owned(),
+                display_name: Some("Recipient".to_owned()),
+            }),
+            None,
+            "sent",
+        )),
+    ];
+
+    let mut rendered = Vec::new();
+    for fact in &facts {
+        let projection = project_message_fact(fact)
+            .expect("message fact")
+            .expect("valid projection");
+        let (expected_role, expected_activation) = match fact {
+            Event::MessageSent(_) => (ContextRole::Assistant, false),
+            Event::MessageDelivered(_)
+            | Event::MessageEdited(_)
+            | Event::MessageDeleted(_)
+            | Event::MessageReactionAdded(_)
+            | Event::MessageReactionRemoved(_) => (ContextRole::User, true),
+            _ => unreachable!("fixture contains only message facts"),
+        };
+        assert_eq!(projection.item.role, expected_role);
+        assert_eq!(projection.activates_model, expected_activation);
+        let ContentPart::Text { text } = &projection.item.content[0];
+        assert!(text.starts_with("<tau_message event="));
+        assert!(!text.contains("<hello>"));
+        assert!(!text.contains('\u{202e}'));
+        assert!(!text.contains("opaque sentinel"));
+        rendered.push(text.clone());
+    }
+    assert_eq!(
+        rendered,
+        vec![
+            "<tau_message event=\"delivered\" publisher=\"bridge-main\" message_id=\"m1\" sender_id=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\">&lt;hello&gt;</tau_message>",
+            "<tau_message event=\"edited\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\">edited</tau_message>",
+            "<tau_message event=\"deleted\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\"/>",
+            "<tau_message event=\"reaction_added\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\" reaction=\"👍\"/>",
+            "<tau_message event=\"reaction_removed\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\" reaction=\"👍\"/>",
+            "<tau_message event=\"sent\" publisher=\"bridge-main\" message_id=\"m2\" recipient_id=\"recipient-1\" recipient_display=\"Recipient\">sent</tau_message>",
+        ]
+    );
+}
+
+/// Universal validation follows deterministic first-match precedence.
+#[test]
+fn message_projection_failure_precedence_is_stable() {
+    let mut fact = MessageDelivered::new(
+        MessagePublisherId::new("bridge-main"),
+        MessageAgentTarget::new("invalid target"),
+        MessageFactId::new(""),
+        MessageParty {
+            stable_id: String::new(),
+            display_name: None,
+        },
+        None,
+        "",
+    );
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidTarget))
+    );
+    fact.agent_id = MessageAgentTarget::new("agent");
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidMessageId))
+    );
+    fact.message_id = MessageFactId::new("m1");
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidParty))
+    );
+    fact.sender.stable_id = "u1".to_owned();
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::EmptyText))
+    );
+    fact.conversation = Some(MessageConversation {
+        stable_id: String::new(),
+        display_name: None,
+    });
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidConversation))
+    );
+    fact.conversation = None;
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact.clone())),
+        Some(Err(MessageProjectionFailure::EmptyText))
+    );
+    fact.text = "x".repeat(131_073);
+    assert_eq!(
+        project_message_fact(&Event::MessageDelivered(fact)),
+        Some(Err(MessageProjectionFailure::TextTooLarge))
+    );
+}
+
+/// Operation-specific reference, metadata, and reaction limits map to their
+/// exact deterministic categories.
+#[test]
+fn message_projection_classifies_operation_metadata_failures() {
+    let agent = MessageAgentTarget::new("agent");
+    let valid_ref = MessageFactRef {
+        publisher_extension_id: MessagePublisherId::new("bridge"),
+        message_id: MessageFactId::new("m1"),
+    };
+    let invalid_reference = Event::MessageDeleted(MessageDeleted::new(
+        MessagePublisherId::new("bridge"),
+        agent.clone(),
+        MessageFactRef {
+            publisher_extension_id: MessagePublisherId::new("invalid publisher"),
+            message_id: MessageFactId::new("m1"),
+        },
+        None,
+        None,
+    ));
+    assert_eq!(
+        project_message_fact(&invalid_reference),
+        Some(Err(MessageProjectionFailure::InvalidReference))
+    );
+
+    let invalid_party = Event::MessageDeleted(MessageDeleted::new(
+        MessagePublisherId::new("bridge"),
+        agent.clone(),
+        valid_ref.clone(),
+        Some(MessageParty {
+            stable_id: "u1".to_owned(),
+            display_name: Some("x".repeat(257)),
+        }),
+        None,
+    ));
+    assert_eq!(
+        project_message_fact(&invalid_party),
+        Some(Err(MessageProjectionFailure::InvalidParty))
+    );
+
+    let invalid_conversation = Event::MessageEdited(MessageEdited::new(
+        MessagePublisherId::new("bridge"),
+        agent.clone(),
+        valid_ref.clone(),
+        None,
+        Some(MessageConversation {
+            stable_id: String::new(),
+            display_name: None,
+        }),
+        "edit",
+    ));
+    assert_eq!(
+        project_message_fact(&invalid_conversation),
+        Some(Err(MessageProjectionFailure::InvalidConversation))
+    );
+
+    let invalid_reaction = Event::MessageReactionAdded(MessageReactionAdded::new(
+        MessagePublisherId::new("bridge"),
+        agent,
+        valid_ref,
+        None,
+        None,
+        "",
+    ));
+    assert_eq!(
+        project_message_fact(&invalid_reaction),
+        Some(Err(MessageProjectionFailure::InvalidReaction))
+    );
+}
+
+/// Operation facts use the same first-match precedence across every applicable
+/// invalid field.
+#[test]
+fn operation_message_projection_failure_precedence_is_stable() {
+    let mut fact = MessageReactionAdded::new(
+        MessagePublisherId::new("bridge"),
+        MessageAgentTarget::new("invalid target"),
+        MessageFactRef {
+            publisher_extension_id: MessagePublisherId::new("invalid publisher"),
+            message_id: MessageFactId::new(""),
+        },
+        Some(MessageParty {
+            stable_id: String::new(),
+            display_name: None,
+        }),
+        Some(MessageConversation {
+            stable_id: String::new(),
+            display_name: None,
+        }),
+        "",
+    );
+    assert_eq!(
+        project_message_fact(&Event::MessageReactionAdded(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidTarget))
+    );
+    fact.agent_id = MessageAgentTarget::new("agent");
+    assert_eq!(
+        project_message_fact(&Event::MessageReactionAdded(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidReference))
+    );
+    fact.target = MessageFactRef {
+        publisher_extension_id: MessagePublisherId::new("bridge"),
+        message_id: MessageFactId::new("m1"),
+    };
+    assert_eq!(
+        project_message_fact(&Event::MessageReactionAdded(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidParty))
+    );
+    fact.actor = None;
+    assert_eq!(
+        project_message_fact(&Event::MessageReactionAdded(fact.clone())),
+        Some(Err(MessageProjectionFailure::InvalidConversation))
+    );
+    fact.conversation = None;
+    assert_eq!(
+        project_message_fact(&Event::MessageReactionAdded(fact)),
+        Some(Err(MessageProjectionFailure::InvalidReaction))
+    );
 }
 
 /// Publisher identifiers use the shared configured extension-name grammar while

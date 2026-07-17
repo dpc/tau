@@ -6,7 +6,65 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
-use crate::MessageExtensionData;
+use crate::{
+    AgentId, ContentPart, ContextRole, Event, MessageExtensionData, MessageItem,
+    visible_escape_metadata,
+};
+
+const MESSAGE_ID_MAX_BYTES: usize = 256;
+const STABLE_ID_MAX_BYTES: usize = 4_096;
+const DISPLAY_MAX_BYTES: usize = 256;
+const DISPLAY_MAX_SCALARS: usize = 80;
+const REACTION_MAX_BYTES: usize = 128;
+const REACTION_MAX_SCALARS: usize = 64;
+const MESSAGE_TEXT_MAX_BYTES: usize = 131_072;
+
+/// Deterministic reason a committed message fact has no model projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageProjectionFailure {
+    /// The claimed transcript target is not a valid agent identifier.
+    InvalidTarget,
+    /// A delivered/sent base-message identifier is invalid.
+    InvalidMessageId,
+    /// An operation target publisher or message identifier is invalid.
+    InvalidReference,
+    /// A sender, actor, or recipient identifier/display is invalid.
+    InvalidParty,
+    /// Conversation identifier/display metadata is invalid.
+    InvalidConversation,
+    /// A reaction is empty or exceeds its universal limit.
+    InvalidReaction,
+    /// A text-bearing fact contains empty text.
+    EmptyText,
+    /// A text-bearing fact exceeds the universal text limit.
+    TextTooLarge,
+}
+
+impl MessageProjectionFailure {
+    /// Return the stable categorical wire/UI label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidTarget => "invalid_target",
+            Self::InvalidMessageId => "invalid_message_id",
+            Self::InvalidReference => "invalid_reference",
+            Self::InvalidParty => "invalid_party",
+            Self::InvalidConversation => "invalid_conversation",
+            Self::InvalidReaction => "invalid_reaction",
+            Self::EmptyText => "empty_text",
+            Self::TextTooLarge => "text_too_large",
+        }
+    }
+}
+
+/// Successful generic model projection of one committed message fact.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageFactProjection {
+    /// Ordinary context message carrying the escaped `tau_message` boundary.
+    pub item: MessageItem,
+    /// Whether a live commit requests one agent activation.
+    pub activates_model: bool,
+}
 
 /// Publisher-scoped opaque identifier for one base message fact.
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -357,4 +415,311 @@ impl MessageSent {
             extension_data: MessageExtensionData::default(),
         }
     }
+}
+
+/// Validate and render one message fact as an ordinary provider context
+/// message.
+///
+/// Non-message events return `None`; committed but universally invalid facts
+/// return their deterministic failure reason without echoing untrusted
+/// payloads.
+#[must_use]
+pub fn project_message_fact(
+    event: &Event,
+) -> Option<Result<MessageFactProjection, MessageProjectionFailure>> {
+    let view = MessageFactView::from_event(event)?;
+    if AgentId::parse(view.agent_id().as_str()).is_err() {
+        return Some(Err(MessageProjectionFailure::InvalidTarget));
+    }
+    if let Some(message_id) = view.message_id()
+        && !valid_opaque_id(message_id.as_str())
+    {
+        return Some(Err(MessageProjectionFailure::InvalidMessageId));
+    }
+    if let Some(reference) = view.reference()
+        && (!reference.publisher_extension_id.is_valid()
+            || !valid_opaque_id(reference.message_id.as_str()))
+    {
+        return Some(Err(MessageProjectionFailure::InvalidReference));
+    }
+    if view.party().is_some_and(|(_, party)| !valid_party(party)) {
+        return Some(Err(MessageProjectionFailure::InvalidParty));
+    }
+    if view
+        .conversation()
+        .is_some_and(|conversation| !valid_conversation(conversation))
+    {
+        return Some(Err(MessageProjectionFailure::InvalidConversation));
+    }
+    if let Some(reaction) = view.reaction()
+        && (reaction.is_empty()
+            || reaction.len() > REACTION_MAX_BYTES
+            || reaction.chars().count() > REACTION_MAX_SCALARS)
+    {
+        return Some(Err(MessageProjectionFailure::InvalidReaction));
+    }
+    if let Some(text) = view.text() {
+        if text.is_empty() {
+            return Some(Err(MessageProjectionFailure::EmptyText));
+        }
+        if text.len() > MESSAGE_TEXT_MAX_BYTES {
+            return Some(Err(MessageProjectionFailure::TextTooLarge));
+        }
+    }
+
+    Some(Ok(MessageFactProjection {
+        item: MessageItem {
+            role: view.role(),
+            content: vec![ContentPart::Text {
+                text: render_message_fact(&view),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        },
+        activates_model: view.activates_model(),
+    }))
+}
+
+/// Exhaustive borrowed view of one concrete message fact.
+enum MessageFactView<'a> {
+    /// Delivered base message.
+    Delivered(&'a MessageDelivered),
+    /// Edited referenced message.
+    Edited(&'a MessageEdited),
+    /// Deleted referenced message.
+    Deleted(&'a MessageDeleted),
+    /// Reaction added to a referenced message.
+    ReactionAdded(&'a MessageReactionAdded),
+    /// Reaction removed from a referenced message.
+    ReactionRemoved(&'a MessageReactionRemoved),
+    /// Successfully sent base message.
+    Sent(&'a MessageSent),
+}
+
+impl<'a> MessageFactView<'a> {
+    /// Borrow a typed view from any of the six message event variants.
+    fn from_event(event: &'a Event) -> Option<Self> {
+        match event {
+            Event::MessageDelivered(fact) => Some(Self::Delivered(fact)),
+            Event::MessageEdited(fact) => Some(Self::Edited(fact)),
+            Event::MessageDeleted(fact) => Some(Self::Deleted(fact)),
+            Event::MessageReactionAdded(fact) => Some(Self::ReactionAdded(fact)),
+            Event::MessageReactionRemoved(fact) => Some(Self::ReactionRemoved(fact)),
+            Event::MessageSent(fact) => Some(Self::Sent(fact)),
+            _ => None,
+        }
+    }
+
+    /// Return the stable presentation discriminator.
+    fn event_name(&self) -> &'static str {
+        match self {
+            Self::Delivered(_) => "delivered",
+            Self::Edited(_) => "edited",
+            Self::Deleted(_) => "deleted",
+            Self::ReactionAdded(_) => "reaction_added",
+            Self::ReactionRemoved(_) => "reaction_removed",
+            Self::Sent(_) => "sent",
+        }
+    }
+
+    /// Borrow the authenticated publisher namespace.
+    fn publisher(&self) -> &MessagePublisherId {
+        match self {
+            Self::Delivered(fact) => &fact.publisher_extension_id,
+            Self::Edited(fact) => &fact.publisher_extension_id,
+            Self::Deleted(fact) => &fact.publisher_extension_id,
+            Self::ReactionAdded(fact) => &fact.publisher_extension_id,
+            Self::ReactionRemoved(fact) => &fact.publisher_extension_id,
+            Self::Sent(fact) => &fact.publisher_extension_id,
+        }
+    }
+
+    /// Borrow the raw transcript target.
+    fn agent_id(&self) -> &MessageAgentTarget {
+        match self {
+            Self::Delivered(fact) => &fact.agent_id,
+            Self::Edited(fact) => &fact.agent_id,
+            Self::Deleted(fact) => &fact.agent_id,
+            Self::ReactionAdded(fact) => &fact.agent_id,
+            Self::ReactionRemoved(fact) => &fact.agent_id,
+            Self::Sent(fact) => &fact.agent_id,
+        }
+    }
+
+    /// Borrow a base-message identifier when this is a base fact.
+    fn message_id(&self) -> Option<&MessageFactId> {
+        match self {
+            Self::Delivered(fact) => Some(&fact.message_id),
+            Self::Sent(fact) => Some(&fact.message_id),
+            Self::Edited(_)
+            | Self::Deleted(_)
+            | Self::ReactionAdded(_)
+            | Self::ReactionRemoved(_) => None,
+        }
+    }
+
+    /// Borrow the opaque operation target when this is a reference fact.
+    fn reference(&self) -> Option<&MessageFactRef> {
+        match self {
+            Self::Edited(fact) => Some(&fact.target),
+            Self::Deleted(fact) => Some(&fact.target),
+            Self::ReactionAdded(fact) => Some(&fact.target),
+            Self::ReactionRemoved(fact) => Some(&fact.target),
+            Self::Delivered(_) | Self::Sent(_) => None,
+        }
+    }
+
+    /// Borrow the event-specific party and presentation attribute label.
+    fn party(&self) -> Option<(&'static str, &MessageParty)> {
+        match self {
+            Self::Delivered(fact) => Some(("sender", &fact.sender)),
+            Self::Edited(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
+            Self::Deleted(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
+            Self::ReactionAdded(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
+            Self::ReactionRemoved(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
+            Self::Sent(fact) => fact.recipient.as_ref().map(|party| ("recipient", party)),
+        }
+    }
+
+    /// Borrow optional descriptive conversation metadata.
+    fn conversation(&self) -> Option<&MessageConversation> {
+        match self {
+            Self::Delivered(fact) => fact.conversation.as_ref(),
+            Self::Edited(fact) => fact.conversation.as_ref(),
+            Self::Deleted(fact) => fact.conversation.as_ref(),
+            Self::ReactionAdded(fact) => fact.conversation.as_ref(),
+            Self::ReactionRemoved(fact) => fact.conversation.as_ref(),
+            Self::Sent(fact) => fact.conversation.as_ref(),
+        }
+    }
+
+    /// Borrow the reaction for reaction facts.
+    fn reaction(&self) -> Option<&str> {
+        match self {
+            Self::ReactionAdded(fact) => Some(&fact.reaction),
+            Self::ReactionRemoved(fact) => Some(&fact.reaction),
+            Self::Delivered(_) | Self::Edited(_) | Self::Deleted(_) | Self::Sent(_) => None,
+        }
+    }
+
+    /// Borrow the body for text-bearing facts.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Delivered(fact) => Some(&fact.text),
+            Self::Edited(fact) => Some(&fact.text),
+            Self::Sent(fact) => Some(&fact.text),
+            Self::Deleted(_) | Self::ReactionAdded(_) | Self::ReactionRemoved(_) => None,
+        }
+    }
+
+    /// Derive the provider context role from the concrete fact type.
+    fn role(&self) -> ContextRole {
+        match self {
+            Self::Sent(_) => ContextRole::Assistant,
+            Self::Delivered(_)
+            | Self::Edited(_)
+            | Self::Deleted(_)
+            | Self::ReactionAdded(_)
+            | Self::ReactionRemoved(_) => ContextRole::User,
+        }
+    }
+
+    /// Return whether a live fact requests model activation.
+    fn activates_model(&self) -> bool {
+        !matches!(self, Self::Sent(_))
+    }
+}
+
+/// Validate a universal opaque stable identifier.
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MESSAGE_ID_MAX_BYTES
+}
+
+/// Validate party stable/display fields.
+fn valid_party(party: &MessageParty) -> bool {
+    !party.stable_id.is_empty()
+        && party.stable_id.len() <= STABLE_ID_MAX_BYTES
+        && party.display_name.as_deref().is_none_or(valid_display)
+}
+
+/// Validate conversation stable/display fields.
+fn valid_conversation(conversation: &MessageConversation) -> bool {
+    !conversation.stable_id.is_empty()
+        && conversation.stable_id.len() <= STABLE_ID_MAX_BYTES
+        && conversation
+            .display_name
+            .as_deref()
+            .is_none_or(valid_display)
+}
+
+/// Validate one optional presentation label.
+fn valid_display(value: &str) -> bool {
+    value.len() <= DISPLAY_MAX_BYTES && value.chars().count() <= DISPLAY_MAX_SCALARS
+}
+
+/// Render one validated fact with centralized visible Unicode and XML escaping.
+fn render_message_fact(view: &MessageFactView<'_>) -> String {
+    let mut output = format!(
+        "<tau_message event=\"{}\" publisher=\"{}\"",
+        view.event_name(),
+        xml_escape(view.publisher().as_str())
+    );
+    if let Some(message_id) = view.message_id() {
+        push_attribute(&mut output, "message_id", message_id.as_str());
+    }
+    if let Some(reference) = view.reference() {
+        push_attribute(
+            &mut output,
+            "target_publisher",
+            reference.publisher_extension_id.as_str(),
+        );
+        push_attribute(
+            &mut output,
+            "target_message_id",
+            reference.message_id.as_str(),
+        );
+    }
+    if let Some((label, party)) = view.party() {
+        push_attribute(&mut output, &format!("{label}_id"), &party.stable_id);
+        if let Some(display) = &party.display_name {
+            push_attribute(&mut output, &format!("{label}_display"), display);
+        }
+    }
+    if let Some(conversation) = view.conversation() {
+        push_attribute(&mut output, "conversation_id", &conversation.stable_id);
+        if let Some(display) = &conversation.display_name {
+            push_attribute(&mut output, "conversation_display", display);
+        }
+    }
+    if let Some(reaction) = view.reaction() {
+        push_attribute(&mut output, "reaction", reaction);
+    }
+    match view.text() {
+        Some(text) => {
+            output.push('>');
+            output.push_str(&xml_escape(text));
+            output.push_str("</tau_message>");
+        }
+        None => output.push_str("/>"),
+    }
+    output
+}
+
+/// Append one escaped XML-like attribute.
+fn push_attribute(output: &mut String, name: &str, value: &str) {
+    output.push(' ');
+    output.push_str(name);
+    output.push_str("=\"");
+    output.push_str(&xml_escape(value));
+    output.push('"');
+}
+
+/// Escape XML delimiters after making spoofing-prone Unicode visible.
+fn xml_escape(value: &str) -> String {
+    visible_escape_metadata(value)
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }

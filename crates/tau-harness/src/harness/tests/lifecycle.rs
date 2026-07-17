@@ -2866,6 +2866,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
             Some(&prompt_agent_id),
             &[],
             None,
+            false,
         )
         .expect("prompt renders");
     assert!(!before_prompt.contains("STAGED SKILL DESCRIPTION"));
@@ -2886,6 +2887,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
             Some(&prompt_agent_id),
             &[],
             None,
+            false,
         )
         .expect("prompt renders");
     assert!(after_prompt.contains("STAGED SKILL DESCRIPTION"));

@@ -1344,7 +1344,11 @@ mod tests {
             harness.agents[&cid]
                 .pending_message_wakes
                 .iter()
-                .any(|wake| wake.message_id == MessageId::new("committed-without-waiter"))
+                .any(|wake| matches!(
+                    &wake.source,
+                    crate::agent::PendingMessageWakeSource::Envelope { message_id, .. }
+                        if message_id == &MessageId::new("committed-without-waiter")
+                ))
                 || harness.event_log.entries_for_test().iter().any(|entry| {
                     matches!(
                         &entry.event,

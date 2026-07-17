@@ -416,7 +416,7 @@ impl Harness {
                     }
                 }
                 Err(message) => {
-                    self.send_replay_error(&client_id, &message);
+                    self.send_replay_error(&client_id, message);
                     errors.push(message.clone());
                 }
             }

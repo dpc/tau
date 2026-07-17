@@ -609,7 +609,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
     assert!(
         policy
             .harness
-            .try_build_system_prompt_for_role_and_agent(ROLE, None, &exclusive, None)
+            .try_build_system_prompt_for_role_and_agent(ROLE, None, &exclusive, None, false)
             .is_ok()
     );
     let (internal, visible) = policy
@@ -644,7 +644,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
         .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
     let error = policy
         .harness
-        .try_build_system_prompt_for_role_and_agent(ROLE, None, &joint, None)
+        .try_build_system_prompt_for_role_and_agent(ROLE, None, &joint, None, false)
         .expect_err("joint alias surface must fail");
     assert!(error.to_string().contains("duplicate model-visible name"));
 }

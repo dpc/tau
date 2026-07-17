@@ -238,6 +238,73 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     h.shutdown().expect("shutdown");
 }
 
+/// A strict template error hidden in the message-fact-only branch must fail
+/// preflight before Tau commits an inference-dispatch checkpoint.
+#[test]
+fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    h.agents.get_mut(&cid).expect("user agent").terminating = true;
+    h.commit_message_fact(
+        None,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m1"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+            },
+            None,
+            "message fact",
+        )),
+    );
+    h.agents.get_mut(&cid).expect("user agent").terminating = false;
+    h.system_prompt_templates.insert(
+        "message-fact-conditional".to_owned(),
+        "{{#if message_fact_boundary_rule}}{{missing_strict_value}}{{else}}READY{{/if}}".to_owned(),
+    );
+    let selected_role = h.selected_role.clone();
+    h.available_roles
+        .entry(selected_role)
+        .or_default()
+        .prompt_override = Some("message-fact-conditional".to_owned());
+    h.agents
+        .get_mut(&cid)
+        .expect("user agent")
+        .pending_replay_activation = true;
+    let checkpoints_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        .count();
+
+    h.try_advance_queue();
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        checkpoints_before,
+        "conditional render failure must precede the durable checkpoint"
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert!(h.replayable_harness_notices.iter().any(|notice| {
+        notice.always_show && notice.message.contains("until its template is repaired")
+    }));
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn late_prompt_surface_failure_terminalizes_running_compaction() {
     let td = TempDir::new().expect("tempdir");

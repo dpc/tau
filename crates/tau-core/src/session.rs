@@ -154,7 +154,7 @@ fn validate_display_name(display_name: &str) -> Result<(), AgentEventValidationE
 /// [`crate::PersistedSessionEventSeq`]. The value is persisted as corruption
 /// detection metadata; replay semantics are still defined by file order, so
 /// load code verifies that stored values match their implied position.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PersistedAgentEventSeq(u64);
 
@@ -250,6 +250,13 @@ pub enum AgentEntry {
         /// Direction, envelope, and harness-derived presentation policy.
         item: Box<tau_proto::MessageEnvelopeItem>,
     },
+    /// Escaped ordinary context message derived from a committed message fact.
+    MessageFact {
+        /// Model-facing message with user/assistant role fixed by fact type.
+        item: Box<tau_proto::MessageItem>,
+        /// Sequence of the canonical raw fact in the owning agent journal.
+        durable_event_seq: PersistedAgentEventSeq,
+    },
     /// Standalone compaction boundary whose replacement window becomes the
     /// complete model-visible history.
     Compaction {
@@ -267,6 +274,20 @@ pub enum AgentEntry {
         /// Whether successful standalone compaction resumes an
         /// already-published inference turn.
         resume_inference: bool,
+    },
+}
+
+/// One committed context input waiting behind an open provider tool round.
+#[derive(Clone, Debug, PartialEq)]
+enum PendingContextInput {
+    /// Existing typed transport envelope.
+    MessageEnvelope(Box<tau_proto::MessageEnvelopeItem>),
+    /// Generic extension-published message fact projection.
+    MessageFact {
+        /// Projected ordinary context message.
+        item: Box<tau_proto::MessageItem>,
+        /// Canonical raw fact sequence used to resolve live wakes.
+        durable_event_seq: PersistedAgentEventSeq,
     },
 }
 
@@ -385,9 +406,10 @@ pub struct AgentTree {
     retained_provider_image_bytes: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
-    /// Message facts committed while provider tool adjacency is open. They are
-    /// materialized immediately after the terminal tool-result node.
-    pending_message_envelopes: Vec<tau_proto::MessageEnvelopeItem>,
+    /// Context inputs committed while provider tool adjacency is open.
+    ///
+    /// They materialize in arrival order after the terminal tool-result node.
+    pending_context_inputs: Vec<PendingContextInput>,
     /// Globally unique tool calls that already have one real background
     /// completion event.
     background_completed_tool_calls: HashSet<ToolCallId>,
@@ -794,7 +816,14 @@ impl AgentTree {
                 AgentEntry::MessageEnvelope { item } => Some(item.as_ref()),
                 _ => None,
             })
-            .chain(self.pending_message_envelopes.iter())
+            .chain(
+                self.pending_context_inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        PendingContextInput::MessageEnvelope(item) => Some(item.as_ref()),
+                        PendingContextInput::MessageFact { .. } => None,
+                    }),
+            )
     }
 
     /// Returns the entries along the branch ending at `head` (root to
@@ -1079,7 +1108,7 @@ impl AgentTree {
             retained_provider_image_bytes: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
-            pending_message_envelopes: Vec::new(),
+            pending_context_inputs: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
             compaction_transactions: HashMap::new(),
             compaction_transaction_order: Vec::new(),
@@ -1106,6 +1135,9 @@ impl AgentTree {
                 // Message facts are canonical raw journal records. Their
                 // transcript projection is a post-commit consumer and therefore
                 // cannot participate in append-time semantic validation.
+                if let Some(Ok(projection)) = tau_proto::project_message_fact(&entry.event) {
+                    tree.record_message_fact(tree.head, Box::new(projection.item), entry.seq);
+                }
                 tree.next_event_seq = entry.seq.next();
                 continue;
             }
@@ -1432,10 +1464,44 @@ impl AgentTree {
         item: Box<tau_proto::MessageEnvelopeItem>,
     ) -> Option<NodeId> {
         if !self.pending_tool_rounds.is_empty() {
-            self.pending_message_envelopes.push(*item);
+            self.pending_context_inputs
+                .push(PendingContextInput::MessageEnvelope(item));
             return None;
         }
         Some(self.append_node_at(parent, AgentEntry::MessageEnvelope { item }))
+    }
+
+    /// Fold one valid committed message fact behind tool adjacency when needed.
+    fn record_message_fact(
+        &mut self,
+        parent: Option<NodeId>,
+        item: Box<tau_proto::MessageItem>,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
+        if !self.pending_tool_rounds.is_empty() {
+            self.pending_context_inputs
+                .push(PendingContextInput::MessageFact {
+                    item,
+                    durable_event_seq,
+                });
+            return None;
+        }
+        Some(self.append_node_at(
+            parent,
+            AgentEntry::MessageFact {
+                item,
+                durable_event_seq,
+            },
+        ))
+    }
+
+    /// Project one already-persisted message fact into the cached transcript.
+    pub(crate) fn record_committed_message_fact(
+        &mut self,
+        item: Box<tau_proto::MessageItem>,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
+        self.record_message_fact(self.head, item, durable_event_seq)
     }
 
     fn apply_provider_response_finished(
@@ -2309,13 +2375,18 @@ impl AgentTree {
             Some(round.assistant_node_id),
             AgentEntry::ToolResults { items },
         );
-        for item in std::mem::take(&mut self.pending_message_envelopes) {
-            head = self.append_node_at(
-                Some(head),
-                AgentEntry::MessageEnvelope {
-                    item: Box::new(item),
+        for input in std::mem::take(&mut self.pending_context_inputs) {
+            let entry = match input {
+                PendingContextInput::MessageEnvelope(item) => AgentEntry::MessageEnvelope { item },
+                PendingContextInput::MessageFact {
+                    item,
+                    durable_event_seq,
+                } => AgentEntry::MessageFact {
+                    item,
+                    durable_event_seq,
                 },
-            );
+            };
+            head = self.append_node_at(Some(head), entry);
         }
         Some(head)
     }

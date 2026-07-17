@@ -157,13 +157,26 @@ impl ActivationDispatchState {
     }
 }
 
-/// One canonical typed-message activation and its durable transcript watermark.
+/// Typed source of one committed message activation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PendingMessageWakeSource {
+    /// Existing typed envelope activation.
+    Envelope {
+        /// Canonical envelope identity.
+        message_id: tau_proto::MessageId,
+    },
+    /// Extension-published message fact activation.
+    MessageFact {
+        /// Sequence of the canonical raw fact in the owning agent log.
+        durable_event_seq: tau_core::PersistedAgentEventSeq,
+    },
+}
+
+/// One committed message activation and its transcript placement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingMessageWake {
-    /// Canonical message identity.
-    pub(crate) message_id: tau_proto::MessageId,
-    /// Sequence of the durable incoming event in the per-agent log.
-    pub(crate) durable_event_seq: u64,
+    /// Typed durable source without cross-domain synthetic identifiers.
+    pub(crate) source: PendingMessageWakeSource,
     /// Transcript node once tool-round adjacency permits materialization.
     pub(crate) node_id: Option<NodeId>,
 }
@@ -597,6 +610,16 @@ impl PendingPrompt {
 }
 
 impl Agent {
+    /// Return the immutable transcript head selected by current dispatch
+    /// ownership.
+    pub(crate) fn selected_prompt_context_head(&self) -> Option<NodeId> {
+        match &self.activation_dispatch {
+            ActivationDispatchState::Running { cut, .. } => cut.as_option(),
+            ActivationDispatchState::DispatchUncertain { through, .. } => through.as_option(),
+            _ => self.head,
+        }
+    }
+
     pub(crate) fn new(
         id: AgentId,
         session_id: SessionId,

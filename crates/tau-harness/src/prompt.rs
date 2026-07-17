@@ -57,6 +57,8 @@ pub(crate) struct RolePromptTemplateContext<'a> {
     /// Durable agent id whose prompt is being rendered, when the render targets
     /// a concrete agent instead of a role-only preview.
     pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
+    /// Conditional trust-boundary rule for selected message-fact context.
+    pub(crate) message_fact_boundary_rule: Option<&'a str>,
 }
 
 /// Harness-owned capabilities visible to one prompt render.
@@ -137,6 +139,7 @@ impl<'a> RolePromptTemplateContext<'a> {
         Self {
             role_name,
             agent_id: None,
+            message_fact_boundary_rule: None,
         }
     }
 
@@ -145,7 +148,14 @@ impl<'a> RolePromptTemplateContext<'a> {
         Self {
             role_name,
             agent_id: Some(agent_id),
+            message_fact_boundary_rule: None,
         }
+    }
+
+    /// Supply the explicit conditional message-fact trust-boundary input.
+    pub(crate) fn with_message_fact_boundary_rule(mut self, rule: Option<&'a str>) -> Self {
+        self.message_fact_boundary_rule = rule;
+        self
     }
 }
 
@@ -295,6 +305,7 @@ fn system_prompt_template_data(
     agent_context: serde_json::Value,
     capabilities: PromptCapabilities,
 ) -> Result<serde_json::Value, handlebars::RenderError> {
+    let message_fact_boundary_rule = context.message_fact_boundary_rule;
     let mut data = prompt_template_data(context, skills, agent_context, capabilities);
     let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data)?;
     let rendered_tool_fragments =
@@ -304,6 +315,11 @@ fn system_prompt_template_data(
         .expect("system prompt template data is an object");
     object.insert("prompt_fragments".to_owned(), rendered_fragments);
     object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
+    object.insert(
+        "message_fact_boundary_rule".to_owned(),
+        serde_json::to_value(message_fact_boundary_rule)
+            .expect("optional message fact boundary rule serializes"),
+    );
     Ok(data)
 }
 
@@ -878,6 +894,8 @@ pub(crate) fn chrono_free_date() -> String {
 pub(crate) struct AssembledPromptContext {
     /// Provider context with prompt-local presentation facts applied.
     pub(crate) context: tau_proto::PromptContext,
+    /// Whether selected context contains a projected message fact.
+    pub(crate) contains_message_fact: bool,
 }
 
 /// Assembles provider context while projecting currently live reply tools.
@@ -891,6 +909,7 @@ pub(crate) fn assemble_prompt_context_from(
     live_send_tools: &std::collections::HashMap<tau_proto::MessageId, tau_proto::ToolName>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
+    let mut contains_message_fact = false;
     let branch_ids = tree.branch_node_ids_from(head);
     let branch: Vec<_> = branch_ids
         .iter()
@@ -936,6 +955,7 @@ pub(crate) fn assemble_prompt_context_from(
                 replacement_window, ..
             } => {
                 blocks.clear();
+                contains_message_fact = false;
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: replacement_window.clone(),
@@ -1121,11 +1141,20 @@ pub(crate) fn assemble_prompt_context_from(
                     },
                 ));
             }
+            AgentEntry::MessageFact { item, .. } => {
+                contains_message_fact = true;
+                blocks.push(tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: vec![ContextItem::Message(*item.clone())],
+                    },
+                ));
+            }
         }
     }
 
     AssembledPromptContext {
         context: tau_proto::PromptContext { blocks },
+        contains_message_fact,
     }
 }
 
