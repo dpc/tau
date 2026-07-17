@@ -281,7 +281,7 @@ fn fixed_chat_reconciles_stale_private_link() {
 #[test]
 fn local_socket_accepts_status_request() {
     let (mut client, server) = UnixStream::pair().expect("socket pair");
-    writeln!(client, r#"{{"protocol_version":2,"kind":"status"}}"#).expect("write request");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"status"}}"#).expect("write request");
 
     assert!(
         read_gateway_socket_request(&server)
@@ -322,7 +322,7 @@ fn local_socket_status_response_contains_core_fields() {
         Arc::new(FakeGatewayClient::default()),
     ));
     let (mut client, server) = UnixStream::pair().expect("socket pair");
-    writeln!(client, r#"{{"protocol_version":2,"kind":"status"}}"#).expect("write request");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"status"}}"#).expect("write request");
 
     handle_gateway_socket_client(server, status);
 
@@ -500,13 +500,13 @@ fn sidecar_register_unregister_and_status_update_counts() {
 fn sidecar_goodbye_disconnect_prunes_registered_routes() {
     let state = Arc::new(test_socket_state());
     let (mut client, server) = UnixStream::pair().expect("socket pair");
-    writeln!(client, r#"{{"protocol_version":2,"kind":"hello"}}"#).expect("write hello");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"hello"}}"#).expect("write hello");
     writeln!(
         client,
-        r#"{{"protocol_version":2,"kind":"register_agent","session_id":"session-a","agent_id":"agent-a"}}"#
+        r#"{{"protocol_version":3,"kind":"register_agent","session_id":"session-a","agent_id":"agent-a"}}"#
     )
     .expect("write register");
-    writeln!(client, r#"{{"protocol_version":2,"kind":"goodbye"}}"#).expect("write goodbye");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"goodbye"}}"#).expect("write goodbye");
 
     handle_gateway_socket_client(server, Arc::clone(&state));
 
@@ -566,8 +566,11 @@ fn routing_selection_queues_plain_text_delivery() {
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].session_id, "session-alpha");
     assert_eq!(deliveries[0].agent_id, "agent-alpha");
-    assert!(deliveries[0].text.contains("[telegram from tester]"));
-    assert!(deliveries[0].text.contains("hello from telegram"));
+    assert_eq!(deliveries[0].source, "tester");
+    assert_eq!(deliveries[0].sender_id, "7");
+    assert_eq!(deliveries[0].conversation_id, "10");
+    assert_eq!(deliveries[0].message_id, "telegram:10:23");
+    assert_eq!(deliveries[0].text, "hello from telegram");
 }
 
 /// Ensures ambiguous plain text is rejected with a Telegram reply instead of
@@ -643,8 +646,8 @@ fn routing_session_aliases_survive_registry_churn() {
 }
 
 /// Ensures pending deliveries are removed if a route unregisters before the
-/// sidecar drains them, so stale prompts are not delivered after ownership
-/// loss.
+/// sidecar drains them, so stale delivery records cannot be published as facts
+/// after ownership loss.
 #[test]
 fn routing_unregister_drops_pending_delivery() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -681,8 +684,8 @@ fn routing_pending_delivery_queue_is_bounded() {
     assert!(sent.iter().any(|(_, text)| text.contains("queue is full")));
 }
 
-/// Ensures queued prompt deliveries are exposed through the persistent sidecar
-/// socket response shape and drained after one successful response.
+/// Ensures queued message-fact deliveries are exposed through the persistent
+/// sidecar socket response shape and drained after one successful response.
 #[test]
 fn sidecar_heartbeat_drains_queued_delivery_response() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -985,27 +988,27 @@ fn outbound_send_failure_keeps_sidecar_connection_live() {
     let (mut client, server) = UnixStream::pair().expect("socket pair");
     let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
 
-    writeln!(client, r#"{{"protocol_version":2,"kind":"hello"}}"#).expect("write hello");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"hello"}}"#).expect("write hello");
     assert_socket_ok(&mut client);
     writeln!(
         client,
-        r#"{{"protocol_version":2,"kind":"register_agent","session_id":"session-alpha","agent_id":"agent-alpha"}}"#
+        r#"{{"protocol_version":3,"kind":"register_agent","session_id":"session-alpha","agent_id":"agent-alpha"}}"#
     )
     .expect("write register");
     assert_socket_ok(&mut client);
     writeln!(
         client,
-        r#"{{"protocol_version":2,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"first"}}"#
+        r#"{{"protocol_version":3,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"first"}}"#
     )
     .expect("write send");
     let failed = read_socket_json(&mut client);
     assert_eq!(failed["ok"], false);
     assert_eq!(failed["keep_connection"], true);
-    writeln!(client, r#"{{"protocol_version":2,"kind":"heartbeat"}}"#).expect("write heartbeat");
+    writeln!(client, r#"{{"protocol_version":3,"kind":"heartbeat"}}"#).expect("write heartbeat");
     assert_socket_ok(&mut client);
     writeln!(
         client,
-        r#"{{"protocol_version":2,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"second"}}"#
+        r#"{{"protocol_version":3,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"second"}}"#
     )
     .expect("write second send");
     assert_socket_ok(&mut client);
@@ -1143,7 +1146,7 @@ fn routing_stable_prefixes_must_be_unambiguous() {
 }
 
 /// Ensures Telegram source labels in queued deliveries are bounded and stripped
-/// of control characters before being reflected in prompt text.
+/// of control characters before becoming fact display metadata.
 #[test]
 fn routing_source_labels_are_sanitized() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -1160,7 +1163,8 @@ fn routing_source_labels_are_sanitized() {
     assert_eq!(deliveries.len(), 1);
     assert!(!deliveries[0].source.contains('\n'));
     assert!(deliveries[0].source.len() <= 80);
-    assert!(deliveries[0].text.contains("[telegram from badname"));
+    assert!(deliveries[0].source.starts_with("badname"));
+    assert_eq!(deliveries[0].text, "sanitize");
 }
 
 /// Fake Telegram client state captured by gateway tests.

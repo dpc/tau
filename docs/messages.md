@@ -18,9 +18,9 @@ Bare top-level `Event` values are not valid protocol items. Peers ask the
 harness to publish events with `emit`; the harness delivers events to peers with
 `deliver`.
 
-## Protocol v11 message-fact publication
+## Protocol v12 message-fact publication
 
-Protocol v11 has no special transport-message RPC family. Bridges publish
+Protocol v12 has no special transport-message RPC family. Bridges publish
 `message.delivered`, `message.edited`, `message.deleted`,
 `message.reaction_added`, `message.reaction_removed`, and `message.sent` through
 the ordinary `emit` message. The harness stamps the authenticated extension's

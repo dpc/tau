@@ -28,8 +28,10 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, SessionId, ToolError,
-    ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
+    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSent, SessionId,
+    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStatus,
 };
 use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
@@ -218,7 +220,7 @@ struct RuntimeConfig {
     account_jid: BareJid,
     /// Resolved account password. Never log this value.
     password: String,
-    /// JIDs allowed to submit prompts through this bridge.
+    /// JIDs allowed to deliver messages through this bridge.
     allowed_jids: Vec<AllowedJid>,
     /// Default human recipient for notices and direct fallback sends.
     default_recipient: Jid,
@@ -242,7 +244,7 @@ struct ExtConfig {
     jid: Option<String>,
     /// Secret name carrying the XMPP password.
     password_secret: Option<String>,
-    /// JIDs allowed to submit prompts.
+    /// JIDs allowed to deliver messages.
     allowed_jids: Vec<String>,
     /// Default human recipient for notices and direct fallback sends.
     default_recipient: Option<String>,
@@ -903,11 +905,36 @@ impl Extension {
                         .to_owned(),
                 );
             }
-        }
-        let text = format!("[{}] {message}", invoke.agent_id.as_ref());
-        match self.bridge.send_message(&invoke.agent_id, &text) {
-            Ok(()) => tool_result(invoke, "sent XMPP message"),
-            Err(message) => tool_error(invoke, message),
+            let Some(registered_conversation) = state.conversations.get(&invoke.agent_id).cloned()
+            else {
+                return tool_error(
+                    invoke,
+                    "The XMPP send tool requires a live registered conversation".to_owned(),
+                );
+            };
+            let conversation = match cfg.routing_mode {
+                RoutingMode::Muc => registered_conversation,
+                RoutingMode::DirectResource => cfg.default_recipient.to_bare().to_string(),
+            };
+            drop(state);
+            let text = format!("[{}] {message}", invoke.agent_id.as_ref());
+            match self.bridge.send_message(&invoke.agent_id, &text) {
+                Ok(()) => {
+                    self.output.emit(Event::MessageSent(MessageSent::new(
+                        MessagePublisherId::default(),
+                        MessageAgentTarget::new(invoke.agent_id.as_ref()),
+                        generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
+                        None,
+                        Some(MessageConversation {
+                            stable_id: conversation,
+                            display_name: None,
+                        }),
+                        &message,
+                    )));
+                    tool_result(invoke, "sent XMPP message")
+                }
+                Err(message) => tool_error(invoke, message),
+            }
         }
     }
 }
@@ -1256,11 +1283,17 @@ struct WorkerState {
     room_to_agent: HashMap<BareJid, AgentId>,
     /// MUC occupant real JID cache.
     occupant_real_jids: HashMap<Jid, Jid>,
+    /// Process-unique entropy for locally generated inbound message identities.
+    message_id_nonce: [u8; 16],
+    /// Monotonic ordinal for inbound stanzas that omit a stanza id.
+    next_local_message_id: u64,
 }
 
 impl WorkerState {
     /// Create a worker state.
     fn new(cfg: RuntimeConfig, output: impl Into<Output>, shutdown: Arc<ShutdownSignal>) -> Self {
+        let mut message_id_nonce = [0_u8; 16];
+        rand::thread_rng().fill_bytes(&mut message_id_nonce);
         Self {
             cfg,
             output: output.into(),
@@ -1270,6 +1303,8 @@ impl WorkerState {
             pending_muc_joins: HashMap::new(),
             room_to_agent: HashMap::new(),
             occupant_real_jids: HashMap::new(),
+            message_id_nonce,
+            next_local_message_id: 1,
         }
     }
 
@@ -1888,7 +1923,7 @@ impl WorkerState {
             return;
         }
         // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
-        // so delayed messages must not become fresh Tau prompt submissions.
+        // so delayed messages must not become fresh Tau fact publications.
         if has_delay_payload(&message) {
             return;
         }
@@ -1933,7 +1968,24 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, room = %room, sender = %real_jid, "dropping muc message from non-allowlisted real jid");
             return;
         }
-        self.route(agent_id, format_room_prompt(real.as_ref(), &from, &body));
+        let sender_id = real
+            .as_ref()
+            .map(|jid| jid.to_bare().to_string())
+            .unwrap_or_else(|| from.to_string());
+        let conversation_id = room.to_string();
+        let message_id = self.inbound_message_id(&message, &sender_id, &conversation_id);
+        self.route(
+            agent_id,
+            message_id,
+            MessageParty {
+                stable_id: sender_id,
+                display_name: from
+                    .resource()
+                    .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+            },
+            conversation_id,
+            body,
+        );
     }
 
     /// Process inbound direct chat fallback.
@@ -1966,12 +2018,20 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message with no registered direct-resource agent; in MUC mode, send messages in the agent room instead of replying to direct notices");
             return;
         }
+        let sender_id = from.to_bare().to_string();
+        let conversation_id = sender_id.clone();
+        let message_id = self.inbound_message_id(&message, &sender_id, &conversation_id);
         self.route(
             agents[0].clone(),
-            format!(
-                "[xmpp direct message from {}]: {body}",
-                prompt_label(from.to_bare())
-            ),
+            message_id,
+            MessageParty {
+                stable_id: sender_id,
+                display_name: from
+                    .resource()
+                    .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+            },
+            conversation_id,
+            body,
         );
     }
 
@@ -1988,57 +2048,77 @@ impl WorkerState {
             })
     }
 
-    /// Submit text to the harness prompt boundary.
-    fn route(&self, agent_id: AgentId, text: String) {
+    /// Publish an accepted XMPP message directly as an immutable delivered
+    /// fact.
+    fn route(
+        &self,
+        agent_id: AgentId,
+        message_id: MessageFactId,
+        sender: MessageParty,
+        conversation_id: String,
+        text: String,
+    ) {
         self.output
-            .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
-                agent_id,
+            .emit(Event::MessageDelivered(MessageDelivered::new(
+                MessagePublisherId::default(),
+                MessageAgentTarget::new(agent_id.as_ref()),
+                message_id,
+                sender,
+                Some(MessageConversation {
+                    stable_id: conversation_id,
+                    display_name: None,
+                }),
                 text,
-                message_class: tau_proto::PromptMessageClass::User,
-                ctx_id: None,
-            }));
+            )));
+    }
+
+    /// Build a bounded publisher-scoped identity from a stanza id or a
+    /// process-unique local nonce and ordinal when the stanza omits one.
+    fn inbound_message_id(
+        &mut self,
+        message: &Message,
+        sender_id: &str,
+        conversation_id: &str,
+    ) -> MessageFactId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tau-ext-xmpp/message.delivered/v1\0");
+        hasher.update(sender_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(conversation_id.as_bytes());
+        if let Some(stanza_id) = message.id.as_ref() {
+            hasher.update(b"\0stanza\0");
+            hasher.update(stanza_id.0.as_bytes());
+        } else {
+            hasher.update(b"\0local\0");
+            hasher.update(&self.message_id_nonce);
+            hasher.update(&self.next_local_message_id.to_be_bytes());
+            self.next_local_message_id = self.next_local_message_id.wrapping_add(1);
+        }
+        MessageFactId::new(format!("xmpp-delivered:{}", hasher.finalize().to_hex()))
     }
 }
 
-/// Format an inbound MUC prompt with channel and best-available source context.
-///
-/// Call only after MUC authorization has accepted either a verified real JID or
-/// `trust_muc_membership`. Without `real`, the occupant resource is only a weak
-/// room-local display label, not proof of sender identity.
-fn format_room_prompt(real: Option<&Jid>, occupant: &Jid, body: &str) -> String {
-    if let Some(source) = display_muc_source(real, occupant) {
-        format!("[xmpp room message from {source}]: {body}")
-    } else {
-        format!("[xmpp room message]: {body}")
-    }
+/// Derive a bounded publisher-unique send identity from the harness-unique tool
+/// call and extension-authoritative conversation.
+fn generated_xmpp_send_message_id(call_id: &str, conversation: &str) -> MessageFactId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-xmpp/message.sent/v1\0");
+    hasher.update(call_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(conversation.as_bytes());
+    MessageFactId::new(format!("xmpp-send:{}", hasher.finalize().to_hex()))
 }
 
-/// Return a concise sender label for user-visible inbound MUC prompt context.
-fn display_muc_source(real: Option<&Jid>, occupant: &Jid) -> Option<String> {
-    if let Some(real) = real {
-        return Some(prompt_label(real.to_bare()));
+/// Bound an XMPP nickname/resource to the universal message-fact display limit.
+fn bounded_xmpp_display_name(value: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in value.trim().chars().take(80) {
+        if out.len() + ch.len_utf8() > 256 {
+            break;
+        }
+        out.push(ch);
     }
-    occupant
-        .resource()
-        .map(|resource| format!("occupant {}", prompt_label(resource.as_str())))
-}
-
-/// Return a single-line prompt label that cannot close the prefix bracket.
-fn prompt_label(label: impl std::fmt::Display) -> String {
-    label
-        .to_string()
-        .chars()
-        .map(|ch| {
-            if ch.is_control() || matches!(ch, '[' | ']') {
-                ' '
-            } else {
-                ch
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    (!out.is_empty()).then_some(out)
 }
 
 #[derive(Clone)]
@@ -2320,7 +2400,7 @@ impl TauExtension for XmppExtension {
                     let mut tool = register_tool_spec();
                     let send = scope.wire_tool(SEND_TOOL_NAME)?;
                     tool.description = Some(format!(
-                        "Register or unregister the current agent for XMPP messages. Incoming prompts are accepted only from configured allowed_jids. Use {send} to reply to XMPP-originated prompts."
+                        "Register or unregister the current agent for XMPP messages. Incoming messages are accepted only from configured allowed_jids. Use {send} to reply to XMPP-originated message facts."
                     ));
                     Ok(tau_proto::ToolRegister {
                         tool,
@@ -2526,7 +2606,7 @@ fn register_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(REGISTER_TOOL_NAME)),
-        description: Some("Register or unregister the current agent for XMPP messages. Incoming prompts are accepted only from configured allowed_jids. Use xmpp_send to reply to XMPP-originated prompts.".to_owned()),
+        description: Some("Register or unregister the current agent for XMPP messages. Incoming messages are accepted only from configured allowed_jids. Use xmpp_send to reply to XMPP-originated message facts.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

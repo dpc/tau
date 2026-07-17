@@ -16,7 +16,8 @@ selected route, recent update ids for restart duplicate suppression, and small c
 it does not store pending sidecar deliveries. The gateway persists after each update is
 intentionally handled or rejected. Successful enqueue into the bounded live sidecar
 queue counts as handling, so a gateway exit after offset advancement but before sidecar
-drain can lose that queued prompt; the queue is not a durable acknowledgement protocol.
+drain can lose that queued delivery before fact publication; the queue is not a
+durable acknowledgement protocol.
 On startup the loaded state is reconciled with the current config: fixed-chat mode
 clears private-chat links, and links or selections that no longer match the configured
 chat/user allowlist are cleared and persisted before polling starts.
@@ -30,7 +31,7 @@ ignored rather than linked or replied to. The local socket accepts a one-shot ve
 JSON-line `status` request and persistent sidecar `hello`, `heartbeat`,
 `register_agent`, `unregister_agent`, `send_message`, and `goodbye` requests up to a
 small fixed byte limit. It returns bounded status snapshots, sidecar lease parameters,
-and queued inbound prompt deliveries on sidecar responses; `send_message` returns
+and queued inbound message-fact deliveries on sidecar responses; `send_message` returns
 bounded operation errors while keeping Telegram destination selection inside the
 gateway. Sidecar registrations are live-only leases: they are removed on explicit
 unregister, goodbye, socket disconnect, heartbeat expiry, or gateway
@@ -45,8 +46,10 @@ for this architecture. In that mode its startup configuration names
 `gateway_socket_path` instead of a bot token secret. The sidecar still declares the
 existing register/send tools, subscribes to session/agent lifecycle facts, sends `hello`
 and persistent `register_agent`/`unregister_agent`/`heartbeat` requests to the gateway,
-and emits gateway-delivered inbound text as `extension.prompt_submit_request` to its own
-harness. It does not acquire the stream lock, check webhooks, or call Telegram
+and emits gateway-delivered inbound text as `message.delivered` to its own
+harness. The gateway supplies native update/message, numeric sender, and chat
+identity while retaining routing authority. It does not acquire the stream lock,
+check webhooks, or call Telegram
 `getUpdates`; those remain solely in the gateway daemon. Outbound `telegram_send` is
 forwarded over the same socket as `send_message`; the gateway verifies the sidecar-owned
 live registration and sends only to its configured or linked active chat, never to a

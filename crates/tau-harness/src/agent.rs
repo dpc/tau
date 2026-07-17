@@ -439,23 +439,6 @@ impl PendingPrompt {
         prompt
     }
 
-    /// Create a user-visible queued prompt that should notify active watchers.
-    pub(crate) fn watch_notified_user(
-        text: String,
-        extension_name: tau_proto::ExtensionName,
-    ) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::User,
-            source: PendingPromptSource::WatchNotifiedUser,
-            submission_source: tau_proto::PromptSubmissionSource::Extension {
-                name: extension_name,
-            },
-            ctx_id: None,
-            peer_admission_bytes: None,
-        }
-    }
-
     /// Create a hidden internal queued prompt.
     pub(crate) fn internal(text: String) -> Self {
         Self {

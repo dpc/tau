@@ -130,7 +130,7 @@ pub(super) struct GatewayAgentView {
     pub(super) alias: usize,
 }
 
-/// Prompt delivery queued for a sidecar client.
+/// Inbound delivery record queued for a sidecar client.
 #[derive(Clone, Debug, serde::Serialize)]
 pub(super) struct GatewayDelivery {
     /// Gateway-minted request id for this live queued delivery.
@@ -139,12 +139,16 @@ pub(super) struct GatewayDelivery {
     pub(super) session_id: String,
     /// Target Tau agent id.
     pub(super) agent_id: String,
+    /// Publisher-scoped Telegram message identity.
+    pub(super) message_id: String,
+    /// Stable numeric Telegram sender id.
+    pub(super) sender_id: String,
     /// Sanitized Telegram source label.
     pub(super) source: String,
-    /// Prompt text including the Telegram source prefix.
+    /// Stable numeric Telegram conversation id.
+    pub(super) conversation_id: String,
+    /// Original Telegram message body without a transport prefix.
     pub(super) text: String,
-    /// Gateway-minted context id for dedup/log correlation.
-    pub(super) ctx_id: String,
 }
 
 /// Split a `/to` body into target selector and non-empty prompt text.

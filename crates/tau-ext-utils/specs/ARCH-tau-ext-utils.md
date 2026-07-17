@@ -17,8 +17,8 @@ extension reconstructs active timers by folding catch-up input:
 4. non-replay `agent.replay_complete` gates firing, so overdue restored timers do
    not submit prompts until the owning agent's catch-up has reached its boundary.
 
-Timer wakeups use `extension.prompt_submit_request` with
-`message_class = Internal`. The harness remains the only component that publishes
+Timer wakeups use the narrow `extension.internal_prompt_submit_request`, which
+has no user-message class. The harness remains the only component that publishes
 `agent.prompt_submitted`; the extension never forges transcript prompt facts.
 Periodic timers coalesce downtime into one internal prompt and advance the next
 fire time beyond the current wall clock.

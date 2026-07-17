@@ -100,7 +100,7 @@ opens a private local status socket.
 Allowlisted users can use `/start`, `/help`, `/status`, `/sessions`, `/agents`,
 `/select-session`, `/select`, `/to`, and `/where`. Session listings use
 gateway-local aliases instead of full session ids; selected or explicit routes
-queue inbound prompt deliveries for the owning sidecar. Plain text routes only
+queue inbound message-fact deliveries for the owning sidecar. Plain text routes only
 when the selected target is live or exactly one agent is registered; ambiguous
 text gets a Telegram explanation instead of being guessed. Unconfigured
 group/supergroup chats are ignored instead of linked or replied to.
@@ -118,17 +118,18 @@ TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
 Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
 `--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The private
 same-UID local socket accepts a one-shot JSON-line
-`{"protocol_version":2,"kind":"status"}` request and returns a status snapshot.
-Gateway and sidecar must be upgraded together because socket protocol v2 removes
-the obsolete Telegram tool-namespace metadata.
+`{"protocol_version":3,"kind":"status"}` request and returns a status snapshot.
+Gateway and sidecar must be upgraded together: socket protocol v3 replaces
+v2's prefixed-text delivery records with transport-neutral message-fact identity
+fields and original message bodies.
 It also accepts persistent sidecar requests: `hello`, `heartbeat`,
 `register_agent`, `unregister_agent`, `send_message`, and `goodbye`. The gateway
 treats registrations as live leases, refreshes them on heartbeat, removes them on
 explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
 `hello`/status responses include a gateway generation and reannouncement hint so
 sidecars reconnecting after a gateway restart know to re-send their current
-registrations. Heartbeat/register responses can include queued inbound prompt
-deliveries for the sidecar to submit to its local Tau harness. `send_message`
+registrations. Heartbeat/register responses can include queued inbound delivery
+records for the sidecar to publish locally as `message.delivered`. `send_message`
 responses report bounded operation errors without accepting any Telegram
 destination from the sidecar.
 
@@ -144,8 +145,9 @@ In this mode the sidecar does not need `bot_token_secret`, does not use
 token, allowlist, chat policy, polling, and update offset. The sidecar still
 publishes the same logical `telegram_register`/`telegram_send` tools (with the
 generic `tool_prefix` when configured), tracks the local session and registered agents, registers
-live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
-deliveries locally as `extension.prompt_submit_request`. Outbound
+live `(session_id, agent_id)` routes with the gateway, and publishes queued inbound
+deliveries locally as `message.delivered`. Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram
-chat without accepting a model-supplied destination.
+chat without accepting a model-supplied destination. A successful local or
+gateway send publishes `message.sent` before its ordinary tool result.

@@ -5611,7 +5611,7 @@ impl Harness {
             Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
-            Event::ExtPromptSubmitRequest(request) => Some(&request.agent_id),
+            Event::ExtInternalPromptSubmitRequest(request) => Some(&request.agent_id),
             Event::ProviderResponseUpdated(updated) => Some(&updated.agent_id),
             Event::ToolRequest(request) => Some(&request.agent_id),
             Event::ToolStarted(started) => Some(&started.agent_id),
@@ -8367,8 +8367,8 @@ impl Harness {
         event: Event,
     ) -> Result<Option<Event>, HarnessError> {
         match event {
-            Event::ExtPromptSubmitRequest(request) => {
-                self.handle_extension_prompt_submit_request(source_id, request)?;
+            Event::ExtInternalPromptSubmitRequest(request) => {
+                self.handle_extension_internal_prompt_submit_request(request)?;
                 Ok(None)
             }
             Event::AgentMetadataSet(set) => {
@@ -9255,10 +9255,9 @@ impl Harness {
         Ok(false)
     }
 
-    fn handle_extension_prompt_submit_request(
+    fn handle_extension_internal_prompt_submit_request(
         &mut self,
-        source_id: &str,
-        request: tau_proto::ExtPromptSubmitRequest,
+        request: tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
         let Some(cid) = self.agent_routes.get(&agent_id).cloned() else {
@@ -9273,22 +9272,8 @@ impl Harness {
             ));
             return Ok(());
         };
-        let text = request.text;
-        let is_internal = request.message_class.is_internal();
-        let prompt = if is_internal {
-            PendingPrompt::internal(text)
-        } else {
-            let extension_name = self
-                .find_extension_by_connection(source_id)
-                .map(|extension| ExtensionName::from(extension.name.clone()))
-                .unwrap_or_else(|| ExtensionName::from("unknown-extension"));
-            PendingPrompt::watch_notified_user(text, extension_name)
-        }
-        .with_ctx_id(request.ctx_id);
-        let submission = self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
-        if !matches!(submission, PromptSubmission::Rejected { .. }) && !is_internal {
-            let _ = self.agent_store.record_agent_user_interaction(&agent_id);
-        }
+        let prompt = PendingPrompt::internal(request.text).with_ctx_id(request.ctx_id);
+        self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
         Ok(())
     }
 

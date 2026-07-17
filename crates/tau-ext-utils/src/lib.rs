@@ -16,7 +16,7 @@ use tau_client::{
 };
 use tau_proto::{
     AgentId, AgentPromptSteered, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event,
-    EventName, EventSelector, ExtPromptSubmitRequest, PromptMessageClass, SessionAgentUnloaded,
+    EventName, EventSelector, ExtInternalPromptSubmitRequest, SessionAgentUnloaded,
     SessionShutdown, SessionStarted, ToolError, ToolResult, ToolResultKind, ToolSpec, ToolStarted,
     ToolType, ToolUseState, ToolUseStatus, UnixMicros,
 };
@@ -268,12 +268,13 @@ impl TimerRuntime {
             let Some(handle) = &self.handle else {
                 continue;
             };
-            handle.emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
-                agent_id: fire.agent_id,
-                text: fire.prompt,
-                message_class: PromptMessageClass::Internal,
-                ctx_id: Some(fire.ctx_id),
-            }))?;
+            handle.emit(Event::ExtInternalPromptSubmitRequest(
+                ExtInternalPromptSubmitRequest {
+                    agent_id: fire.agent_id,
+                    text: fire.prompt,
+                    ctx_id: Some(fire.ctx_id),
+                },
+            ))?;
         }
         Ok(())
     }
@@ -905,6 +906,8 @@ fn missed_intervals(next_fire_at: UnixMicros, now: UnixMicros, interval_seconds:
 
 #[cfg(test)]
 mod tests {
+    use tau_proto::PromptMessageClass;
+
     use super::*;
 
     fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {

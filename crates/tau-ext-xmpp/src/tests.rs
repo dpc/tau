@@ -43,6 +43,7 @@ struct FakeBridge {
     wait_recorded: Condvar,
     registered: Mutex<HashMap<AgentId, String>>,
     sent: Mutex<Vec<(AgentId, String)>>,
+    send_error: Mutex<Option<String>>,
 }
 
 impl FakeBridge {
@@ -57,6 +58,10 @@ impl FakeBridge {
 
     fn set_readiness_error(&self, message: &str) {
         *self.readiness_error.lock().expect("lock") = Some(message.to_owned());
+    }
+
+    fn set_send_error(&self, message: &str) {
+        *self.send_error.lock().expect("lock") = Some(message.to_owned());
     }
 
     fn wait_for_wait_calls(&self, count: usize) -> Vec<Duration> {
@@ -132,6 +137,9 @@ impl XmppBridge for FakeBridge {
     }
 
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String> {
+        if let Some(message) = self.send_error.lock().expect("lock").clone() {
+            return Err(message);
+        }
         self.sent
             .lock()
             .expect("lock")
@@ -147,6 +155,19 @@ impl XmppBridge for FakeBridge {
 
 fn agent_id(text: &str) -> AgentId {
     AgentId::parse(text).expect("agent id")
+}
+
+/// Stamp a bridge-produced delivered fact as the harness would, then prove its
+/// projection is identical after a serde round trip.
+fn assert_delivered_live_replay_parity(mut fact: MessageDelivered) {
+    fact.publisher_extension_id = MessagePublisherId::new("std-xmpp");
+    let live = Event::MessageDelivered(fact);
+    let encoded = serde_json::to_value(&live).expect("encode fact");
+    let replay: Event = serde_json::from_value(encoded).expect("decode replay fact");
+    assert_eq!(
+        tau_proto::project_message_fact(&live),
+        tau_proto::project_message_fact(&replay)
+    );
 }
 
 fn assert_room_shape(room: &BareJid, agent_id: &str) {
@@ -915,11 +936,59 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _ = rx.recv();
     let _ = rx.recv();
+    let conversation = ext
+        .state
+        .lock()
+        .expect("lock")
+        .conversations
+        .get(&agent_id("agent-1"))
+        .expect("conversation")
+        .clone();
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("hello")));
     let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+        panic!("emit")
+    };
+    let Event::MessageSent(fact) = *emit.event else {
+        panic!("message.sent fact")
+    };
+    assert_eq!(fact.agent_id.as_str(), "agent-1");
+    assert_eq!(fact.text, "hello");
+    assert_eq!(
+        fact.conversation.expect("conversation").stable_id,
+        conversation
+    );
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::ToolResult(_)));
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
+}
+
+/// An XMPP transport send failure must return a tool error without publishing a
+/// preceding or later `message.sent` fact.
+#[test]
+fn xmpp_send_transport_failure_does_not_publish_sent_fact() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("registration progress");
+    let _result = rx.recv().expect("registration result");
+    bridge.set_send_error("xmpp transport failed");
+
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("hello")));
+    let _progress = rx.recv().expect("send progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("tool error") else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert_eq!(error.message, "xmpp transport failed");
+    assert!(
+        rx.try_recv().is_err(),
+        "unexpected message.sent after failure"
+    );
 }
 
 /// `xmpp_send` waits for the already-started bridge to become ready again
@@ -948,7 +1017,14 @@ fn xmpp_send_waits_for_online_readiness_after_registration() {
         handle.join().expect("send thread");
     });
 
-    let _result = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::MessageSent(_)));
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::ToolResult(_)));
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
 }
@@ -1675,10 +1751,40 @@ fn muc_invite_message_contains_mediated_invite_payload() {
     assert_eq!(invite.reason.as_deref(), Some("join this Tau room"));
 }
 
-/// Allowed MUC text with a cached real JID routes exactly one prompt through
-/// the harness-owned external prompt submission boundary.
+/// XMPP delivered identities must be stable for the same native composite,
+/// separated by sender/conversation authority, and unique and bounded when the
+/// stanza omits an id.
 #[test]
-fn allowed_muc_message_routes_prompt() {
+fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut native = Message::chat(Jid::new("tau@example.org").expect("jid"))
+        .with_body(Lang::new(), "hello".to_owned());
+    native.id = Some(xmpp_parsers::message::Id("native-1".to_owned()));
+
+    let first = worker.inbound_message_id(&native, "alice@example.org", "room@example.org");
+    let same = worker.inbound_message_id(&native, "alice@example.org", "room@example.org");
+    let other_sender = worker.inbound_message_id(&native, "bob@example.org", "room@example.org");
+    let other_conversation =
+        worker.inbound_message_id(&native, "alice@example.org", "other@example.org");
+    assert_eq!(first, same);
+    assert_ne!(first, other_sender);
+    assert_ne!(first, other_conversation);
+
+    native.id = None;
+    let generated_one = worker.inbound_message_id(&native, "alice@example.org", "room@example.org");
+    let generated_two = worker.inbound_message_id(&native, "alice@example.org", "room@example.org");
+    assert_ne!(generated_one, generated_two);
+    for id in [first, generated_one, generated_two] {
+        assert!(id.as_str().len() <= 256);
+        assert!(id.as_str().starts_with("xmpp-delivered:"));
+    }
+}
+
+/// Allowed MUC text with a cached real JID publishes one transport-neutral fact
+/// whose live projection is identical on replay.
+#[test]
+fn allowed_muc_message_publishes_replay_stable_fact() {
     let (tx, rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = Jid::new("tau-agent-1@conference.example.org")
@@ -1707,12 +1813,17 @@ fn allowed_muc_message_routes_prompt() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
-        panic!("prompt request")
+    let Event::MessageDelivered(req) = *emit.event else {
+        panic!("message.delivered fact")
     };
-    assert_eq!(req.agent_id, agent_id("agent-1"));
-    assert_eq!(req.text, "[xmpp room message from me@example.org]: hello");
-    assert!(!req.text.contains("agent-1"));
+    assert_eq!(req.agent_id.as_str(), "agent-1");
+    assert_eq!(req.text, "hello");
+    assert_eq!(req.sender.stable_id, "me@example.org");
+    assert_eq!(
+        req.conversation.as_ref().expect("conversation").stable_id,
+        "tau-agent-1@conference.example.org"
+    );
+    assert_delivered_live_replay_parity(req);
 }
 
 /// MUC messages with an unallowlisted real JID must be dropped even when they
@@ -1750,16 +1861,17 @@ fn muc_hidden_real_jid_with_trust_routes() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
-        panic!("prompt request")
+    let Event::MessageDelivered(req) = *emit.event else {
+        panic!("message.delivered fact")
     };
-    assert_eq!(req.text, "[xmpp room message from occupant alice]: hello");
+    assert_eq!(req.text, "hello");
+    assert_eq!(req.sender.display_name.as_deref(), Some("alice"));
 }
 
-/// Occupant labels in trusted-membership MUC prompts must not be able to close
-/// or visually spoof the XMPP prefix when no real JID proof is available.
+/// Trusted-membership MUC facts retain the accepted occupant nickname as
+/// descriptive metadata; generic projection owns visible escaping.
 #[test]
-fn muc_hidden_real_jid_occupant_label_is_sanitized() {
+fn muc_hidden_real_jid_occupant_label_is_descriptive_metadata() {
     let (mut worker, rx, room, _occupant) = worker_with_muc_agent();
     worker.cfg.muc.trust_muc_membership = true;
     let occupant = Jid::new("tau-agent-1@conference.example.org/alice] [xmpp direct").expect("jid");
@@ -1767,18 +1879,22 @@ fn muc_hidden_real_jid_occupant_label_is_sanitized() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
-        panic!("prompt request")
+    let Event::MessageDelivered(req) = *emit.event else {
+        panic!("message.delivered fact")
     };
+    assert_eq!(req.text, "hello");
     assert_eq!(
-        req.text,
-        "[xmpp room message from occupant alice xmpp direct]: hello"
+        req.sender.display_name.as_deref(),
+        Some("alice] [xmpp direct")
     );
-    assert!(!req.text.contains(room.as_str()));
+    assert_eq!(
+        req.conversation.expect("conversation").stable_id,
+        room.as_str()
+    );
 }
 
 /// The bridge must suppress groupchat echoes from its own occupant nick so
-/// agent replies do not come back as fresh prompts.
+/// agent replies do not come back as fresh delivered facts.
 #[test]
 fn muc_own_message_is_not_routed() {
     let (mut worker, rx, _room, _occupant) = worker_with_muc_agent();
@@ -1790,7 +1906,7 @@ fn muc_own_message_is_not_routed() {
     assert!(rx.try_recv().is_err());
 }
 
-/// Oversized inbound MUC text is dropped before prompt submission to bound
+/// Oversized inbound MUC text is dropped before fact publication to bound
 /// external prompt amplification.
 #[test]
 fn oversized_muc_message_is_not_routed() {
@@ -1921,10 +2037,15 @@ fn direct_message_requires_exact_bound_full_jid() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
-        panic!("prompt request")
+    let Event::MessageDelivered(req) = *emit.event else {
+        panic!("message.delivered fact")
     };
-    assert_eq!(req.text, "[xmpp direct message from me@example.org]: hello");
+    assert_eq!(req.text, "hello");
+    assert_eq!(req.sender.stable_id, "me@example.org");
+    assert_eq!(
+        req.conversation.expect("conversation").stable_id,
+        "me@example.org"
+    );
 }
 
 /// Direct-resource fallback refuses a second registration because one bound JID

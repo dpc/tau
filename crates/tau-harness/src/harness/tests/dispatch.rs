@@ -21684,52 +21684,10 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
     assert_eq!(pim_group_prompts, 1, "group prompt renders once");
 }
 
-/// Extension prompt submission is the sanctioned intake path for side-effect
-/// bridges like Telegram. It must produce the same durable user prompt fact as
-/// a UI prompt instead of accepting forged `agent.prompt_submitted` events.
-#[test]
-fn extension_prompt_submit_request_routes_to_loaded_agent() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("harness");
-    h.selected_model = Some("test/model".into());
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-
-    h.handle_extension_event(
-        "telegram-ext",
-        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
-            tau_proto::ExtPromptSubmitRequest {
-                agent_id: agent_id.clone(),
-                text: "[telegram from alice] hello".to_owned(),
-                message_class: tau_proto::PromptMessageClass::User,
-                ctx_id: Some("telegram-1".to_owned()),
-            },
-        )),
-    )
-    .expect("submit prompt request");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptSubmitted(prompt)
-            if prompt.agent_id == agent_id
-                && prompt.text == "[telegram from alice] hello"
-                && prompt.message_class == tau_proto::PromptMessageClass::User
-                && prompt.originator.is_user()
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptCreated(created)
-            if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("telegram-1")
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
 /// Internal extension prompt submissions must stay hidden while still producing
 /// harness-owned prompt facts for timer and other wakeup extensions.
 #[test]
-fn internal_extension_prompt_submit_request_routes_as_internal_prompt() {
+fn extension_internal_prompt_submit_request_routes_as_internal_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
@@ -21739,11 +21697,10 @@ fn internal_extension_prompt_submit_request_routes_as_internal_prompt() {
 
     h.handle_extension_event(
         "utils-ext",
-        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
-            tau_proto::ExtPromptSubmitRequest {
+        TestProtocolItem::Event(Event::ExtInternalPromptSubmitRequest(
+            tau_proto::ExtInternalPromptSubmitRequest {
                 agent_id: agent_id.clone(),
                 text: "timer fired".to_owned(),
-                message_class: tau_proto::PromptMessageClass::Internal,
                 ctx_id: Some("timer:wake:1".to_owned()),
             },
         )),
@@ -21765,18 +21722,17 @@ fn internal_extension_prompt_submit_request_routes_as_internal_prompt() {
 /// Bad extension prompt targets must be rejected with user-visible harness
 /// notice and must not create durable prompt facts for arbitrary agent ids.
 #[test]
-fn extension_prompt_submit_request_rejects_unknown_agent() {
+fn extension_internal_prompt_submit_request_rejects_unknown_agent() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
 
     h.handle_extension_event(
-        "telegram-ext",
-        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
-            tau_proto::ExtPromptSubmitRequest {
+        "utils-ext",
+        TestProtocolItem::Event(Event::ExtInternalPromptSubmitRequest(
+            tau_proto::ExtInternalPromptSubmitRequest {
                 agent_id: tau_proto::AgentId::parse("missing-agent").expect("agent id"),
                 text: "hello".to_owned(),
-                message_class: tau_proto::PromptMessageClass::User,
                 ctx_id: None,
             },
         )),
@@ -21795,10 +21751,11 @@ fn extension_prompt_submit_request_rejects_unknown_agent() {
     h.shutdown().expect("shutdown");
 }
 
-/// Queued extension prompt-submit requests preserve their ctx_id when they are
-/// folded as steering messages, giving timer restore replayable fired evidence.
+/// Queued extension internal-prompt requests preserve their ctx_id when they
+/// are folded as steering messages, giving timer restore replayable fired
+/// evidence.
 #[test]
-fn queued_extension_prompt_submit_request_preserves_ctx_id_when_steered() {
+fn queued_extension_internal_prompt_submit_request_preserves_ctx_id_when_steered() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
@@ -21813,11 +21770,10 @@ fn queued_extension_prompt_submit_request_preserves_ctx_id_when_steered() {
     );
     h.handle_extension_event(
         "utils-ext",
-        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
-            tau_proto::ExtPromptSubmitRequest {
+        TestProtocolItem::Event(Event::ExtInternalPromptSubmitRequest(
+            tau_proto::ExtInternalPromptSubmitRequest {
                 agent_id: agent_id.clone(),
                 text: "timer fired".to_owned(),
-                message_class: tau_proto::PromptMessageClass::Internal,
                 ctx_id: Some("timer:wake:1".to_owned()),
             },
         )),
@@ -21837,11 +21793,11 @@ fn queued_extension_prompt_submit_request_preserves_ctx_id_when_steered() {
     h.shutdown().expect("shutdown");
 }
 
-/// Queued extension prompt-submit requests must keep their own ctx_id values;
+/// Queued extension internal-prompt requests must keep their own ctx_id values;
 /// a single per-agent scratch slot would make later queued prompts overwrite
 /// earlier request correlation ids.
 #[test]
-fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
+fn queued_extension_internal_prompt_submit_requests_preserve_individual_ctx_ids() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
@@ -21856,12 +21812,11 @@ fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
 
     for (text, ctx_id) in [("first", "ctx-1"), ("second", "ctx-2")] {
         h.handle_extension_event(
-            "telegram-ext",
-            TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
-                tau_proto::ExtPromptSubmitRequest {
+            "utils-ext",
+            TestProtocolItem::Event(Event::ExtInternalPromptSubmitRequest(
+                tau_proto::ExtInternalPromptSubmitRequest {
                     agent_id: agent_id.clone(),
                     text: text.to_owned(),
-                    message_class: tau_proto::PromptMessageClass::User,
                     ctx_id: Some(ctx_id.to_owned()),
                 },
             )),

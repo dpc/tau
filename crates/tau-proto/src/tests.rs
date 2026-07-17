@@ -988,10 +988,9 @@ fn representative_events() -> Vec<Event> {
                 PromptContent::new("Be concise."),
             ),
         }),
-        Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+        Event::ExtInternalPromptSubmitRequest(ExtInternalPromptSubmitRequest {
             agent_id: agent_id("agent-1"),
-            text: "extension prompt".to_owned(),
-            message_class: PromptMessageClass::User,
+            text: "internal extension prompt".to_owned(),
             ctx_id: Some("ctx-1".to_owned()),
         }),
         Event::StartAgentRequest(StartAgentRequest {
@@ -1605,7 +1604,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "extension.context_provider_register",
         "extension.context_ready",
         "extension.prompt_fragment_publish",
-        "extension.prompt_submit_request",
+        "extension.internal_prompt_submit_request",
         "extension.ready",
         "extension.restarting",
         "extension.session_context_provider_register",
@@ -2260,34 +2259,39 @@ fn event_wire_form_uses_dotted_event_tag() {
     assert!(json.get("payload").is_some());
 }
 
-/// Extension prompt submit requests are a request/intake event, not a durable
-/// transcript fact. This locks in the explicit `extension.*` wire name.
+/// Internal extension prompt requests are a narrow control request, not a
+/// durable transcript fact. This locks in the v12 wire name and field set.
 #[test]
-fn extension_prompt_submit_request_wire_form() {
-    let event = Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+fn extension_internal_prompt_submit_request_wire_form() {
+    let event = Event::ExtInternalPromptSubmitRequest(ExtInternalPromptSubmitRequest {
         agent_id: agent_id("agent-1"),
-        text: "[telegram from alice] hello".to_owned(),
-        message_class: PromptMessageClass::User,
-        ctx_id: Some("ctx-1".to_owned()),
+        text: "timer fired".to_owned(),
+        ctx_id: Some("timer:wake:1".to_owned()),
     });
     let json = serde_json::to_value(&event).expect("serialize");
-    assert_eq!(json["event"], "extension.prompt_submit_request");
+    assert_eq!(json["event"], "extension.internal_prompt_submit_request");
     assert_eq!(json["payload"]["agent_id"], "agent-1");
-    assert_eq!(json["payload"]["ctx_id"], "ctx-1");
-    assert_eq!(event.name(), EventName::EXTENSION_PROMPT_SUBMIT_REQUEST);
+    assert_eq!(json["payload"]["ctx_id"], "timer:wake:1");
+    assert!(json["payload"].get("message_class").is_none());
+    assert_eq!(
+        event.name(),
+        EventName::EXTENSION_INTERNAL_PROMPT_SUBMIT_REQUEST
+    );
 }
 
-/// Omitted extension prompt message classes remain user-style for backwards
-/// compatibility with existing bridge extensions.
+/// Protocol v12 must not retain a decoder for the removed extension
+/// user-message prompt request.
 #[test]
-fn extension_prompt_submit_request_defaults_to_user_message_class() {
-    let payload: ExtPromptSubmitRequest = serde_json::from_value(serde_json::json!({
-        "agent_id": "agent-1",
-        "text": "hello"
-    }))
-    .expect("decode extension prompt request");
-
-    assert_eq!(payload.message_class, PromptMessageClass::User);
+fn legacy_extension_prompt_submit_request_has_no_v12_decoder() {
+    let legacy = serde_json::json!({
+        "event": "extension.prompt_submit_request",
+        "payload": {
+            "agent_id": "agent-1",
+            "text": "legacy user message",
+            "message_class": "user"
+        }
+    });
+    assert!(serde_json::from_value::<Event>(legacy).is_err());
 }
 
 /// Ensures model ids split only on the first slash so provider model names may

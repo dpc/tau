@@ -2,9 +2,9 @@
 //!
 //! This module implements the single-owner gateway slice: stream locking,
 //! durable update offsets, Telegram allowlist/chat policy, help/status command
-//! handling, inbound routing commands, bounded live queued prompt deliveries,
-//! and private local socket support for gateway-side sidecar heartbeat and
-//! registration-lease bookkeeping and outbound sends.
+//! handling, inbound routing commands, bounded live queued message-fact
+//! deliveries, and private local socket support for gateway-side sidecar
+//! heartbeat and registration-lease bookkeeping and outbound sends.
 
 mod routing;
 
@@ -54,7 +54,7 @@ const OUTBOUND_SEND_RATE_WINDOW: Duration = Duration::from_secs(60);
 const RECENT_UPDATE_LIMIT: usize = 128;
 
 /// Version of the local gateway status socket protocol.
-const SOCKET_PROTOCOL_VERSION: u32 = 2;
+const SOCKET_PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum bytes read from one local socket request.
 const MAX_SOCKET_REQUEST_BYTES: usize = 8192;
@@ -65,7 +65,7 @@ const SIDECAR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// Maximum time a registration remains live without a sidecar heartbeat.
 const REGISTRATION_LEASE_DURATION: Duration = Duration::from_secs(30);
 
-/// Maximum queued prompt deliveries retained per sidecar connection.
+/// Maximum queued message-fact deliveries retained per sidecar connection.
 const MAX_PENDING_DELIVERIES_PER_SIDECAR: usize = 32;
 
 /// Default environment variable carrying the bot token.
@@ -378,7 +378,7 @@ impl Gateway {
             return Ok(UpdateOutcome::AdvanceOffset);
         }
         if let Some(message) = update.message.as_ref()
-            && self.process_message(message) == UpdateOutcome::NeedsRedelivery
+            && self.process_message(message, update.update_id) == UpdateOutcome::NeedsRedelivery
         {
             return Ok(UpdateOutcome::NeedsRedelivery);
         }
@@ -411,7 +411,7 @@ impl Gateway {
     }
 
     /// Handle a Telegram message after update decoding.
-    fn process_message(&mut self, message: &TgMessage) -> UpdateOutcome {
+    fn process_message(&mut self, message: &TgMessage, update_id: i64) -> UpdateOutcome {
         if !self.cfg.allowed_user_ids.contains(&message.user_id) {
             tracing::warn!(
                 target: crate::LOG_TARGET,
@@ -435,7 +435,7 @@ impl Gateway {
         if !self.chat_is_active(message) {
             return self.reject_inactive_chat(message);
         }
-        UpdateOutcome::from_required_reply(self.route_or_command(message, text))
+        UpdateOutcome::from_required_reply(self.route_or_command(message, update_id, text))
     }
 
     /// Handle `/start` chat-linking before the generic active-chat check.
@@ -583,7 +583,7 @@ impl Gateway {
     }
 
     /// Handle a command or plain text message once the Telegram chat is active.
-    fn route_or_command(&mut self, message: &TgMessage, text: &str) -> bool {
+    fn route_or_command(&mut self, message: &TgMessage, update_id: i64, text: &str) -> bool {
         let (command, rest) = parse_command(text);
         match command {
             Some("/help") => self.reply(message.chat_id, gateway_help_text()),
@@ -593,13 +593,13 @@ impl Gateway {
             Some("/agents") => self.reply(message.chat_id, &self.agents_text(message, rest)),
             Some("/select-session") => self.select_session(message, rest),
             Some("/select") => self.select_agent(message, rest),
-            Some("/to") => self.route_to(message, rest),
+            Some("/to") => self.route_to(message, update_id, rest),
             Some("/where") => self.reply(message.chat_id, &self.where_text(message)),
             Some(_) => self.reply(
                 message.chat_id,
                 "Unknown Telegram gateway command. Supported commands: /start, /help, /status, /sessions, /agents, /select-session, /select, /to, /where.",
             ),
-            None => self.route_plain(message, text),
+            None => self.route_plain(message, update_id, text),
         }
     }
 
@@ -731,7 +731,7 @@ impl Gateway {
     }
 
     /// Route one explicit `/to` command.
-    fn route_to(&self, message: &TgMessage, rest: &str) -> bool {
+    fn route_to(&self, message: &TgMessage, update_id: i64, rest: &str) -> bool {
         let Some((target, text)) = split_target_and_text(rest) else {
             return self.reply(
                 message.chat_id,
@@ -760,11 +760,11 @@ impl Gateway {
             session_id,
             agent_id,
         };
-        self.queue_route_or_reply(message, target, text)
+        self.queue_route_or_reply(message, update_id, target, text)
     }
 
     /// Route plain text through the selected target or only live registration.
-    fn route_plain(&self, message: &TgMessage, text: &str) -> bool {
+    fn route_plain(&self, message: &TgMessage, update_id: i64, text: &str) -> bool {
         let snapshot = self.socket_state.registry_snapshot();
         if let Some(selection) = self.selection_for_message(Some(message))
             && let Some(agent_id) = selection.agent_id.clone()
@@ -773,6 +773,7 @@ impl Gateway {
             if snapshot.has_registration(&session_id, &agent_id) {
                 return self.queue_route_or_reply(
                     message,
+                    update_id,
                     GatewayRegistrationKey {
                         session_id,
                         agent_id,
@@ -787,7 +788,7 @@ impl Gateway {
         }
         if snapshot.registrations.len() == 1 {
             let target = snapshot.registrations[0].key.clone();
-            return self.queue_route_or_reply(message, target, text);
+            return self.queue_route_or_reply(message, update_id, target, text);
         }
         self.reply(
             message.chat_id,
@@ -843,14 +844,19 @@ impl Gateway {
         Some(selection)
     }
 
-    /// Queue a routed prompt for the target sidecar or explain why it failed.
+    /// Queue a routed delivery record for the target sidecar or explain
+    /// failure.
     fn queue_route_or_reply(
         &self,
         message: &TgMessage,
+        update_id: i64,
         target: GatewayRegistrationKey,
         text: &str,
     ) -> bool {
-        match self.socket_state.enqueue_delivery(&target, message, text) {
+        match self
+            .socket_state
+            .enqueue_delivery(&target, message, update_id, text)
+        {
             Ok(()) => true,
             Err(error) => self.reply(message.chat_id, &error),
         }
@@ -1074,7 +1080,8 @@ struct GatewaySocketState {
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
     generation: String,
-    /// Monotonic request id allocator for queued inbound prompt deliveries.
+    /// Monotonic request id allocator for queued inbound message-fact
+    /// deliveries.
     next_delivery_id: AtomicU64,
 }
 
@@ -1171,17 +1178,18 @@ impl GatewaySocketState {
         registry.snapshot()
     }
 
-    /// Queue one inbound prompt delivery for a registered sidecar.
+    /// Queue one inbound message-fact delivery for a registered sidecar.
     fn enqueue_delivery(
         &self,
         target: &GatewayRegistrationKey,
         message: &TgMessage,
+        update_id: i64,
         text: &str,
     ) -> Result<(), String> {
         let request_id = self.next_delivery_id.fetch_add(1, Ordering::Relaxed);
         let mut registry = self.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
-        registry.enqueue_delivery(target, message, text, request_id)
+        registry.enqueue_delivery(target, message, update_id, text, request_id)
     }
 
     /// Send one outbound Telegram message for a currently registered route.
@@ -1273,7 +1281,7 @@ struct GatewayRegistry {
     sidecars: HashMap<u64, GatewaySidecar>,
     /// Registered agent routes owned by connected sidecars.
     registrations: HashMap<GatewayRegistrationKey, GatewayRegistration>,
-    /// Prompt deliveries waiting for each sidecar's next socket response.
+    /// Delivery records waiting for each sidecar's next socket response.
     pending_deliveries: HashMap<u64, Vec<GatewayDelivery>>,
     /// Stable alias numbers assigned to live or previously-seen session ids.
     session_aliases: HashMap<String, usize>,
@@ -1464,11 +1472,12 @@ impl GatewayRegistry {
         }
     }
 
-    /// Queue one prompt delivery for the sidecar that owns `target`.
+    /// Queue one message-fact delivery for the sidecar that owns `target`.
     fn enqueue_delivery(
         &mut self,
         target: &GatewayRegistrationKey,
         message: &TgMessage,
+        update_id: i64,
         text: &str,
         request_id: u64,
     ) -> Result<(), String> {
@@ -1491,15 +1500,17 @@ impl GatewayRegistry {
             request_id: format!("telegram-{request_id}"),
             session_id: target.session_id.clone(),
             agent_id: target.agent_id.clone(),
-            source: source.clone(),
-            text: format!("[telegram from {source}] {text}"),
-            ctx_id: format!("telegram:{}:{}", message.chat_id, request_id),
+            message_id: format!("telegram:{}:{update_id}", message.chat_id),
+            sender_id: message.user_id.to_string(),
+            source,
+            conversation_id: message.chat_id.to_string(),
+            text: text.to_owned(),
         };
         pending.push(delivery);
         Ok(())
     }
 
-    /// Drain prompt deliveries queued for one sidecar connection.
+    /// Drain message-fact deliveries queued for one sidecar connection.
     fn take_deliveries(&mut self, connection_id: u64) -> Vec<GatewayDelivery> {
         self.pending_deliveries
             .remove(&connection_id)

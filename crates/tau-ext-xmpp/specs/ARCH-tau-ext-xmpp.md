@@ -67,20 +67,17 @@ leave presence under the remaining cleanup budget. Shutdown wakeups are
 event-driven: async worker paths wait on notification instead of periodic
 polling, while synchronous paths keep a cheap requested-state check.
 
-Incoming XMPP text is emitted as `extension.prompt_submit_request`. The harness
-validates the target loaded agent and owns the durable prompt fact. The
-model-visible text uses a compact transport/channel prefix that must not expose
-generated room labels, room JIDs, Tau session ids, or Tau agent ids:
+After XMPP allowlist, room-membership, target, history, and own-message checks,
+incoming text is emitted directly as `message.delivered`. Accepted direct bare
+JIDs or MUC real/occupant identities become stable sender IDs; the direct peer or
+room becomes the conversation ID. Native stanza IDs are hashed with
+sender/conversation identity, while missing IDs use a process-unique local
+identity. The original stanza body is published without a transport prefix.
 
-- `[xmpp room message from <bare-jid>]: <body>` for MUC messages with verified
-  real-JID proof.
-- `[xmpp room message from occupant <sanitized-nick>]: <body>` for explicitly
-  trusted hidden-real-JID MUC membership.
-- `[xmpp room message]: <body>` when no source label is shown.
-- `[xmpp direct message from <bare-jid>]: <body>` for direct-resource fallback.
-
-Occupant labels are only weak room-local display hints and are sanitized so they
-cannot close or spoof the bracketed prefix.
+Successful `xmpp_send` calls emit `message.sent` before their ordinary terminal
+tool result. The fact uses the original body and a bounded identity derived from
+the unique tool call and locally authoritative conversation. Full-resource
+routes, membership proof, and send authorization remain extension-local.
 
 - The built-in extension is disabled by default and requires an explicit
   password secret plus a non-empty `allowed_jids` allowlist.
@@ -113,10 +110,10 @@ cannot close or spoof the bracketed prefix.
   the resulting cross-process/restart collision and room-reuse risk.
   If two rendered room names ever collide in one process, registration fails
   closed instead of overwriting the existing room route.
-- Text is treated as untrusted external input and is prefixed with XMPP
-  message/channel/source context before being submitted to Tau. The
-  model-visible prefix intentionally omits generated room labels, session ids,
-  and agent ids.
+- Text is treated as untrusted external input and published as the original body
+  in a transport-neutral `message.delivered` fact. Sender/conversation metadata
+  describes provenance without exposing actionable routes, membership proof,
+  Tau session IDs, or Tau agent IDs.
 - Tau sends unavailable presence for MUC rooms on unregister and session
   shutdown where the worker is still connected. After a successful MUC join,
   invite/fallback notices are best-effort, happen after `xmpp_register` success,

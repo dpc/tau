@@ -14,12 +14,15 @@ contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
-Protocol version 11 requires an extension's first harness response after
+Protocol version 12 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
 [DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
 The configured extension instance name is required and supplies the stable
 harness-stamped publisher ID for extension-published `message.*` facts.
+V12 removes the extension user-message prompt request; the only extension prompt
+request is the narrow `extension.internal_prompt_submit_request` control path
+with `agent_id`, `text`, and optional `ctx_id`.
 The protocol deliberately provides no generic transport registration, ingress
 acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB

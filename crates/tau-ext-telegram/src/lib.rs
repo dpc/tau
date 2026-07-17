@@ -25,7 +25,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
 use gateway_client::{
-    GatewayClient, GatewayClientConfig, GatewayPromptDelivery, GatewaySocketResponse,
+    GatewayClient, GatewayClientConfig, GatewayMessageDelivery, GatewaySocketResponse,
 };
 use stream_owner::{
     StreamIdentity, TelegramWebhookInfo, UpdateStreamLock, telegram_contention_diagnostic,
@@ -33,9 +33,10 @@ use stream_owner::{
 };
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, HarnessNotice,
-    NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted,
-    ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
+    MessageConversation, MessageDelivered, MessageFactId, MessageParty, MessagePublisherId,
+    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -339,8 +340,7 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     /// Current local Tau session observed from `session.started`.
     /// Gateway-client mode never announces agent routes until this is
-    /// known, and deliveries must match it before they are submitted
-    /// locally.
+    /// known, and delivery records must match it before local fact publication.
     current_session_id: Option<tau_proto::SessionId>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
     learned_chat: Option<LinkedChat>,
@@ -351,11 +351,11 @@ struct State {
     next_update_offset: Option<i64>,
 }
 
-/// Submit all gateway-delivered prompts that target the current local session.
+/// Publish all gateway delivery records that target the current local session.
 fn emit_gateway_deliveries(
     state: &SharedState,
     output: &Output,
-    deliveries: Vec<GatewayPromptDelivery>,
+    deliveries: Vec<GatewayMessageDelivery>,
 ) {
     for delivery in deliveries {
         let Ok(agent_id) = AgentId::parse(&delivery.agent_id) else {
@@ -383,12 +383,20 @@ fn emit_gateway_deliveries(
             );
             continue;
         };
-        output.emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
-            agent_id,
-            text: delivery.text,
-            message_class: tau_proto::PromptMessageClass::User,
-            ctx_id: Some(delivery.ctx_id),
-        }));
+        output.emit(Event::MessageDelivered(MessageDelivered::new(
+            MessagePublisherId::default(),
+            MessageAgentTarget::new(agent_id.as_ref()),
+            MessageFactId::new(delivery.message_id),
+            MessageParty {
+                stable_id: delivery.sender_id,
+                display_name: bounded_display_name(&delivery.source),
+            },
+            Some(MessageConversation {
+                stable_id: delivery.conversation_id,
+                display_name: None,
+            }),
+            delivery.text,
+        )));
     }
 }
 
@@ -1056,6 +1064,7 @@ impl Extension {
             match gateway.send_message(session_id.as_ref(), invoke.agent_id.as_ref(), &message) {
                 Ok(response) => {
                     self.apply_gateway_response(response);
+                    self.emit_sent_fact(&invoke.agent_id, invoke.call_id.as_str(), None, &message);
                     tool_result(invoke, "sent Telegram message through gateway")
                 }
                 Err(message) => tool_error(invoke, message),
@@ -1089,13 +1098,22 @@ impl Extension {
             };
             let text = format!("[{}] {message}", invoke.agent_id.as_ref());
             match self.client.send_message(&cfg, chat_id, &text) {
-                Ok(()) => tool_result(invoke, "sent Telegram message"),
+                Ok(()) => {
+                    self.emit_sent_fact(
+                        &invoke.agent_id,
+                        invoke.call_id.as_str(),
+                        Some(chat_id),
+                        &message,
+                    );
+                    tool_result(invoke, "sent Telegram message")
+                }
                 Err(message) => tool_error(invoke, message),
             }
         }
     }
 
     fn process_update_for_generation(&self, update: TgUpdate, config_generation: ConfigGeneration) {
+        let update_id = update.update_id;
         let Some(message) = update.message else {
             return;
         };
@@ -1120,18 +1138,11 @@ impl Extension {
         if self.rejects_unlinked_command(&cfg, &message, active_chat, command, config_generation) {
             return;
         }
-        if self.handle_command(
-            &cfg,
-            &message,
-            is_private_chat,
-            command,
-            rest,
-            config_generation,
-        ) {
+        if self.handle_command(&cfg, &message, update_id, command, rest, config_generation) {
             return;
         }
 
-        self.route_plain_text(&cfg, &message, &text, config_generation);
+        self.route_plain_text(&cfg, &message, update_id, &text, config_generation);
     }
 
     fn config_for_allowed_message(
@@ -1246,14 +1257,19 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
-        is_private_chat: bool,
+        update_id: i64,
         command: Option<&str>,
         rest: &str,
         config_generation: ConfigGeneration,
     ) -> bool {
         match command {
             Some("/start") => {
-                self.handle_start_command(cfg, message, is_private_chat, config_generation);
+                self.handle_start_command(
+                    cfg,
+                    message,
+                    is_private_message_chat(message),
+                    config_generation,
+                );
                 true
             }
             Some("/agents") => {
@@ -1265,7 +1281,7 @@ impl Extension {
                 true
             }
             Some("/to") => {
-                self.handle_to_command(cfg, message, rest, config_generation);
+                self.handle_to_command(cfg, message, update_id, rest, config_generation);
                 true
             }
             Some(_) => {
@@ -1365,6 +1381,7 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
+        update_id: i64,
         rest: &str,
         config_generation: ConfigGeneration,
     ) {
@@ -1380,7 +1397,9 @@ impl Extension {
         }
 
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => self.route_text(message, agent_id, body.trim(), config_generation),
+            Ok(agent_id) => {
+                self.route_text(message, update_id, agent_id, body.trim(), config_generation)
+            }
             Err(reply) => {
                 self.reply(cfg, message.chat_id, &reply, config_generation);
             }
@@ -1391,11 +1410,12 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
+        update_id: i64,
         text: &str,
         config_generation: ConfigGeneration,
     ) {
         match self.plain_text_target(message.chat_id) {
-            Ok(agent_id) => self.route_text(message, agent_id, text, config_generation),
+            Ok(agent_id) => self.route_text(message, update_id, agent_id, text, config_generation),
             Err(reply) => {
                 self.reply(cfg, message.chat_id, &reply, config_generation);
             }
@@ -1449,6 +1469,7 @@ impl Extension {
     fn route_text(
         &self,
         message: &TgMessage,
+        update_id: i64,
         agent_id: AgentId,
         text: &str,
         config_generation: ConfigGeneration,
@@ -1456,21 +1477,64 @@ impl Extension {
         if !self.poll_response_matches_config(config_generation) {
             return;
         }
-        let source = message
-            .from_name
-            .as_deref()
-            .filter(|name| !name.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| message.user_id.to_string());
-        let prompt = format!("[telegram from {source}] {text}");
         self.output
-            .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
-                agent_id,
-                text: prompt,
-                message_class: tau_proto::PromptMessageClass::User,
-                ctx_id: None,
-            }));
+            .emit(Event::MessageDelivered(MessageDelivered::new(
+                MessagePublisherId::default(),
+                MessageAgentTarget::new(agent_id.as_ref()),
+                MessageFactId::new(format!("telegram:{}:{update_id}", message.chat_id)),
+                MessageParty {
+                    stable_id: message.user_id.to_string(),
+                    display_name: message.from_name.as_deref().and_then(bounded_display_name),
+                },
+                Some(MessageConversation {
+                    stable_id: message.chat_id.to_string(),
+                    display_name: None,
+                }),
+                text,
+            )));
     }
+
+    /// Publish remote Telegram send success before returning the terminal tool
+    /// result through the same serialized extension writer.
+    fn emit_sent_fact(&self, agent_id: &AgentId, call_id: &str, chat_id: Option<i64>, text: &str) {
+        let destination = chat_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "gateway".to_owned());
+        self.output.emit(Event::MessageSent(MessageSent::new(
+            MessagePublisherId::default(),
+            MessageAgentTarget::new(agent_id.as_ref()),
+            generated_send_message_id(call_id, &destination),
+            None,
+            chat_id.map(|id| MessageConversation {
+                stable_id: id.to_string(),
+                display_name: None,
+            }),
+            text,
+        )));
+    }
+}
+
+/// Derive a bounded publisher-unique send identity from the harness-unique tool
+/// call and the extension-authoritative destination.
+fn generated_send_message_id(call_id: &str, destination: &str) -> MessageFactId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-telegram/message.sent/v1\0");
+    hasher.update(call_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(destination.as_bytes());
+    MessageFactId::new(format!("telegram-send:{}", hasher.finalize().to_hex()))
+}
+
+/// Bound a Telegram profile label to the universal message-fact display limit.
+fn bounded_display_name(value: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in value.trim().chars().take(80) {
+        if out.len() + ch.len_utf8() > 256 {
+            break;
+        }
+        out.push(ch);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn is_private_message_chat(message: &TgMessage) -> bool {
@@ -2029,7 +2093,7 @@ fn send_tool_spec_for(tool_names: &ToolNames) -> ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
         description: Some(format!(
-            "Send a text message to the configured or linked Telegram chat for the `{}` bot namespace. Only registered agents may use this tool; it cannot choose arbitrary chat ids. Use it to answer prompts prefixed with [telegram from ...].",
+            "Send a text message to the configured or linked Telegram chat for the `{}` bot namespace. Only registered agents may use this tool; it cannot choose arbitrary chat ids. Use it to answer Telegram-originated message facts.",
             tool_names.namespace
         )),
         tool_type: tau_proto::ToolType::Function,

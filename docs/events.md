@@ -417,13 +417,13 @@ harness/agent.
   particular agent/session context provider slot.
 - **`extension.prompt_fragment_publish`** — The extension publishes a prompt
   fragment contribution that prompt assembly may include according to config.
-- **`extension.prompt_submit_request`** — An extension request to submit a
-  user-style or hidden internal prompt to an already loaded agent. The harness
-  validates the target agent and, when accepted, publishes the durable
-  `agent.prompt_submitted` fact with the requested `message_class`; queued prompts
-  that are folded into an in-flight turn preserve the request `ctx_id` on
-  `agent.prompt_steered`. Extensions must not forge transcript prompt facts
-  directly. `tau-ext-utils` uses internal prompt submissions for timer wakeups.
+- **`extension.internal_prompt_submit_request`** — A narrow extension request to
+  submit hidden internal control text to an already loaded agent. The harness
+  validates the target agent and, when accepted, publishes an internal
+  `agent.prompt_submitted` fact; queued prompts folded into an in-flight turn
+  preserve the request `ctx_id` on `agent.prompt_steered`. It has no user-message
+  class. `tau-ext-utils` uses it for timer wakeups. External user messages instead
+  enter through extension-published `message.delivered` facts.
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call
@@ -470,8 +470,7 @@ intent.
 
 - **`ui.prompt_submitted`** — The user submitted a prompt request for an
   existing agent: session id, text, required `agent_id`, originator (defaults to
-  `user`; reused for extension-driven side prompts), and user/internal message
-  class. The harness translates accepted requests into durable
+  `user`), and user/internal message class. The harness translates accepted requests into durable
   `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals

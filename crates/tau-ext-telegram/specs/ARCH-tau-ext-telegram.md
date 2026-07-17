@@ -15,7 +15,8 @@ Telegram update stream, identified by the Bot API base URL plus bot token. When
 that stream identity changes, the extension resets the offset and drains the new
 stream before routing messages. The first poll after lazy startup uses
 non-long-poll requests to drain Telegram's existing backlog until it receives an
-empty batch, so pre-registration messages are not submitted as fresh prompts.
+empty batch, so pre-registration messages are not published as fresh
+`message.delivered` facts.
 Poll responses captured under an older configuration generation are discarded
 instead of advancing offsets, marking the new stream drained, or routing old
 updates.
@@ -41,10 +42,17 @@ fails closed with the same behavior.
 
 ## Harness boundary
 
-Incoming Telegram text is emitted as `extension.prompt_submit_request`. The
-harness validates the target loaded agent and owns the resulting durable
-`agent.prompt_submitted` fact. This extension must not publish transcript prompt
-facts directly.
+After local allowlist, chat, command, and target selection, incoming Telegram
+text is emitted directly as `message.delivered`. Numeric user/chat IDs map to
+stable sender/conversation IDs, the native update identity becomes the
+publisher-scoped message ID, and the original body is published without a
+transport prefix. The harness stamps publisher provenance and performs ordinary
+durable fact projection.
+
+Successful `telegram_send` calls emit `message.sent` before returning their
+ordinary terminal tool result. The sent fact uses the original body and a
+bounded ID derived from the unique tool call and extension-owned destination;
+remote routing remains local.
 
 ## Routing
 
@@ -91,7 +99,7 @@ unregister pruning, gateway restart reannouncement hints, command routing,
 chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
 socket delivery response shape, and CLI/env parsing. Gateway-client sidecar
 tests use fake Unix sockets and in-memory harness channels to cover no-poll
-registration, inbound prompt submission, gateway-client outbound send forwarding,
+registration, inbound fact publication, gateway-client outbound send forwarding,
 and stale-delivery filtering. Outbound-send tests use fake gateway clients rather
 than live Telegram.
 

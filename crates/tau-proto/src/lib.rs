@@ -81,7 +81,10 @@ pub use tool_name_prefix::{
 /// Version 11 replaces harness-managed transport messages with six immutable
 /// extension-published message fact events and requires a stable configured
 /// extension instance name.
-pub const PROTOCOL_VERSION: u32 = 11;
+///
+/// Version 12 removes the extension user-message prompt request and replaces
+/// its remaining control use with a narrow internal-prompt request.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

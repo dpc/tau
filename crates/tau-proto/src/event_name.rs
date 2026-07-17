@@ -273,8 +273,8 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agent_context_publish");
     pub const EXTENSION_PROMPT_FRAGMENT_PUBLISH: Self =
         Self::from_static(EventCategory::Extension, "prompt_fragment_publish");
-    pub const EXTENSION_PROMPT_SUBMIT_REQUEST: Self =
-        Self::from_static(EventCategory::Extension, "prompt_submit_request");
+    pub const EXTENSION_INTERNAL_PROMPT_SUBMIT_REQUEST: Self =
+        Self::from_static(EventCategory::Extension, "internal_prompt_submit_request");
     pub const AGENT_START_REQUEST: Self = Self::from_static(EventCategory::Agent, "start_request");
     pub const AGENT_START_ACCEPTED: Self =
         Self::from_static(EventCategory::Agent, "start_accepted");

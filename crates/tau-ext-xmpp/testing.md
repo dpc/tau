@@ -5,7 +5,8 @@ unit tests cover configuration validation, tool schemas, registration/send
 gating, bounded readiness waits, default and custom room-template derivation,
 strict helper/runtime validation, replayed role metadata, MUC join
 confirmation, history suppression, real-JID allowlist enforcement, model-visible
-prompt-prefix privacy, direct-resource routing, and shutdown handling.
+fact metadata privacy, direct-resource routing, sent-fact ordering, and shutdown
+handling.
 
 For a live Prosody smoke test, use a private test account and MUC component:
 
@@ -18,11 +19,12 @@ For a live Prosody smoke test, use a private test account and MUC component:
    returns a room JID.
 4. Confirm the human client receives the mediated invite or the direct fallback
    notice, joins the room, and replies in the room.
-5. Confirm Tau receives the reply as an external prompt annotated with XMPP
-   room message/source context, without exposing the generated room label.
+5. Confirm Tau receives the reply as an external message fact whose sender and
+   conversation metadata identify the accepted source without exposing
+   actionable routes or the generated Tau occupant label.
 6. Call `xmpp_send` and confirm the response appears in the same room.
 7. Restart the XMPP connection and confirm registered MUC rooms rejoin, while
-   delayed room history is not converted into fresh prompts.
+   delayed room history is not published as fresh message facts.
 8. Unregister the agent or shut down the session and confirm Tau sends
    unavailable presence / leaves the room on the server.
 9. Configure a role/group-based `muc.room_template`, resume Tau, and confirm the

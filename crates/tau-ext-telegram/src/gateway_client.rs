@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// Version of the private gateway socket protocol used by sidecars.
-const SOCKET_PROTOCOL_VERSION: u32 = 2;
+const SOCKET_PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum bytes accepted from one gateway response line.
 const MAX_GATEWAY_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -275,26 +275,30 @@ pub(crate) struct GatewaySocketResponse {
     /// Whether the gateway asks clients to reannounce registrations.
     #[serde(default)]
     pub(crate) reannounce_required: bool,
-    /// Queued inbound prompt deliveries for this sidecar.
+    /// Queued inbound message-fact deliveries for this sidecar.
     #[serde(default)]
-    pub(crate) deliveries: Vec<GatewayPromptDelivery>,
+    pub(crate) deliveries: Vec<GatewayMessageDelivery>,
 }
 
-/// Queued inbound prompt delivery received from the gateway.
+/// Queued inbound message-fact delivery received from the gateway.
 #[derive(serde::Deserialize)]
-pub(crate) struct GatewayPromptDelivery {
+pub(crate) struct GatewayMessageDelivery {
     /// Gateway request correlation id.
     pub(crate) request_id: String,
     /// Target Tau session id.
     pub(crate) session_id: String,
     /// Target Tau agent id.
     pub(crate) agent_id: String,
+    /// Publisher-scoped Telegram message identity.
+    pub(crate) message_id: String,
+    /// Stable numeric Telegram sender id.
+    pub(crate) sender_id: String,
     /// Sanitized Telegram source label.
     pub(crate) source: String,
-    /// Prompt text already prefixed by the gateway.
+    /// Stable numeric Telegram conversation id.
+    pub(crate) conversation_id: String,
+    /// Original Telegram message body without a transport prefix.
     pub(crate) text: String,
-    /// Context/correlation id assigned by the gateway.
-    pub(crate) ctx_id: String,
 }
 
 #[cfg(test)]

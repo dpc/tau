@@ -5,9 +5,9 @@
 Message bridges publish six immutable `message.*` facts through ordinary event
 emission: delivered, edited, deleted, reaction added, reaction removed, and sent.
 The harness stamps the authenticated configured publisher, commits each fact
-before any consumer acts, and then broadcasts the same record. Slack uses this
-interface. Telegram and XMPP retain their legacy prompt paths until their
-separate adapter migrations land.
+before any consumer acts, and then broadcasts the same record. Slack, Telegram,
+and XMPP all use this interface; bundled IM bridges have no legacy user-message
+prompt path.
 
 Valid committed facts project to compact `<tau_message event="…">` provider
 context. External content and publisher-provided metadata remain untrusted data;

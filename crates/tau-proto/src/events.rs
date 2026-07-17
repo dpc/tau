@@ -1917,22 +1917,18 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// Request from an extension to submit a user or internal prompt to a loaded
+/// Request from an extension to submit a hidden internal prompt to a loaded
 /// agent.
 ///
 /// The harness owns validation and transcript publication for this request;
-/// extensions must not publish `agent.prompt_submitted` directly. Internal
-/// prompts are hidden from ordinary user-facing UI and latest-user-prompt
-/// metadata.
+/// extensions must not publish `agent.prompt_submitted` directly. These prompts
+/// are hidden from ordinary user-facing UI and latest-user-prompt metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtPromptSubmitRequest {
+pub struct ExtInternalPromptSubmitRequest {
     /// Loaded agent that should receive the prompt.
     pub agent_id: AgentId,
     /// Prompt text to submit.
     pub text: String,
-    /// Whether this prompt is user-authored or hidden internal control text.
-    #[serde(default)]
-    pub message_class: PromptMessageClass,
     /// Optional submitter correlation id copied to the created prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
@@ -4469,8 +4465,8 @@ pub enum Event {
     ExtAgentContextPublish(ExtAgentContextPublish),
     #[serde(rename = "extension.prompt_fragment_publish")]
     ExtPromptFragmentPublish(ExtPromptFragmentPublish),
-    #[serde(rename = "extension.prompt_submit_request")]
-    ExtPromptSubmitRequest(ExtPromptSubmitRequest),
+    #[serde(rename = "extension.internal_prompt_submit_request")]
+    ExtInternalPromptSubmitRequest(ExtInternalPromptSubmitRequest),
     #[serde(rename = "agent.start_request")]
     StartAgentRequest(StartAgentRequest),
     #[serde(rename = "agent.start_accepted")]
@@ -4788,7 +4784,9 @@ impl Event {
             Self::ExtensionSessionContextReady(_) => EventName::EXTENSION_SESSION_CONTEXT_READY,
             Self::ExtAgentContextPublish(_) => EventName::EXTENSION_AGENT_CONTEXT_PUBLISH,
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
-            Self::ExtPromptSubmitRequest(_) => EventName::EXTENSION_PROMPT_SUBMIT_REQUEST,
+            Self::ExtInternalPromptSubmitRequest(_) => {
+                EventName::EXTENSION_INTERNAL_PROMPT_SUBMIT_REQUEST
+            }
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
             Self::StartAgentAccepted(_) => EventName::AGENT_START_ACCEPTED,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,

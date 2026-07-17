@@ -58,14 +58,14 @@ Tool examples are registration metadata, not prompt-surface definitions: rendere
 tool definitions omit them, and the harness surfaces at most one bounded relevant
 example after a failed call in an agent branch.
 
-Extensions that need to turn external input or internal wakeups into an agent
-prompt use `extension.prompt_submit_request`. The harness accepts this request
-only on the extension path, validates the target loaded agent, and then submits
-a user-style or hidden internal prompt through the same machinery as UI prompt
-intake. Internal extension prompts do not update user-interaction metadata, but
-still wake queued agents. The durable transcript fact remains the harness-owned
-`agent.prompt_submitted`; extensions may not forge prompt or message transcript
-facts directly.
+Extensions that need to turn an internal wakeup into an agent prompt use
+`extension.internal_prompt_submit_request`. The harness accepts this narrow
+request only on the extension path, validates the target loaded agent, and
+submits hidden internal text through the ordinary prompt queue. It has no
+user-message class and does not update user-interaction metadata, but still
+wakes queued agents. The durable transcript fact remains the harness-owned
+internal `agent.prompt_submitted`. External user messages use immutable
+`message.delivered` facts; extensions may not forge prompt transcript facts.
 
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses

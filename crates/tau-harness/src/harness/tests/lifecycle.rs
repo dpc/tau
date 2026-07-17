@@ -1859,9 +1859,10 @@ fn empty_extension_set_completes_initial_activation_barrier() {
     h.shutdown().expect("shutdown");
 }
 
-/// Protocol-v10 handshake failures obey required/optional availability policy.
+/// Protocol-v11 peers are strictly rejected after the atomic v12 cutover while
+/// preserving required/optional extension availability policy.
 #[test]
-fn optional_old_protocol_is_disabled_but_required_old_protocol_is_fatal() {
+fn optional_v11_protocol_is_disabled_but_required_v11_protocol_is_fatal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.initial_extension_tool_preflight_complete = false;
@@ -1877,7 +1878,7 @@ fn optional_old_protocol_is_disabled_but_required_old_protocol_is_fatal() {
     }
     let old_hello = |name: &str| {
         TestMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::PROTOCOL_VERSION - 1,
+            protocol_version: 11,
             client_name: name.to_owned().into(),
             client_kind: tau_proto::ClientKind::Tool,
         })
