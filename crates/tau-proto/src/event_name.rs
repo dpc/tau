@@ -20,6 +20,8 @@ pub enum EventCategory {
     Action,
     /// Global agent transcript and command events.
     Agent,
+    /// Immutable extension-published message facts.
+    Message,
     /// Extension lifecycle and publication events.
     Extension,
     /// Provider backend events.
@@ -49,6 +51,7 @@ impl EventCategory {
             Self::Tool => "tool",
             Self::Action => "action",
             Self::Agent => "agent",
+            Self::Message => "message",
             Self::Extension => "extension",
             Self::Provider => "provider",
             Self::Harness => "harness",
@@ -68,6 +71,7 @@ impl EventCategory {
             "tool" => Self::Tool,
             "action" => Self::Action,
             "agent" => Self::Agent,
+            "message" => Self::Message,
             "extension" => Self::Extension,
             "provider" => Self::Provider,
             "harness" => Self::Harness,
@@ -230,6 +234,21 @@ impl EventName {
     pub const ACTION_INVOKE: Self = Self::from_static(EventCategory::Action, "invoke");
     pub const ACTION_RESULT: Self = Self::from_static(EventCategory::Action, "result");
     pub const ACTION_ERROR: Self = Self::from_static(EventCategory::Action, "error");
+
+    /// External message delivery reported by an extension publisher.
+    pub const MESSAGE_DELIVERED: Self = Self::from_static(EventCategory::Message, "delivered");
+    /// External message edit reported by an extension publisher.
+    pub const MESSAGE_EDITED: Self = Self::from_static(EventCategory::Message, "edited");
+    /// External message deletion reported by an extension publisher.
+    pub const MESSAGE_DELETED: Self = Self::from_static(EventCategory::Message, "deleted");
+    /// External reaction addition reported by an extension publisher.
+    pub const MESSAGE_REACTION_ADDED: Self =
+        Self::from_static(EventCategory::Message, "reaction_added");
+    /// External reaction removal reported by an extension publisher.
+    pub const MESSAGE_REACTION_REMOVED: Self =
+        Self::from_static(EventCategory::Message, "reaction_removed");
+    /// Remote send success reported by an extension publisher.
+    pub const MESSAGE_SENT: Self = Self::from_static(EventCategory::Message, "sent");
 
     pub const EXTENSION_STARTING: Self = Self::from_static(EventCategory::Extension, "starting");
     pub const EXTENSION_READY: Self = Self::from_static(EventCategory::Extension, "ready");

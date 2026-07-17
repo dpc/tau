@@ -57,7 +57,7 @@ fn test_message_envelope() -> MessageEnvelope {
             agent_id: AgentId::parse("agent-a").expect("agent"),
             display_name: None,
         },
-        conversation: Some(MessageConversation {
+        conversation: Some(LegacyMessageConversation {
             kind: ConversationKind::Channel,
             stable_id: Some("C123".to_owned()),
             display_name: Some("ops".to_owned()),
@@ -635,6 +635,78 @@ fn representative_events() -> Vec<Event> {
             action_id: "email.out.list".to_owned(),
             message: "approval queue unavailable".to_owned(),
             details: None,
+        }),
+        Event::MessageDelivered(MessageDelivered {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            message_id: MessageFactId::new("m1"),
+            sender: MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: Some("Alice".to_owned()),
+            },
+            conversation: Some(MessageConversation {
+                stable_id: "c1".to_owned(),
+                display_name: Some("General".to_owned()),
+            }),
+            text: "hello".to_owned(),
+            extension_data: MessageExtensionData::default(),
+        }),
+        Event::MessageEdited(MessageEdited {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            target: MessageFactRef {
+                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                message_id: MessageFactId::new("m1"),
+            },
+            actor: None,
+            conversation: None,
+            text: "edited".to_owned(),
+            extension_data: MessageExtensionData::default(),
+        }),
+        Event::MessageDeleted(MessageDeleted {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            target: MessageFactRef {
+                publisher_extension_id: MessagePublisherId::new("other-bridge"),
+                message_id: MessageFactId::new("future"),
+            },
+            actor: None,
+            conversation: None,
+            extension_data: MessageExtensionData::default(),
+        }),
+        Event::MessageReactionAdded(MessageReactionAdded {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            target: MessageFactRef {
+                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                message_id: MessageFactId::new("m1"),
+            },
+            actor: None,
+            conversation: None,
+            reaction: "👍".to_owned(),
+            extension_data: MessageExtensionData::default(),
+        }),
+        Event::MessageReactionRemoved(MessageReactionRemoved {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            target: MessageFactRef {
+                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                message_id: MessageFactId::new("m1"),
+            },
+            actor: None,
+            conversation: None,
+            reaction: "👍".to_owned(),
+            extension_data: MessageExtensionData::default(),
+        }),
+        Event::MessageSent(MessageSent {
+            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            agent_id: MessageAgentTarget::new("agent"),
+            message_id: MessageFactId::new("m2"),
+            recipient: None,
+            conversation: None,
+            text: "reply".to_owned(),
+            extension_data: MessageExtensionData::new(CborValue::Text("opaque".to_owned()))
+                .expect("bounded extension data"),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1347,7 +1419,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
 fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
-            instance_name: None,
+            instance_name: ExtensionName::new("test-extension"),
             tool_prefix: None,
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
@@ -1438,6 +1510,42 @@ fn event_name_round_trips_from_string() {
         let name = event.name();
         let serialized = name.to_string();
         assert_eq!(serialized.parse::<EventName>(), Ok(name));
+    }
+}
+
+/// All six message facts remain distinct durable events, preserve universal and
+/// opaque fields through both codecs, and require explicit opaque data on wire.
+#[test]
+fn message_fact_events_have_distinct_required_v11_wire_shapes() {
+    let facts = representative_events()
+        .into_iter()
+        .filter(|event| event.name().category() == &EventCategory::Message)
+        .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 6);
+    for fact in facts {
+        assert!(!fact.defaults_to_transient());
+        let json = serde_json::to_value(&fact).expect("serialize fact to JSON");
+        assert!(
+            json["payload"].get("extension_data").is_some(),
+            "opaque data is required for {}",
+            fact.name()
+        );
+        let decoded: Event = serde_json::from_value(json.clone()).expect("decode fact from JSON");
+        assert_eq!(decoded, fact);
+        let encoded = encode_message_to_vec(&HarnessInputMessage::emit(fact.clone()))
+            .expect("encode fact frame");
+        assert_eq!(
+            decode_harness_input_from_slice(&encoded).expect("decode fact frame"),
+            HarnessInputMessage::emit(fact)
+        );
+
+        let mut missing = json;
+        missing
+            .get_mut("payload")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("fact payload")
+            .remove("extension_data");
+        assert!(serde_json::from_value::<Event>(missing).is_err());
     }
 }
 
@@ -1572,6 +1680,12 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "harness.thinking_summaries_available",
         "harness.ui_dir",
         "harness.verbosities_available",
+        "message.deleted",
+        "message.delivered",
+        "message.edited",
+        "message.reaction_added",
+        "message.reaction_removed",
+        "message.sent",
         "provider.cache_miss_diagnostic",
         "provider.models_updated",
         "provider.prompt_submitted",
@@ -2522,24 +2636,29 @@ fn bare_event_is_not_a_protocol_item_in_either_direction() {
     assert!(decode_harness_output_from_slice(&bytes).is_err());
 }
 
-/// Ensures older configure payloads without state_dir still deserialize
-/// successfully.
+/// Ensures v11 requires stable publisher provenance while retaining the
+/// independently optional extension state directory.
 #[test]
-fn configure_state_dir_is_optional_for_older_payloads() {
-    // Older harnesses sent only `config`. New extensions must still accept that
-    // payload and treat the state directory as unavailable rather than failing
-    // deserialization during the lifecycle handshake.
+fn configure_requires_instance_name_and_keeps_state_dir_optional() {
+    assert!(
+        serde_json::from_value::<Configure>(serde_json::json!({
+            "config": null
+        }))
+        .is_err()
+    );
     let parsed: Configure = serde_json::from_value(serde_json::json!({
-        "config": null
+        "config": null,
+        "instance_name": "demo"
     }))
-    .expect("legacy configure decodes");
+    .expect("v11 configure decodes");
 
     assert_eq!(parsed.config, CborValue::Null);
+    assert_eq!(parsed.instance_name.as_str(), "demo");
     assert_eq!(parsed.state_dir, None);
     assert!(parsed.secrets.is_empty());
 
     let with_state = Configure {
-        instance_name: None,
+        instance_name: ExtensionName::new("test-extension"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
@@ -2554,7 +2673,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
-        instance_name: None,
+        instance_name: ExtensionName::new("test-extension"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
@@ -2573,7 +2692,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     let mut secrets = std::collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
-        instance_name: None,
+        instance_name: ExtensionName::new("test-extension"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,

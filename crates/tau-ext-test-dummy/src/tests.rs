@@ -47,7 +47,7 @@ fn replayed_restart() -> HarnessOutputMessage {
 fn restart_config(mode: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
             CborValue::Text(mode.to_owned()),
@@ -70,7 +70,7 @@ fn run_restart_frames(
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
-                instance_name: None,
+                instance_name: tau_proto::ExtensionName::new("test-extension"),
                 config: CborValue::Map(Vec::new()),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
@@ -347,7 +347,7 @@ fn run_intercept(prompt: AgentPromptSubmitted) -> (Vec<tau_proto::Emit>, Vec<Int
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),

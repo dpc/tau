@@ -173,7 +173,7 @@ fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Conf
     tau_proto::Configure {
         tool_prefix: None,
         config,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: Some(state_root.join("state")),
         secrets: BTreeMap::new(),
     }

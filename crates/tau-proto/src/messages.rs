@@ -93,9 +93,8 @@ pub struct Disconnect {
 pub struct Configure {
     /// Free-form extension configuration from harness settings.
     pub config: CborValue,
-    /// Configured extension instance name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instance_name: Option<ExtensionName>,
+    /// Stable configured extension instance name.
+    pub instance_name: ExtensionName,
     /// Optional immutable prefix assigned to structural tool identifiers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prefix: Option<ToolNamePrefix>,

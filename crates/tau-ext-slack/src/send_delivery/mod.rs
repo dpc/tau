@@ -72,7 +72,7 @@ pub(super) struct PreparedSend {
     /// Canonical outgoing endpoint.
     pub(super) endpoint: MessageEndpoint,
     /// Canonical outgoing conversation.
-    pub(super) conversation: MessageConversation,
+    pub(super) conversation: LegacyMessageConversation,
     /// Policy status committed with the outgoing fact.
     pub(super) policy_status: SenderPolicyStatus,
     /// Private reaction authority installed only after completion.

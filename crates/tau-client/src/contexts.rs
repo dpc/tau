@@ -126,10 +126,10 @@ impl<'a, State> RawConfigureContext<'a, State> {
         crate::config::parse_config(&self.configure.config).map_err(ClientError::handler)
     }
 
-    /// Returns the configured extension instance name, if any.
+    /// Returns the configured extension instance name.
     #[must_use]
-    pub fn instance_name(&self) -> Option<&tau_proto::ExtensionName> {
-        self.configure.instance_name.as_ref()
+    pub fn instance_name(&self) -> &tau_proto::ExtensionName {
+        &self.configure.instance_name
     }
 
     /// Returns the harness-assigned extension state directory, if any.
@@ -152,10 +152,10 @@ impl<'a, State> RawConfigureContext<'a, State> {
 }
 
 impl<'a, State> ConfigureErrorContext<'a, State> {
-    /// Returns the configured extension instance name, if any.
+    /// Returns the configured extension instance name.
     #[must_use]
-    pub fn instance_name(&self) -> Option<&tau_proto::ExtensionName> {
-        self.configure.instance_name.as_ref()
+    pub fn instance_name(&self) -> &tau_proto::ExtensionName {
+        &self.configure.instance_name
     }
 
     /// Returns the harness-assigned extension state directory, if any.
@@ -184,10 +184,10 @@ impl<'a, State, Config> ConfigureContext<'a, State, Config> {
         &self.config
     }
 
-    /// Returns the configured extension instance name, if any.
+    /// Returns the configured extension instance name.
     #[must_use]
-    pub fn instance_name(&self) -> Option<&tau_proto::ExtensionName> {
-        self.configure.instance_name.as_ref()
+    pub fn instance_name(&self) -> &tau_proto::ExtensionName {
+        &self.configure.instance_name
     }
 
     /// Returns the harness-assigned extension state directory, if any.

@@ -415,7 +415,7 @@ fn spawn_extension_with_exit_and_prefix(
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
@@ -438,7 +438,7 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: Some(prefix),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(true))]),
@@ -569,7 +569,7 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(enable))]),
@@ -1350,7 +1350,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
     input_writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(true))]),
@@ -5618,7 +5618,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![
@@ -5744,7 +5744,7 @@ fn shell_extension_rejects_invalid_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![(
@@ -5786,7 +5786,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(vec![(
                 CborValue::Text("dir_lock".to_owned()),
                 CborValue::Map(vec![
@@ -5885,7 +5885,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: cbor_text_map(vec![(
                 "working_directory",
                 missing_dir.to_str().expect("utf8 temp path"),

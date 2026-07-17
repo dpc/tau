@@ -703,7 +703,7 @@ struct TransportReplyRoute {
     send_tool: Option<ToolName>,
     transport_name: String,
     external_endpoint: tau_proto::MessageEndpoint,
-    conversation: Option<tau_proto::MessageConversation>,
+    conversation: Option<tau_proto::LegacyMessageConversation>,
 }
 
 fn live_send_tools_for_prompt(
@@ -7804,6 +7804,14 @@ impl Harness {
         transient_override: Option<bool>,
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
+        if event_name.category() == &tau_proto::EventCategory::Message {
+            let Some((event, transient)) = self.prepare_extension_message_fact(source_id, event)
+            else {
+                return Ok(());
+            };
+            self.handle_extension_fallback_event(source_id, event, Some(transient));
+            return Ok(());
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
@@ -7833,6 +7841,25 @@ impl Harness {
         };
         self.handle_extension_fallback_event(source_id, event, transient_override);
         Ok(())
+    }
+
+    /// Stamp authenticated message-fact provenance and force durable intake.
+    ///
+    /// The returned boolean is the transient classification consumed by the
+    /// generic phase-1 publication path. Phase 2 replaces that path with direct
+    /// append-before-delivery persistence.
+    fn prepare_extension_message_fact(
+        &self,
+        source_id: &str,
+        mut event: Event,
+    ) -> Option<(Event, bool)> {
+        let publisher = self
+            .extensions
+            .entries
+            .get(source_id)
+            .map(|entry| tau_proto::MessagePublisherId::new(entry.name.clone()))?;
+        event.stamp_message_publisher(publisher);
+        Some((event, false))
     }
 
     fn handle_extension_action_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
@@ -8732,6 +8759,9 @@ impl Harness {
         transient_override: Option<bool>,
     ) -> Result<bool, HarnessError> {
         let event_name = event.name();
+        if event_name.category() == &tau_proto::EventCategory::Message {
+            return Ok(true);
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider {
             self.handle_extension_event_inner_with_transient(client_id, event, transient_override)?;
             return Ok(true);
@@ -11130,6 +11160,12 @@ impl Harness {
                 | Event::HarnessNotice(_)
                 | Event::Osc1337SetUserVar(_)
                 | Event::TermBell(_)
+                | Event::MessageDelivered(_)
+                | Event::MessageEdited(_)
+                | Event::MessageDeleted(_)
+                | Event::MessageReactionAdded(_)
+                | Event::MessageReactionRemoved(_)
+                | Event::MessageSent(_)
         )
     }
 
@@ -11353,7 +11389,8 @@ impl Harness {
                     .extensions
                     .entries
                     .get(source_id)
-                    .map(|entry| entry.name.clone().into()),
+                    .map(|entry| entry.name.clone().into())
+                    .expect("configured extension has a stable instance name"),
                 tool_prefix,
                 state_dir: Some(state_dir),
                 secrets,

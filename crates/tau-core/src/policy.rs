@@ -194,6 +194,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                     C::Tool
                     | C::Action
                     | C::Agent
+                    | C::Message
                     | C::Extension
                     | C::Provider
                     | C::Session

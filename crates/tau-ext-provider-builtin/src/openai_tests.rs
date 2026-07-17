@@ -241,7 +241,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
                 .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
-                    instance_name: None,
+                    instance_name: tau_proto::ExtensionName::new("test-extension"),
                     state_dir: None,
                     secrets: std::collections::BTreeMap::new(),
                 }))

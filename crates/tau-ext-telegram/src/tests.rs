@@ -341,7 +341,7 @@ fn telegram_uses_generic_tool_prefix() {
     let scope = tau_client::ToolNameScope::from_configure(&tau_proto::Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Null,
-        instance_name: Some("arbitrary-instance".into()),
+        instance_name: tau_proto::ExtensionName::new("arbitrary-instance"),
         state_dir: None,
         secrets: BTreeMap::new(),
     });
@@ -1930,7 +1930,7 @@ fn run_exits_after_register_then_disconnect() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -1969,7 +1969,7 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2015,7 +2015,7 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2074,7 +2074,7 @@ fn run_initial_malformed_config_emits_config_error_without_ready() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
             })),
@@ -2115,7 +2115,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
-            instance_name: Some("telegram-work".into()),
+            instance_name: tau_proto::ExtensionName::new("telegram-work"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2193,7 +2193,7 @@ fn run_ignores_unrelated_tool_started_events() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2247,7 +2247,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2268,7 +2268,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
             })),
@@ -2328,7 +2328,7 @@ fn run_legacy_tool_namespace_is_rejected() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2348,7 +2348,7 @@ fn run_legacy_tool_namespace_is_rejected() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "tool_namespace": "tg_ops",
                 "bot_token_secret": "bot",

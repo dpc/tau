@@ -2398,7 +2398,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, XmppRuntime>) -> Cli
             return Err(error);
         }
     };
-    let instance_name = cx.instance_name().map(ToString::to_string);
+    let instance_name = Some(cx.instance_name().to_string());
     let cfg = match cfg.validate(cx.secrets(), instance_name) {
         Ok(cfg) => cfg,
         Err(message) => {

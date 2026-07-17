@@ -358,7 +358,7 @@ fn spawn_extension_with_prefix(tool_prefix: Option<&str>) -> FramePair {
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: tool_prefix
                 .map(|prefix| tau_proto::ToolNamePrefix::parse(prefix).expect("tool prefix")),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(Vec::new()),
             state_dir: Some(state_dir),
             secrets: configure_secrets(),
@@ -730,7 +730,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(Vec::new()),
             state_dir: Some(temp.path().join("state")),
             secrets: BTreeMap::new(),
@@ -862,7 +862,7 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(vec![(
                 CborValue::Text("unknown".to_owned()),
                 CborValue::Bool(true),
@@ -4470,7 +4470,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: configure_secrets(),

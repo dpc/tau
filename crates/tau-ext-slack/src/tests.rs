@@ -745,7 +745,7 @@ fn valid_config_message() -> HarnessOutputMessage {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "app_token_secret": "app",
             "bot_token_secret": "bot",
@@ -790,7 +790,7 @@ fn proactive_config_message() -> HarnessOutputMessage {
 fn malformed_config_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "unknown_field": true,
         })),

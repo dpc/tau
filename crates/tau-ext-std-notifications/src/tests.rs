@@ -265,7 +265,7 @@ fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
 fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         config,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),

@@ -200,7 +200,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),
-            instance_name: Some("provider-builtin".into()),
+            instance_name: tau_proto::ExtensionName::new("provider-builtin"),
             state_dir: None,
             secrets: Default::default(),
         }),
@@ -238,7 +238,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),
-            instance_name: Some("tool".into()),
+            instance_name: tau_proto::ExtensionName::new("tool"),
             state_dir: Some(tool_state_dir),
             secrets: Default::default(),
         }),

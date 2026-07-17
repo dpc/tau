@@ -740,6 +740,87 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     )));
 }
 
+/// Message fact intake overwrites claimed provenance with a configured name
+/// distinct from the connection identity and classifies the publish as durable.
+#[test]
+fn extension_message_fact_provenance_is_stamped_and_requests_durable_intake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let conn_id = "bridge-main";
+    let configured_name = "configured-bridge";
+    connect_handshaking_tool(&mut h, conn_id);
+    let entry = h.extensions.entries.get_mut(conn_id).expect("extension");
+    entry.state = ExtensionState::Ready;
+    entry.name = configured_name.to_owned();
+    let fact = tau_proto::MessageDelivered {
+        publisher_extension_id: tau_proto::MessagePublisherId::new("forged"),
+        agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
+        message_id: tau_proto::MessageFactId::new("m1"),
+        sender: tau_proto::MessageParty {
+            stable_id: "u1".to_owned(),
+            display_name: None,
+        },
+        conversation: None,
+        text: "hello".to_owned(),
+        extension_data: tau_proto::MessageExtensionData::default(),
+    };
+
+    let (prepared, transient) = h
+        .prepare_extension_message_fact(conn_id, Event::MessageDelivered(fact.clone()))
+        .expect("authenticated message fact");
+    assert!(!transient, "message facts must request durable intake");
+    assert!(matches!(
+        prepared,
+        Event::MessageDelivered(prepared)
+            if prepared.publisher_extension_id.as_str() == configured_name
+    ));
+
+    h.handle_extension_event_inner_with_transient(
+        conn_id,
+        Event::MessageDelivered(fact),
+        Some(true),
+    )
+    .expect("fact intake");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        conn_id,
+        |event| matches!(
+            event,
+            Event::MessageDelivered(fact)
+                if fact.publisher_extension_id.as_str() == configured_name
+        )
+    ));
+}
+
+/// A socket client cannot claim extension message-fact publication authority.
+#[test]
+fn socket_client_cannot_emit_message_fact() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let client_id = "ui";
+    connect_test_client(&mut h, client_id, tau_proto::ClientKind::Ui);
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered {
+        publisher_extension_id: tau_proto::MessagePublisherId::new("forged"),
+        agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
+        message_id: tau_proto::MessageFactId::new("m1"),
+        sender: tau_proto::MessageParty {
+            stable_id: "u1".to_owned(),
+            display_name: None,
+        },
+        conversation: None,
+        text: "hello".to_owned(),
+        extension_data: tau_proto::MessageExtensionData::default(),
+    });
+
+    h.handle_client_event_inner(client_id, fact)
+        .expect("client intake");
+
+    assert!(!event_log_contains_source_event(&h, client_id, |event| {
+        matches!(event, Event::MessageDelivered(_))
+    }));
+}
+
 /// Extensions cannot skip the Hello/Configure gate by declaring capabilities
 /// or announcing readiness while their lifecycle state is still Spawning.
 #[test]
@@ -926,7 +1007,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
-    let extension_name = format!("optional-{}-trailing-secret", "x".repeat(300));
+    let extension_name = "optional-spawn-failure".to_owned();
     let command = format!("/definitely/not/a/{}-trailing-secret", "y".repeat(300));
     let config = crate::settings::Config {
         core: crate::settings::CoreConfig {

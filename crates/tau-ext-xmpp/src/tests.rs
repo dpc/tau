@@ -260,7 +260,7 @@ fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
     tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
-        instance_name: Some(tau_proto::ExtensionName::new("std-xmpp")),
+        instance_name: tau_proto::ExtensionName::new("std-xmpp"),
         state_dir: None,
         secrets: secrets(),
     }

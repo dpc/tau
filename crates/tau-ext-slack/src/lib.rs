@@ -25,7 +25,7 @@ use rand::RngCore as _;
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     AgentId, CborValue, CompleteTransportSendRequest, ConversationKind, Event, ExternalActorKind,
-    ExternalMessageIdentity, HarnessInputMessage, HarnessNotice, MessageConversation,
+    ExternalMessageIdentity, HarnessInputMessage, HarnessNotice, LegacyMessageConversation,
     MessageEndpoint, MessageId, MessageOperation, MessagePayload, MessageReaction, MessageRef,
     MessageThread, MessageTransportAcceptance, NoticeLevel, ReactionAction,
     RegisterTransportCapabilityRequest, SenderIdentityAssurance, SenderPolicyStatus, TextFormat,
@@ -4038,8 +4038,8 @@ fn is_route_authorized(
 
 /// Build the canonical conversation metadata used identically for ingress and
 /// successful-send completion.
-fn message_conversation(conversation: &SlackConversation) -> MessageConversation {
-    MessageConversation {
+fn message_conversation(conversation: &SlackConversation) -> LegacyMessageConversation {
+    LegacyMessageConversation {
         kind: match conversation.kind {
             ConversationPolicyKind::Channel => ConversationKind::Channel,
             ConversationPolicyKind::Mpim => ConversationKind::Group,
@@ -4061,8 +4061,8 @@ fn message_conversation(conversation: &SlackConversation) -> MessageConversation
     }
 }
 
-fn send_destination_conversation(destination: &ConversationPolicy) -> MessageConversation {
-    MessageConversation {
+fn send_destination_conversation(destination: &ConversationPolicy) -> LegacyMessageConversation {
+    LegacyMessageConversation {
         kind: match destination.kind {
             ConversationPolicyKind::Channel => ConversationKind::Channel,
             ConversationPolicyKind::Mpim => ConversationKind::Group,
@@ -5145,7 +5145,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
     if cx.state.ext.config_frozen() {
         return Err(ClientError::handler(immutable_config_error()));
     }
-    let instance_name = cx.instance_name().cloned();
+    let instance_name = Some(cx.instance_name().clone());
     let cfg = match cx.parse_config::<ExtConfig>() {
         Ok(cfg) => cfg,
         Err(error) => {

@@ -1,6 +1,7 @@
 //! Protocol event types and payloads.
 //!
-//! All event definitions live here so `grep events.rs` finds them.
+//! Every [`Event`] variant is declared here; cohesive payload DTOs may live in
+//! dedicated modules.
 //!
 //! Events are facts — each component broadcasts what happened.
 //! There are no requests or responses, only announcements.
@@ -17,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, HarnessProviderQuotaChanged, MessageEnvelope, MessageId, MessagePhase,
-    MessageTransportAcceptance, ModelId, ModelTag, PromptContext, PromptFragment,
+    ExtensionName, HarnessProviderQuotaChanged, MessageDeleted, MessageDelivered, MessageEdited,
+    MessageEnvelope, MessageId, MessagePhase, MessageReactionAdded, MessageReactionRemoved,
+    MessageSent, MessageTransportAcceptance, ModelId, ModelTag, PromptContext, PromptFragment,
     PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace,
     ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
     ToolGroupName, ToolName, ToolTag,
@@ -4458,6 +4460,20 @@ pub enum Event {
     #[serde(rename = "action.error")]
     ActionError(ActionError),
 
+    // Extension-published message facts
+    #[serde(rename = "message.delivered")]
+    MessageDelivered(MessageDelivered),
+    #[serde(rename = "message.edited")]
+    MessageEdited(MessageEdited),
+    #[serde(rename = "message.deleted")]
+    MessageDeleted(MessageDeleted),
+    #[serde(rename = "message.reaction_added")]
+    MessageReactionAdded(MessageReactionAdded),
+    #[serde(rename = "message.reaction_removed")]
+    MessageReactionRemoved(MessageReactionRemoved),
+    #[serde(rename = "message.sent")]
+    MessageSent(MessageSent),
+
     // Extension supervision
     #[serde(rename = "extension.starting")]
     ExtensionStarting(ExtensionStarting),
@@ -4670,6 +4686,38 @@ pub enum Event {
 }
 
 impl Event {
+    /// Return the raw claimed transcript target for a message fact.
+    #[must_use]
+    pub fn message_agent_target(&self) -> Option<&crate::MessageAgentTarget> {
+        match self {
+            Self::MessageDelivered(fact) => Some(&fact.agent_id),
+            Self::MessageEdited(fact) => Some(&fact.agent_id),
+            Self::MessageDeleted(fact) => Some(&fact.agent_id),
+            Self::MessageReactionAdded(fact) => Some(&fact.agent_id),
+            Self::MessageReactionRemoved(fact) => Some(&fact.agent_id),
+            Self::MessageSent(fact) => Some(&fact.agent_id),
+            _ => None,
+        }
+    }
+
+    /// Replace a message fact's claimed publisher with authenticated
+    /// provenance.
+    ///
+    /// Returns false when this event is not a message fact.
+    pub fn stamp_message_publisher(&mut self, publisher: crate::MessagePublisherId) -> bool {
+        let target = match self {
+            Self::MessageDelivered(fact) => &mut fact.publisher_extension_id,
+            Self::MessageEdited(fact) => &mut fact.publisher_extension_id,
+            Self::MessageDeleted(fact) => &mut fact.publisher_extension_id,
+            Self::MessageReactionAdded(fact) => &mut fact.publisher_extension_id,
+            Self::MessageReactionRemoved(fact) => &mut fact.publisher_extension_id,
+            Self::MessageSent(fact) => &mut fact.publisher_extension_id,
+            _ => return false,
+        };
+        *target = publisher;
+        true
+    }
+
     /// Returns the dotted event name carried by this envelope.
     #[must_use]
     pub fn name(&self) -> EventName {
@@ -4680,6 +4728,9 @@ impl Event {
             return name;
         }
         if let Some(name) = self.action_event_name() {
+            return name;
+        }
+        if let Some(name) = self.message_event_name() {
             return name;
         }
         if let Some(name) = self.extension_and_delegation_event_name() {
@@ -4735,6 +4786,19 @@ impl Event {
             Self::ActionInvoke(_) => EventName::ACTION_INVOKE,
             Self::ActionResult(_) => EventName::ACTION_RESULT,
             Self::ActionError(_) => EventName::ACTION_ERROR,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn message_event_name(&self) -> Option<EventName> {
+        match self {
+            Self::MessageDelivered(_) => EventName::MESSAGE_DELIVERED,
+            Self::MessageEdited(_) => EventName::MESSAGE_EDITED,
+            Self::MessageDeleted(_) => EventName::MESSAGE_DELETED,
+            Self::MessageReactionAdded(_) => EventName::MESSAGE_REACTION_ADDED,
+            Self::MessageReactionRemoved(_) => EventName::MESSAGE_REACTION_REMOVED,
+            Self::MessageSent(_) => EventName::MESSAGE_SENT,
             _ => return None,
         }
         .into()

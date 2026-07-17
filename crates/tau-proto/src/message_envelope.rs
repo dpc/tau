@@ -82,9 +82,11 @@ pub enum ExternalActorKind {
     Unknown,
 }
 
-/// Transport conversation metadata.
+/// Temporary legacy harness-managed transport conversation metadata.
+///
+/// New extension-published facts use [`crate::MessageConversation`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MessageConversation {
+pub struct LegacyMessageConversation {
     /// Conversation class.
     pub kind: ConversationKind,
     /// Transport-stable conversation id.
@@ -320,7 +322,7 @@ pub struct MessageEnvelope {
     pub destination: MessageEndpoint,
     /// Optional conversation relation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<MessageConversation>,
+    pub conversation: Option<LegacyMessageConversation>,
     /// Immutable operation.
     pub operation: MessageOperation,
     /// Informational, non-authoritative fact that normalized Create/Edit text
@@ -663,7 +665,7 @@ pub struct TransportMessageDraft {
     pub external_endpoint: MessageEndpoint,
     /// Optional conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<MessageConversation>,
+    pub conversation: Option<LegacyMessageConversation>,
     /// Immutable operation.
     pub operation: MessageOperation,
     /// Informational, non-authoritative fact that normalized Create/Edit text
@@ -726,7 +728,7 @@ pub struct TransportSendDestinationCapability {
     /// Exact external endpoint expected in a completion.
     pub external_endpoint: MessageEndpoint,
     /// Exact native conversation and optional fixed thread.
-    pub conversation: MessageConversation,
+    pub conversation: LegacyMessageConversation,
 }
 
 /// Authority used for one transport send completion.

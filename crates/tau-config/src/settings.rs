@@ -1821,25 +1821,16 @@ pub fn extension_state_dir_of(
 /// dotted harness config override paths. Valid names contain only ASCII
 /// letters, digits, `_`, and `-`.
 pub fn validate_extension_name(extension_name: &str) -> Result<(), InvalidExtensionName> {
-    if extension_name.is_empty() {
+    if extension_name.len() > tau_proto::EXTENSION_NAME_MAX_BYTES {
         return Err(InvalidExtensionName {
             name: extension_name.to_owned(),
-            reason: "extension name must not be empty",
+            reason: "extension name must be at most 128 ASCII bytes",
         });
     }
-    if extension_name == "." || extension_name == ".." {
+    if !tau_proto::valid_extension_name(extension_name) {
         return Err(InvalidExtensionName {
             name: extension_name.to_owned(),
-            reason: "extension name must be a normal path component",
-        });
-    }
-    if !extension_name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(InvalidExtensionName {
-            name: extension_name.to_owned(),
-            reason: "extension name may contain only ASCII letters, digits, '_' and '-'",
+            reason: "extension name must contain 1-128 ASCII letters, digits, '_' or '-'",
         });
     }
     Ok(())

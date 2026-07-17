@@ -295,7 +295,7 @@ fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: BTreeMap::new(),
     })

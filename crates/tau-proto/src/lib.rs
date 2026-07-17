@@ -20,6 +20,8 @@ mod event_name;
 mod events;
 mod interception;
 mod message_envelope;
+mod message_extension_data;
+mod message_fact;
 mod messages;
 pub mod notice_kind;
 mod prompt_fragment;
@@ -38,6 +40,8 @@ pub use event_name::*;
 pub use events::*;
 pub use interception::*;
 pub use message_envelope::*;
+pub use message_extension_data::*;
+pub use message_fact::*;
 pub use messages::*;
 pub use prompt_fragment::*;
 pub use provider_quota::*;
@@ -73,7 +77,11 @@ pub use tool_name_prefix::{
 /// Version 10 requires the harness to answer extension `Hello` with `Configure`
 /// before accepting declarations or `Ready`, and adds the optional immutable
 /// per-instance tool-name prefix carried by that configuration.
-pub const PROTOCOL_VERSION: u32 = 10;
+///
+/// Version 11 replaces harness-managed transport messages with six immutable
+/// extension-published message fact events and requires a stable configured
+/// extension instance name.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
@@ -274,6 +282,22 @@ string_newtype!(/// Connection identifier.
 
 string_newtype!(/// Extension name.
     ExtensionName);
+
+/// Maximum encoded bytes in a configured extension name.
+pub const EXTENSION_NAME_MAX_BYTES: usize = 128;
+
+/// Return whether a name follows the shared configured-extension grammar.
+///
+/// Valid names contain 1–128 ASCII letters, digits, `_`, or `-`.
+#[must_use]
+pub fn valid_extension_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= EXTENSION_NAME_MAX_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 string_newtype!(/// Agent-scoped context key published by an extension.
     AgentContextKey);
 string_newtype!(/// Durable agent metadata key visible to extensions.

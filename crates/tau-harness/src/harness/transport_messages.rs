@@ -1088,7 +1088,7 @@ mod tests {
             identity_alias: None,
             actor_kind: ExternalActorKind::Unknown,
         };
-        let conversation = tau_proto::MessageConversation {
+        let conversation = tau_proto::LegacyMessageConversation {
             kind: tau_proto::ConversationKind::Channel,
             stable_id: Some("C1".to_owned()),
             display_name: Some("team-ops".to_owned()),
@@ -1522,7 +1522,7 @@ mod tests {
                     identity_alias: None,
                     actor_kind: ExternalActorKind::Unknown,
                 },
-                conversation: tau_proto::MessageConversation {
+                conversation: tau_proto::LegacyMessageConversation {
                     kind: tau_proto::ConversationKind::Channel,
                     stable_id: Some(conversation_id),
                     display_name: Some(display),

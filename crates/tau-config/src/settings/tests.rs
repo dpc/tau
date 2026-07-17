@@ -3113,6 +3113,8 @@ fn extension_state_dir_rejects_unsafe_extension_names() {
             state_dir.join("ext").join(name)
         );
     }
+    let longest = "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES);
+    assert!(extension_state_dir_of(state_dir, &longest).is_ok());
 
     for name in ["", "../x", "a/b", "/tmp/x", ".", "..", "foo.bar"] {
         assert!(
@@ -3120,6 +3122,35 @@ fn extension_state_dir_rejects_unsafe_extension_names() {
             "{name:?} must be rejected"
         );
     }
+    let oversized = "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES + 1);
+    assert!(extension_state_dir_of(state_dir, &oversized).is_err());
+}
+
+/// Harness config loading accepts the exact extension-name byte limit and
+/// rejects the next byte before the name can reach path construction.
+#[test]
+fn harness_settings_enforce_extension_name_length_boundary() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    let accepted = "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES);
+    std::fs::write(
+        dir.join("harness.yaml"),
+        format!("extensions:\n  {accepted}:\n    command: [/bin/true]\n"),
+    )
+    .expect("write accepted config");
+    let loaded =
+        load_harness_settings_in(&dirs_with_config(dir)).expect("128-byte name should load");
+    assert!(loaded.extensions.contains_key(&accepted));
+
+    let rejected = "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES + 1);
+    std::fs::write(
+        dir.join("harness.yaml"),
+        format!("extensions:\n  {rejected}:\n    command: [/bin/true]\n"),
+    )
+    .expect("write rejected config");
+    let error =
+        load_harness_settings_in(&dirs_with_config(dir)).expect_err("129-byte name must fail");
+    assert!(error.to_string().contains("at most 128 ASCII bytes"));
 }
 
 /// Regression guard: invalid extension keys in harness.yaml fail at load time.

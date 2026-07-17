@@ -879,7 +879,7 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "unknown": 4 })),
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
@@ -920,7 +920,7 @@ fn configure_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 3 })),
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
@@ -1148,7 +1148,7 @@ fn configure_application_failure_sends_config_error() {
             HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-                instance_name: None,
+                instance_name: tau_proto::ExtensionName::new("test-extension"),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
             }),
@@ -1192,7 +1192,7 @@ fn configure_application_failure_runs_error_hook() {
         &[HarnessOutputMessage::Configure(Configure {
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })],
@@ -1222,7 +1222,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
             HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-                instance_name: None,
+                instance_name: tau_proto::ExtensionName::new("test-extension"),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
             }),
@@ -2682,7 +2682,7 @@ fn manual_loop_dispatch_config_error_continues() {
     let initial = HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3217,7 +3217,7 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
     let configure = HarnessOutputMessage::Configure(Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Null,
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3299,7 +3299,7 @@ fn manual_loop_uses_configured_tool_scope() {
     let configure = HarnessOutputMessage::Configure(Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Map(Vec::new()),
-        instance_name: None,
+        instance_name: tau_proto::ExtensionName::new("test-extension"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3327,7 +3327,7 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3368,7 +3368,7 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3416,7 +3416,7 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": value })),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3441,7 +3441,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3478,7 +3478,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
         .install_tool_name_scope(ToolNameScope::from_configure(&Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: None,
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }))
