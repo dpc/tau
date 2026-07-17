@@ -81,26 +81,21 @@ drop the sidecar for non-Responses providers. The sidecar is replay-eligible
 only when it decodes as a Responses assistant `message`; otherwise providers
 must synthesize replay from the typed fields.
 
-## Provider-visible message envelopes
+## Provider-visible message facts
 
-All `MessageOperation` variants share one compact, valid `<tau_message>`
-provider projection. Harness-authored routing facts use canonically ordered XML
-attributes and text-bearing operations use the element's direct escaped text;
-delete and reaction occurrences are self-closing. `origin="external"` means
-all payload text is untrusted. `sender_allowlisted="true"` means the operator
-allowlisted the authenticated sender, while `"false"` means lax policy admitted
-an outsider; neither value grants instruction, tool, or control authority.
-The optional true-only `transport_identity_mentioned="true"` attribute is an
-informational, non-routing fact: normalized Create/Edit text addressed the
-authenticated receiving transport identity. It grants no routing, instruction,
-tool, control, or transport capability and is absent from textless operations.
+The six extension-published `message.*` event types share one compact, valid
+`<tau_message event="…">` provider projection. Canonically ordered attributes
+carry the harness-stamped publisher plus applicable message, target, party, and
+conversation identifiers. Text-bearing facts use direct escaped text; delete and
+reaction facts are self-closing. Publisher-provided text and metadata are
+untrusted data and grant no identity, routing, instruction, tool, or control
+authority. Opaque `extension_data` is never projected generically.
 
 Attribute and text escaping are deliberately separate. Attribute controls,
 line separators, bidi/format controls, and noncharacters become visible
 `\u{XXXX}` escapes; element text preserves ordinary LF/tab but visibly escapes
-unsafe controls and format characters. Reply attributes are transient: prompt
-assembly includes one only while the source-bound route is live and its named
-tool is present in that agent's effective tool policy.
+unsafe controls and format characters. Message-fact references are descriptive
+opaque identifiers, not generic reply routes or capabilities.
 
 ## Provider tool-type metadata
 

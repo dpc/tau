@@ -23,43 +23,24 @@ semantic session or agent history. See
 
 This component implements the harness-owned parts of [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md), and [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 
-## Transport message boundary
+## Extension-published message facts
 
-Extensions register a transport family, send tool, and zero or more exact
-proactive alias capabilities. Registration is bound to the authenticated
-connection and current session generation; refresh replaces the route set, while
-tool unregister, disconnect, and session rollover revoke it. Dedicated
-ingress/send-completion RPCs replace generic event emission; the harness stamps
-instance, agent endpoint, trust class, canonical id, and commit time, then owns
-the protected durable fact. Per-peer retention is capped at 16 distinct transport
-capabilities, in addition to the route-count and encoded-metadata bounds on each
-registration.
+Extensions publish the six immutable `message.*` fact types through ordinary
+`Emit`. Intake unconditionally stamps the authenticated extension's stable
+configured name, ignores the transient bit, persists the exact fact in the
+target agent journal (or the session fallback journal for unknown targets), and
+only then broadcasts it. Consumers cannot reject, replace, or mutate a committed
+fact. The harness owns no transport registration, admission, ordering,
+deduplication, native routing, reply state, or send-completion protocol.
 
-The harness performs no transport-ingress deduplication and never scans agent
-history for native retry ids. Every authorized request records a new incoming
-occurrence before delivery. Transport-specific adapters own any bounded
-best-effort retry suppression.
-
-Source sequence checks are scoped by extension,
-transport, conversation, and thread; durable append order remains authoritative.
-Only the post-commit hook acknowledges ingress. A correlated accepted result
-returns the new message id and installs a live source reply route from the pending
-request when the extension connection and session are still active.
-Disconnect and session rollover clear pending acknowledgements and runtime routes.
-It queues message identity, durable sequence, and an optional transcript node;
-tool-adjacent messages remain unresolved until tool closure. Replay
-reconstructs unacknowledged typed wakes from their durable identities and
-inference watermarks rather than replaying live acknowledgements.
-
-Remote transport acceptance cannot be transactional with Tau storage.
-Successful-send completion validates the live call and either opaque reply route
-or exact alias/endpoint/native conversation/fixed-thread capability, then queues
-the outgoing fact immediately before its terminal tool result and caches exact
-retry results. A crash can still leave remote and local state different; the
-recorded acceptance must not imply delivery or read receipt.
-The durable outgoing fact records authorization and tool-call audit before the
-terminal result. Capability input is bounded and duplicate native
-conversation/thread routes are rejected independently of presentation metadata.
+The post-commit prompt consumer validates universal fields, projects valid
+incoming facts as ordinary user context, and requests one live activation after
+transcript placement. `message.sent` becomes assistant context without activation.
+Open tool rounds defer transcript placement and wake until terminal tool results
+close, while the fact itself broadcasts immediately. Replay reconstructs context
+but never wakes the agent, resends transport traffic, or rebuilds
+extension-private authority. Invalid or unavailable targets remain committed and
+visible to subscribers even when no prompt projection is possible.
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

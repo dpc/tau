@@ -16,7 +16,7 @@ fn decode_counts_map_keys_and_values() {
             .collect(),
     );
     let rejected = CborValue::Map(
-        (0..(MESSAGE_EXTENSION_DATA_MAX_NODES + 1) / 2)
+        (0..MESSAGE_EXTENSION_DATA_MAX_NODES.div_ceil(2))
             .map(|index| (CborValue::Integer(index.into()), CborValue::Null))
             .collect(),
     );

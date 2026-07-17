@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use tau_proto::AgentId;
+use tau_proto::{AgentId, MessageFactId};
+
+use super::SlackConversation;
 
 /// Stable identity of one Slack message within a conversation.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -24,12 +26,16 @@ impl PostedMessageKey {
 }
 
 /// Agent ownership and thread context retained for one bridge-authored post.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct PostedMessageOwner {
     /// Registered agent that created the post through `slack_send`.
     pub(super) agent_id: AgentId,
+    /// Publisher-scoped identifier used by mutation facts.
+    pub(super) message_id: MessageFactId,
     /// Optional authenticated outbound-request thread root.
     pub(super) thread_ts: Option<String>,
+    /// Exact outbound conversation retained for deletion provenance.
+    pub(super) conversation: SlackConversation,
     /// Exact installation team that authored the post.
     pub(super) installation_team_id: String,
 }
@@ -69,6 +75,13 @@ impl PostedMessageCache {
     /// Return ownership for an exact Slack message identity.
     pub(super) fn get(&self, key: &PostedMessageKey) -> Option<&PostedMessageOwner> {
         self.owners.get(key)
+    }
+
+    /// Remove and return ownership for one exact Slack message identity.
+    pub(super) fn remove(&mut self, key: &PostedMessageKey) -> Option<PostedMessageOwner> {
+        let owner = self.owners.remove(key)?;
+        self.order.retain(|candidate| candidate != key);
+        Some(owner)
     }
 
     /// Forget every post owned by one agent while preserving synchronization.

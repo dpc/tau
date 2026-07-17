@@ -749,8 +749,6 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::AgentInferenceDispatchStarted(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
-            | Event::AgentMessageIncoming(_)
-            | Event::AgentMessageOutgoing(_)
             | Event::MessageDelivered(_)
             | Event::MessageEdited(_)
             | Event::MessageDeleted(_)

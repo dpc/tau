@@ -19,12 +19,12 @@ mod diff;
 mod event_name;
 mod events;
 mod interception;
-mod message_envelope;
 mod message_extension_data;
 mod message_fact;
 mod messages;
 pub mod notice_kind;
 mod prompt_fragment;
+mod prompt_submission;
 mod provider_quota;
 mod suggestion;
 mod token_usage;
@@ -39,11 +39,11 @@ pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
 pub use event_name::*;
 pub use events::*;
 pub use interception::*;
-pub use message_envelope::*;
 pub use message_extension_data::*;
 pub use message_fact::*;
 pub use messages::*;
 pub use prompt_fragment::*;
+pub use prompt_submission::*;
 pub use provider_quota::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -270,8 +270,6 @@ string_newtype!(/// Stable identifier for one agent transcript prompt.
     AgentPromptId);
 string_newtype!(/// Stable identifier for one global agent message.
     AgentMessageId);
-string_newtype!(/// Stable identifier for one canonical v2 message occurrence.
-    MessageId);
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);

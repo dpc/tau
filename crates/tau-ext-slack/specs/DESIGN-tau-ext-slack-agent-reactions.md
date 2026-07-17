@@ -2,13 +2,19 @@
 
 Status: confirmed, 2026-07-14, dpc
 
+The Slack-local reaction policy remains current. Its former harness transport
+registration/completion integration is superseded by
+[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md):
+targets are keyed to locally written message-fact IDs and successful sends publish
+`message.sent` before their ordinary tool result.
+
 ## Recommendation
 
 Add one fourth, separately authorized Slack tool:
 
 ```text
 slack_react({
-  "message_ref": "<opaque Tau/extension-issued reference>",
+  "message_ref": "<Tau/extension-issued message fact ID>",
   "emoji": "eyes",
   "action": "add" | "remove"
 })
@@ -20,14 +26,14 @@ Key defaults/decisions:
 
 - Logical name `slack_react`, tag `slack:react`, existing logical group `slack`, `enabled_by_default: false`.
 - A role may receive/register/send without react, or react without send. `slack_register` is not the authorization for this tool; current role/tool policy is. Whole-group grants intentionally gain this new surface and must be documented.
-- Incoming committed create/edit `message_id`s and opaque references returned by committed `slack_send` are eligible. Human-reaction occurrence IDs, bridge help/control posts, rejected ingress, and arbitrary Slack items are not.
-- The reference is an opaque selector, not a secret or bearer capability. Revalidate exact extension instance, live agent, active session/capability, current source/config authority, native target, and reaction ownership on every call.
+- Incoming locally written create/edit message-fact IDs and references returned by successful `slack_send` are eligible. Human-reaction occurrence IDs, bridge help/control posts, unpublished events, and arbitrary Slack items are not.
+- The reference is a Tau-issued fact selector in the documented `slack:<channel>:<message-ts>` format, not a secret or bearer capability. Although it contains native coordinates, callers cannot supply channel/timestamp fields separately and every use must resolve an exact retained local target. Revalidate exact extension instance, live agent, active session, current source/config authority, native target, and reaction ownership on every call.
 - Adding establishes runtime ownership only after an unambiguous Slack success. Removing is permitted only for a reaction that the same Tau agent owns in this runtime. Never adopt/remove a pre-existing bot reaction merely because Slack returns `already_reacted`.
 - No new config key. The extension, tool, and `reactions:write` installation are the operator opt-ins. No automatic retries, no local rate-limit queue, no persistence, and no crash-safe exactly-once claim.
 
-This fits the existing Slack architecture: source-bound opaque selectors, current
-routes, per-instance prefixing, commit-gated pending-route activation,
-runtime-only ownership, and native Slack identifiers kept out of model inputs.
+This fits the existing Slack architecture: source-bound Tau fact selectors,
+current routes, per-instance prefixing, fact-keyed local authority, runtime-only
+ownership, and no separately selectable native Slack route arguments.
 
 ## Exact model API
 
@@ -52,7 +58,7 @@ Recommended schema:
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "description": "Opaque message reference from a Tau Slack message envelope or successful slack_send result; never a Slack ID"
+      "description": "Tau-issued Slack message fact ID from a written fact or successful slack_send result"
     },
     "emoji": {
       "type": "string",
@@ -82,25 +88,23 @@ Do not echo native routing data. Errors are terminal `ToolError`s with bounded s
 
 ### `slack_send` result extension
 
-A successful send must make its posted message targetable. Change its committed tool result from the text `sent Slack message` to:
+A successful send must make its posted message targetable. Its tool result is:
 
 ```json
-{"status":"sent","message_ref":"slack-msg-v1-<opaque random token>","delivery_copies":"one"|"one_or_two_possible"}
+{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}
 ```
 
-Mint a collision-resistant, bounded extension-local reference after Slack returns a valid posted identity. It must not encode the conversation, timestamp, thread, alias, token, or agent ID. Store that same ref in `PendingPostedMessage` and in the accepted-send replay record so identical same-process send completion returns the same ref without reposting.
+Derive the bounded extension-local reference from the validated Slack
+conversation and message timestamp after Slack returns a valid posted identity.
+It is a stable fact ID, not an accepted native route argument. Store that same
+ref in `PostedMessageOwner` and in the retained send replay record so identical
+same-process replay returns the same ref without reposting.
 
-Activate the reference only after `CompleteTransportSendResult {
-accepted: true, message_id: Some(_) }`; discard it on rejected completion or an
-accepted result without a canonical ID. The harness commits the terminal tool
-result before delivering this completion result, so a short
-returned-but-not-yet-active window is unavoidable without protocol work. Pending,
-unknown, rejected, evicted, and stale refs must all return the same fail-closed
-error. This preserves the existing rule that successful sends install ownership
-only after durable outgoing completion. The harness's canonical outgoing
-`message_id` arrives too late to place in the already-constructed tool result, so
-using a separate extension-issued opaque ref avoids a cross-crate protocol
-expansion.
+After Slack success, write `message.sent`, key local posted-message authority to
+that fact's `MessageFactId`, and then write the ordinary tool result through the
+serialized local write-and-flush gate. This is not a harness commit
+acknowledgement. Writer failure activates no target. Pending, unknown,
+unwritten, evicted, and stale refs all return the same fail-closed error.
 
 ## Target eligibility and semantics
 
@@ -117,24 +121,23 @@ message_ref -> ReactionTarget {
 }
 ```
 
-The native `(channel, message_ts)` is private extension state and is never accepted from the tool.
+The native coordinates are retained in private extension state and appear in the Tau-issued fact ref, but are never accepted as separate route fields by the tool.
 
 | Reference source | Eligible? | Required live authority |
 |---|---:|---|
-| Accepted incoming message create | Yes | Its own pending reply route, receiving agent, registered receive/source route, current config/dynamic link |
-| Accepted incoming edit | Yes | New edit occurrence ref resolves to the edited original `(channel, ts)`; its own source route remains live |
+| Locally written incoming message create | Yes | Its own reply route, receiving agent, registered receive/source route, current config/dynamic link |
+| Locally written incoming edit | Yes | Edit target ref resolves to the original `(channel, ts)`; its source route remains live |
 | Incoming human reaction occurrence | No | It is an occurrence about a target, not a message target; do not turn its reply ID into confused-deputy target authority |
-| Successful `slack_send` reply | Yes | Commit-accepted opaque send ref plus the original current source reply route |
-| Successful proactive `slack_send` | Yes | Commit-accepted opaque send ref plus the same current configured proactive alias/route; registration is not required |
+| Successful `slack_send` reply | Yes | Locally written sent-fact ref plus the original current source reply route |
+| Successful proactive `slack_send` | Yes | Locally written sent-fact ref plus the same current configured proactive alias/route; registration is not required |
 | Bridge-local help/start/agents/select/error post | No | It did not pass through `slack_send` and exposes no ref |
-| Rejected/failed/uncommitted ingress or send | No | No target activation |
+| Rejected/failed/unpublished incoming event or send | No | No target activation |
 | Arbitrary Slack ID/timestamp, destination alias, or message not routed to Tau | No | Never accepted |
 
-For incoming creates, extend `PendingIngress` with an optional exact reaction
-target key and install it only on an accepted
-`TransportMessageIngressResult`. For edits, carry the original message timestamp
-into the pending occurrence and map the edit's new message ID to that same Slack
-item. Reaction operations deliberately carry no eligible target. Incoming target,
+For incoming creates, install the exact reaction target under the locally written
+delivered fact's `MessageFactId`. For edits, retain the original message
+timestamp and map the edit fact's target reference to that same Slack item.
+Reaction operations deliberately establish no eligible target. Incoming target,
 edit ownership, and outbound target references remain runtime-only.
 
 ### Threads and dynamic DMs
@@ -149,7 +152,7 @@ edit ownership, and outbound target references remain runtime-only.
 
 - Bind each target reference to the exact agent that received the incoming message or authored the outgoing post. Copying it to another agent, another Slack extension instance, or another prefixed instance fails with the same generic unknown/stale/unauthorized error.
 - Role changes do not transfer ownership. The same live agent may use the ref only when its **current** role authorizes the concrete react tool. `slack_send` need not still be authorized.
-- `slack_register(false)` revokes incoming/source-reply targets because their reply routes are removed. It should not revoke already committed proactive-post targets merely because proactive authority never required registration.
+- `slack_register(false)` revokes incoming/source-reply targets because their reply routes are removed. It should not revoke already published proactive-post targets merely because proactive authority never required registration.
 - Agent unload removes all that agent's target/reaction/attempt state. Session shutdown, inactive config replacement, and process restart clear all target references and reaction ownership. A later session/instance cannot adopt them.
 - A reaction left remotely after unload/restart or an ambiguous unowned add must
   be removed manually or by an independently authorized Slack client. This
@@ -242,13 +245,18 @@ The existing `parse_slack_api_response` only special-cases 429 for `chat.postMes
 
 ### Configuration/routing
 
-No `ExtConfig` field is added. Conversation policy does not gain a broad `react` permission: eligibility is the intersection of (a) a source-bound/committed exact target, (b) current route authority, and (c) current role authorization for `slack_react`. This allows reactions on receive-only incoming messages without turning aliases into message selectors.
+No `ExtConfig` field is added. Conversation policy does not gain a broad `react` permission: eligibility is the intersection of (a) a source-bound locally retained exact target, (b) current route authority, and (c) current role authorization for `slack_react`. This allows reactions on receive-only incoming messages without turning aliases into message selectors.
 
 `prefix_agent_id` has no effect on reactions. `tool_prefix` scopes the tool/group structurally. References remain extension-instance scoped even though their text is not prefixed. Add/remove does not change agent selection, registration, reply authority, thread routing, or wake an agent. The bot's own resulting reaction event is rejected by the existing self-user check, preventing prompt loops.
 
 ### Audit boundary
 
-For v1, use the existing durable tool trace as the audit record: `ToolStarted` records action, bounded emoji name, and opaque ref; `ToolResult`/`ToolError` records the outcome. Native channel/timestamp stays private. Do not add a new harness transport-completion RPC or fabricate an incoming `MessageOperation::Reaction`; the latter would imply external sender/reply semantics and could wake an agent. A future generic typed external-mutation audit envelope can be designed across transports, but is not required for this bounded Slack-only tool.
+For v1, use the existing tool trace as the audit record:
+`ToolStarted` records action, bounded emoji name, and fact ref;
+`ToolResult`/`ToolError` records the outcome. Native channel/timestamp is never accepted separately from the fact ref. Agent-invoked reactions do not fabricate `message.reaction_added`; that
+fact is reserved for externally observed reaction occurrences and could wake an
+agent. A future generic typed external-mutation audit fact can be designed across
+publishers, but is not required for this bounded Slack-only tool.
 
 ### Security/privacy impact
 
@@ -256,7 +264,7 @@ For v1, use the existing durable tool trace as the audit record: `ToolStarted` r
 - Prompt-injected Slack content can induce a granted agent to react, but only to an exact message the same agent received or posted and whose authority remains live. It cannot select arbitrary Slack IDs.
 - Conversation members, Slack Connect participants, workspace administrators, and Slack see the bot identity, emoji, target, and timing. This is not end-to-end private.
 - The tool performs no reaction/user listing and reads no message body or reaction roster. It adds only `reactions:write`; no new data-discovery scope.
-- Opaque refs are not credentials and can appear in tool audit/transcript, but remain agent/session/instance/route checked. Never log their native mapping.
+- Fact refs are not credentials and can appear in tool audit/transcript, but remain agent/session/instance/route checked. Never log additional private route mapping.
 - Custom emoji existence remains a server-side fact; error handling should not become a broad enumeration API.
 
 ## Implementation map
@@ -268,8 +276,8 @@ Primary changes should stay inside `crates/tau-ext-slack`:
    - strict parsers for action/ref/emoji;
    - `SlackClient` reaction method plus typed error;
    - target/ownership/attempt state and lifecycle clearing;
-   - `PendingIngress` target metadata and accepted-result activation;
-   - `PendingPostedMessage` ref/authority and accepted send activation;
+   - fact-keyed incoming target metadata and post-publication activation;
+   - `PostedMessageOwner` ref/authority and sent-fact publication;
    - structured `slack_send` result and `handle_react`;
    - generic safe 429 handling without leaking response bodies.
 2. Prefer a focused module analogous to `posted_message_cache.rs` for bounded target/reaction ownership and in-flight state rather than further enlarging `lib.rs`.
@@ -290,19 +298,22 @@ All new/changed Rust structs, fields, public methods, helpers, and tests need in
 
 ### Target creation and routing
 
-- Incoming create target appears only after accepted ingress completion; rejection/failed ingress does not activate it.
-- An accepted edit ref resolves to the exact original item; an accepted reaction occurrence ref is ineligible.
-- Successful send returns a non-native opaque ref; only completion with
-  `accepted:true` and `message_id:Some` activates it. Exercise the unavoidable
-  ref-before-activation window plus rejected/missing-ID completion. Accepted-send
-  replay preserves the identical ref and does not repost.
+- Incoming create target appears only after the fact frame is written locally;
+  writer failure does not activate it.
+- An edit target ref resolves to the exact original item; a reaction occurrence
+  ref is ineligible.
+- Successful send returns a stable `slack:<channel>:<message-ts>` fact ref after
+  writing `message.sent` and the result locally. Writer failure activates
+  nothing. Same-call replay preserves the ref and does not repost or rewrite the
+  fact.
 - Root, fixed-thread root, and child references call Slack with the exact item timestamp and authenticated route root; no child/root substitution.
 - Dynamic DM requires the exact live D-to-user source link. Proactive post works without registration; local help/control posts remain ineligible.
 
 ### Authorization/lifecycle
 
-- Unknown, evicted, stale, cross-agent, cross-instance/prefix, wrong route/alias, changed dynamic link, inactive capability, unloaded agent, and old session/restart refs fail without network and with non-oracular errors.
-- Unregister revokes source/reply targets but not committed proactive targets. Current role policy remains enforced by the harness.
+- Unknown, evicted, stale, cross-agent, cross-instance/prefix, wrong route/alias, changed dynamic link, inactive lifecycle, unloaded agent, and old session/restart refs fail without network and with non-oracular errors.
+- Unregister revokes source/reply targets but not proactive targets or their
+  deletion provenance. Current role policy remains enforced by the harness.
 - Inactive config replacement and session shutdown clear all new caches; stale late API completion cannot reinstall them.
 - Capacity tests prove oldest-first eviction of unpinned refs, refusal to evict
   live ownership/pinned refs, pre-I/O ownership-capacity rejection, bounded

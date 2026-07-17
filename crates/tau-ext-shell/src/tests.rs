@@ -625,7 +625,7 @@ fn targeted_user_shell_runs_from_agent_workdir() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(workdir.path().display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -1709,7 +1709,7 @@ fn locked_apply_patch_uses_workdir_frozen_at_admission() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(cwd_a.display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -1767,7 +1767,7 @@ fn locked_apply_patch_uses_workdir_frozen_at_admission() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(cwd_b.display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -1841,7 +1841,7 @@ fn shell_without_manual_lock_does_not_wait_for_update_lock() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(cwd_a.display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8029,7 +8029,7 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(remembered.path().display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8153,7 +8153,7 @@ fn malformed_gpt_workdir_fails_without_side_effects_through_full_dispatch() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(remembered.path().display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8269,7 +8269,7 @@ fn workdir_without_path_reports_current_status_without_mutation() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(remembered.path().display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8320,7 +8320,7 @@ fn absolute_workdir_setter_repairs_malformed_metadata() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(".".to_owned()),
             mutation_id: None,
             inheritable: true,
@@ -8416,7 +8416,7 @@ fn workdir_setter_waits_for_committed_metadata_before_notice_and_result() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(start.display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8493,7 +8493,7 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Text(start.display().to_string()),
             mutation_id: None,
             inheritable: true,
@@ -8575,7 +8575,7 @@ fn replayed_session_agent_loaded_restores_workdir_context_and_ready() {
             tau_proto::UnixMicros::new(1),
             Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
                 agent_id: agent_id.clone(),
-                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
                 value: CborValue::Text(cwd.display().to_string()),
                 mutation_id: None,
                 inheritable: true,
@@ -8651,7 +8651,7 @@ fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
             tau_proto::UnixMicros::new(1),
             Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
                 agent_id: agent_id.clone(),
-                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
                 value: CborValue::Text(stored_cwd.display().to_string()),
                 mutation_id: None,
                 inheritable: true,
@@ -8731,7 +8731,7 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
         if let Event::AgentMetadataSet(metadata) = event
             && metadata.agent_id == agent_id
         {
-            assert_eq!(metadata.key.as_str(), "ext_core-shell_cwd");
+            assert_eq!(metadata.key.as_str(), "ext_test-extension_cwd");
             break;
         }
     }
@@ -8875,7 +8875,7 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
             value: CborValue::Bool(true),
             mutation_id: None,
             inheritable: true,

@@ -164,9 +164,6 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "ExternalAgentMessageAuth",
         HarnessInputMessage::PeerSessionProbe(_) => "PeerSessionProbe",
-        HarnessInputMessage::RegisterTransportCapability(_) => "RegisterTransportCapability",
-        HarnessInputMessage::TransportMessageIngress(_) => "TransportMessageIngress",
-        HarnessInputMessage::CompleteTransportSend(_) => "CompleteTransportSend",
     }
 }
 

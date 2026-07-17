@@ -27,12 +27,6 @@ normal bypass and is allowed immediately before the provider prompt closes. The 
 validates provider ownership and broadcasts these stats unchanged; UI clients render
 them directly from provider updates.
 
-## Message-envelope chaining
-
-When a cached Responses anchor has a message envelope in its server-owned prefix,
-request construction fully resends context without `previous_response_id`, because reply
-presentation is transient. Envelopes after the anchor remain in the normal delta.
-
 ## Replay-sidecar trust boundary
 
 Raw provider replay sidecars are external-provider-authored transcript data. They may

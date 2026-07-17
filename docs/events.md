@@ -1,29 +1,29 @@
 # Event log reference
 
-## Canonical transport messages
+## Extension-published message facts
 
-`agent.message_incoming` and `agent.message_outgoing` are harness-owned,
-immutable durable v2 facts carrying a transport-neutral `MessageEnvelope`.
-Extensions register a source-bound capability and use dedicated correlated
-ingress/completion RPCs; they cannot emit either fact. Ingress success is sent
-only after commit. Every submitted ingress request creates a distinct durable
-fact; transport adapters own any bounded retry suppression.
+Message bridges publish immutable durable facts through ordinary `emit`:
+`message.delivered`, `message.edited`, `message.deleted`,
+`message.reaction_added`, `message.reaction_removed`, and `message.sent`. The
+harness replaces the claimed publisher with the authenticated extension's stable
+configured name, persists the fact before any consumer acts, and broadcasts the
+same committed record. There is no generic transport registration, admission,
+reply-routing, or send-completion service.
 
-An incoming fact folds directly into typed provider context and creates only a
-payload-free live wake marker. Replay restores and renders context but never
-wakes an agent or activates a reply route. Native identifiers are bounded
-durable metadata. A canonical `reply_to` id is an opaque selector rather than a
-bearer capability and is reauthorized against the live source, session, agent,
-route, and tool at send completion.
-External stable ids remain audit identity. Optional display names and explicitly
-authorized aliases are presentation snapshots retained with their occurrence.
-Provider projection
-keeps the stable id primary and separately labels an operator alias plus the
-harness-authenticated transport instance.
-Incoming envelopes may additionally record the default-false
-`transport_identity_mentioned` fact. It is immutable occurrence content
-indicating that normalized text addressed the receiving transport's own
-authenticated identity, not an identity disclosure, capability, or route grant.
+Each fact carries a claimed Tau agent target, small universal typed fields, and
+bounded opaque `extension_data`. Delivered and sent facts establish
+publisher-scoped message IDs; edit, delete, and reaction facts carry opaque
+references to a base fact. Generic consumers do not resolve those references or
+interpret extension data. Transport authentication, admission, deduplication,
+native routing, reply authority, and send/retry policy remain extension-local.
+
+Valid committed incoming facts project as escaped `<tau_message event="…">`
+user context and request one live activation after transcript placement.
+`message.sent` projects as assistant context and never activates by itself.
+Replay reconstructs the same projection without waking the agent or restoring
+extension-private authority. A malformed or unavailable target cannot veto
+persistence; deterministic projection failures remain visible as bounded
+diagnostics without exposing fact text or extension data.
 
 The tau bus mostly carries facts: components broadcast what happened, while the
 `ui.*` category carries user-intent requests from attached UIs to the harness.

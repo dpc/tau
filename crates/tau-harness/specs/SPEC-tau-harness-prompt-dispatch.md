@@ -96,9 +96,12 @@ tool-call state retains whether the exact registered tool carried
 Semantic validation and prospective encoded-record validation run before result
 deduplication or generic success publication.
 
-## Transient reply presentation
+## Extension-published message facts
 
-Durable envelopes retain source-owned `reply_path` for audit. Prompt assembly does not mutate that fact; it separately projects `reply` only when the route belongs to the target agent and the internally identified tool remains in the effective prompt snapshot, then uses its model-visible alias.
+Committed `message.*` facts project as ordinary escaped context after universal
+field validation. Prompt assembly never adds reply routes or actionable
+capabilities; those remain private to the publishing extension. Replay restores
+context without waking the model or rebuilding extension-local authority.
 
 Compaction-triggered dispatch and continuation refine [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md); that record owns their transaction, checkpoint, replay, and model-correlation behavior.
 

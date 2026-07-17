@@ -1063,58 +1063,6 @@ fn prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
-/// Chat Completions request lowering must preserve the compact XML as logical
-/// user/assistant content without adding a Markdown fence or `xml` prefix.
-#[test]
-fn chat_request_lowers_message_envelopes_without_wrappers() {
-    let envelope = |direction: &str| {
-        serde_json::from_value::<ContextItem>(serde_json::json!({
-            "type": "message_envelope",
-            "payload": {
-              "direction": direction,
-              "envelope": {
-                "message_id": format!("msg-{direction}"),
-                "transport": {"name": "slack"},
-                "source": {"kind": "external", "stable_id": "U1", "actor_kind": "human"},
-                "destination": {"kind": "agent", "agent_id": "main"},
-                "operation": {"kind": "create", "payload": {"kind": "text", "text": "</tau_message>", "format": "plain"}},
-                "trust": {"content": "untrusted_external", "identity": "verified_account", "policy": "allowlisted"}
-              },
-              "model_presentation": {"transport_label": "slack", "source_label": "U1"}
-            }
-        }))
-        .expect("envelope")
-    };
-    let mut created = prompt();
-    created.context.blocks = vec![
-        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-            items: vec![envelope("incoming")],
-        }),
-        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
-            provider_response_id: None,
-            backend: None,
-            output_items: vec![envelope("outgoing")],
-            usage: None,
-        }),
-    ];
-    let body = serde_json::to_value(build_request(
-        &resolved_provider(&provider()),
-        &provider().models[0],
-        &created,
-    ))
-    .expect("request");
-    let messages = body["messages"].as_array().expect("messages");
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[1]["role"], "assistant");
-    for message in messages {
-        let text = message["content"].as_str().expect("content");
-        assert!(text.starts_with("<tau_message"));
-        assert!(text.contains("&lt;/tau_message&gt;"));
-        assert!(!text.contains("```"));
-        assert!(!text.starts_with("xml\n"));
-    }
-}
-
 /// Chat Completions must reject Custom tools visibly rather than silently
 /// dropping a definition that escaped harness filtering.
 #[test]

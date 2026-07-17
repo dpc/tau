@@ -2,28 +2,28 @@
 
 ## External transport foundation
 
-The v2 bridge protocol uses canonical message envelopes instead of
-prefix-formatted user prompts. Slack uses this canonical path. Telegram and XMPP still use their legacy prompt
-path until separate adapter migrations land; they do not yet receive these
-guarantees. Canonical external content remains internally typed as untrusted even when its
-account identity is verified and allowlisted. Provider adapters lower the typed
-context item once to compact XML such as `<tau_message transport="slack"
-message_id="…" sender="U123" origin="external" sender_allowlisted="true">…</tau_message>`; harness routing and UI
-code never infer authority from rendered text. When configured, the projection
-keeps the native sender primary and adds `transport_instance`, `sender_alias`,
-and `sender_alias_authority="operator_configured"` attributes. Mutable
-transport-fetched display labels stay UI-only and are retained per occurrence.
-The optional true-only `transport_identity_mentioned="true"` attribute records
-that normalized text addressed the authenticated receiving transport identity.
-It is generic typed context—not a native identifier, routing signal, or
-capability—and belongs to the immutable occurrence.
+Message bridges publish six immutable `message.*` facts through ordinary event
+emission: delivered, edited, deleted, reaction added, reaction removed, and sent.
+The harness stamps the authenticated configured publisher, commits each fact
+before any consumer acts, and then broadcasts the same record. Slack uses this
+interface. Telegram and XMPP retain their legacy prompt paths until their
+separate adapter migrations land.
 
-Reply tools select an extension-private live destination with an opaque
-canonical `reply_to` id. Replayed messages do not restore reply authority.
-The foundation exposes capability registration, durable ingress ack, and
-successful-send completion for bridge migration. The experimental Telegram
-gateway still requires a separate end-to-end pending-delivery/ack journal
-migration before offset advancement can claim durable Tau acceptance.
+Valid committed facts project to compact `<tau_message event="…">` provider
+context. External content and publisher-provided metadata remain untrusted data;
+they grant no identity, routing, tool, or instruction authority. Live incoming
+facts can activate the targeted agent after transcript placement, while replay
+reconstructs context without waking the model. `message.sent` projects as
+assistant context and never activates the model by itself.
+
+Transport admission, duplicate suppression, native identity interpretation,
+reply routes, proactive destinations, retries, and remote-send policy belong to
+the publishing extension. Opaque reply and reaction references may identify
+extension-local runtime state, but they are not generic harness capabilities and
+replay does not recreate that private authority.
+
+These external message facts are separate from the harness-owned peer-agent
+message events documented below.
 
 The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `/set show-messages`. When shown fully, a message renders as:
 

@@ -4140,12 +4140,6 @@ impl EventRenderer {
             Event::AgentMessageReceived(message) => {
                 EventAgentIdResolution::Agent(message.recipient_id.to_string())
             }
-            Event::AgentMessageIncoming(message) => {
-                EventAgentIdResolution::Agent(message.recipient_id.to_string())
-            }
-            Event::AgentMessageOutgoing(message) => {
-                EventAgentIdResolution::Agent(message.sender_id.to_string())
-            }
             _ => EventAgentIdResolution::Unhandled,
         }
     }
@@ -4337,10 +4331,7 @@ impl EventRenderer {
     fn handle_agent_message_event(&mut self, event: &Event) -> bool {
         if !matches!(
             event,
-            Event::AgentMessageSent(_)
-                | Event::AgentMessageReceived(_)
-                | Event::AgentMessageIncoming(_)
-                | Event::AgentMessageOutgoing(_)
+            Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
         ) {
             return false;
         }
@@ -4481,14 +4472,6 @@ impl EventRenderer {
                 self.agent_message_received_sender_label(message, use_local_names),
                 self.message_agent_display_label(message.recipient_id.as_str(), use_local_names)
             ),
-            Event::AgentMessageIncoming(message) => {
-                Self::typed_message_summary(&message.envelope, &message.envelope.source, "received")
-            }
-            Event::AgentMessageOutgoing(message) => Self::typed_message_summary(
-                &message.envelope,
-                &message.envelope.destination,
-                "sent",
-            ),
             _ => unreachable!("only agent message events are rendered here"),
         }
     }
@@ -4497,82 +4480,8 @@ impl EventRenderer {
         match event {
             Event::AgentMessageSent(message) => message.message.clone(),
             Event::AgentMessageReceived(message) => message.message.clone(),
-            Event::AgentMessageIncoming(message) => {
-                Self::message_operation_body(&message.envelope.operation)
-            }
-            Event::AgentMessageOutgoing(message) => {
-                Self::message_operation_body(&message.envelope.operation)
-            }
             _ => unreachable!("only agent message events are rendered here"),
         }
-    }
-
-    fn message_endpoint_label(
-        transport: &str,
-        endpoint: &tau_proto::MessageEndpoint,
-        source_actor: bool,
-    ) -> String {
-        use unicode_width::UnicodeWidthStr as _;
-
-        match endpoint {
-            tau_proto::MessageEndpoint::Agent {
-                session_id,
-                agent_id,
-                display_name,
-            } => {
-                let identity = session_id.as_ref().map_or_else(
-                    || agent_id.to_string(),
-                    |session| format!("{session}/{agent_id}"),
-                );
-                Self::agent_identity_with_name(
-                    &identity,
-                    display_name.as_deref(),
-                    agent_id.as_str(),
-                )
-            }
-            tau_proto::MessageEndpoint::User => "user".to_owned(),
-            tau_proto::MessageEndpoint::External {
-                stable_id,
-                display_name,
-                identity_alias,
-                ..
-            } => {
-                let stable = stable_id
-                    .as_deref()
-                    .map(|value| Self::bounded_metadata(value, 80, 256))
-                    .unwrap_or_else(|| "external".to_owned());
-                let alias = identity_alias.as_ref().map(|alias| {
-                    format!("alias {}", Self::bounded_metadata(&alias.value, 64, 128))
-                });
-                let baseline = alias
-                    .as_ref()
-                    .map_or_else(|| stable.clone(), |alias| format!("{stable} ({alias})"));
-                let display = display_name.as_deref().map(|value| {
-                    let escaped = Self::bounded_quoted_metadata(value, 48, 192);
-                    if transport == "slack" && source_actor {
-                        format!("Slack \"{escaped}\"")
-                    } else {
-                        format!("display \"{escaped}\"")
-                    }
-                });
-                let candidate = match (display, alias) {
-                    (Some(display), Some(alias)) => format!("{stable} ({display}; {alias})"),
-                    (Some(display), None) => format!("{stable} ({display})"),
-                    (None, _) => baseline.clone(),
-                };
-                if candidate.len() <= 512 && candidate.width() <= 160 {
-                    candidate
-                } else {
-                    baseline
-                }
-            }
-        }
-    }
-
-    fn bounded_metadata(value: &str, max_columns: usize, max_bytes: usize) -> String {
-        Self::bounded_metadata_with(value, max_columns, max_bytes, |grapheme| {
-            tau_proto::visible_escape_metadata(grapheme)
-        })
     }
 
     /// Bounds a supplemental agent name after visibly escaping controls,
@@ -4601,24 +4510,6 @@ impl EventRenderer {
         )
     }
 
-    fn bounded_quoted_metadata(value: &str, max_columns: usize, max_bytes: usize) -> String {
-        Self::bounded_metadata_with(value, max_columns, max_bytes, |grapheme| {
-            let mut escaped = String::new();
-            for character in grapheme.chars() {
-                if tau_proto::requires_visible_escape(character) {
-                    escaped.push_str(&tau_proto::visible_escape_metadata(&character.to_string()));
-                } else {
-                    match character {
-                        '\\' => escaped.push_str("\\\\"),
-                        '"' => escaped.push_str("\\\""),
-                        _ => escaped.push(character),
-                    }
-                }
-            }
-            escaped
-        })
-    }
-
     fn bounded_metadata_with(
         value: &str,
         max_columns: usize,
@@ -4645,76 +4536,6 @@ impl EventRenderer {
             columns = next_columns;
         }
         output
-    }
-
-    fn typed_message_summary(
-        envelope: &tau_proto::MessageEnvelope,
-        endpoint: &tau_proto::MessageEndpoint,
-        direction: &str,
-    ) -> String {
-        let operation = match &envelope.operation {
-            tau_proto::MessageOperation::Edit { target, .. } => format!(
-                "edit {direction} · {} · updates {}",
-                Self::message_endpoint_label(
-                    &envelope.transport.name,
-                    endpoint,
-                    direction == "received",
-                ),
-                target
-                    .message_id
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .or_else(|| target.external_message_id.clone())
-                    .unwrap_or_else(|| "unresolved message".to_owned())
-            ),
-            tau_proto::MessageOperation::Reaction {
-                action, reaction, ..
-            } => format!(
-                "reaction {} by {} · :{}:",
-                match action {
-                    tau_proto::ReactionAction::Add => "added",
-                    tau_proto::ReactionAction::Remove => "removed",
-                },
-                Self::message_endpoint_label(
-                    &envelope.transport.name,
-                    endpoint,
-                    direction == "received",
-                ),
-                reaction.name,
-            ),
-            _ => format!(
-                "message {direction} · {}",
-                Self::message_endpoint_label(
-                    &envelope.transport.name,
-                    endpoint,
-                    direction == "received",
-                )
-            ),
-        };
-        format!("{} {operation}", envelope.transport.name)
-    }
-
-    fn message_operation_body(operation: &tau_proto::MessageOperation) -> String {
-        match operation {
-            tau_proto::MessageOperation::Create {
-                payload: tau_proto::MessagePayload::Text { text, .. },
-            }
-            | tau_proto::MessageOperation::Edit {
-                payload: tau_proto::MessagePayload::Text { text, .. },
-                ..
-            } => text.clone(),
-            tau_proto::MessageOperation::Delete { .. } => "[message deleted]".to_owned(),
-            tau_proto::MessageOperation::Reaction {
-                action, reaction, ..
-            } => format!(
-                "{} :{}:",
-                match action {
-                    tau_proto::ReactionAction::Add => "added",
-                    tau_proto::ReactionAction::Remove => "removed",
-                },
-                reaction.name
-            ),
-        }
     }
 
     fn agent_message_sent_recipient_display(
@@ -4773,28 +4594,6 @@ impl EventRenderer {
         show_messages: tau_config::settings::ShowMessages,
         event: &Event,
     ) -> MessageRenderMode {
-        if let Event::AgentMessageIncoming(message) = event
-            && matches!(
-                message.envelope.operation,
-                tau_proto::MessageOperation::Reaction { .. }
-            )
-        {
-            return MessageRenderMode::Summary;
-        }
-        if let Event::AgentMessageOutgoing(message) = event
-            && matches!(
-                message.envelope.operation,
-                tau_proto::MessageOperation::Reaction { .. }
-            )
-        {
-            return MessageRenderMode::Summary;
-        }
-        if matches!(
-            event,
-            Event::AgentMessageIncoming(_) | Event::AgentMessageOutgoing(_)
-        ) {
-            return MessageRenderMode::Full;
-        }
         if Self::is_user_broadcast_agent_message(event) {
             return MessageRenderMode::Full;
         }

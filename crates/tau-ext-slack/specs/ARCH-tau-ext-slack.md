@@ -1,156 +1,127 @@
 # ARCH-tau-ext-slack: tau-ext-slack architecture
 
-External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md). Conversation policy follows [DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
+External messages follow
+[ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md)
+and the extension-published fact interface in
+[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md).
+Conversation policy follows
+[DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
 
 `std-slack` is a disabled-by-default Socket Mode text bridge exposing scoped
 `slack_register`, `slack_conversations`, `slack_send`, and separately authorized
 default-off `slack_react` tools. Configuration validates one exact
-conversation-route list into alias, parent-receive, thread-receive, and
-proactive-alias indexes. Routes carry explicit channel/MPIM/DM kind and optional
-fixed root. A bounded runtime map holds exact dynamic D-to-U/W links.
+conversation-route list into alias, parent-receive, thread-receive, and proactive
+alias indexes. Routes carry explicit channel/MPIM/DM kind and an optional fixed
+thread root. A bounded runtime map holds exact dynamic D-to-U/W links.
+
 Each configured extension instance is intended for one receiving Tau agent at a
-time. Multi-agent sharing or retargeting remains ad hoc best-effort behavior and
-must not be treated as exact routing, permanent ownership, once-only delivery, or
-cross-agent deduplication. This operating model is documented in
-[DESIGN-tau-ext-slack-single-agent-operating-model](DESIGN-tau-ext-slack-single-agent-operating-model.md);
-it is not newly runtime-enforced.
+time. Multi-agent sharing or retargeting is ad hoc best-effort behavior and does
+not provide exact cross-agent routing, permanent ownership, once-only delivery,
+or cross-agent deduplication.
+
+## Receive and fact publication
 
 Supported Socket events reserve one of 64 process-local outstanding slots before
-ACK. A successful local ACK write commits the occurrence to one persistent serial
-FIFO that survives websocket reconnects; failed ACKs release the reservation, and
-saturation/worker closure does not ACK so Slack may retry after reconnect. The FIFO
-owns capacity through the terminal admission outcome and keeps identity checks,
-local replies, and ingress submission off the websocket reader while preserving
-global successful-ACK order. It is not durable: process death after ACK retains the
-existing loss window. Startup/reconnect first binds the exact `auth.test` bot U/W
-and installing T workspace. Socket events are authorized only after ACK and only
-when the wrapper carries exact `context_team_id` or one unambiguous matching
-authorization; top-level team data and actor home team are not installation
-authority. Reconnect must exactly match both halves of the established pair; a
-changed, incomplete, or malformed reconnect observation disables capability,
-retires all installation-scoped ingress, dynamic-link, reply/edit,
-post-ownership, and reaction authority, and permanently rejects later
-capability registration until restart rather than
-admitting events for the new pair. The bridge rejects malformed,
-bot/self, subtype, kind, route, thread, and sender metadata; verifies humans via
-`users.info`; applies strict/lax and allowlist-only control; then submits a typed
-native route to a route-selected registered agent. `message` and `app_mention`
-wrappers normalize leading-mention commands and `(conversation, ts)` create
-identity identically. Parent routes share selection across actual threads;
-receive-enabled fixed-thread routes and dynamic DMs isolate it.
-The same `users.info` response may contribute only a bounded
-`profile.display_name` UI snapshot. Exact U/W identity remains authoritative and
-model-primary. Optional one-to-one operator aliases are presentation-only,
-extension-instance scoped, and do not affect the received-id cache.
-See
-[DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md).
+ACK. A successful local ACK write admits the occurrence to one persistent
+serial FIFO that survives websocket reconnects. Failed ACKs release the
+reservation; saturation or worker closure does not ACK so Slack may retry after
+reconnect. The FIFO is not durable, so process death after ACK retains the
+existing loss window.
 
-Exact occurrences of the authenticated installation bot's native mention are
-recognized only outside complete equal-length backtick code ranges. One leading
-occurrence is removed for command compatibility and every remaining occurrence
-becomes the semantic `@slack_bridge` token. The generic
-`transport_identity_mentioned` fact records either case in the durable
-occurrence; it is transport-instance context, not authority or an egress
-capability. See
-[DESIGN-tau-ext-slack-transport-identity-mentions](DESIGN-tau-ext-slack-transport-identity-mentions.md).
+Startup and reconnect bind the exact `auth.test` bot U/W and installing T
+workspace. Socket events are authorized only when the wrapper proves that
+installation through exact `context_team_id` or one unambiguous matching
+authorization. The bridge rejects malformed, bot/self, subtype, kind, route,
+thread, and sender metadata; verifies humans through `users.info`; applies
+strict/lax admission and allowlist-only control; and then selects a registered
+Tau agent through extension-local routing.
 
-The extension drops recently repeated native occurrence ids with a bounded
-4,096-entry process-local FIFO set. Cached ids are nonempty, control-free, and
-at most 256 bytes. Message and edit occurrences use native ids or stable message
-coordinates; reactions are cached only when Slack supplies an event id.
-The occurrence is recorded before identity lookup, local effects, capacity
-admission, or durable commit, so a later transient failure consumes it until
-eviction or restart. The harness stamps trust and commits every submitted
-ingress request before returning a correlated result. An accepted result installs
-source-bound reply/edit/reaction state from the pending Slack
-request while the installation and session remain current; rejected and orphaned
-results install nothing. Successful sends install bounded reaction ownership.
-Edits and reactions revalidate original/owner,
-sender, agent, receive route, thread, capability, and completion. Replay cannot
-wake or reactivate a route.
-These ownership flows follow
-[DESIGN-tau-ext-slack-canonical-reply-selectors](DESIGN-tau-ext-slack-canonical-reply-selectors.md),
-[DESIGN-tau-ext-slack-edit-ownership](DESIGN-tau-ext-slack-edit-ownership.md),
-and [DESIGN-tau-ext-slack-reaction-ownership](DESIGN-tau-ext-slack-reaction-ownership.md).
+Admitted creates, edits, deletes, and reactions publish ordinary immutable
+`message.delivered`, `message.edited`, `message.deleted`,
+`message.reaction_added`, or `message.reaction_removed` facts. Slack derives
+stable fact IDs from native channel/message coordinates and uses
+`MessageFactRef` for later operations on the same logical message. The harness
+stamps the configured extension publisher and persists the fact before prompt
+projection. There is no Slack-specific ingress acknowledgement or harness
+transport-registration state.
+
+Slack installs and revalidates reply, edit, and reaction routes locally. A
+locally written create establishes source reply/edit authority keyed by its
+`MessageFactId`; a locally written outgoing send establishes posted-message reaction
+authority keyed by its sent fact ID. Delete publication revokes the matching
+local source/reply/reaction target state. These maps are bounded, process-local,
+agent- and lifecycle-scoped, and never reconstructed by fact replay.
+
+The extension drops recently repeated native occurrence IDs with a bounded
+4,096-entry process-local FIFO set. Cache eviction, races, or restart may
+duplicate publication. Generic infrastructure does not deduplicate or resolve
+message facts.
+
+Exact U/W identity remains authoritative and model-primary. A bounded
+`profile.display_name` snapshot is untrusted presentation. Optional operator
+sender aliases are also presentation-only and do not affect admission, routing,
+reply, reaction, or mention authority.
+
+## Sending
 
 `slack_conversations` returns bounded pages of static aliases, operator
-descriptions, kinds, scopes, and configured receive/proactive policy; it excludes
+descriptions, kinds, scopes, and configured receive/proactive policy. It excludes
 native routes, dynamic links, identities, and runtime state.
-`slack_send` accepts exactly one opaque reply id or a plain current proactive alias.
-It never accepts a native id or thread. The extension and
-harness independently revalidate agent, tool, session, capability, route,
-endpoint, kind, thread, and completion. MPIM metadata uses `ConversationKind::Group`.
-Thread sends use the immutable root and never broadcast replies.
-Accepted calls freeze their exact canonical route, lifecycle/config authority,
-mandatory authenticated bot/workspace pair, and final wire body in a non-evicting
-1,024-entry process/session ledger before I/O. At most 64 active delivery workers
-run initial HTTP, acknowledged completion output, and notification-driven retry
-waits, never on tau-client's serialized reader. A live per-channel logical-call
-FIFO owns provider/backoff turns and advances pacing at actual attempt starts.
-One initial attempt
-plus at most one byte-identical retry provides process/session at-least-once
-delivery: an ambiguous first attempt followed by success can leave one or two
-Slack copies. Same-call replay resubmits only its stable completion/error;
-conflicting reuse fails, and a new call id is new intent. Lifecycle, capability,
-route, config, disconnect, or session changes cancel retry and stale completion
-authority. A Tau-accepted completion remains a stable result while current
-authority separately gates reaction ownership; completion-writer failure retires
-outbound authority and shuts down the extension. Synchronous HTTP workers are
-process-owned and may outlive `run` only through their 30-second request timeout;
-retired workers cannot retry or restore local state. Every source-bound route and
-frozen send retains the exact typed workspace/team installation evidence.
-There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
-claim. See
-[DESIGN-tau-ext-slack-send-delivery](DESIGN-tau-ext-slack-send-delivery.md).
-Agent-authored reply and proactive text is unchanged by default. The
-presentation-only `prefix_agent_id` setting may add the legacy `[agent-id] `
-prefix after message-size validation; it does not alter authorization, routing,
-thread selection, or send cardinality.
-Raw `<@`, `<!`, and `<#` controls are rejected. The default-false,
-reply-only `mention_source_user` option can prepend only the exact verified human
-bound to the live canonical route; it is invalid for configured destinations and
-is part of the exact frozen retry body.
-See
-[DESIGN-tau-ext-slack-safe-source-mentions](DESIGN-tau-ext-slack-safe-source-mentions.md).
-See [DESIGN-tau-ext-slack-proactive-sends](DESIGN-tau-ext-slack-proactive-sends.md)
-and [DESIGN-tau-ext-slack-conversation-discovery](DESIGN-tau-ext-slack-conversation-discovery.md)
-and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-immutable-thread-destinations.md).
 
-Runtime links, selections, registrations, reply routes, post ownership, received
-ids, and worker state clear on restart. Eviction, restart, or races may duplicate
-delivery. Session/process retirement clears the outbound replay
-ledger and ends its at-least-once boundary.
+`slack_send` accepts exactly one Tau-issued local reply selector or a current
+proactive alias; it never accepts native Slack conversation IDs or thread
+timestamps. The extension revalidates the current agent, tool, session, route,
+installation, lifecycle, and configuration. Accepted calls freeze their route,
+authority snapshot, and final wire body in a bounded process/session ledger
+before I/O.
 
-Configuration has a monotonic freeze latch. Successful auth/socket preflight
-freezes the worker snapshot before activation; otherwise the first fully
-authorized post or reaction freezes under the state lock before Slack I/O. Invalid calls and
-failed synchronous preflight do not freeze. Invalid pre-freeze replacement
-clears inactive authority and capability metadata.
+At most 64 active delivery workers run HTTP and notification-driven retry waits
+off tau-client's serialized reader. A live per-channel FIFO serializes actual
+attempts. One initial attempt plus at most one byte-identical retry provides
+process/session at-least-once delivery: an ambiguous first attempt followed by
+success can leave one or two Slack copies. There is no durable outbox,
+`client_msg_id`, restart guarantee, remote/local transaction, or exactly-once
+claim.
 
-Strict mode admits allowlisted verified humans. Lax additionally admits verified
-humans only on static routes; it never grants control or dynamic linking.
-Dynamic DMs always remain exact allowlisted-user-bound. External text remains
-`UntrustedExternal`. Native ids remain durable authorization/audit metadata;
-only stable aliases, trusted operator descriptions, and factual configured
-kind/scope/receive/proactive policy are discoverable.
-Admission authority follows
-[DESIGN-tau-ext-slack-sender-admission](DESIGN-tau-ext-slack-sender-admission.md).
+After Slack reports success, the extension writes `message.sent` and then the
+ordinary `tool.result` through one serialized local write-and-flush gate. This
+preserves frame order but does not acknowledge a harness commit. The result's
+`message_ref` becomes local reaction authority keyed to the sent fact ID. Its
+documented `slack:<channel>:<message-ts>` representation contains native
+coordinates but is accepted only when it resolves to an exact retained target.
+Same-call replay returns the retained stable result without posting again or
+publishing another sent fact. Conflicting call-ID reuse fails, while a new call
+ID is new intent.
 
-Socket lifecycle, rejection logging, diagnostics, token redaction, HTTPS/WSS
-requirements, and shutdown are fail-closed and identifier-free as described in
-the [README](../README.md). Payload-free `TRACE` latency markers use only monotonic
-durations, bounded classes/depth buckets, connection generations, and process-local
-occurrence/request ordinals; they never enter the durable event protocol.
-The decision and privacy contract are recorded in
-[DESIGN-tau-ext-slack-latency-observability](DESIGN-tau-ext-slack-latency-observability.md).
+Agent-authored text is unchanged by default. The presentation-only
+`prefix_agent_id` setting may add the legacy `[agent-id] ` prefix. Raw `<@`,
+`<!`, and `<#` controls are rejected. The default-false reply-only
+`mention_source_user` option can prepend only the exact verified human bound to
+the selected live reply route.
 
-## Agent-invoked reactions
+## Lifecycle and safety
 
-The disabled-by-default `slack_react` (`slack:react`) tool mutates only exact,
-commit-accepted Tau-issued message references. Native Slack identifiers remain
-private. Targets, same-agent reaction ownership, in-flight reservations, and
-ToolCallId attempts are bounded runtime state and are revalidated against the
-current extension, capability, agent, session, route, dynamic link, and config
-on every call. `slack_send` returns a collision-resistant opaque `message_ref`
-that activates only after accepted durable completion. See
-[DESIGN-tau-ext-slack-agent-reactions](DESIGN-tau-ext-slack-agent-reactions.md).
+Reconnect must match both halves of the established bot/workspace pair. A
+changed, incomplete, or malformed observation permanently retires
+installation-scoped routes, links, ownership, workers, and publication authority
+until restart. Configuration freezes after successful worker preflight or before
+the first authorized post or reaction API attempt.
+
+Runtime links, selections, registrations, reply/edit routes, posted-message
+ownership, received IDs, and send workers clear on restart. Disconnect, session
+rollover, agent unload, route replacement, and tool loss retire the applicable
+authority. Already-started synchronous HTTP may outlive `run` only through its
+bounded request timeout; retired workers cannot retry or restore local state.
+
+Strict mode admits allowlisted verified humans. Lax mode additionally admits
+verified humans on static receive routes, but never grants control or dynamic DM
+linking. External text and metadata remain untrusted. Logs and notices use
+bounded closed outcome categories and never expose tokens, URLs, response
+bodies, message text, or native identifiers other than documented message fact IDs.
+
+The disabled-by-default `slack_react` tool accepts only exact retained Tau-issued
+fact references from locally written incoming facts or successful `slack_send` results.
+Targets, same-agent reaction ownership, in-flight reservations, and tool-call
+attempts are bounded runtime state. Adds establish ownership only after
+unambiguous Slack success; removes require that ownership. Ambiguous effects are
+not adopted.

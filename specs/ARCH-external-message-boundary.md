@@ -1,10 +1,16 @@
 # ARCH-external-message-boundary: External message boundary
 
-Canonical external-message intake uses source-bound transport capability
-registration and dedicated RPCs. Extension-provided labels or payload can never
-claim `HumanUi`, harness-internal, authenticated Tau-agent, or another extension
-instance authority. External payload always remains untrusted content; identity
-assurance and allowlist/lax routing policy are separate fields.
+External-message bridges publish immutable `message.*` facts through ordinary
+extension event emission. The harness stamps the authenticated extension's
+stable configured publisher ID, persists each fact before any consumer acts, and
+then broadcasts the same record. It does not own transport registration,
+admission, routing, reply authority, or send completion.
+
+Extension-provided labels or payload can never claim `HumanUi`,
+harness-internal, authenticated Tau-agent, or another extension instance
+authority. External payload always remains untrusted content; transport
+authentication, identity assurance, allowlist/lax routing policy, and actionable
+native routes remain extension-local.
 
 ## Boundary map
 
@@ -18,25 +24,23 @@ External content remains untrusted when an extension proxies it, but that does n
 turn the configured local extension stream into a hostile-process sandbox. See
 [`SECURITY.md`](../SECURITY.md) for the review rule.
 
-Canonical `reply_to` ids are opaque selectors, not secrets or bearer
-capabilities. Send completion revalidates the owning live connection, active
-session generation, agent, reply tool, and originating route. Durable facts may
-contain bounded native sender, conversation/thread, event, and message ids
-visible to authorized event subscribers, but never transport credentials or raw
-private route capabilities.
+Bridge-issued reply and reaction references select extension-private runtime
+state; generic consumers treat them as opaque data, and replay does not recreate
+their authority. Durable facts may contain bounded inert sender, conversation,
+message, and publisher-defined metadata visible to authorized event subscribers,
+but never transport credentials or bearer route values.
 
-The harness does not deduplicate transport ingress: each accepted RPC appends a
-new occurrence. Adapters may apply bounded transport-local retry suppression.
-Slack keeps only a process-local recent native-id cache, so cache eviction,
-restart, or races may duplicate delivery. External endpoints may also carry an
-explicitly sourced operator identity alias. It is presentation-only and requires
-a stable verified account. Model projection keeps the stable id primary and
-separately exposes alias authority plus the harness-authenticated transport
-instance.
-The generic default-false `transport_identity_mentioned` fact is likewise part
-of each durable ingress snapshot. It records
-transport-own addressing without exposing the transport's native identifier and
-confers no authority or egress behavior.
+The generic infrastructure does not deduplicate, order, resolve, authorize, or
+mutate message facts. Each successfully emitted fact is a distinct immutable
+occurrence. Adapters may apply bounded transport-local retry suppression. Slack
+keeps only a process-local recent native-id cache, so cache eviction, restart, or
+races may duplicate delivery.
+
+Valid committed facts project to an escaped `<tau_message event="…">` boundary
+that keeps stable IDs primary and optional display labels secondary. Incoming
+facts can activate a live target after transcript placement; replay reconstructs
+context without waking the model. Publisher metadata and message content remain
+untrusted and confer no identity, instruction, route, tool, or egress authority.
 
 ## Cross-harness messages
 

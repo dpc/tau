@@ -76,9 +76,6 @@ enum TestMessage {
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
     PeerSessionProbeResult(tau_proto::PeerSessionProbeResult),
-    RegisterTransportCapabilityResult(tau_proto::RegisterTransportCapabilityResult),
-    TransportMessageIngressResult(tau_proto::TransportMessageIngressResult),
-    CompleteTransportSendResult(tau_proto::CompleteTransportSendResult),
 }
 
 impl TestProtocolItem {
@@ -131,15 +128,6 @@ impl TestProtocolItem {
             HarnessOutputMessage::PeerSessionProbeResult(message) => {
                 Self::Message(TestMessage::PeerSessionProbeResult(message))
             }
-            HarnessOutputMessage::RegisterTransportCapabilityResult(message) => {
-                Self::Message(TestMessage::RegisterTransportCapabilityResult(message))
-            }
-            HarnessOutputMessage::TransportMessageIngressResult(message) => {
-                Self::Message(TestMessage::TransportMessageIngressResult(message))
-            }
-            HarnessOutputMessage::CompleteTransportSendResult(message) => {
-                Self::Message(TestMessage::CompleteTransportSendResult(message))
-            }
         }
     }
 
@@ -185,10 +173,7 @@ impl TestMessage {
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
-            | Self::PeerSessionProbeResult(_)
-            | Self::RegisterTransportCapabilityResult(_)
-            | Self::TransportMessageIngressResult(_)
-            | Self::CompleteTransportSendResult(_) => {
+            | Self::PeerSessionProbeResult(_) => {
                 panic!("test frame shim cannot send harness-output message as input")
             }
         }
@@ -1687,7 +1672,6 @@ mod mode;
 mod model;
 mod quota;
 mod replay;
-mod reply_projection;
 mod retry;
 mod strict_compaction_provider;
 

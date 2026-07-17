@@ -43,82 +43,6 @@ impl Write for SharedWriter {
     }
 }
 
-/// Writer that lets concurrency tests wait on emitted protocol bytes without
-/// polling or sleeping.
-#[derive(Clone, Default)]
-struct NotifyingWriter {
-    /// Shared bytes and write notification.
-    shared: Arc<(Mutex<Vec<u8>>, std::sync::Condvar)>,
-}
-
-impl NotifyingWriter {
-    /// Wait until a stable text fragment appears in encoded output.
-    fn wait_for(&self, needle: &[u8]) {
-        let (bytes, changed) = &*self.shared;
-        let bytes = bytes.lock().expect("writer bytes");
-        let (bytes, timeout) = changed
-            .wait_timeout_while(bytes, Duration::from_secs(2), |bytes| {
-                !bytes.windows(needle.len()).any(|window| window == needle)
-            })
-            .expect("writer wait");
-        assert!(!timeout.timed_out(), "output marker was not emitted");
-        assert!(bytes.windows(needle.len()).any(|window| window == needle));
-    }
-}
-
-impl Write for NotifyingWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let (bytes, changed) = &*self.shared;
-        bytes.lock().expect("writer bytes").extend(buf);
-        changed.notify_all();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Reader fed with complete framed chunks so tests can stop the serialized
-/// reader between lifecycle steps.
-struct StagedReader {
-    /// Ordered input chunks; channel close means EOF.
-    chunks: mpsc::Receiver<Vec<u8>>,
-    /// Current chunk.
-    current: Vec<u8>,
-    /// Next unread byte.
-    offset: usize,
-}
-
-impl Read for StagedReader {
-    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-        while self.offset == self.current.len() {
-            match self.chunks.recv() {
-                Ok(chunk) => {
-                    self.current = chunk;
-                    self.offset = 0;
-                }
-                Err(_) => return Ok(0),
-            }
-        }
-        let count = output.len().min(self.current.len() - self.offset);
-        output[..count].copy_from_slice(&self.current[self.offset..self.offset + count]);
-        self.offset += count;
-        Ok(count)
-    }
-}
-
-/// Encode complete harness-output frames for a staged reader.
-fn encode_output_frames(messages: &[HarnessOutputMessage]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut writer = tau_proto::HarnessOutputWriter::new(&mut bytes);
-    for message in messages {
-        writer.write_message(message).expect("encode output frame");
-    }
-    writer.flush().expect("flush output frames");
-    bytes
-}
-
 /// One complete fake Slack post recorded atomically for assertions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SentMessage {
@@ -208,7 +132,7 @@ impl FakeClient {
             .collect()
     }
 
-    /// Script one reaction result in call order.
+    /// Queue one typed reaction outcome for the next fake API call.
     fn push_reaction_result(&self, result: Result<(), ReactionApiError>) {
         self.reaction_results
             .lock()
@@ -283,16 +207,16 @@ impl SlackClient for FakeClient {
     }
 }
 
-/// Fake whose reaction call blocks until the test releases a lifecycle race.
+/// Reaction client whose one API call can complete after a fatal writer
+/// barrier.
 struct BlockingReactionClient {
-    /// Signals that Slack I/O has begun.
     started: Mutex<Option<mpsc::Sender<()>>>,
-    /// Release signal consumed by the blocked call.
     release: Mutex<mpsc::Receiver<()>>,
 }
+
 impl SlackClient for BlockingReactionClient {
     fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("not used")
+        Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
     }
 
     fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
@@ -300,53 +224,6 @@ impl SlackClient for BlockingReactionClient {
             bot_user_id: "UBOT123".to_owned(),
             team_id: "T123".to_owned(),
         })
-    }
-
-    fn verified_human_identity(
-        &self,
-        _cfg: &RuntimeConfig,
-        _user_id: &str,
-    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
-        unreachable!("not used")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _body: &FrozenPostBody,
-    ) -> PostAttemptOutcome<PostedMessage> {
-        unreachable!("not used")
-    }
-
-    fn react(
-        &self,
-        _cfg: &RuntimeConfig,
-        _action: ReactionActionKind,
-        _channel_id: &str,
-        _message_ts: &str,
-        _emoji: &str,
-    ) -> Result<(), ReactionApiError> {
-        if let Some(started) = self.started.lock().expect("started lock").take() {
-            started.send(()).expect("signal started");
-        }
-        self.release
-            .lock()
-            .expect("release lock")
-            .recv()
-            .expect("release reaction");
-        Ok(())
-    }
-}
-
-struct FailingAuthClient;
-
-impl SlackClient for FailingAuthClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        Err(SlackApiError::Authentication)
     }
 
     fn verified_human_identity(
@@ -368,105 +245,27 @@ impl SlackClient for FailingAuthClient {
             thread_ts: body.thread_ts().map(str::to_owned),
         })
     }
-}
 
-/// Auth-only fake for malformed or incomplete reconnect evidence.
-struct InvalidInstallationClient {
-    result: Result<SlackInstallationIdentity, SlackApiError>,
-}
-
-/// Reconnect fake proving pair comparison precedes socket-ticket acquisition.
-struct ChangedInstallationClient {
-    open_count: Mutex<usize>,
-    open_result: Result<String, SlackApiError>,
-}
-
-impl SlackClient for ChangedInstallationClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        *self.open_count.lock().expect("open count") += 1;
-        self.open_result.clone()
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        Ok(SlackInstallationIdentity {
-            bot_user_id: "UBOT999".to_owned(),
-            team_id: "T999".to_owned(),
-        })
-    }
-
-    fn verified_human_identity(
+    fn react(
         &self,
         _cfg: &RuntimeConfig,
-        _user_id: &str,
-    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
-        unreachable!("installation-only client")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _body: &FrozenPostBody,
-    ) -> PostAttemptOutcome<PostedMessage> {
-        unreachable!("installation-only client")
+        _action: ReactionActionKind,
+        _channel_id: &str,
+        _message_ts: &str,
+        _emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        if let Some(started) = self.started.lock().expect("started").take() {
+            started.send(()).expect("announce blocked reaction");
+        }
+        self.release
+            .lock()
+            .expect("release")
+            .recv()
+            .expect("release blocked reaction");
+        Ok(())
     }
 }
 
-impl SlackClient for InvalidInstallationClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("identity validation stops before socket open")
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        self.result.clone()
-    }
-
-    fn verified_human_identity(
-        &self,
-        _cfg: &RuntimeConfig,
-        _user_id: &str,
-    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
-        unreachable!("installation-only client")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _body: &FrozenPostBody,
-    ) -> PostAttemptOutcome<PostedMessage> {
-        unreachable!("installation-only client")
-    }
-}
-
-struct FailingPostClient;
-
-impl SlackClient for FailingPostClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        unreachable!("post-only client")
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        Ok(SlackInstallationIdentity {
-            bot_user_id: "UBOT123".to_owned(),
-            team_id: "T123".to_owned(),
-        })
-    }
-
-    fn verified_human_identity(
-        &self,
-        _cfg: &RuntimeConfig,
-        _user_id: &str,
-    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
-        unreachable!("post-only client")
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _body: &FrozenPostBody,
-    ) -> PostAttemptOutcome<PostedMessage> {
-        PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Transport)
-    }
-}
 /// Scripted identity client used to verify fail-closed outage and recovery
 /// behavior.
 struct IdentitySequenceClient {
@@ -590,23 +389,6 @@ fn dm_cfg() -> RuntimeConfig {
         }),
         ..cfg()
     }
-}
-
-fn multi_channel_cfg() -> RuntimeConfig {
-    let mut config = cfg();
-    config.conversations.insert(
-        "team-two".to_owned(),
-        ConversationPolicy {
-            alias: "team-two".to_owned(),
-            conversation_id: "C456".to_owned(),
-            kind: ConversationPolicyKind::Channel,
-            receive: Some(ReceiveMode::MentionsOnly),
-            description: None,
-            thread_ts: None,
-        },
-    );
-    reindex_receive_routes(&mut config);
-    config
 }
 
 fn fixed_thread_cfg(kind: ConversationPolicyKind, conversation_id: &str) -> RuntimeConfig {
@@ -894,20 +676,6 @@ fn run_protocol_messages(
     let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
     for message in messages {
         writer.write_message(message).expect("write input");
-        if matches!(
-            message,
-            HarnessOutputMessage::Configure(configure) if !configure.secrets.is_empty()
-        ) {
-            writer
-                .write_message(&HarnessOutputMessage::RegisterTransportCapabilityResult(
-                    tau_proto::RegisterTransportCapabilityResult {
-                        request_id: format!("{CAPABILITY_REQUEST_PREFIX}1"),
-                        accepted: true,
-                        error: None,
-                    },
-                ))
-                .expect("write capability result");
-        }
     }
     writer.flush().expect("flush input");
 
@@ -937,9 +705,31 @@ fn extension() -> (
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
         state.instance_name = Some("std-slack".into());
-        state.capability_active = true;
     }
     (ext, rx, client)
+}
+
+/// Capture the lifecycle fields attached to one ACK-admitted Socket occurrence.
+fn admission_context(ext: &Extension) -> AdmissionContext {
+    let state = ext.state.lock().expect("state");
+    AdmissionContext {
+        trace: LatencyTrace {
+            connection_generation: 1,
+            trace_seq: 1,
+            event_class: "delete",
+        },
+        received_at: Instant::now(),
+        ingress_epoch: state.ingress_epoch,
+        config_generation: state.config_generation,
+        agent_generation: state.agent_generation,
+        installation_team_id: state
+            .installation_team_id
+            .clone()
+            .expect("installation identity"),
+        queue_wait_us: 0,
+        identity_us: Cell::new(0),
+        outcome: Cell::new("rejected_route"),
+    }
 }
 
 fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> SlackMessage {
@@ -971,70 +761,35 @@ fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> Sl
 #[test]
 fn transport_mention_normalization_is_exact_and_code_aware() {
     let cases = [
-        ("<@UBOT123> hello", "hello", true, true),
+        ("<@UBOT123> hello", "hello", true),
         (
             "hello <@UBOT123> <@UBOT123>",
             "hello @slack_bridge @slack_bridge",
-            true,
             false,
         ),
-        ("hello <@UBOT123>", "hello @slack_bridge", true, false),
-        ("<@UBOT123><@UBOT123>", "@slack_bridge", true, true),
-        ("`<@UBOT123>`", "`<@UBOT123>`", false, false),
-        ("``<@UBOT123>``", "``<@UBOT123>``", false, false),
+        ("hello <@UBOT123>", "hello @slack_bridge", false),
+        ("<@UBOT123><@UBOT123>", "@slack_bridge", true),
+        ("`<@UBOT123>`", "`<@UBOT123>`", false),
+        ("``<@UBOT123>``", "``<@UBOT123>``", false),
         (
             "```text\n<@UBOT123>\n``` after <@UBOT123>",
             "```text\n<@UBOT123>\n``` after @slack_bridge",
-            true,
             false,
         ),
-        (
-            "` unmatched <@UBOT123>",
-            "` unmatched @slack_bridge",
-            true,
-            false,
-        ),
-        ("&lt;@UBOT123&gt;", "&lt;@UBOT123&gt;", false, false),
-        ("<@UOTHER>", "<@UOTHER>", false, false),
-        ("<@UBOT123|bridge>", "<@UBOT123|bridge>", false, false),
-        ("<@UBOT123", "<@UBOT123", false, false),
-        ("<@ubot123>", "<@ubot123>", false, false),
-        ("<@UBOT12>", "<@UBOT12>", false, false),
-        ("＠slack_bridge", "＠slack_bridge", false, false),
-        ("@slack_bridge", "@slack_bridge", false, false),
+        ("` unmatched <@UBOT123>", "` unmatched @slack_bridge", false),
+        ("&lt;@UBOT123&gt;", "&lt;@UBOT123&gt;", false),
+        ("<@UOTHER>", "<@UOTHER>", false),
+        ("<@UBOT123|bridge>", "<@UBOT123|bridge>", false),
+        ("<@UBOT123", "<@UBOT123", false),
+        ("<@ubot123>", "<@ubot123>", false),
+        ("<@UBOT12>", "<@UBOT12>", false),
+        ("＠slack_bridge", "＠slack_bridge", false),
+        ("@slack_bridge", "@slack_bridge", false),
     ];
-    for (input, expected, mentioned, leading) in cases {
+    for (input, expected, leading) in cases {
         let normalized = normalize_transport_mentions(input, "UBOT123");
         assert_eq!(normalized.text, expected, "{input}");
-        assert_eq!(normalized.mentioned, mentioned, "{input}");
         assert_eq!(normalized.leading, leading, "{input}");
-    }
-}
-
-/// Canonical create drafts carry normalized text and the independent typed
-/// addressing fact for leading, embedded, and literal-token inputs.
-#[test]
-fn transport_mention_create_projection_is_canonical() {
-    for (input, expected, mentioned) in [
-        ("<@UBOT123> hello", "hello", true),
-        (
-            "hello <@UBOT123> and `<@UBOT123>`",
-            "hello @slack_bridge and `<@UBOT123>`",
-            true,
-        ),
-        ("literal @slack_bridge", "literal @slack_bridge", false),
-    ] {
-        let (ext, rx, _client) = extension();
-        register_agent(&ext, "agent-a");
-        ext.process_slack_message(slack_message("C123", Some("channel"), input));
-        let request = recv_prompt_request(&rx);
-        assert_eq!(request.draft.transport_identity_mentioned, mentioned);
-        assert!(matches!(
-            request.draft.operation,
-            MessageOperation::Create {
-                payload: MessagePayload::Text { ref text, .. }
-            } if text == expected
-        ));
     }
 }
 
@@ -1110,7 +865,6 @@ fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
     reindex_receive_routes(&mut config);
     ext.apply_config(config).expect("test config");
     let mut state = ext.state.lock().expect("state");
-    state.capability_active = true;
     state.bot_user_id = Some("UBOT123".to_owned());
     state.installation_team_id = Some("T123".to_owned());
     state
@@ -1143,212 +897,606 @@ fn discovery_aliases(value: &CborValue) -> Vec<String> {
         .collect()
 }
 
+/// Receive the next directly published delivered-message text.
 fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
-    let request = recv_prompt_request(rx);
-    match request.draft.operation {
-        MessageOperation::Create {
-            payload: MessagePayload::Text { text, .. },
-        } => text,
-        operation => panic!("expected text create, got {operation:?}"),
-    }
-}
-
-fn recv_prompt_request(
-    rx: &mpsc::Receiver<HarnessInputMessage>,
-) -> tau_proto::TransportMessageIngressRequest {
     loop {
-        if let HarnessInputMessage::TransportMessageIngress(request) = rx.recv().expect("message") {
-            return *request;
+        if let HarnessInputMessage::Emit(emit) = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("direct message fact")
+            && let Event::MessageDelivered(fact) = *emit.event
+        {
+            return fact.text;
         }
     }
 }
 
-fn activate_prompt_origin(ext: &Extension, prompt: &tau_proto::TransportMessageIngressRequest) {
-    activate_ingress_route(ext, prompt, "msg-test");
-}
-
-fn activate_ingress_route(
-    ext: &Extension,
-    prompt: &tau_proto::TransportMessageIngressRequest,
-    message_id: &str,
-) {
-    apply_output_message(
-        &HarnessOutputMessage::TransportMessageIngressResult(
-            tau_proto::TransportMessageIngressResult {
-                request_id: prompt.request_id.clone(),
-                message_id: Some(MessageId::new(message_id)),
-                outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
-                error: None,
-            },
-        ),
-        ext,
-    );
-}
-fn ingress_text(request: &tau_proto::TransportMessageIngressRequest) -> &str {
-    match &request.draft.operation {
-        MessageOperation::Create {
-            payload: MessagePayload::Text { text, .. },
-        } => text,
-        operation => panic!("expected text create, got {operation:?}"),
+/// Receive the next directly published message fact.
+fn recv_message_fact(rx: &mpsc::Receiver<HarnessInputMessage>, expected: &str) -> Event {
+    loop {
+        if let HarnessInputMessage::Emit(emit) = rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or_else(|error| panic!("expected {expected} fact: {error}"))
+            && matches!(
+                emit.event.as_ref(),
+                Event::MessageDelivered(_)
+                    | Event::MessageEdited(_)
+                    | Event::MessageDeleted(_)
+                    | Event::MessageReactionAdded(_)
+                    | Event::MessageReactionRemoved(_)
+            )
+        {
+            return *emit.event;
+        }
     }
 }
 
+/// Assert that no directly published message fact is queued.
 fn assert_no_ingress(rx: &mpsc::Receiver<HarnessInputMessage>) {
     while let Ok(message) = rx.try_recv() {
-        assert!(
-            !matches!(message, HarnessInputMessage::TransportMessageIngress(_)),
-            "unexpected typed ingress"
-        );
-    }
-}
-
-fn complete_pending_send(
-    ext: &Extension,
-    rx: &mpsc::Receiver<HarnessInputMessage>,
-    accepted: bool,
-) {
-    loop {
-        if let HarnessInputMessage::CompleteTransportSend(request) =
-            rx.recv().expect("send completion request")
-        {
-            apply_output_message(
-                &HarnessOutputMessage::CompleteTransportSendResult(
-                    tau_proto::CompleteTransportSendResult {
-                        request_id: request.request_id.clone(),
-                        message_id: accepted.then(|| MessageId::new("msg-outgoing")),
-                        accepted,
-                        error: (!accepted).then(|| "rejected_for_test".to_owned()),
-                    },
+        if let HarnessInputMessage::Emit(emit) = message {
+            assert!(
+                !matches!(
+                    emit.event.as_ref(),
+                    Event::MessageDelivered(_)
+                        | Event::MessageEdited(_)
+                        | Event::MessageDeleted(_)
+                        | Event::MessageReactionAdded(_)
+                        | Event::MessageReactionRemoved(_)
                 ),
-                ext,
+                "unexpected direct message fact"
             );
-            return;
         }
     }
 }
 
-/// A correlated accepted harness result activates the pending source route used
-/// by successful send completion and preserves the originating sender policy.
+/// Slack publishes create, edit, reaction, and delete occurrences directly as
+/// immutable facts that retain one publisher-scoped target identity.
 #[test]
-fn accepted_ingress_result_activates_pending_send_completion_route() {
+fn direct_message_fact_lifecycle_preserves_target_identity() {
     let (ext, rx, _client) = extension();
-    ext.state
-        .lock()
-        .expect("lock")
-        .config
-        .as_mut()
-        .expect("config")
-        .security_mode = SecurityMode::Lax;
     register_agent(&ext, "agent-a");
-    let mut message = slack_message("C123", None, "<@UBOT123> typed");
-    message.user_id = "U999".to_owned();
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    let native_id = message.ts.clone().expect("native message id");
+
     ext.process_slack_message(message);
-    let ingress = recv_prompt_request(&rx);
-    apply_output_message(
-        &HarnessOutputMessage::TransportMessageIngressResult(
-            tau_proto::TransportMessageIngressResult {
-                request_id: ingress.request_id,
-                message_id: Some(MessageId::new("msg-canonical")),
-                outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
-                error: None,
-            },
-        ),
-        &ext,
+    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
+        panic!("expected delivered fact");
+    };
+    assert_eq!(delivered.publisher_extension_id.as_str(), "std-slack");
+    assert_eq!(delivered.text, "hello");
+    assert_eq!(
+        delivered.message_id.as_str(),
+        format!("slack:C123:{native_id}")
     );
 
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("message".to_owned()),
-            CborValue::Text("reply".to_owned()),
-        ),
-        (
-            CborValue::Text("reply_to".to_owned()),
-            CborValue::Text("msg-canonical".to_owned()),
-        ),
-    ]);
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", args))
-            .is_none()
-    );
-    let HarnessInputMessage::CompleteTransportSend(request) = rx.recv().expect("completion") else {
-        panic!("expected successful-send completion");
+    ext.process_slack_edit(slack_edit("edit-1", "C123", &native_id, None, "updated"));
+    let Event::MessageEdited(edited) = recv_message_fact(&rx, "edited") else {
+        panic!("expected edited fact");
     };
-    assert_eq!(request.in_reply_to, Some(MessageId::new("msg-canonical")));
-    assert_eq!(
-        request.draft.policy_status,
-        SenderPolicyStatus::LaxPermitted
+    assert_eq!(edited.target.message_id, delivered.message_id);
+    assert_eq!(edited.text, "updated");
+    assert_eq!(edited.publisher_extension_id.as_str(), "std-slack");
+
+    ext.state.lock().expect("state").posted_messages.insert(
+        PostedMessageKey::new("C123", "9.0"),
+        PostedMessageOwner {
+            agent_id: agent_id("agent-a"),
+            message_id: delivered.message_id.clone(),
+            thread_ts: None,
+            conversation: slack_conversation("C123", None),
+            installation_team_id: "T123".to_owned(),
+        },
     );
-    assert_eq!(
-        request.draft.conversation,
-        Some(message_conversation(&slack_conversation("C123", None)))
-    );
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none(),
-        "post ownership must wait for durable completion"
-    );
-    apply_output_message(
-        &HarnessOutputMessage::CompleteTransportSendResult(
-            tau_proto::CompleteTransportSendResult {
-                request_id: request.request_id.clone(),
-                message_id: None,
-                accepted: false,
-                error: Some("rejected_for_test".to_owned()),
+    ext.process_slack_reaction(slack_reaction(
+        "reaction-1",
+        "reaction_added",
+        "C123",
+        "9.0",
+    ));
+    let Event::MessageReactionAdded(reaction) = recv_message_fact(&rx, "reaction-added") else {
+        panic!("expected reaction-added fact");
+    };
+    assert_eq!(reaction.target.message_id, delivered.message_id);
+    assert_eq!(reaction.reaction, "thumbsup");
+    assert_eq!(reaction.publisher_extension_id.as_str(), "std-slack");
+    ext.process_slack_reaction(slack_reaction(
+        "reaction-2",
+        "reaction_removed",
+        "C123",
+        "9.0",
+    ));
+    let Event::MessageReactionRemoved(removed) = recv_message_fact(&rx, "reaction-removed") else {
+        panic!("expected reaction-removed fact");
+    };
+    assert_eq!(removed.target.message_id, delivered.message_id);
+    assert_eq!(removed.publisher_extension_id.as_str(), "std-slack");
+
+    let reaction_key = ReactionKey {
+        channel_id: "C123".to_owned(),
+        message_ts: native_id.clone(),
+        emoji: "eyes".to_owned(),
+    };
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.reaction_owners.insert(
+            reaction_key.clone(),
+            ReactionOwner {
+                agent_id: agent_id("agent-a"),
+                message_ref: delivered.message_id.clone(),
             },
-        ),
-        &ext,
-    );
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none(),
-        "rejected completion must never activate ownership"
-    );
+        );
+        state.reaction_in_flight.insert(
+            reaction_key,
+            ReactionReservation {
+                agent_id: agent_id("agent-a"),
+                token: 7,
+                message_ref: delivered.message_id.clone(),
+                unowned_add: false,
+            },
+        );
+    }
+    ext.process_slack_delete(SlackDelete {
+        event_id: Some("delete-1".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: native_id,
+        thread_ts: None,
+    });
+    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "deleted") else {
+        panic!("expected deleted fact");
+    };
+    assert_eq!(deleted.publisher_extension_id.as_str(), "std-slack");
+    assert_eq!(deleted.target.message_id, delivered.message_id);
+    assert!(deleted.actor.is_none());
+    let state = ext.state.lock().expect("state");
+    assert!(!state.reply_routes.contains_key(&delivered.message_id));
+    assert!(!state.reaction_targets.contains_key(&delivered.message_id));
+    assert!(state.reaction_owners.is_empty());
+    assert!(state.reaction_in_flight.is_empty());
 }
 
-/// Rejected completions and accepted results without a matching pending request
-/// cannot install source-bound route or ownership state.
+/// Deleting a bridge-authored post publishes against its sent fact and revokes
+/// all retained post and reaction authority.
 #[test]
-fn rejected_and_orphaned_ingress_results_install_nothing() {
+fn outgoing_message_delete_revokes_post_authority() {
+    let (ext, rx, _client) = extension();
+    let conversation = slack_conversation("C123", None);
+    let message_id = slack_message_fact_id("C123", "9.0");
+    ext.remember_posted_message(
+        conversation.clone(),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "9.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    {
+        let mut state = ext.state.lock().expect("state");
+        assert!(state.insert_reaction_target(
+            message_id.clone(),
+            ReactionTarget {
+                agent_id: agent_id("agent-a"),
+                conversation,
+                message_ts: "9.0".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                authority: ReactionAuthority::ConfiguredDestination {
+                    alias: "team".to_owned(),
+                },
+            },
+        ));
+        state.reaction_owners.insert(
+            ReactionKey {
+                channel_id: "C123".to_owned(),
+                message_ts: "9.0".to_owned(),
+                emoji: "eyes".to_owned(),
+            },
+            ReactionOwner {
+                agent_id: agent_id("agent-a"),
+                message_ref: message_id.clone(),
+            },
+        );
+    }
+
+    ext.process_slack_delete(SlackDelete {
+        event_id: Some("delete-outgoing".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: "9.0".to_owned(),
+        thread_ts: None,
+    });
+    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "outgoing deleted") else {
+        panic!("expected deleted fact");
+    };
+    assert_eq!(deleted.target.message_id, message_id);
+    let state = ext.state.lock().expect("state");
+    assert!(
+        state
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "9.0"))
+            .is_none()
+    );
+    assert!(!state.reaction_targets.contains_key(&message_id));
+    assert!(state.reaction_owners.is_empty());
+}
+
+/// Unregistering receive authority preserves proactive post provenance so a
+/// later Slack deletion can still revoke the sent target.
+#[test]
+fn outgoing_message_delete_survives_receive_unregister() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> typed"));
-    let ingress = recv_prompt_request(&rx);
-
-    apply_output_message(
-        &HarnessOutputMessage::TransportMessageIngressResult(
-            tau_proto::TransportMessageIngressResult {
-                request_id: ingress.request_id,
-                message_id: None,
-                outcome: None,
-                error: Some("rejected_for_test".to_owned()),
-            },
-        ),
-        &ext,
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "10.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
     );
-    apply_output_message(
-        &HarnessOutputMessage::TransportMessageIngressResult(
-            tau_proto::TransportMessageIngressResult {
-                request_id: "orphan-request".to_owned(),
-                message_id: Some(MessageId::new("orphan-message")),
-                outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
-                error: None,
-            },
-        ),
-        &ext,
+    assert!(matches!(
+        ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false))),
+        Event::ToolResult(_)
+    ));
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "10.0"))
+            .is_some()
     );
 
-    let state = ext.state.lock().expect("lock");
+    ext.process_slack_delete(SlackDelete {
+        event_id: Some("delete-after-unregister".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: "10.0".to_owned(),
+        thread_ts: None,
+    });
+    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "unregistered outgoing deleted")
+    else {
+        panic!("expected deleted fact");
+    };
+    assert_eq!(deleted.target.message_id.as_str(), "slack:C123:10.0");
+}
+
+/// Receive-registration generation changes after ACK do not invalidate exact
+/// proactive post provenance, including changes for unrelated agents.
+#[test]
+fn admitted_outgoing_delete_ignores_receive_registration_churn() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.state.lock().expect("state").session_active = true;
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "11.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let admission = admission_context(&ext);
+    assert!(matches!(
+        ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false))),
+        Event::ToolResult(_)
+    ));
+    register_agent(&ext, "agent-b");
+
+    ext.process_slack_delete_admitted(
+        SlackDelete {
+            event_id: Some("delete-after-agent-churn".to_owned()),
+            channel_id: "C123".to_owned(),
+            message_ts: "11.0".to_owned(),
+            thread_ts: None,
+        },
+        Some(&admission),
+    );
+    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "churned outgoing deleted") else {
+        panic!("expected deleted fact");
+    };
+    assert_eq!(deleted.target.message_id.as_str(), "slack:C123:11.0");
+}
+
+/// An ACK-era incoming owner cannot publish deletion after unregister removes
+/// its exact source ownership.
+#[test]
+fn admitted_incoming_delete_fails_closed_after_unregister() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", Some("channel"), "<@UBOT123> hello"));
+    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
+        panic!("expected delivered fact");
+    };
+    ext.state.lock().expect("state").session_active = true;
+    let admission = admission_context(&ext);
+    assert!(matches!(
+        ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false))),
+        Event::ToolResult(_)
+    ));
+
+    let message_ts = delivered
+        .message_id
+        .as_str()
+        .strip_prefix("slack:C123:")
+        .expect("Slack fact id");
+    ext.process_slack_delete_admitted(
+        SlackDelete {
+            event_id: Some("stale-incoming-delete".to_owned()),
+            channel_id: "C123".to_owned(),
+            message_ts: message_ts.to_owned(),
+            thread_ts: None,
+        },
+        Some(&admission),
+    );
+    assert_no_ingress(&rx);
+}
+
+/// Confirmed deletion-output failure enters the same synchronous fatal barrier
+/// as send publication failure before any later remote effect can start.
+#[test]
+fn deletion_writer_failure_retires_all_remote_effect_authority() {
+    let (output_tx, output_rx) = mpsc::channel();
+    drop(output_rx);
+    let client = FakeClient::new();
+    let ext = Extension::new(client.clone(), output_tx);
+    ext.apply_config(cfg()).expect("config");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
+        state.instance_name = Some("std-slack".into());
+        state.session_active = true;
+        state.registered_agents.insert(agent_id("agent-a"));
+    }
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "12.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    {
+        let mut state = ext.state.lock().expect("state");
+        assert!(state.insert_reaction_target(
+            MessageFactId::new("slack:C123:12.0"),
+            ReactionTarget {
+                agent_id: agent_id("agent-a"),
+                conversation: slack_conversation("C123", None),
+                message_ts: "12.0".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                authority: ReactionAuthority::ConfiguredDestination {
+                    alias: "team".to_owned(),
+                },
+            },
+        ));
+    }
+
+    ext.process_slack_delete(SlackDelete {
+        event_id: Some("delete-writer-failure".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: "12.0".to_owned(),
+        thread_ts: None,
+    });
+
+    assert!(ext.output_failed.load(Ordering::Acquire));
+    assert!(ext.shutdown.is_requested());
+    let state = ext.state.lock().expect("state");
+    assert!(!state.session_active);
+    assert!(state.send_ledger.is_empty());
     assert!(state.reply_routes.is_empty());
-    assert!(state.incoming_messages.is_empty());
     assert!(state.reaction_targets.is_empty());
+    assert!(state.reaction_in_flight.is_empty());
+    drop(state);
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message":"must not post","destination":"team"}),
+        ),
+    ));
+    assert!(matches!(result, Some(Event::ToolError(_))));
+    assert!(client.sent.lock().expect("sent").is_empty());
+}
+
+/// A reaction that returns after fatal output retirement cannot recreate target
+/// ownership cleared by the barrier.
+#[test]
+fn deletion_writer_failure_rejects_late_reaction_completion() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let client = Arc::new(BlockingReactionClient {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (output_tx, output_rx) = mpsc::channel();
+    drop(output_rx);
+    let ext = Arc::new(Extension::new(client, output_tx));
+    ext.apply_config(proactive_cfg()).expect("config");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
+        state.instance_name = Some("std-slack".into());
+        state.session_active = true;
+        assert!(state.insert_reaction_target(
+            MessageFactId::new("slack:C456:1.0"),
+            ReactionTarget {
+                agent_id: agent_id("agent-a"),
+                conversation: SlackConversation {
+                    alias: "team-ops".to_owned(),
+                    channel_id: "C456".to_owned(),
+                    kind: ConversationPolicyKind::Channel,
+                    thread_ts: None,
+                },
+                message_ts: "1.0".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                authority: ReactionAuthority::ConfiguredDestination {
+                    alias: "team-ops".to_owned(),
+                },
+            },
+        ));
+    }
+    ext.remember_posted_message(
+        SlackConversation {
+            alias: "team-ops".to_owned(),
+            channel_id: "C456".to_owned(),
+            kind: ConversationPolicyKind::Channel,
+            thread_ts: None,
+        },
+        PostedMessage {
+            channel_id: "C456".to_owned(),
+            ts: "2.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+
+    let reacting = Arc::clone(&ext);
+    let reaction = std::thread::spawn(move || {
+        reacting.handle_react(tool(
+            REACT_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message_ref":"slack:C456:1.0","emoji":"eyes","action":"add"}),
+            ),
+        ))
+    });
+    started_rx.recv().expect("reaction started");
+    ext.process_slack_delete(SlackDelete {
+        event_id: Some("fatal-delete-with-reaction".to_owned()),
+        channel_id: "C456".to_owned(),
+        message_ts: "2.0".to_owned(),
+        thread_ts: None,
+    });
+    release_tx.send(()).expect("release reaction");
+    assert!(matches!(
+        reaction.join().expect("reaction worker"),
+        Event::ToolError(_)
+    ));
+    let state = ext.state.lock().expect("state");
+    assert!(state.reaction_targets.is_empty());
+    assert!(state.reaction_owners.is_empty());
+    assert!(state.reaction_in_flight.is_empty());
+}
+
+/// The early output-failure latch closes reaction and local-reply admission
+/// even while fatal retirement is blocked behind an in-progress publication.
+#[test]
+fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
+    let (output_tx, output_rx) = mpsc::channel();
+    drop(output_rx);
+    let client = FakeClient::new();
+    let ext = Extension::new(client.clone(), output_tx);
+    ext.apply_config(cfg()).expect("config");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.installation_team_id = Some("T123".to_owned());
+        state.instance_name = Some("std-slack".into());
+    }
+    register_agent(&ext, "agent-a");
+    let message_ref = "slack:C123:13.0";
+    install_source_reaction_target(&ext, message_ref);
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "13.5".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks.output_failure_boundary.lock().expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let ext = Arc::new(ext);
+    let deleting = Arc::clone(&ext);
+    let deletion = std::thread::spawn(move || {
+        deleting.process_slack_delete(SlackDelete {
+            event_id: Some("writer-failure-boundary".to_owned()),
+            channel_id: "C123".to_owned(),
+            message_ts: "13.5".to_owned(),
+            thread_ts: None,
+        });
+    });
+    reached_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer failure latched under gate");
+    assert!(ext.output_failed.load(Ordering::Acquire));
+    assert!(matches!(
+        ext.handle_react(tool(
+            REACT_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message_ref":message_ref,"emoji":"eyes","action":"add"}),
+            ),
+        )),
+        Event::ToolError(_)
+    ));
+    ext.reply(&cfg(), "C123", None, "must not post", None);
+    assert!(client.reactions.lock().expect("reactions").is_empty());
+    assert!(client.sent.lock().expect("sent").is_empty());
+    release_tx.send(()).expect("release writer failure");
+    deletion.join().expect("deletion");
+}
+
+/// Session retirement while deletion waits at the publication boundary is
+/// observed by the final owner/lifecycle validation and suppresses the fact.
+#[test]
+fn delete_publication_gate_revalidates_after_session_retirement() {
+    let (ext, rx, _client) = extension();
+    ext.state.lock().expect("state").session_active = true;
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            channel_id: "C123".to_owned(),
+            ts: "14.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let admission = admission_context(&ext);
+    let ext = Arc::new(ext);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks
+        .delete_publication_boundary
+        .lock()
+        .expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let publication_gate = Arc::clone(&ext.output_publication_gate);
+    let publication = publication_gate.lock().expect("publication gate");
+    let deleting = Arc::clone(&ext);
+    let deletion = std::thread::spawn(move || {
+        deleting.process_slack_delete_admitted(
+            SlackDelete {
+                event_id: Some("delete-at-session-retirement".to_owned()),
+                channel_id: "C123".to_owned(),
+                message_ts: "14.0".to_owned(),
+                thread_ts: None,
+            },
+            Some(&admission),
+        );
+    });
+    reached_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("deletion reached publication boundary");
+    {
+        let mut state = ext.state.lock().expect("state");
+        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+        state.session_active = false;
+    }
+    release_tx.send(()).expect("release deletion");
+    drop(publication);
+    deletion.join().expect("deletion");
+    assert_no_ingress(&rx);
 }
 
 /// Lax mode cannot use an unlinked DM even to trigger validation replies or
@@ -1372,68 +1520,6 @@ fn lax_unlinked_dm_has_no_ingress_or_reply_side_effects() {
     }
     assert_no_ingress(&rx);
     assert!(client.sent.lock().expect("lock").is_empty());
-}
-
-/// Canonical reply routes evict oldest selectors at their hard capacity instead
-/// of growing connection state.
-#[test]
-fn typed_reply_route_state_is_bounded() {
-    let mut state = State::default();
-    for index in 0..=REPLY_ROUTE_LIMIT {
-        state.insert_reply_route(
-            MessageId::new(format!("msg-{index}")),
-            ReplyRoute {
-                agent_id: agent_id("agent-a"),
-                conversation: slack_conversation("C123", None),
-                user_id: "U123".to_owned(),
-                display_name: None,
-                identity_alias: None,
-                installation_team_id: "T123".to_owned(),
-                policy_status: SenderPolicyStatus::Allowlisted,
-            },
-        );
-    }
-    assert_eq!(state.reply_routes.len(), REPLY_ROUTE_LIMIT);
-    assert!(!state.reply_routes.contains_key(&MessageId::new("msg-0")));
-}
-
-/// Session capability renewal uses unique correlation ids and ignores late
-/// results from an earlier harness generation.
-#[test]
-fn capability_renewal_ignores_stale_results() {
-    let (ext, rx, _client) = extension();
-    ext.request_transport_capability();
-    let HarnessInputMessage::RegisterTransportCapability(first) = rx.recv().expect("first") else {
-        panic!("expected capability request");
-    };
-    ext.request_transport_capability();
-    let HarnessInputMessage::RegisterTransportCapability(second) = rx.recv().expect("second")
-    else {
-        panic!("expected capability request");
-    };
-    assert_ne!(first.request_id, second.request_id);
-    apply_output_message(
-        &HarnessOutputMessage::RegisterTransportCapabilityResult(
-            tau_proto::RegisterTransportCapabilityResult {
-                request_id: first.request_id,
-                accepted: true,
-                error: None,
-            },
-        ),
-        &ext,
-    );
-    assert!(!ext.state.lock().expect("lock").capability_active);
-    apply_output_message(
-        &HarnessOutputMessage::RegisterTransportCapabilityResult(
-            tau_proto::RegisterTransportCapabilityResult {
-                request_id: second.request_id,
-                accepted: true,
-                error: None,
-            },
-        ),
-        &ext,
-    );
-    assert!(ext.state.lock().expect("lock").capability_active);
 }
 
 /// Ensures the shared shutdown signal wakes async waiters immediately,
@@ -1606,7 +1692,6 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
         state.registered_agents.insert(agent_id("agent-a"));
-        state.capability_active = true;
         state.session_active = true;
     }
     let queue = AdmissionQueue::new();
@@ -1839,30 +1924,238 @@ fn outbound_reaction_emoji_validation_is_strict() {
     assert!(!valid_outbound_emoji(&"a".repeat(65)));
 }
 
-/// Committed incoming creates become exact targets; local ownership gates
-/// removal and same-call replay never repeats Slack I/O.
+/// Install one exact source-authorized reaction target for tool behavior tests.
+fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
+    let message_id = MessageFactId::new(message_ref);
+    let conversation = slack_conversation("C123", None);
+    let mut state = ext.state.lock().expect("state");
+    state.session_active = true;
+    state.insert_reply_route(
+        message_id.clone(),
+        ReplyRoute {
+            agent_id: agent_id("agent-a"),
+            conversation: conversation.clone(),
+            user_id: "U123".to_owned(),
+            display_name: None,
+            identity_alias: None,
+            installation_team_id: "T123".to_owned(),
+        },
+    );
+    assert!(state.insert_reaction_target(
+        MessageFactId::new(message_ref),
+        ReactionTarget {
+            agent_id: agent_id("agent-a"),
+            conversation,
+            message_ts: "1.0".to_owned(),
+            installation_team_id: "T123".to_owned(),
+            authority: ReactionAuthority::Source {
+                message_id,
+                user_id: "U123".to_owned(),
+            },
+        },
+    ));
+}
+
+/// Ownership capacity rejects a new unowned add before Slack I/O.
 #[test]
-fn reaction_target_ownership_and_replay_are_bounded() {
+fn reaction_ownership_capacity_is_enforced_before_io() {
+    let (ext, _rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    install_source_reaction_target(&ext, "slack:C123:1.0");
+    {
+        let mut state = ext.state.lock().expect("state");
+        for index in 0..REACTION_OWNERSHIP_LIMIT {
+            state.reaction_owners.insert(
+                ReactionKey {
+                    channel_id: "C999".to_owned(),
+                    message_ts: format!("{index}.0"),
+                    emoji: "eyes".to_owned(),
+                },
+                ReactionOwner {
+                    agent_id: agent_id("agent-a"),
+                    message_ref: MessageFactId::new(format!("slack:C999:{index}.0")),
+                },
+            );
+        }
+    }
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "capacity-add",
+            reaction_args("slack:C123:1.0", "eyes", "add"),
+        )),
+        Event::ToolError(_)
+    ));
+    assert!(client.reactions.lock().expect("reactions").is_empty());
+}
+
+/// Target and attempt caches enforce oldest-first eviction without displacing
+/// live pinned entries or in-flight attempts.
+#[test]
+fn reaction_target_and_attempt_bounds_preserve_live_entries() {
+    let target = ReactionTarget {
+        agent_id: agent_id("agent-a"),
+        conversation: slack_conversation("C123", None),
+        message_ts: "1.0".to_owned(),
+        installation_team_id: "T123".to_owned(),
+        authority: ReactionAuthority::ConfiguredDestination {
+            alias: "team".to_owned(),
+        },
+    };
+    let mut state = State::default();
+    for index in 0..REACTION_TARGET_LIMIT {
+        assert!(state.insert_reaction_target(
+            MessageFactId::new(format!("slack:C123:{index}.0")),
+            target.clone()
+        ));
+    }
+    state.reaction_in_flight.insert(
+        ReactionKey {
+            channel_id: "C123".to_owned(),
+            message_ts: "0.0".to_owned(),
+            emoji: "eyes".to_owned(),
+        },
+        ReactionReservation {
+            agent_id: agent_id("agent-a"),
+            token: 1,
+            message_ref: MessageFactId::new("slack:C123:0.0"),
+            unowned_add: false,
+        },
+    );
+    assert!(state.insert_reaction_target(MessageFactId::new("slack:C123:new"), target.clone()));
+    assert!(
+        state
+            .reaction_targets
+            .contains_key(&MessageFactId::new("slack:C123:0.0"))
+    );
+    assert!(
+        !state
+            .reaction_targets
+            .contains_key(&MessageFactId::new("slack:C123:1.0"))
+    );
+    assert_eq!(state.reaction_targets.len(), REACTION_TARGET_LIMIT);
+
+    state.clear_reaction_state();
+    for index in 0..REACTION_TARGET_LIMIT {
+        let message_ref = MessageFactId::new(format!("slack:C123:{index}.0"));
+        assert!(state.insert_reaction_target(message_ref.clone(), target.clone()));
+        state.reaction_owners.insert(
+            ReactionKey {
+                channel_id: "C123".to_owned(),
+                message_ts: format!("{index}.0"),
+                emoji: "eyes".to_owned(),
+            },
+            ReactionOwner {
+                agent_id: agent_id("agent-a"),
+                message_ref,
+            },
+        );
+    }
+    assert!(!state.insert_reaction_target(MessageFactId::new("slack:C123:blocked"), target));
+
+    state.clear_reaction_state();
+    for index in 0..REACTION_ATTEMPT_LIMIT {
+        let invoke = tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            &format!("completed-{index}"),
+            reaction_args("slack:C123:1.0", "eyes", "add"),
+        );
+        assert!(state.remember_reaction_attempt(
+            &invoke,
+            ReactionAttemptDisposition::Success(CborValue::Null),
+        ));
+    }
+    let replacement = tool_call(
+        REACT_TOOL_NAME,
+        "agent-a",
+        "completed-new",
+        reaction_args("slack:C123:1.0", "eyes", "add"),
+    );
+    assert!(state.remember_reaction_attempt(
+        &replacement,
+        ReactionAttemptDisposition::Success(CborValue::Null),
+    ));
+    assert_eq!(state.reaction_attempts.len(), REACTION_ATTEMPT_LIMIT);
+    assert!(
+        !state
+            .reaction_attempts
+            .contains_key(&tau_proto::ToolCallId::new("completed-0"))
+    );
+
+    state.clear_reaction_state();
+    for index in 0..REACTION_ATTEMPT_LIMIT {
+        let invoke = tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            &format!("in-flight-{index}"),
+            reaction_args("slack:C123:1.0", "eyes", "add"),
+        );
+        assert!(state.remember_reaction_attempt(&invoke, ReactionAttemptDisposition::InFlight));
+    }
+    let blocked = tool_call(
+        REACT_TOOL_NAME,
+        "agent-a",
+        "in-flight-blocked",
+        reaction_args("slack:C123:1.0", "eyes", "add"),
+    );
+    assert!(!state.remember_reaction_attempt(&blocked, ReactionAttemptDisposition::InFlight));
+}
+
+/// A current Tau-issued reply selector resolves to its retained private route
+/// and publishes the sent fact/result without accepting a native destination.
+#[test]
+fn successful_send_uses_local_reply_selector() {
     let (ext, rx, client) = extension();
     register_agent(&ext, "agent-a");
-    let message = slack_message("C123", None, "<@UBOT123> react here");
-    let expected_ts = message.ts.clone().expect("timestamp");
-    ext.process_slack_message(message);
-    let prompt = recv_prompt_request(&rx);
+    install_source_reaction_target(&ext, "slack:C123:1.0");
     assert!(
-        !ext.state
-            .lock()
-            .expect("state")
-            .reaction_targets
-            .contains_key("msg-react")
+        ext.handle_send(tool_call(
+            SEND_TOOL_NAME,
+            "agent-a",
+            "successful-local-reply",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message":"reply","reply_to":"slack:C123:1.0"}),
+            ),
+        ))
+        .is_none()
     );
-    activate_ingress_route(&ext, &prompt, "msg-react");
+    let mut sent_publisher = None;
+    loop {
+        let message = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sent fact and result");
+        if let HarnessInputMessage::Emit(emit) = message {
+            match *emit.event {
+                Event::MessageSent(fact) => {
+                    sent_publisher = Some(fact.publisher_extension_id);
+                }
+                Event::ToolResult(_) => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(sent_publisher.expect("sent fact").as_str(), "std-slack");
+    let sent = client.sent.lock().expect("sent");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].channel_id, "C123");
+    assert_eq!(sent[0].text, "reply");
+}
+
+/// Successful add/replay/remove obey local ownership without repeating Slack
+/// I/O, while another agent cannot remove the owned reaction.
+#[test]
+fn reaction_target_ownership_and_replay_are_enforced() {
+    let (ext, _rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    install_source_reaction_target(&ext, "slack:C123:1.0");
 
     let add = tool_call(
         REACT_TOOL_NAME,
         "agent-a",
         "react-add",
-        reaction_args("msg-react", "eyes", "add"),
+        reaction_args("slack:C123:1.0", "eyes", "add"),
     );
     assert!(matches!(
         ext.handle_react(add.clone()),
@@ -1874,86 +2167,49 @@ fn reaction_target_ownership_and_replay_are_bounded() {
         &[RecordedReaction {
             action: ReactionActionKind::Add,
             channel_id: "C123".to_owned(),
-            message_ts: expected_ts.clone(),
+            message_ts: "1.0".to_owned(),
             emoji: "eyes".to_owned(),
         }]
     );
 
-    let other_remove = tool_call(
-        REACT_TOOL_NAME,
-        "agent-b",
-        "react-other",
-        reaction_args("msg-react", "eyes", "remove"),
-    );
     assert!(matches!(
-        ext.handle_react(other_remove),
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-b",
+            "react-other",
+            reaction_args("slack:C123:1.0", "eyes", "remove"),
+        )),
         Event::ToolError(_)
     ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 1);
-
-    let remove = tool_call(
-        REACT_TOOL_NAME,
-        "agent-a",
-        "react-remove",
-        reaction_args("msg-react", "eyes", "remove"),
-    );
-    assert!(matches!(ext.handle_react(remove), Event::ToolResult(_)));
+    assert!(matches!(
+        ext.handle_react(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "react-remove",
+            reaction_args("slack:C123:1.0", "eyes", "remove"),
+        )),
+        Event::ToolResult(_)
+    ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 2);
     assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
 }
 
-/// `already_reacted` never adopts an unowned shared-bot reaction, while an
-/// owned `no_reaction` remove clears stale local ownership.
+/// Slack idempotency outcomes never adopt an unowned shared-bot reaction, while
+/// an owned missing reaction is a successful local removal.
 #[test]
 fn reaction_idempotency_errors_respect_local_ownership() {
     let (ext, _rx, client) = extension();
     register_agent(&ext, "agent-a");
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.insert_reply_route(
-            MessageId::new("msg-react"),
-            ReplyRoute {
-                agent_id: agent_id("agent-a"),
-                conversation: SlackConversation {
-                    channel_id: "C123".to_owned(),
-                    thread_ts: None,
-                    kind: ConversationPolicyKind::Channel,
-                    alias: "team".to_owned(),
-                },
-                user_id: "U123".to_owned(),
-                display_name: None,
-                identity_alias: None,
-                installation_team_id: "T123".to_owned(),
-                policy_status: SenderPolicyStatus::Allowlisted,
-            },
-        );
-        let conversation = state
-            .reply_routes
-            .get(&MessageId::new("msg-react"))
-            .expect("route")
-            .conversation
-            .clone();
-        assert!(state.insert_reaction_target(
-            "msg-react".to_owned(),
-            ReactionTarget {
-                agent_id: agent_id("agent-a"),
-                conversation,
-                message_ts: "1.0".to_owned(),
-                installation_team_id: "T123".to_owned(),
-                authority: ReactionAuthority::Source {
-                    message_id: MessageId::new("msg-react"),
-                    user_id: "U123".to_owned(),
-                },
-            },
-        ));
-    }
+    install_source_reaction_target(&ext, "slack:C123:1.0");
+
     client.push_reaction_result(Err(ReactionApiError::AlreadyReacted));
     assert!(matches!(
         ext.handle_react(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "already",
-            reaction_args("msg-react", "eyes", "add"),
+            reaction_args("slack:C123:1.0", "eyes", "add"),
         )),
         Event::ToolError(_)
     ));
@@ -1965,7 +2221,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "add-ok",
-            reaction_args("msg-react", "eyes", "add"),
+            reaction_args("slack:C123:1.0", "eyes", "add"),
         )),
         Event::ToolResult(_)
     ));
@@ -1975,18 +2231,19 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "remove-missing",
-            reaction_args("msg-react", "eyes", "remove"),
+            reaction_args("slack:C123:1.0", "eyes", "remove"),
         )),
         Event::ToolResult(_)
     ));
     assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+
     client.push_reaction_result(Err(ReactionApiError::OutcomeUnknown));
     assert!(matches!(
         ext.handle_react(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "ambiguous-add",
-            reaction_args("msg-react", "wave", "add"),
+            reaction_args("slack:C123:1.0", "wave", "add"),
         )),
         Event::ToolError(_)
     ));
@@ -2027,82 +2284,6 @@ fn reaction_validation_and_ambiguous_failure_are_fail_closed() {
     assert!(client.reactions.lock().expect("lock").is_empty());
 }
 
-/// A Slack success arriving after session teardown cannot recreate ownership or
-/// replay state, even though the remote effect may have happened.
-#[test]
-fn late_reaction_success_after_shutdown_cannot_restore_state() {
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let client = Arc::new(BlockingReactionClient {
-        started: Mutex::new(Some(started_tx)),
-        release: Mutex::new(release_rx),
-    });
-    let (output, _output_rx) = mpsc::channel();
-    let ext = Arc::new(Extension::new(client, output));
-    apply_test_config(&ext, cfg());
-    register_agent(&ext, "agent-a");
-    {
-        let mut state = ext.state.lock().expect("state");
-        let conversation = SlackConversation {
-            channel_id: "C123".to_owned(),
-            thread_ts: None,
-            kind: ConversationPolicyKind::Channel,
-            alias: "team".to_owned(),
-        };
-        state.insert_reply_route(
-            MessageId::new("msg-late"),
-            ReplyRoute {
-                agent_id: agent_id("agent-a"),
-                conversation: conversation.clone(),
-                user_id: "U123".to_owned(),
-                display_name: None,
-                identity_alias: None,
-                installation_team_id: "T123".to_owned(),
-                policy_status: SenderPolicyStatus::Allowlisted,
-            },
-        );
-        assert!(state.insert_reaction_target(
-            "msg-late".to_owned(),
-            ReactionTarget {
-                agent_id: agent_id("agent-a"),
-                conversation,
-                message_ts: "1.0".to_owned(),
-                installation_team_id: "T123".to_owned(),
-                authority: ReactionAuthority::Source {
-                    message_id: MessageId::new("msg-late"),
-                    user_id: "U123".to_owned(),
-                },
-            },
-        ));
-    }
-    let worker = {
-        let ext = ext.clone();
-        std::thread::spawn(move || {
-            ext.handle_react(tool_call(
-                REACT_TOOL_NAME,
-                "agent-a",
-                "late-reaction",
-                reaction_args("msg-late", "eyes", "add"),
-            ))
-        })
-    };
-    started_rx.recv().expect("reaction started");
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.capability_active = false;
-        state.clear_reply_routes();
-        state.clear_reaction_state();
-    }
-    release_tx.send(()).expect("release reaction");
-    assert!(matches!(
-        worker.join().expect("worker"),
-        Event::ToolError(_)
-    ));
-    let state = ext.state.lock().expect("state");
-    assert!(state.reaction_owners.is_empty());
-    assert!(state.reaction_attempts.is_empty());
-    assert!(state.reaction_in_flight.is_empty());
-}
 /// Discovery returns sorted static route metadata while excluding every native
 /// route, dynamic link, identity, and runtime-state field.
 #[test]
@@ -2778,43 +2959,6 @@ fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     );
 }
 
-/// Changing the configured channel set before startup clears post ownership
-/// along with registrations so old destinations cannot survive reconfiguration.
-#[test]
-fn channel_reconfiguration_clears_post_ownership() {
-    let (ext, _rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.remember_posted_message(
-        slack_conversation("C123", Some("10.0")),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "1.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.capability_active = true;
-        state.pending_capability_request = Some("old-capability".to_owned());
-        state
-            .received_occurrences
-            .insert_new("old-local-effect".to_owned());
-    }
-    ext.apply_config(multi_channel_cfg()).expect("reconfigure");
-    let state = ext.state.lock().expect("lock");
-    assert!(state.registered_agents.is_empty());
-    assert!(!state.capability_active);
-    assert!(state.pending_capability_request.is_none());
-    assert!(state.received_occurrences.seen.is_empty());
-    assert!(
-        state
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none()
-    );
-}
-
 /// Protocol migration regression: a malformed pre-start config must emit a
 /// parse `ConfigError`, clear inactive config, and prevent a later registration
 /// from starting Slack with stale credentials.
@@ -2847,11 +2991,11 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
             frame,
             HarnessInputMessage::Emit(emit)
                 if matches!(
-                    emit.event.as_ref(),
-                    Event::ToolError(error)
-                        if error.tool_name.as_str() == REGISTER_TOOL_NAME
-                            && error.message.contains("capability is not active")
-                )
+                     emit.event.as_ref(),
+                     Event::ToolError(error)
+                         if error.tool_name.as_str() == REGISTER_TOOL_NAME
+                            && error.message.contains("not configured")
+                 )
         )),
         "register should fail after malformed config clears active config"
     );
@@ -3136,433 +3280,7 @@ fn slack_register_toggles_agent_and_starts_worker() {
         state
             .posted_messages
             .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none()
-    );
-}
-
-/// Registration performs a bounded Slack auth/open preflight before reporting
-/// success, so bad tokens are visible as tool errors instead of silent
-/// background-only failures.
-#[test]
-fn slack_register_reports_initial_auth_failure() {
-    let (tx, _rx) = mpsc::channel();
-    let ext = Extension::new(Arc::new(FailingAuthClient), tx);
-    ext.apply_config(cfg()).expect("config");
-    ext.state.lock().expect("lock").capability_active = true;
-    let event = ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(true)));
-    let Event::ToolError(err) = event else {
-        panic!("expected tool error");
-    };
-    assert!(err.message.contains("authentication failed"));
-    assert!(!ext.state.lock().expect("lock").config_frozen);
-    let mut replacement = cfg();
-    replacement.max_message_bytes -= 1;
-    ext.apply_config(replacement)
-        .expect("failed preflight remains reconfigurable");
-}
-
-/// Registered agents reply only to the configured conversation from which
-/// the exact source-bound opaque selector returned by durable ingress.
-#[test]
-fn slack_send_uses_originating_conversation() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, multi_channel_cfg());
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> hello"));
-    let prompt = recv_prompt_request(&rx);
-    assert_eq!(ingress_text(&prompt), "hello");
-    activate_prompt_origin(&ext, &prompt);
-    let result = ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello")));
-    assert!(result.is_none());
-    rx.recv().expect("background completion");
-    assert_eq!(
-        client.sent_pairs(),
-        vec![("C456".to_owned(), "hello".to_owned())]
-    );
-}
-
-/// The only generated native mention is the exact verified source selected by a
-/// live reply route; omission remains byte-for-byte unmentioned.
-#[test]
-fn slack_send_source_mention_is_reply_only_and_internal() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> hello"));
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-    let mentioned = tool_call(
-        SEND_TOOL_NAME,
-        "agent-a",
-        "mention",
-        tau_proto::json_to_cbor(&serde_json::json!({
-            "message": "hello",
-            "reply_to": "msg-test",
-            "mention_source_user": true
-        })),
-    );
-    assert!(ext.handle_send(mentioned).is_none());
-    rx.recv().expect("background completion");
-    assert_eq!(
-        client.sent_pairs(),
-        vec![("C123".to_owned(), "<@U123> hello".to_owned())]
-    );
-    for (call_id, mention_field) in [
-        ("mention-false", Some(serde_json::Value::Bool(false))),
-        ("mention-omitted", None),
-    ] {
-        let mut arguments = serde_json::json!({
-            "message": call_id,
-            "reply_to": "msg-test"
-        });
-        if let Some(value) = mention_field {
-            arguments["mention_source_user"] = value;
-        }
-        assert!(
-            ext.handle_send(tool_call(
-                SEND_TOOL_NAME,
-                "agent-a",
-                call_id,
-                tau_proto::json_to_cbor(&arguments),
-            ))
-            .is_none()
-        );
-        rx.recv().expect("background completion");
-    }
-    assert_eq!(
-        client.sent_pairs(),
-        vec![
-            ("C123".to_owned(), "<@U123> hello".to_owned()),
-            ("C123".to_owned(), "mention-false".to_owned()),
-            ("C123".to_owned(), "mention-omitted".to_owned()),
-        ]
-    );
-
-    let invalid = ext.handle_send(tool_call(
-        SEND_TOOL_NAME,
-        "agent-a",
-        "mention-destination",
-        tau_proto::json_to_cbor(&serde_json::json!({
-            "message": "hello",
-            "destination": "team",
-            "mention_source_user": true
-        })),
-    ));
-    assert!(matches!(invalid, Some(Event::ToolError(_))));
-    for raw in ["text <@U999>", "text <!channel>", "text <#C999>"] {
-        let rejected = ext.handle_send(tool_call(
-            SEND_TOOL_NAME,
-            "agent-a",
-            raw,
-            tau_proto::json_to_cbor(&serde_json::json!({
-                "message": raw,
-                "reply_to": "msg-test"
-            })),
-        ));
-        assert!(matches!(rejected, Some(Event::ToolError(_))));
-    }
-    ext.state.lock().expect("state").installation_team_id = Some("T999".to_owned());
-    let stale_install = ext.handle_send(tool_call(
-        SEND_TOOL_NAME,
-        "agent-a",
-        "stale-install",
-        tau_proto::json_to_cbor(&serde_json::json!({
-            "message": "hello",
-            "reply_to": "msg-test",
-            "mention_source_user": false
-        })),
-    ));
-    assert!(matches!(stale_install, Some(Event::ToolError(_))));
-}
-
-/// Root messages keep replies top-level while thread messages automatically
-/// carry their originating root without any model-supplied destination.
-#[test]
-fn slack_send_preserves_root_and_thread_context() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> root"));
-    let root = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &root);
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("root reply")))
-            .is_none()
-    );
-    rx.recv().expect("root completion");
-
-    let mut threaded = slack_message("C123", None, "<@UBOT123> threaded");
-    threaded.thread_ts = Some("42.0".to_owned());
-    ext.process_slack_message(threaded);
-    let threaded = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &threaded);
-    let mut thread_send = tool(SEND_TOOL_NAME, "agent-a", message_args("thread reply"));
-    thread_send.call_id = tau_proto::ToolCallId::new("call-thread");
-    assert!(ext.handle_send(thread_send).is_none());
-    rx.recv().expect("thread completion");
-
-    assert_eq!(
-        client.sent_thread_ids(),
-        vec![None, Some("42.0".to_owned())]
-    );
-}
-
-/// Authorized reactions to an agent-owned bridge post preserve structured
-/// source metadata, and recent retries are dropped by native event id.
-/// This guards `DESIGN-tau-ext-slack-reaction-ownership`.
-#[test]
-fn authorized_reactions_to_agent_posts_drop_recent_native_duplicates() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> question"));
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
-            .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-    let reaction = slack_reaction("ER1", "reaction_added", "C123", "1.0");
-    let mut reaction = reaction;
-    reaction.reaction = "thumbsup::skin-tone-6".to_owned();
-    ext.process_slack_reaction(reaction);
-    let prompt = recv_prompt_request(&rx);
-    assert_eq!(prompt.target_agent_id, agent_id("agent-a"));
-    assert!(!prompt.draft.transport_identity_mentioned);
-    assert_eq!(
-        prompt.draft.external_endpoint,
-        MessageEndpoint::External {
-            stable_id: Some("U123".to_owned()),
-            display_name: None,
-            identity_alias: None,
-            actor_kind: ExternalActorKind::Human,
-        }
-    );
-    assert_eq!(
-        prompt.draft.conversation,
-        Some(message_conversation(&slack_conversation("C123", None)))
-    );
-    assert_eq!(
-        prompt
-            .draft
-            .external_identity
-            .as_ref()
-            .and_then(|identity| identity.event_id.as_deref()),
-        Some("ER1")
-    );
-    assert!(matches!(
-        prompt.draft.operation,
-        MessageOperation::Reaction {
-            action: ReactionAction::Add,
-            ..
-        }
-    ));
-    ext.process_slack_reaction(slack_reaction("ER1", "reaction_added", "C123", "1.0"));
-    assert!(rx.try_recv().is_err());
-}
-
-/// Without a Slack event id, reaction state transitions are not collapsed by a
-/// synthetic state key, so a legitimate add/remove/add sequence remains intact.
-#[test]
-fn reactions_without_event_ids_preserve_add_remove_add() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> question"));
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
-            .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-
-    for (event_type, expected) in [
-        ("reaction_added", ReactionAction::Add),
-        ("reaction_removed", ReactionAction::Remove),
-        ("reaction_added", ReactionAction::Add),
-    ] {
-        let mut reaction = slack_reaction("unused", event_type, "C123", "1.0");
-        reaction.event_id = None;
-        ext.process_slack_reaction(reaction);
-        let request = recv_prompt_request(&rx);
-        assert!(matches!(
-            request.draft.operation,
-            MessageOperation::Reaction { action, .. } if action == expected
-        ));
-    }
-}
-
-/// A commit-confirmed Slack create makes later root-message edits immutable
-/// typed mutations that reference both canonical and native original identity.
-#[test]
-fn committed_root_message_edit_references_canonical_original() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    let mut original_message = slack_message("C123", None, "<@UBOT123> original");
-    original_message.ts = Some("1.0".to_owned());
-    ext.process_slack_message(original_message);
-    let original = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &original);
-
-    ext.process_slack_edit(slack_edit(
-        "EE1",
-        "C123",
-        "1.0",
-        None,
-        "<@UBOT123> edited <@UBOT123>",
-    ));
-    let edit = recv_prompt_request(&rx);
-    assert_eq!(edit.target_agent_id, agent_id("agent-a"));
-    assert!(edit.draft.transport_identity_mentioned);
-    assert_eq!(
-        edit.draft.operation,
-        MessageOperation::Edit {
-            target: MessageRef {
-                message_id: Some(MessageId::new("msg-test")),
-                external_message_id: Some("1.0".to_owned()),
-            },
-            payload: MessagePayload::Text {
-                text: "edited @slack_bridge".to_owned(),
-                format: TextFormat::Plain,
-            },
-        }
-    );
-    let identity = edit.draft.external_identity.expect("edit identity");
-    assert_eq!(identity.event_id.as_deref(), Some("EE1"));
-    assert_eq!(identity.message_id.as_deref(), Some("1.0"));
-    assert_eq!(identity.revision_id.as_deref(), Some("2.0"));
-
-    ext.process_slack_edit(slack_edit("EE2", "C123", "1.0", None, "plain edit"));
-    let edit = recv_prompt_request(&rx);
-    assert!(!edit.draft.transport_identity_mentioned);
-    assert!(matches!(
-        edit.draft.operation,
-        MessageOperation::Edit {
-            payload: MessagePayload::Text { ref text, .. },
-            ..
-        } if text == "plain edit"
-    ));
-}
-
-/// Incoming native identity ownership is bounded, immutable on collision, and
-/// remains synchronized through agent removal and full clear.
-#[test]
-fn incoming_edit_identity_cache_is_bounded_and_immutable() {
-    let mut state = State::default();
-    for index in 0..=REPLY_ROUTE_LIMIT {
-        let key = PostedMessageKey::new("C123", &format!("{index}.0"));
-        assert!(state.insert_incoming_message(
-            key,
-            IncomingMessageOwner {
-                agent_id: agent_id("agent-a"),
-                message_id: MessageId::new(format!("msg-{index}")),
-                conversation: slack_conversation("C123", None),
-                user_id: "U123".to_owned(),
-            },
-        ));
-    }
-    assert_eq!(state.incoming_messages.len(), REPLY_ROUTE_LIMIT);
-    let key = PostedMessageKey::new("C123", "1.0");
-    let original = state.incoming_messages.get(&key).cloned().expect("owner");
-    assert!(!state.insert_incoming_message(
-        key.clone(),
-        IncomingMessageOwner {
-            agent_id: agent_id("agent-b"),
-            message_id: MessageId::new("msg-conflict"),
-            conversation: slack_conversation("C123", Some("9.0")),
-            user_id: "U999".to_owned(),
-        },
-    ));
-    assert!(state.incoming_messages.get(&key) == Some(&original));
-    state.remove_agent_incoming_messages(&agent_id("agent-a"));
-    assert!(state.incoming_messages.is_empty());
-    assert!(state.incoming_message_order.is_empty());
-    state.clear_incoming_messages();
-}
-
-/// Thread edits preserve the original thread route, recent retries are dropped
-/// locally, and unknown/conflicting originals fail closed.
-#[test]
-fn thread_edit_retry_and_original_confusion_fail_closed() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    let mut original = slack_message("C123", None, "<@UBOT123> original");
-    original.ts = Some("1.0".to_owned());
-    original.thread_ts = Some("9.0".to_owned());
-    ext.process_slack_message(original);
-    let ingress = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &ingress);
-
-    let edit = slack_edit("EE2", "C123", "1.0", Some("9.0"), "edited");
-    ext.process_slack_edit(slack_edit("UNKNOWN", "C123", "8.0", Some("9.0"), "bad"));
-    ext.process_slack_edit(slack_edit("THREAD", "C123", "1.0", Some("8.0"), "bad"));
-    assert_no_ingress(&rx);
-    ext.process_slack_edit(edit);
-    ext.process_slack_edit(slack_edit("EE2", "C123", "1.0", Some("9.0"), "edited"));
-    let first = recv_prompt_request(&rx);
-    assert_no_ingress(&rx);
-    assert_eq!(
-        first.draft.conversation,
-        Some(message_conversation(&slack_conversation(
-            "C123",
-            Some("9.0")
-        )))
-    );
-}
-
-/// Commit-confirmed edit and reaction occurrences each install their own exact
-/// opaque reply route rather than borrowing only the original create authority.
-#[test]
-fn committed_mutations_install_independent_reply_authority() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    let mut original = slack_message("C123", Some("channel"), "<@UBOT123> original");
-    original.ts = Some("1.0".to_owned());
-    ext.process_slack_message(original);
-    let create = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &create);
-
-    ext.process_slack_edit(slack_edit("edit", "C123", "1.0", None, "changed"));
-    let edit = recv_prompt_request(&rx);
-    activate_ingress_route(&ext, &edit, "msg-edit");
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"edit reply","reply_to":"msg-edit"}),
-            ),
-        ))
-        .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-
-    ext.remember_posted_message(
-        slack_conversation("C123", None),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "9.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    ext.process_slack_reaction(slack_reaction("reaction", "reaction_added", "C123", "9.0"));
-    let reaction = recv_prompt_request(&rx);
-    activate_ingress_route(&ext, &reaction, "msg-reaction");
-    let mut reaction_reply = tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        tau_proto::json_to_cbor(
-            &serde_json::json!({"message":"reaction reply","reply_to":"msg-reaction"}),
-        ),
-    );
-    reaction_reply.call_id = "call-reaction-reply".into();
-    assert!(ext.handle_send(reaction_reply).is_none());
-    rx.recv().expect("reaction reply completion");
-    assert!(
-        client
-            .sent_pairs()
-            .iter()
-            .any(|(_, text)| text.ends_with("reaction reply"))
+            .is_some()
     );
 }
 
@@ -3690,7 +3408,9 @@ fn posted_message_cache_eviction_and_cleanup_are_synchronized() {
             PostedMessageKey::new("C123", ts),
             PostedMessageOwner {
                 agent_id,
+                message_id: MessageFactId::new(format!("slack:C123:{ts}")),
                 thread_ts: None,
+                conversation: slack_conversation("C123", None),
                 installation_team_id: "T123".to_owned(),
             },
         );
@@ -3824,220 +3544,6 @@ fn event_installation_binding_is_exact_and_connect_safe() {
         ]}}),
     ] {
         assert!(!event_matches_installation(&invalid, "T123", "UBOT123"));
-    }
-}
-
-/// A reconnect reporting a different authenticated installation fails closed,
-/// retains the original pair for audit, and retires its private authority.
-#[test]
-fn installation_mismatch_requires_restart_and_retires_private_authority() {
-    let (ext, rx, client) = extension();
-    let mut state = ext.state.lock().expect("state");
-    state.pending_capability_request = Some("late-capability".to_owned());
-    state.worker_online = true;
-    state.worker_startup_failure_reported = true;
-    state.insert_reply_route(
-        MessageId::new("msg-old"),
-        ReplyRoute {
-            agent_id: agent_id("agent-a"),
-            conversation: slack_conversation("C123", None),
-            user_id: "U123".to_owned(),
-            display_name: None,
-            identity_alias: None,
-            installation_team_id: "T123".to_owned(),
-            policy_status: SenderPolicyStatus::Allowlisted,
-        },
-    );
-    state.posted_messages.insert(
-        PostedMessageKey::new("C123", "1.0"),
-        PostedMessageOwner {
-            agent_id: agent_id("agent-a"),
-            thread_ts: None,
-            installation_team_id: "T123".to_owned(),
-        },
-    );
-    assert!(state.insert_reaction_target(
-        "ref-old".to_owned(),
-        ReactionTarget {
-            agent_id: agent_id("agent-a"),
-            conversation: slack_conversation("C123", None),
-            message_ts: "1.0".to_owned(),
-            installation_team_id: "T123".to_owned(),
-            authority: ReactionAuthority::ConfiguredDestination {
-                alias: "team".to_owned(),
-            },
-        },
-    ));
-    assert_eq!(
-        state.install_or_match_installation("UBOT123".to_owned(), "T123".to_owned()),
-        Ok(false)
-    );
-    assert!(state.reaction_targets.contains_key("ref-old"));
-
-    assert!(
-        state
-            .install_or_match_installation("UBOT999".to_owned(), "T999".to_owned())
-            .is_err()
-    );
-    assert!(state.reply_routes.is_empty());
-    assert!(
-        state
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none()
-    );
-    assert!(state.reaction_targets.is_empty());
-    assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
-    assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
-    assert!(!state.capability_active);
-    assert!(state.installation_mismatch);
-    assert_eq!(state.pending_capability_request, None);
-    assert!(
-        state
-            .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
-            .is_err()
-    );
-    drop(state);
-
-    ext.report_installation_restart_once();
-    ext.report_installation_restart_once();
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("restart notice") else {
-        panic!("expected restart notice")
-    };
-    let Event::HarnessNotice(notice) = *emit.event else {
-        panic!("expected harness notice")
-    };
-    assert!(notice.always_show);
-    assert_eq!(notice.level, NoticeLevel::Warning);
-    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
-    assert!(!notice.message.contains("UBOT123"));
-    assert!(!notice.message.contains("T123"));
-    {
-        let state = ext.state.lock().expect("state");
-        assert!(!state.worker_online);
-        assert!(state.installation_restart_notice_reported);
-    }
-
-    apply_output_message(
-        &HarnessOutputMessage::RegisterTransportCapabilityResult(
-            tau_proto::RegisterTransportCapabilityResult {
-                request_id: "late-capability".to_owned(),
-                accepted: true,
-                error: None,
-            },
-        ),
-        &ext,
-    );
-    ext.request_transport_capability();
-    assert!(rx.try_recv().is_err());
-    let state = ext.state.lock().expect("state");
-    assert!(!state.capability_active);
-    assert_eq!(state.pending_capability_request, None);
-    drop(state);
-    assert!(matches!(
-        ext.handle_send(tool_call(
-            SEND_TOOL_NAME,
-            "agent-a",
-            "poisoned-send",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"must not post","destination":"team"})
-            ),
-        )),
-        Some(Event::ToolError(_))
-    ));
-    assert!(client.sent_pairs().is_empty());
-
-    for (bot, team) in [("UBOT999", "T123"), ("UBOT123", "T999")] {
-        let mut state = State {
-            bot_user_id: Some("UBOT123".to_owned()),
-            installation_team_id: Some("T123".to_owned()),
-            capability_active: true,
-            ..State::default()
-        };
-        assert!(
-            state
-                .install_or_match_installation(bot.to_owned(), team.to_owned())
-                .is_err()
-        );
-        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
-        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
-        assert!(!state.capability_active);
-    }
-    let mut partial = State {
-        bot_user_id: Some("UBOT123".to_owned()),
-        capability_active: true,
-        ..State::default()
-    };
-    assert!(
-        partial
-            .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
-            .is_err()
-    );
-    assert!(!partial.capability_active);
-}
-
-/// Malformed or incomplete reconnect identity evidence poisons an established
-/// installation exactly like an explicit pair mismatch.
-#[test]
-fn invalid_reconnect_installation_latches_restart_requirement() {
-    for result in [
-        Err(SlackApiError::MalformedResponse),
-        Ok(SlackInstallationIdentity {
-            bot_user_id: "UBOT123".to_owned(),
-            team_id: String::new(),
-        }),
-    ] {
-        let (tx, _rx) = mpsc::channel();
-        let ext = Extension::new(Arc::new(InvalidInstallationClient { result }), tx);
-        {
-            let mut state = ext.state.lock().expect("state");
-            state.bot_user_id = Some("UBOT123".to_owned());
-            state.installation_team_id = Some("T123".to_owned());
-            state.capability_active = true;
-        }
-
-        assert!(ext.authenticated_installation(&cfg()).is_err());
-        let mut state = ext.state.lock().expect("state");
-        assert!(state.installation_mismatch);
-        assert!(!state.capability_active);
-        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
-        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
-        assert!(
-            state
-                .install_or_match_installation("UBOT123".to_owned(), "T123".to_owned())
-                .is_err()
-        );
-    }
-}
-
-/// A valid changed pair is latched before socket-ticket acquisition, even when
-/// that later call would fail or return an invalid URL.
-#[test]
-fn changed_reconnect_pair_precedes_socket_open_failure() {
-    for open_result in [
-        Err(SlackApiError::TransportConnect),
-        Ok("http://invalid.example/socket".to_owned()),
-    ] {
-        let client = Arc::new(ChangedInstallationClient {
-            open_count: Mutex::new(0),
-            open_result,
-        });
-        let (tx, _rx) = mpsc::channel();
-        let ext = Extension::new(client.clone(), tx);
-        {
-            let mut state = ext.state.lock().expect("state");
-            state.bot_user_id = Some("UBOT123".to_owned());
-            state.installation_team_id = Some("T123".to_owned());
-            state.capability_active = true;
-        }
-
-        assert!(ext.prepare_worker_start(&cfg()).is_err());
-        assert_eq!(*client.open_count.lock().expect("open count"), 0);
-        let state = ext.state.lock().expect("state");
-        assert!(state.installation_mismatch);
-        assert!(!state.capability_active);
-        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
-        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
     }
 }
 
@@ -4380,231 +3886,6 @@ fn reactions_outside_authorized_owned_posts_are_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
-/// Proactive-only posts cannot receive reactions without covering receive
-/// policy, while a parent receive route covers a proactive fixed-thread post.
-#[test]
-fn reaction_authority_requires_covering_receive_policy() {
-    let (ext, rx, _client) = extension();
-    apply_test_config(&ext, proactive_cfg());
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"post","destination":"team-ops"}),
-            ),
-        ))
-        .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-    ext.process_slack_reaction(slack_reaction(
-        "proactive-only",
-        "reaction_added",
-        "C456",
-        "1.0",
-    ));
-    assert!(rx.try_recv().is_err());
-
-    let (ext, rx, _client) = extension();
-    let mut config = cfg();
-    let child = ConversationPolicy {
-        alias: "child".to_owned(),
-        conversation_id: "C123".to_owned(),
-        kind: ConversationPolicyKind::Channel,
-        receive: None,
-        description: None,
-        thread_ts: Some("7.0".to_owned()),
-    };
-    config
-        .conversations
-        .insert(child.alias.clone(), child.clone());
-    config.proactive_aliases.insert(child.alias.clone());
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-a");
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"thread post","destination":"child"}),
-            ),
-        ))
-        .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-    ext.process_slack_reaction(slack_reaction("covered", "reaction_added", "C123", "1.0"));
-    let reaction = recv_prompt_request(&rx);
-    let conversation = reaction.draft.conversation.expect("conversation");
-    assert_eq!(conversation.display_name.as_deref(), Some("team"));
-    assert_eq!(
-        conversation.thread.expect("thread").stable_id,
-        "7.0".to_owned()
-    );
-}
-
-/// A receive-enabled fixed-thread sibling does not authorize reactions to a
-/// proactive post under a different root in the same native conversation.
-#[test]
-fn fixed_thread_sibling_does_not_cover_proactive_reaction() {
-    let (ext, rx, _client) = extension();
-    let mut config = cfg();
-    config.conversations.clear();
-    let receive = ConversationPolicy {
-        alias: "receive-eight".to_owned(),
-        conversation_id: "C777".to_owned(),
-        kind: ConversationPolicyKind::Channel,
-        receive: Some(ReceiveMode::AllMessages),
-        description: None,
-        thread_ts: Some("8.0".to_owned()),
-    };
-    let proactive = ConversationPolicy {
-        alias: "send-seven".to_owned(),
-        conversation_id: "C777".to_owned(),
-        kind: ConversationPolicyKind::Channel,
-        receive: None,
-        description: None,
-        thread_ts: Some("7.0".to_owned()),
-    };
-    config.conversations.insert(receive.alias.clone(), receive);
-    config
-        .conversations
-        .insert(proactive.alias.clone(), proactive.clone());
-    config.proactive_aliases.insert(proactive.alias);
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-a");
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"thread post","destination":"send-seven"}),
-            ),
-        ))
-        .is_none()
-    );
-    complete_pending_send(&ext, &rx, true);
-    ext.process_slack_reaction(slack_reaction(
-        "wrong-sibling",
-        "reaction_added",
-        "C777",
-        "1.0",
-    ));
-    assert!(rx.try_recv().is_err());
-}
-
-/// Reaction prompts use the authenticated thread from the original outbound
-/// request even when Slack omits it in the response, and conflicting event
-/// metadata can never redirect a root or threaded post.
-#[test]
-fn reaction_routing_uses_cached_authenticated_thread_only() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.remember_posted_message(
-        slack_conversation("C123", Some("10.0")),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "1.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    let mut reaction = slack_reaction("ER-THREAD", "reaction_added", "C123", "1.0");
-    reaction.thread_ts = None;
-    ext.process_slack_reaction(reaction);
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            message_args("thread reply")
-        ))
-        .is_none()
-    );
-    rx.recv().expect("thread reply completion");
-    assert_eq!(
-        client.sent_thread_ids().last(),
-        Some(&Some("10.0".to_owned()))
-    );
-
-    ext.remember_posted_message(
-        slack_conversation("C123", None),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "2.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    let mut root_conflict = slack_reaction("ER-ROOT-CONFLICT", "reaction_added", "C123", "2.0");
-    root_conflict.thread_ts = Some("99.0".to_owned());
-    ext.process_slack_reaction(root_conflict);
-
-    ext.remember_posted_message(
-        slack_conversation("C123", Some("10.0")),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "3.0".to_owned(),
-            thread_ts: Some("10.0".to_owned()),
-        },
-        agent_id("agent-a"),
-    );
-    let mut thread_conflict = slack_reaction("ER-THREAD-CONFLICT", "reaction_added", "C123", "3.0");
-    thread_conflict.thread_ts = Some("99.0".to_owned());
-    ext.process_slack_reaction(thread_conflict);
-
-    ext.remember_posted_message(
-        slack_conversation("C123", None),
-        PostedMessage {
-            channel_id: "C123".to_owned(),
-            ts: "4.0".to_owned(),
-            thread_ts: Some("99.0".to_owned()),
-        },
-        agent_id("agent-a"),
-    );
-    ext.process_slack_reaction(slack_reaction(
-        "ER-RESPONSE-CONFLICT",
-        "reaction_added",
-        "C123",
-        "4.0",
-    ));
-    assert_no_ingress(&rx);
-}
-
-/// A registered agent cannot send proactively merely because channels are
-/// configured; an authorized inbound route must establish the destination.
-#[test]
-fn slack_send_rejects_missing_or_forged_origin_context() {
-    let (ext, _rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello"))),
-        Some(Event::ToolError(_))
-    ));
-    ext.state.lock().expect("lock").reply_routes.insert(
-        MessageId::new("msg-test"),
-        ReplyRoute {
-            agent_id: agent_id("agent-a"),
-            conversation: SlackConversation {
-                channel_id: "C999".to_owned(),
-                thread_ts: Some("9.0".to_owned()),
-                kind: ConversationPolicyKind::Channel,
-                alias: "team".to_owned(),
-            },
-            user_id: "U123".to_owned(),
-            display_name: None,
-            identity_alias: None,
-            installation_team_id: "T123".to_owned(),
-            policy_status: SenderPolicyStatus::Allowlisted,
-        },
-    );
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello"))),
-        Some(Event::ToolError(_))
-    ));
-    assert!(client.sent.lock().expect("lock").is_empty());
-}
-
 /// Blank and oversized outbound messages are rejected before Slack API calls so
 /// tool diagnostics remain deterministic and bounded.
 #[test]
@@ -4634,36 +3915,6 @@ fn unallowed_user_produces_no_prompt_or_reply() {
     ext.process_slack_message(msg);
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
-}
-
-/// Lax mode admits a verified non-allowlisted human only in a configured
-/// conversation and labels that independent policy fact in the typed draft.
-#[test]
-fn lax_mode_routes_verified_human_with_lax_policy() {
-    let (ext, rx, _client) = extension();
-    ext.state
-        .lock()
-        .expect("lock")
-        .config
-        .as_mut()
-        .expect("config")
-        .security_mode = SecurityMode::Lax;
-    register_agent(&ext, "agent-a");
-    let mut msg = slack_message("C123", None, "<@UBOT123> hello");
-    msg.user_id = "U999".to_owned();
-    ext.process_slack_message(msg);
-    let HarnessInputMessage::TransportMessageIngress(request) = rx.recv().expect("lax ingress")
-    else {
-        panic!("expected typed ingress");
-    };
-    assert_eq!(
-        request.draft.identity_assurance,
-        SenderIdentityAssurance::VerifiedAccount
-    );
-    assert_eq!(
-        request.draft.policy_status,
-        SenderPolicyStatus::LaxPermitted
-    );
 }
 
 /// Security mode omission is strict, both supported spellings deserialize, and
@@ -4724,118 +3975,6 @@ fn configured_channel_rejects_other_conversations() {
     ext.process_slack_message(slack_message("D123", Some("im"), "hello"));
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
-}
-
-/// Each configured channel keeps its own selected Tau agent, so commands in
-/// one shared Slack conversation cannot redirect another conversation.
-#[test]
-fn configured_channels_keep_independent_agent_selections() {
-    let (ext, rx, _client) = extension();
-    apply_test_config(&ext, multi_channel_cfg());
-    register_agent(&ext, "agent-alpha");
-    register_agent(&ext, "agent-beta");
-
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> select agent-alpha"));
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> select agent-beta"));
-    let mut first_message = slack_message("C123", None, "<@UBOT123> first");
-    first_message.thread_ts = Some("10.0".to_owned());
-    let mut second_message = slack_message("C456", None, "<@UBOT123> second");
-    second_message.thread_ts = Some("20.0".to_owned());
-    ext.process_slack_message(first_message);
-    ext.process_slack_message(second_message);
-
-    let first = recv_prompt_request(&rx);
-    let second = recv_prompt_request(&rx);
-    assert_eq!(first.target_agent_id, agent_id("agent-alpha"));
-    assert_eq!(ingress_text(&first), "first");
-    assert_eq!(second.target_agent_id, agent_id("agent-beta"));
-    assert_eq!(ingress_text(&second), "second");
-}
-
-/// Receive-enabled fixed-thread siblings own independent selected-agent state.
-#[test]
-fn fixed_thread_siblings_keep_independent_agent_selections() {
-    let (ext, rx, _client) = extension();
-    let mut config = cfg();
-    config.conversations.clear();
-    for (alias, root) in [("one", "1.0"), ("two", "2.0")] {
-        config.conversations.insert(
-            alias.to_owned(),
-            ConversationPolicy {
-                alias: alias.to_owned(),
-                conversation_id: "C777".to_owned(),
-                kind: ConversationPolicyKind::Channel,
-                receive: Some(ReceiveMode::MentionsOnly),
-                description: None,
-                thread_ts: Some(root.to_owned()),
-            },
-        );
-    }
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-one");
-    register_agent(&ext, "agent-two");
-    for (root, agent) in [("1.0", "agent-one"), ("2.0", "agent-two")] {
-        let mut select = slack_message(
-            "C777",
-            Some("channel"),
-            &format!("<@UBOT123> select {agent}"),
-        );
-        select.thread_ts = Some(root.to_owned());
-        ext.process_slack_message(select);
-    }
-    for (root, text) in [("1.0", "first"), ("2.0", "second")] {
-        let mut message = slack_message("C777", Some("channel"), &format!("<@UBOT123> {text}"));
-        message.thread_ts = Some(root.to_owned());
-        ext.process_slack_message(message);
-    }
-    assert_eq!(
-        recv_prompt_request(&rx).target_agent_id,
-        agent_id("agent-one")
-    );
-    assert_eq!(
-        recv_prompt_request(&rx).target_agent_id,
-        agent_id("agent-two")
-    );
-}
-
-/// Dynamic DM discovery requires `start` and retains multiple exact links.
-#[test]
-fn dm_linking_is_explicit_and_multi_link() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, dm_cfg());
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("D123", Some("im"), "hello before start"));
-    assert!(rx.try_recv().is_err());
-    assert!(
-        client.sent.lock().expect("lock")[0]
-            .text
-            .contains("Send start")
-    );
-
-    ext.process_slack_message(slack_message("D123", Some("im"), "start"));
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .linked_dms
-            .contains_key("D123")
-    );
-    ext.process_slack_message(slack_message("D999", Some("im"), "start"));
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .linked_dms
-            .contains_key("D999")
-    );
-    ext.process_slack_message(slack_message("D123", Some("im"), "first DM <@UBOT123>"));
-    ext.process_slack_message(slack_message("D999", Some("im"), "second DM"));
-    let first = recv_prompt_request(&rx);
-    assert!(first.draft.transport_identity_mentioned);
-    assert_eq!(ingress_text(&first), "first DM @slack_bridge");
-    let second = recv_prompt_request(&rx);
-    assert!(!second.draft.transport_identity_mentioned);
-    assert_eq!(ingress_text(&second), "second DM");
 }
 
 /// A dynamic D id remains bound to its exact allowlisted U/W user for prompts,
@@ -4957,35 +4096,6 @@ fn static_fixed_dm_receive_blocks_dynamic_parent_link() {
     );
 }
 
-/// DM mode keeps the existing explicit `start` link and derives outbound
-/// replies from later prompts routed through that allowlisted DM.
-#[test]
-fn dm_send_uses_linked_prompt_origin() {
-    let (ext, rx, client) = extension();
-    apply_test_config(&ext, dm_cfg());
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("D123", Some("im"), "start"));
-    let mut question = slack_message("D123", Some("im"), "question");
-    question.thread_ts = Some("7.0".to_owned());
-    ext.process_slack_message(question);
-    let prompt = recv_prompt_request(&rx);
-    assert_eq!(ingress_text(&prompt), "question");
-    activate_prompt_origin(&ext, &prompt);
-    assert!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
-            .is_none()
-    );
-    rx.recv().expect("DM reply completion");
-    assert_eq!(
-        client.sent_pairs().last(),
-        Some(&("D123".to_owned(), "answer".to_owned()))
-    );
-    assert_eq!(
-        client.sent_thread_ids().last(),
-        Some(&Some("7.0".to_owned()))
-    );
-}
-
 /// With exactly one registered agent, plain Slack text becomes an unprefixed
 /// typed payload with structured external provenance.
 #[test]
@@ -5010,45 +4120,6 @@ fn multiple_agents_without_selection_get_guidance() {
             .text
             .contains("Multiple Tau agents")
     );
-}
-
-/// `agents`, `select`, and `to` use stable agent ids in Slack-visible routing
-/// commands while display names remain parenthetical context only.
-#[test]
-fn agents_select_and_to_route_by_agent_id() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-alpha");
-    register_agent(&ext, "agent-beta");
-    ext.state
-        .lock()
-        .expect("lock")
-        .agent_labels
-        .insert(agent_id("agent-alpha"), "Alpha Display".to_owned());
-
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> agents"));
-    assert!(
-        client.sent.lock().expect("lock")[0]
-            .text
-            .contains("agent-alpha (Alpha Display)")
-    );
-
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> select agent-al"));
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> later"));
-    assert_eq!(recv_prompt(&rx), "later");
-
-    ext.process_slack_message(slack_message(
-        "C123",
-        None,
-        "<@UBOT123> to agent-beta direct <@UBOT123>",
-    ));
-    let direct = recv_prompt_request(&rx);
-    assert!(direct.draft.transport_identity_mentioned);
-    assert!(matches!(
-        direct.draft.operation,
-        MessageOperation::Create {
-            payload: MessagePayload::Text { ref text, .. }
-        } if text == "direct @slack_bridge"
-    ));
 }
 
 /// Malformed command-shaped text is handled as command feedback and must not
@@ -5332,34 +4403,6 @@ fn mention_and_message_event_types_do_not_cross_conversation_modes() {
     assert!(client.sent.lock().expect("lock").is_empty());
 }
 
-/// All-messages scope accepts an eligible unmentioned configured-channel post,
-/// while duplicate `message` and `app_mention` deliveries share one local id.
-#[test]
-fn all_messages_accepts_unmentioned_posts_and_drops_duplicate_wrapper() {
-    let (ext, rx, _client) = extension();
-    ext.state
-        .lock()
-        .expect("lock")
-        .config
-        .as_mut()
-        .expect("config")
-        .conversations
-        .get_mut("team")
-        .expect("team")
-        .receive = Some(ReceiveMode::AllMessages);
-    register_agent(&ext, "agent-a");
-    let mut message = slack_message("C123", None, "ordinary channel text");
-    message.event_type = "message".to_owned();
-    let mut mention = message.clone();
-    mention.event_type = "app_mention".to_owned();
-    mention.event_id = Some("E-mention-copy".to_owned());
-    ext.process_slack_message(message);
-    ext.process_slack_message(mention);
-    let first = recv_prompt_request(&rx);
-    assert_eq!(ingress_text(&first), "ordinary channel text");
-    assert!(rx.try_recv().is_err());
-}
-
 /// Unmentioned all-messages chatter must remain prompt content even when its
 /// first word resembles a bridge command, and must cause no Slack reply.
 #[test]
@@ -5547,158 +4590,6 @@ fn operator_conversation_config_parsing_matrix() {
     }
 }
 
-/// Fixed-thread roots normalize their root create, MPIMs retain group metadata,
-/// and static DMs receive without dynamic `start`.
-#[test]
-fn static_route_kinds_and_fixed_threads_normalize_ingress() {
-    let (ext, rx, _client) = extension();
-    let mut config = cfg();
-    config.conversations.clear();
-    for policy in [
-        ConversationPolicy {
-            alias: "fixed".to_owned(),
-            conversation_id: "C777".to_owned(),
-            kind: ConversationPolicyKind::Channel,
-            receive: Some(ReceiveMode::MentionsOnly),
-            description: None,
-            thread_ts: Some("7.0".to_owned()),
-        },
-        ConversationPolicy {
-            alias: "group".to_owned(),
-            conversation_id: "G777".to_owned(),
-            kind: ConversationPolicyKind::Mpim,
-            receive: Some(ReceiveMode::AllMessages),
-            description: None,
-            thread_ts: None,
-        },
-        ConversationPolicy {
-            alias: "alice".to_owned(),
-            conversation_id: "D777".to_owned(),
-            kind: ConversationPolicyKind::Dm,
-            receive: Some(ReceiveMode::AllMessages),
-            description: None,
-            thread_ts: None,
-        },
-    ] {
-        config.conversations.insert(policy.alias.clone(), policy);
-    }
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-a");
-
-    let mut root = slack_message("C777", Some("channel"), "<@UBOT123> root");
-    root.ts = Some("7.0".to_owned());
-    ext.process_slack_message(root);
-    let root = recv_prompt_request(&rx);
-    assert!(root.draft.transport_identity_mentioned);
-    let root_conversation = root.draft.conversation.expect("conversation");
-    assert_eq!(root_conversation.display_name.as_deref(), Some("fixed"));
-    assert_eq!(
-        root_conversation
-            .thread
-            .as_ref()
-            .map(|thread| thread.stable_id.as_str()),
-        Some("7.0")
-    );
-
-    let mut mpim = slack_message("G777", Some("mpim"), "group <@UBOT123>");
-    mpim.event_type = "message".to_owned();
-    ext.process_slack_message(mpim);
-    let mpim = recv_prompt_request(&rx);
-    assert!(mpim.draft.transport_identity_mentioned);
-    assert_eq!(ingress_text(&mpim), "group @slack_bridge");
-    assert_eq!(
-        mpim.draft.conversation.expect("conversation").kind,
-        ConversationKind::Group
-    );
-
-    ext.process_slack_message(slack_message("D777", Some("im"), "direct <@UBOT123>"));
-    let direct = recv_prompt_request(&rx);
-    assert!(direct.draft.transport_identity_mentioned);
-    assert_eq!(ingress_text(&direct), "direct @slack_bridge");
-}
-
-/// Private-channel, parent-thread, fixed-thread, and explicit kind matching
-/// cover the remaining native receive matrix and reject sibling/type ambiguity.
-#[test]
-fn channel_kind_and_thread_receive_matrix_is_exact() {
-    let (ext, rx, _client) = extension();
-    let mut config = cfg();
-    for policy in [
-        ConversationPolicy {
-            alias: "private".to_owned(),
-            conversation_id: "G222".to_owned(),
-            kind: ConversationPolicyKind::Channel,
-            receive: Some(ReceiveMode::AllMessages),
-            description: None,
-            thread_ts: None,
-        },
-        ConversationPolicy {
-            alias: "parent".to_owned(),
-            conversation_id: "C444".to_owned(),
-            kind: ConversationPolicyKind::Channel,
-            receive: Some(ReceiveMode::AllMessages),
-            description: None,
-            thread_ts: None,
-        },
-        ConversationPolicy {
-            alias: "fixed".to_owned(),
-            conversation_id: "C555".to_owned(),
-            kind: ConversationPolicyKind::Channel,
-            receive: Some(ReceiveMode::AllMessages),
-            description: None,
-            thread_ts: Some("5.0".to_owned()),
-        },
-    ] {
-        config.conversations.insert(policy.alias.clone(), policy);
-    }
-    apply_test_config(&ext, config);
-    register_agent(&ext, "agent-a");
-
-    let mut private = slack_message("G222", Some("group"), "private");
-    private.event_type = "message".to_owned();
-    ext.process_slack_message(private);
-    assert_eq!(
-        recv_prompt_request(&rx)
-            .draft
-            .conversation
-            .expect("conversation")
-            .display_name
-            .as_deref(),
-        Some("private")
-    );
-
-    let mut parent = slack_message("C444", Some("channel"), "thread");
-    parent.event_type = "message".to_owned();
-    parent.thread_ts = Some("4.0".to_owned());
-    ext.process_slack_message(parent);
-    assert_eq!(
-        recv_prompt_request(&rx)
-            .draft
-            .conversation
-            .expect("conversation")
-            .thread
-            .expect("thread")
-            .stable_id,
-        "4.0"
-    );
-
-    for mut rejected in [
-        slack_message("G222", Some("mpim"), "wrong kind"),
-        slack_message("C555", Some("channel"), "wrong fixed sibling"),
-        slack_message("C123", Some("channel"), "missing type"),
-    ] {
-        rejected.event_type = "message".to_owned();
-        if rejected.channel_id == "C555" {
-            rejected.thread_ts = Some("6.0".to_owned());
-        }
-        if rejected.channel_id == "C123" {
-            rejected.channel_type = None;
-        }
-        ext.process_slack_message(rejected);
-    }
-    assert!(rx.try_recv().is_err());
-}
-
 /// Slack app mentions are message-like and need not carry `channel_type`;
 /// explicit static policy still supplies channel versus MPIM authority.
 #[test]
@@ -5748,38 +4639,6 @@ fn fixed_thread_root_local_replies_never_escape_to_parent() {
     assert_eq!(client.sent_thread_ids(), vec![Some("7.0".to_owned())]);
 }
 
-/// A fixed-thread root edit normalizes omitted Slack thread metadata while
-/// child edits with absent or conflicting roots remain rejected.
-#[test]
-fn fixed_thread_root_edit_normalizes_omitted_thread() {
-    let (ext, rx, _client) = extension();
-    apply_test_config(
-        &ext,
-        fixed_thread_cfg(ConversationPolicyKind::Channel, "C777"),
-    );
-    register_agent(&ext, "agent-a");
-    let mut root = slack_message("C777", Some("channel"), "<@UBOT123> original");
-    root.ts = Some("7.0".to_owned());
-    ext.process_slack_message(root);
-    let create = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &create);
-
-    ext.process_slack_edit(slack_edit("edit-root", "C777", "7.0", None, "changed"));
-    let edit = recv_prompt_request(&rx);
-    assert_eq!(
-        edit.draft
-            .conversation
-            .expect("conversation")
-            .thread
-            .expect("thread")
-            .stable_id,
-        "7.0"
-    );
-    ext.process_slack_edit(slack_edit("wrong-child", "C777", "8.0", None, "bad"));
-    ext.process_slack_edit(slack_edit("wrong-root", "C777", "7.0", Some("8.0"), "bad"));
-    assert!(rx.try_recv().is_err());
-}
-
 /// Slack's two wrappers for one leading-mention command have identical command
 /// semantics and exactly one bridge-local side effect in either arrival order.
 #[test]
@@ -5815,43 +4674,6 @@ fn dual_wrapper_commands_have_one_local_effect() {
             }
             assert!(rx.try_recv().is_err(), "{text}");
             assert_eq!(client.sent_pairs().len(), 1, "{text}");
-        }
-    }
-}
-
-/// Dual Slack wrappers share one native message id and therefore submit one
-/// normalized occurrence in either arrival order.
-#[test]
-fn dual_wrapper_routed_creates_submit_once() {
-    for text in [
-        "<@UBOT123> to agent-a hello <@UBOT123>",
-        "<@UBOT123> hello <@UBOT123>",
-    ] {
-        for message_first in [true, false] {
-            let (ext, rx, client) = extension();
-            ext.state
-                .lock()
-                .expect("state")
-                .config
-                .as_mut()
-                .expect("config")
-                .conversations
-                .get_mut("team")
-                .expect("team")
-                .receive = Some(ReceiveMode::AllMessages);
-            register_agent(&ext, "agent-a");
-            let (message, mention) = dual_slack_messages(text);
-            if message_first {
-                ext.process_slack_message(message);
-                ext.process_slack_message(mention);
-            } else {
-                ext.process_slack_message(mention);
-                ext.process_slack_message(message);
-            }
-            let first = recv_prompt_request(&rx);
-            assert!(first.draft.transport_identity_mentioned);
-            assert!(rx.try_recv().is_err());
-            assert!(client.sent_pairs().is_empty());
         }
     }
 }
@@ -5929,18 +4751,6 @@ fn duplicate_slack_event_ids_are_dropped_locally() {
     ext.process_slack_message(msg.clone());
     ext.process_slack_message(msg);
     assert_eq!(recv_prompt(&rx), "hello");
-    assert!(rx.try_recv().is_err());
-}
-/// Explicit `to` routing uses the same local native-id cache.
-#[test]
-fn duplicate_to_command_is_dropped_locally() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    let message = slack_message("C123", None, "<@UBOT123> to agent-a hello");
-    ext.process_slack_message(message.clone());
-    ext.process_slack_message(message);
-    let first = recv_prompt_request(&rx);
-    assert_eq!(ingress_text(&first), "hello");
     assert!(rx.try_recv().is_err());
 }
 
@@ -6150,201 +4960,4 @@ fn latency_markers_are_payload_free() {
     for sentinel in [sentinel_user, sentinel_channel, sentinel_text, "xoxb-test"] {
         assert!(!output.contains(sentinel));
     }
-}
-
-/// A users.info failure at the real create ingress boundary emits no transport
-/// request, while the next verified occurrence recovers and routes normally.
-#[test]
-fn message_identity_failure_is_fail_closed_then_recovers() {
-    let client = Arc::new(IdentitySequenceClient {
-        results: Mutex::new(
-            [Err(SlackApiError::Transport), Ok(true)]
-                .into_iter()
-                .collect(),
-        ),
-    });
-    let (tx, rx) = mpsc::channel();
-    let ext = Extension::new(client, tx);
-    {
-        let mut state = ext.state.lock().expect("lock state");
-        state.config = Some(cfg());
-        state.registered_agents.insert(agent_id("agent-a"));
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.capability_active = true;
-    }
-    let first = slack_message("C123", None, "<@UBOT123> first");
-    ext.process_slack_message(first.clone());
-    assert_no_ingress(&rx);
-    ext.process_slack_message(first);
-    assert_no_ingress(&rx);
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> recovered"));
-    let ingress = (0..4)
-        .find_map(
-            |_| match rx.recv_timeout(Duration::from_millis(100)).ok()? {
-                HarnessInputMessage::TransportMessageIngress(request) => Some(request),
-                _ => None,
-            },
-        )
-        .expect("recovered occurrence should emit typed ingress");
-    let MessageOperation::Create {
-        payload: MessagePayload::Text { text, .. },
-    } = &ingress.draft.operation
-    else {
-        panic!("expected create ingress");
-    };
-    assert_eq!(text, "recovered");
-}
-
-/// Session teardown during a blocked identity lookup invalidates the explicit
-/// admission epoch, so the late success cannot submit into a later session.
-#[test]
-fn blocked_identity_completion_is_stale_after_session_teardown() {
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let client = Arc::new(BlockingIdentityClient {
-        started: Mutex::new(Some(started_tx)),
-        release: Mutex::new(release_rx),
-    });
-    let (output_tx, output_rx) = mpsc::channel();
-    let ext = Arc::new(Extension::new(client, output_tx));
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.config = Some(cfg());
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.registered_agents.insert(agent_id("agent-a"));
-        state.capability_active = true;
-        state.session_active = true;
-    }
-    let worker_ext = Arc::clone(&ext);
-    let worker = std::thread::spawn(move || {
-        let context = AdmissionContext {
-            trace: LatencyTrace {
-                connection_generation: 1,
-                trace_seq: 1,
-                event_class: "create",
-            },
-            received_at: Instant::now(),
-            ingress_epoch: 0,
-            config_generation: 0,
-            agent_generation: 0,
-            installation_team_id: "T123".to_owned(),
-            queue_wait_us: 0,
-            identity_us: Cell::new(0),
-            outcome: Cell::new("rejected_policy"),
-        };
-        worker_ext.process_slack_message_admitted(
-            slack_message("C123", Some("channel"), "<@UBOT123> late"),
-            Some(&context),
-        );
-    });
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("identity barrier reached");
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-        state.session_active = false;
-        state.registered_agents.clear();
-        state.capability_active = false;
-    }
-    release_tx.send(()).expect("release identity");
-    worker.join().expect("admission worker");
-    assert_no_ingress(&output_rx);
-}
-
-/// Agent unload uses exact local-effect generation revalidation rather than the
-/// global ingress epoch, suppressing late help/link/select replies after I/O.
-#[test]
-fn blocked_identity_completion_has_no_local_effect_after_agent_unload() {
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let client = Arc::new(BlockingIdentityClient {
-        started: Mutex::new(Some(started_tx)),
-        release: Mutex::new(release_rx),
-    });
-    let (output_tx, output_rx) = mpsc::channel();
-    let ext = Arc::new(Extension::new(client, output_tx));
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.config = Some(cfg());
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.registered_agents.insert(agent_id("agent-a"));
-        state.capability_active = true;
-        state.session_active = true;
-    }
-    let worker_ext = Arc::clone(&ext);
-    let worker = std::thread::spawn(move || {
-        let context = AdmissionContext {
-            trace: LatencyTrace {
-                connection_generation: 1,
-                trace_seq: 1,
-                event_class: "local_command",
-            },
-            received_at: Instant::now(),
-            ingress_epoch: 0,
-            config_generation: 0,
-            agent_generation: 0,
-            installation_team_id: "T123".to_owned(),
-            queue_wait_us: 0,
-            identity_us: Cell::new(0),
-            outcome: Cell::new("rejected_policy"),
-        };
-        worker_ext.process_slack_message_admitted(
-            slack_message("C123", Some("channel"), "<@UBOT123>"),
-            Some(&context),
-        );
-    });
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("identity barrier reached");
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.registered_agents.clear();
-        state.agent_generation = state.agent_generation.wrapping_add(1);
-    }
-    release_tx.send(()).expect("release identity");
-    worker.join().expect("admission worker");
-    assert_no_ingress(&output_rx);
-}
-
-/// A closed harness writer is terminal for Socket Mode admission: after rolling
-/// back private correlation, shutdown prevents later ACK-and-drop behavior.
-#[test]
-fn ingress_writer_closure_stops_socket_admission() {
-    let (output_tx, output_rx) = mpsc::channel();
-    drop(output_rx);
-    let ext = Extension::new(FakeClient::new(), output_tx);
-    {
-        let mut state = ext.state.lock().expect("state");
-        state.config = Some(cfg());
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.registered_agents.insert(agent_id("agent-a"));
-        state.capability_active = true;
-        state.session_active = true;
-    }
-    let context = AdmissionContext {
-        trace: LatencyTrace {
-            connection_generation: 1,
-            trace_seq: 1,
-            event_class: "create",
-        },
-        received_at: Instant::now(),
-        ingress_epoch: 0,
-        config_generation: 0,
-        agent_generation: 0,
-        installation_team_id: "T123".to_owned(),
-        queue_wait_us: 0,
-        identity_us: Cell::new(0),
-        outcome: Cell::new("rejected_policy"),
-    };
-    ext.process_slack_message_admitted(
-        slack_message("C123", Some("channel"), "<@UBOT123> writer"),
-        Some(&context),
-    );
-    assert!(ext.shutdown.is_requested());
-    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
 }

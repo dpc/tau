@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::events::{ProviderBackend, ToolFormat, ToolType};
-use crate::{CborValue, MessageEnvelopeItem, ProviderTokenUsage, ToolCallId, ToolName};
+use crate::{CborValue, ProviderTokenUsage, ToolCallId, ToolName};
 
 // ---------------------------------------------------------------------------
 // Item-based conversation types
@@ -542,8 +542,6 @@ pub struct ReasoningTextItem {
 pub enum ContextItem {
     /// Message authored by a system, developer, user, or assistant role.
     Message(MessageItem),
-    /// Typed transport-neutral incoming or outgoing message.
-    MessageEnvelope(Box<MessageEnvelopeItem>),
     /// Assistant request to invoke a tool.
     ToolCall(ToolCallItem),
     /// Tool result returned to the model.
@@ -604,8 +602,7 @@ pub fn validate_compaction_window(items: &[ContextItem]) -> Result<(), &'static 
             ContextItem::Message(_)
             | ContextItem::ReasoningText(_)
             | ContextItem::Reasoning(_)
-            | ContextItem::UnknownProviderItem(_)
-            | ContextItem::MessageEnvelope(_) => {}
+            | ContextItem::UnknownProviderItem(_) => {}
         }
     }
     if calls != results {

@@ -17,7 +17,7 @@ rejectable atomically, keeps receive mode local to the route it affects, and
 lets one record combine both permissions without granting either implicitly.
 
 Aliases, not native ids, are the only proactive selectors. Receive creates
-source-bound opaque reply authority but no proactive authority; proactive send
+source-bound Tau-issued reply authority but no proactive authority; proactive send
 creates no receive, reply, linking, or control authority. Parent receive includes
 all threads, while a fixed-thread receive route isolates state and normalizes its
 root create. Static receive DM policy takes precedence over dynamic discovery;

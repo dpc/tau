@@ -26,7 +26,7 @@ discovery tool.
 
 This is a source-only notification capability for roles already granted the
 default-off `slack_send` tool. It uses the same `slack:send` tag and adds no
-configuration switch or Slack scope. Selecting another eligible opaque
+configuration switch or Slack scope. Selecting another eligible Tau-issued
 `reply_to` can notify that occurrence's exact source, matching the role's
 existing source-reply authority.
 
@@ -34,9 +34,9 @@ existing source-reply authority.
 
 For `mention_source_user: true`, the extension:
 
-1. resolves the opaque selector to the invoking agent's same-process,
-   commit-accepted, live `ReplyRoute`;
-2. revalidates current agent, session, transport capability, configuration
+1. resolves the Tau-issued selector to the invoking agent's same-process,
+   locally retained, live `ReplyRoute`;
+2. revalidates current agent, session, extension lifecycle, configuration
    generation, exact conversation/thread, receive policy or dynamic-DM link,
    and exact installation team;
 3. takes the target only from the route's ingress-verified U/W `user_id`; and

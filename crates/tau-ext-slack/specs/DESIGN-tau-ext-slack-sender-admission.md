@@ -26,6 +26,6 @@ capture come from one `users.info` snapshot; see
 
 Each route independently chooses mentions-only or all-message triggers. Outside
 DMs, commands require an exact leading authenticated bot mention regardless of
-Slack event wrapper. Only an accepted ingress result
-activates its pending opaque source-bound reply route and grants no proactive
+Slack event wrapper. Only successful direct message-fact publication installs
+its Tau-issued source-bound reply route, and that route grants no proactive
 authority.

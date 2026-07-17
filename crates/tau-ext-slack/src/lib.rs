@@ -21,17 +21,13 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use rand::RngCore as _;
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, CompleteTransportSendRequest, ConversationKind, Event, ExternalActorKind,
-    ExternalMessageIdentity, HarnessInputMessage, HarnessNotice, LegacyMessageConversation,
-    MessageEndpoint, MessageId, MessageOperation, MessagePayload, MessageReaction, MessageRef,
-    MessageThread, MessageTransportAcceptance, NoticeLevel, ReactionAction,
-    RegisterTransportCapabilityRequest, SenderIdentityAssurance, SenderPolicyStatus, TextFormat,
-    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus, TransportMessageDraft, TransportMessageIngressOutcome,
-    TransportMessageIngressRequest, TransportSendDestinationCapability,
+    AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
+    MessageConversation, MessageDeleted, MessageDelivered, MessageEdited, MessageFactId,
+    MessageFactRef, MessageParty, MessagePublisherId, MessageReactionAdded, MessageReactionRemoved,
+    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -44,8 +40,7 @@ mod transport_mentions;
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
 use send_delivery::{
-    CompletionOutput, FrozenPostBody, FrozenSendAuthority, PostAttemptFailure, PostAttemptOutcome,
-    RemoteCopyPossibility, SendFailureCategory, SendLedgerDisposition, SendLedgerEntry,
+    FrozenPostBody, PostAttemptFailure, PostAttemptOutcome, SendFailureCategory, SendLedgerEntry,
     SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
     SystemSendScheduler, classify_api_error, classify_post_api_error, parse_retry_after,
 };
@@ -115,15 +110,13 @@ const MAX_SLACK_API_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_ID_BYTES: usize = 256;
 const RECEIVED_OCCURRENCE_LIMIT: usize = 4096;
 const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
-const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
-const PENDING_SEND_LIMIT: usize = 1024;
-const SEND_LEDGER_LIMIT: usize = PENDING_SEND_LIMIT;
+const SEND_LEDGER_LIMIT: usize = 1024;
 const ACTIVE_SEND_WORKER_LIMIT: usize = 64;
 // Ownership can pin at most `REACTION_OWNERSHIP_LIMIT` entries; the additional
-// pending-send headroom guarantees every accepted send completion can activate
+// send-ledger headroom guarantees every accepted send can activate
 // without evicting a pinned target.
-const REACTION_TARGET_LIMIT: usize = REACTION_OWNERSHIP_LIMIT + PENDING_SEND_LIMIT;
+const REACTION_TARGET_LIMIT: usize = REACTION_OWNERSHIP_LIMIT + SEND_LEDGER_LIMIT;
 const REACTION_OWNERSHIP_LIMIT: usize = 1024;
 const REACTION_ATTEMPT_LIMIT: usize = 256;
 const CONVERSATION_LIMIT: usize = 64;
@@ -135,8 +128,6 @@ const MAX_DISCOVERY_CURSOR_BYTES: usize = 128;
 const MAX_DISCOVERY_RESULT_BYTES: usize = 24 * 1024;
 const DYNAMIC_DM_LIMIT: usize = 64;
 const DYNAMIC_DM_LABEL: &str = "direct-message";
-const TRANSPORT_NAME: &str = "slack";
-const CAPABILITY_REQUEST_PREFIX: &str = "slack-capability-";
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_SOCKET_FRAME_BYTES: usize = 256 * 1024;
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
@@ -163,6 +154,38 @@ struct AdmissionContext {
     identity_us: Cell<u64>,
     /// Explicit terminal class selected by the operation that owns the outcome.
     outcome: Cell<&'static str>,
+}
+
+/// Exact retained ownership captured while admitting one Slack deletion.
+#[derive(Clone, Eq, PartialEq)]
+enum DeleteOwner {
+    /// A Slack-authored message whose receive authority must remain current.
+    Incoming(IncomingMessageOwner),
+    /// A bridge-authored post whose provenance survives receive unregister.
+    Posted(PostedMessageOwner),
+}
+
+impl DeleteOwner {
+    fn agent_id(&self) -> &AgentId {
+        match self {
+            Self::Incoming(owner) => &owner.agent_id,
+            Self::Posted(owner) => &owner.agent_id,
+        }
+    }
+
+    fn message_id(&self) -> &MessageFactId {
+        match self {
+            Self::Incoming(owner) => &owner.message_id,
+            Self::Posted(owner) => &owner.message_id,
+        }
+    }
+
+    fn conversation(&self) -> &SlackConversation {
+        match self {
+            Self::Incoming(owner) => &owner.conversation,
+            Self::Posted(owner) => &owner.conversation,
+        }
+    }
 }
 
 /// Payload-free fields shared by one occurrence's latency markers.
@@ -727,11 +750,50 @@ struct IngressSender {
     display_name: Option<String>,
     /// Operator-configured presentation-only alias.
     identity_alias: Option<String>,
-    /// Policy classification established before submission.
-    policy_status: SenderPolicyStatus,
 }
 
-/// Fully normalized Slack occurrence ready for typed ingress.
+/// Local sender-admission class retained only for Slack reply authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SenderPolicyStatus {
+    /// The sender is explicitly allowlisted.
+    Allowlisted,
+    /// Lax mode admitted the verified sender.
+    LaxPermitted,
+}
+
+/// One direct immutable message fact selected after Slack-local admission.
+enum IngressFact {
+    /// A newly delivered external message.
+    Delivered {
+        /// Publisher-scoped identifier derived from Slack native identity.
+        message_id: MessageFactId,
+        /// Original normalized Slack body.
+        text: String,
+    },
+    /// Replacement text for one known delivered message.
+    Edited {
+        /// Previously published delivered-message identifier.
+        target: MessageFactId,
+        /// Original normalized replacement body.
+        text: String,
+    },
+    /// A reaction added to one known message.
+    ReactionAdded {
+        /// Previously published base-message identifier.
+        target: MessageFactId,
+        /// Slack reaction name.
+        reaction: String,
+    },
+    /// A reaction removed from one known message.
+    ReactionRemoved {
+        /// Previously published base-message identifier.
+        target: MessageFactId,
+        /// Slack reaction name.
+        reaction: String,
+    },
+}
+
+/// Fully normalized Slack occurrence ready for direct fact publication.
 struct IngressSubmission {
     /// Exact currently authorized native conversation.
     conversation: SlackConversation,
@@ -739,13 +801,10 @@ struct IngressSubmission {
     agent_id: AgentId,
     /// Verified sender and policy.
     sender: IngressSender,
-    /// Immutable create/edit/reaction operation.
-    operation: MessageOperation,
-    /// Whether normalized text addressed this installation's receiving
-    /// identity.
-    transport_identity_mentioned: bool,
-    /// Native identity retained for transport audit and mutation correlation.
-    external_identity: ExternalMessageIdentity,
+    /// Immutable fact payload chosen by Slack.
+    fact: IngressFact,
+    /// Native message timestamp used only for Slack-local route ownership.
+    native_message_ts: Option<String>,
 }
 
 /// Command prefix and remainder parsed from normalized Slack text.
@@ -825,6 +884,20 @@ impl SlackConversation {
     }
 }
 
+/// Build the inert conversation description included in published facts.
+fn message_fact_conversation(conversation: &SlackConversation) -> MessageConversation {
+    MessageConversation {
+        stable_id: conversation.channel_id.clone(),
+        display_name: Some(conversation.alias.clone()),
+    }
+}
+
+/// Compose Slack conversation and native occurrence identity into one
+/// publisher-scoped Slack fact identifier.
+fn slack_message_fact_id(channel_id: &str, native_id: &str) -> MessageFactId {
+    MessageFactId::new(format!("slack:{channel_id}:{native_id}"))
+}
+
 /// Exact policy scope owning one selected-agent choice.
 #[derive(Clone, Eq, Hash, PartialEq)]
 enum SelectionRouteKey {
@@ -871,6 +944,18 @@ struct SlackEdit {
     revision_ts: String,
 }
 
+/// Validated Slack `message_deleted` mutation.
+struct SlackDelete {
+    /// Slack event id used for process-local repeat suppression.
+    event_id: Option<String>,
+    /// Authorized conversation containing the original message.
+    channel_id: String,
+    /// Stable timestamp/id of the deleted logical message.
+    message_ts: String,
+    /// Optional original thread root.
+    thread_ts: Option<String>,
+}
+
 /// Supported Slack reaction lifecycle kinds.
 #[derive(Clone, Copy)]
 enum ReactionKind {
@@ -899,6 +984,8 @@ enum DecodedSlackEvent {
     Reaction(SlackReaction),
     /// Immutable edit occurrence referencing an earlier create.
     Edit(SlackEdit),
+    /// Immutable deletion occurrence referencing an earlier create.
+    Delete(SlackDelete),
 }
 
 /// Bounded Socket Mode envelope classes used by payload-free traces.
@@ -938,6 +1025,7 @@ impl DecodedSlackEvent {
             Self::Message(_) => "create",
             Self::Reaction(_) => "reaction",
             Self::Edit(_) => "edit",
+            Self::Delete(_) => "delete",
         }
     }
 }
@@ -999,34 +1087,7 @@ struct LinkedConversation {
     user_id: String,
 }
 
-/// Source-bound ingress awaiting its durable harness result.
-struct PendingIngress {
-    /// Agent targeted by this occurrence.
-    agent_id: AgentId,
-    /// Authorized native route submitted to the harness.
-    conversation: SlackConversation,
-    /// Verified Slack account that authored the occurrence.
-    user_id: String,
-    /// Bounded UI-only sender display snapshot.
-    display_name: Option<String>,
-    /// Operator-configured presentation-only sender alias.
-    identity_alias: Option<String>,
-    /// Exact installation team which admitted the event wrapper.
-    installation_team_id: String,
-    /// Sender policy retained for the eventual source-bound reply route.
-    policy_status: SenderPolicyStatus,
-    /// Native create identity to bind after durable commit, when applicable.
-    original_key: Option<PostedMessageKey>,
-    /// Exact native item eligible for reaction after commit, if this is
-    /// create/edit.
-    reaction_message_ts: Option<String>,
-    /// Monotonic extension instant at RPC submission.
-    submitted_at: Instant,
-    /// Payload-free process-local correlation retained until the RPC result.
-    latency_trace: Option<LatencyTrace>,
-}
-
-/// Opaque source route installed only after durable ingress commit.
+/// Opaque source route installed after direct fact publication succeeds.
 #[derive(Clone)]
 struct ReplyRoute {
     /// Agent allowed to use this route.
@@ -1041,35 +1102,15 @@ struct ReplyRoute {
     identity_alias: Option<String>,
     /// Installation team bound to this source occurrence.
     installation_team_id: String,
-    /// Policy of the sender that activated this route.
-    policy_status: SenderPolicyStatus,
-}
-
-/// A successful Slack post awaiting durable outgoing-fact completion.
-struct PendingPostedMessage {
-    /// Authenticated route used for the remote post.
-    conversation: SlackConversation,
-    /// Native identity returned by Slack.
-    posted: PostedMessage,
-    /// Agent that authored the post.
-    agent_id: AgentId,
-    /// Original tool invocation used to fail closed if completion is rejected.
-    invoke: ToolStarted,
-    /// Opaque model-facing reference activated only after durable completion.
-    message_ref: String,
-    /// Authority that must remain current for later reactions.
-    authority: ReactionAuthority,
-    /// Exact lifecycle/configuration authority captured before Slack I/O.
-    send_authority: FrozenSendAuthority,
 }
 
 /// Live authority retained for one reaction target.
 #[derive(Clone, Eq, PartialEq)]
 enum ReactionAuthority {
-    /// Exact committed incoming source route.
+    /// Exact published incoming source route.
     Source {
-        /// Canonical Tau message occurrence id.
-        message_id: MessageId,
+        /// Publisher-scoped message fact id.
+        message_id: MessageFactId,
         /// Verified source user bound to the route.
         user_id: String,
     },
@@ -1111,7 +1152,7 @@ struct ReactionOwner {
     /// Agent allowed to remove the reaction.
     agent_id: AgentId,
     /// Reference pinned while ownership remains live.
-    message_ref: String,
+    message_ref: MessageFactId,
 }
 
 /// One exact in-flight reservation protected against late completion races.
@@ -1121,7 +1162,7 @@ struct ReactionReservation {
     /// Monotonic token unique within this extension process.
     token: u64,
     /// Target reference pinned until the call finishes.
-    message_ref: String,
+    message_ref: MessageFactId,
     /// Whether this is an unowned add counted against ownership capacity.
     unowned_add: bool,
 }
@@ -1148,13 +1189,13 @@ struct ReactionAttempt {
     disposition: ReactionAttemptDisposition,
 }
 
-/// Commit-confirmed incoming Slack create eligible for later edit references.
+/// Locally written incoming Slack create eligible for later edit references.
 #[derive(Clone, Eq, PartialEq)]
 struct IncomingMessageOwner {
     /// Agent that received the original create.
     agent_id: AgentId,
-    /// Canonical id of the original immutable create occurrence.
-    message_id: MessageId,
+    /// Publisher-scoped id of the original immutable create occurrence.
+    message_id: MessageFactId,
     /// Exact source-bound conversation and thread.
     conversation: SlackConversation,
     /// Verified original sender account.
@@ -1197,25 +1238,10 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     /// Selected agent independently owned by each static route or dynamic DM.
     selected_agent_by_route: HashMap<SelectionRouteKey, AgentId>,
-    /// Ingress requests waiting for a commit-gated result.
-    pending_ingress: HashMap<String, PendingIngress>,
-    /// Canonical opaque ids mapped to private Slack routes.
-    reply_routes: HashMap<MessageId, ReplyRoute>,
-    /// Oldest-first bound for canonical reply routes.
-    reply_route_order: VecDeque<MessageId>,
-    /// Remote posts waiting for outgoing fact plus terminal result commit.
-    pending_posts: HashMap<String, PendingPostedMessage>,
-    /// Exact send reservations whose acknowledged completion output is either
-    /// queued behind the shared cap or owned by one active worker.
-    ///
-    /// An owner remains here continuously while moving from the pending FIFO to
-    /// an active slot, so every replay coalesces until that exact owner
-    /// releases.
-    completion_resubmitting: HashSet<SendQueueReservation>,
-    /// Oldest-first acknowledged completion outputs queued behind the shared
-    /// worker cap. Moving the front item to an active slot is one locked state
-    /// transition performed by `reserve_pending_completion_output`.
-    pending_completion_outputs: VecDeque<CompletionOutput>,
+    /// Published fact ids mapped to private Slack routes.
+    reply_routes: HashMap<MessageFactId, ReplyRoute>,
+    /// Oldest-first bound for published reply routes.
+    reply_route_order: VecDeque<MessageFactId>,
     /// Bounded, non-evicting process/session ledger preventing replay reposts.
     send_ledger: HashMap<tau_proto::ToolCallId, SendLedgerEntry>,
     /// Monotonic send reservation token source.
@@ -1223,32 +1249,19 @@ struct State {
     /// Per-agent send lifecycle generations preventing unrelated churn from
     /// cancelling other agents.
     send_agent_generations: HashMap<AgentId, u64>,
-    /// Shared slots reserved by delivery/retry workers and queued-to-running
-    /// completion-output workers. Every release decrements exactly its own slot
-    /// and reserves at most one FIFO successor while holding the state lock.
+    /// Shared slots reserved by delivery/retry workers.
     active_send_workers: usize,
     /// Harness session generation captured by accepted sends.
     session_generation: u64,
-    /// Typed transport capability generation captured by accepted sends.
-    capability_generation: u64,
     /// Live per-channel pacing barrier consulted immediately before attempts.
     channel_attempt_deadlines: HashMap<String, Instant>,
     /// Logical-call FIFO per native channel. The front call retains its turn
     /// through its sole retry and provider backoff.
     channel_send_queues: HashMap<String, VecDeque<SendQueueReservation>>,
-    /// Recent commit-confirmed incoming creates by native Slack identity.
+    /// Recent locally written incoming creates by native Slack identity.
     incoming_messages: HashMap<PostedMessageKey, IncomingMessageOwner>,
     /// Oldest-first bound for incoming create identities.
     incoming_message_order: VecDeque<PostedMessageKey>,
-    /// Monotonic id source for extension-owned RPC correlation ids.
-    next_route_id: u64,
-    /// Whether the harness accepted this connection's Slack/reply-tool
-    /// capability.
-    capability_active: bool,
-    /// Session-generation registration request awaiting its result.
-    pending_capability_request: Option<String>,
-    /// Monotonic capability request correlation source.
-    next_capability_request: u64,
     /// Bounded exact D-conversation to U/W-user dynamic links.
     linked_dms: HashMap<String, LinkedConversation>,
     /// Monotonic latch preventing configuration changes after remote effects.
@@ -1278,10 +1291,10 @@ struct State {
     received_occurrences: ReceivedOccurrenceCache,
     /// Recent bridge-authored Slack posts and their owning agents.
     posted_messages: PostedMessageCache,
-    /// Opaque commit-accepted refs mapped to private exact targets.
-    reaction_targets: HashMap<String, ReactionTarget>,
+    /// Tau-issued fact refs mapped to private exact targets.
+    reaction_targets: HashMap<MessageFactId, ReactionTarget>,
     /// Oldest-first target insertion order.
-    reaction_target_order: VecDeque<String>,
+    reaction_target_order: VecDeque<MessageFactId>,
     /// Locally owned bot reactions.
     reaction_owners: HashMap<ReactionKey, ReactionOwner>,
     /// Reaction tuples reserved during Slack I/O.
@@ -1300,11 +1313,7 @@ impl State {
     /// Irreversibly revoke installation-scoped authority for this process.
     fn latch_installation_mismatch(&mut self) {
         self.ingress_epoch = self.ingress_epoch.wrapping_add(1);
-        self.capability_active = false;
-        self.capability_generation = self.capability_generation.wrapping_add(1);
-        self.pending_capability_request = None;
         self.installation_mismatch = true;
-        self.pending_ingress.clear();
         self.clear_reaction_state();
         self.clear_reply_routes();
         self.clear_incoming_messages();
@@ -1352,7 +1361,11 @@ impl State {
     }
 
     /// Insert a target, evicting only the oldest target without live ownership.
-    fn insert_reaction_target(&mut self, message_ref: String, target: ReactionTarget) -> bool {
+    fn insert_reaction_target(
+        &mut self,
+        message_ref: MessageFactId,
+        target: ReactionTarget,
+    ) -> bool {
         if let std::collections::hash_map::Entry::Occupied(mut entry) =
             self.reaction_targets.entry(message_ref.clone())
         {
@@ -1475,15 +1488,29 @@ impl State {
         // safely and same-call replay cannot regain Slack I/O authority.
     }
 
+    /// Revoke every private route or reaction state keyed to one message fact.
+    fn revoke_message_authority(&mut self, message_id: &MessageFactId) {
+        self.reply_routes.remove(message_id);
+        self.reply_route_order
+            .retain(|candidate| candidate != message_id);
+        self.reaction_targets.remove(message_id);
+        self.reaction_target_order
+            .retain(|candidate| candidate != message_id);
+        self.reaction_owners
+            .retain(|_, owner| &owner.message_ref != message_id);
+        self.reaction_in_flight
+            .retain(|_, reservation| &reservation.message_ref != message_id);
+    }
+
     /// Return whether live reaction ownership pins this source reply route.
-    fn reply_route_is_pinned(&self, message_id: &MessageId) -> bool {
+    fn reply_route_is_pinned(&self, message_id: &MessageFactId) -> bool {
         self.reaction_owners
             .values()
-            .map(|owner| owner.message_ref.as_str())
+            .map(|owner| &owner.message_ref)
             .chain(
                 self.reaction_in_flight
                     .values()
-                    .map(|reservation| reservation.message_ref.as_str()),
+                    .map(|reservation| &reservation.message_ref),
             )
             .any(|message_ref| {
                 self.reaction_targets
@@ -1501,7 +1528,7 @@ impl State {
     }
 
     /// Insert or refresh one canonical route while evicting the oldest route.
-    fn insert_reply_route(&mut self, message_id: MessageId, route: ReplyRoute) {
+    fn insert_reply_route(&mut self, message_id: MessageFactId, route: ReplyRoute) {
         self.reply_route_order.retain(|id| id != &message_id);
         self.reply_route_order.push_back(message_id.clone());
         self.reply_routes.insert(message_id, route);
@@ -1533,7 +1560,8 @@ impl State {
         self.reply_route_order.clear();
     }
 
-    /// Remember one committed incoming create for immutable edit references.
+    /// Remember one locally written incoming create for immutable edit
+    /// references.
     fn insert_incoming_message(
         &mut self,
         key: PostedMessageKey,
@@ -1554,7 +1582,7 @@ impl State {
         true
     }
 
-    /// Remove all committed incoming identities owned by one agent.
+    /// Remove all locally written incoming identities owned by one agent.
     fn remove_agent_incoming_messages(&mut self, agent_id: &AgentId) {
         self.incoming_messages
             .retain(|_, owner| &owner.agent_id != agent_id);
@@ -1567,7 +1595,7 @@ impl State {
             .retain(|key| retained.contains(key));
     }
 
-    /// Clear all committed incoming native identities.
+    /// Clear all locally written incoming native identities.
     fn clear_incoming_messages(&mut self) {
         self.incoming_messages.clear();
         self.incoming_message_order.clear();
@@ -1576,21 +1604,8 @@ impl State {
     /// Clear the process/session send horizon after the harness retires it.
     fn clear_send_ledger(&mut self) {
         self.send_ledger.clear();
-        self.completion_resubmitting.clear();
-        self.pending_completion_outputs.clear();
         self.channel_attempt_deadlines.clear();
         self.channel_send_queues.clear();
-    }
-
-    /// Atomically move at most one oldest queued completion output into a
-    /// reserved shared worker slot.
-    fn reserve_pending_completion_output(&mut self) -> Option<CompletionOutput> {
-        if self.active_send_workers >= ACTIVE_SEND_WORKER_LIMIT {
-            return None;
-        }
-        let output = self.pending_completion_outputs.pop_front()?;
-        self.active_send_workers += 1;
-        Some(output)
     }
 
     /// Return one agent's current send lifecycle generation.
@@ -1666,26 +1681,11 @@ impl Output {
     }
 }
 
-/// Injectable OS-thread boundary for acknowledged completion output.
-trait CompletionOutputSpawner: Send + Sync {
-    fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
-}
-
-struct SystemCompletionOutputSpawner;
-
-impl CompletionOutputSpawner for SystemCompletionOutputSpawner {
-    fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
-        std::thread::Builder::new()
-            .name("tau-slack-send-completion".to_owned())
-            .spawn(task)
-            .map(|_| ())
-    }
-}
-
 struct Extension {
     state: Arc<Mutex<State>>,
-    /// Serializes completion-publication admission with session retirement.
-    completion_publication_gate: Arc<Mutex<()>>,
+    /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
+    /// retirement barrier.
+    output_publication_gate: Arc<Mutex<()>>,
     client: Arc<dyn SlackClient>,
     output: Output,
     shutdown: Arc<ShutdownSignal>,
@@ -1693,12 +1693,46 @@ struct Extension {
     send_wake: Arc<SendWake>,
     /// Injectable delivery scheduler used by deterministic tests.
     send_scheduler: Arc<dyn SendScheduler>,
-    /// Injectable completion thread boundary used by deterministic tests.
-    completion_output_spawner: Arc<dyn CompletionOutputSpawner>,
-    /// Fail-closed latch set before known completion-output retirement.
+    /// Fail-closed latch set before known protocol-output retirement.
     output_failed: Arc<AtomicBool>,
     /// Process-local ordinal for private TRACE correlation.
     trace_seq: AtomicU64,
+    /// Deterministic unit-test synchronization at otherwise unobservable races.
+    #[cfg(test)]
+    test_hooks: Arc<ExtensionTestHooks>,
+}
+
+/// One test-only boundary that announces arrival and waits for explicit
+/// release.
+#[cfg(test)]
+struct BlockingTestHook {
+    /// Announces that production code reached the exact boundary.
+    reached: mpsc::Sender<()>,
+    /// Holds production code at the boundary until the test mutates state.
+    release: mpsc::Receiver<()>,
+}
+
+/// Test-only hooks for writer failure and delete-publication races.
+#[cfg(test)]
+#[derive(Default)]
+struct ExtensionTestHooks {
+    /// Runs after the failure latch is set but before publication-gate release.
+    output_failure_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Runs immediately before deletion acquires the publication gate.
+    delete_publication_boundary: Mutex<Option<BlockingTestHook>>,
+}
+
+/// Run and consume one installed test boundary.
+#[cfg(test)]
+fn run_blocking_test_hook(slot: &Mutex<Option<BlockingTestHook>>) {
+    if let Some(hook) = slot
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        hook.reached.send(()).expect("announce test boundary");
+        hook.release.recv().expect("release test boundary");
+    }
 }
 
 impl Extension {
@@ -1708,37 +1742,24 @@ impl Extension {
         output: impl Into<Output>,
         send_scheduler: Arc<dyn SendScheduler>,
     ) -> Self {
-        Self::new_with_scheduler_and_completion_spawner(
-            client,
-            output,
-            send_scheduler,
-            Arc::new(SystemCompletionOutputSpawner),
-        )
-    }
-
-    /// Create an extension with both background execution boundaries injected.
-    fn new_with_scheduler_and_completion_spawner(
-        client: Arc<dyn SlackClient>,
-        output: impl Into<Output>,
-        send_scheduler: Arc<dyn SendScheduler>,
-        completion_output_spawner: Arc<dyn CompletionOutputSpawner>,
-    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
-            completion_publication_gate: Arc::new(Mutex::new(())),
+            output_publication_gate: Arc::new(Mutex::new(())),
             client,
             output: output.into(),
             shutdown: Arc::new(ShutdownSignal::new()),
             send_wake: Arc::new(SendWake::default()),
             send_scheduler,
-            completion_output_spawner,
             output_failed: Arc::new(AtomicBool::new(false)),
             trace_seq: AtomicU64::new(0),
+            #[cfg(test)]
+            test_hooks: Arc::new(ExtensionTestHooks::default()),
         }
     }
 
     /// Build the Socket Mode worker view over the primary extension's shared
-    /// lifecycle state, completion-publication gate, and cancellation wake.
+    /// lifecycle state, sent/delete publication and retirement gate, and
+    /// cancellation wake.
     fn new_socket_worker_view(
         send_retirement: SendRetirement,
         client: Arc<dyn SlackClient>,
@@ -1747,20 +1768,22 @@ impl Extension {
     ) -> Self {
         let SendRetirement {
             state,
-            completion_publication_gate,
+            output_publication_gate,
             wake,
+            output_failed,
         } = send_retirement;
         Self {
             state,
-            completion_publication_gate,
+            output_publication_gate,
             client,
             output,
             shutdown,
             send_wake: wake,
             send_scheduler: Arc::new(SystemSendScheduler),
-            completion_output_spawner: Arc::new(SystemCompletionOutputSpawner),
-            output_failed: Arc::new(AtomicBool::new(false)),
+            output_failed,
             trace_seq: AtomicU64::new(0),
+            #[cfg(test)]
+            test_hooks: Arc::new(ExtensionTestHooks::default()),
         }
     }
 
@@ -1779,17 +1802,12 @@ impl Extension {
         state.registered_agents.clear();
         state.send_agent_generations.clear();
         state.selected_agent_by_route.clear();
-        state.pending_ingress.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
-        state.pending_posts.clear();
         state.posted_messages.clear();
         state.clear_reaction_state();
         state.bot_user_id = None;
         state.installation_team_id = None;
-        state.capability_active = false;
-        state.capability_generation = state.capability_generation.wrapping_add(1);
-        state.pending_capability_request = None;
         state.received_occurrences = ReceivedOccurrenceCache::default();
         self.send_wake.notify_lifecycle_change();
         Ok(())
@@ -1808,14 +1826,9 @@ impl Extension {
         state.registered_agents.clear();
         state.send_agent_generations.clear();
         state.selected_agent_by_route.clear();
-        state.pending_ingress.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
-        state.pending_posts.clear();
         state.clear_send_ledger();
-        state.capability_active = false;
-        state.capability_generation = state.capability_generation.wrapping_add(1);
-        state.pending_capability_request = None;
         state.posted_messages.clear();
         state.linked_dms.clear();
         state.bot_user_id = None;
@@ -1828,15 +1841,22 @@ impl Extension {
     /// Retire all outbound send authority at the process/session transport
     /// boundary before waking background workers.
     fn retire_send_authority(&self) {
-        retire_send_state(
+        retire_send_state(&self.state, &self.output_publication_gate, &self.send_wake);
+    }
+
+    /// Synchronously retire every route and remote-effect authority after the
+    /// confirmed protocol writer becomes unavailable.
+    fn retire_after_output_failure(&self) {
+        retire_after_output_failure(
             &self.state,
-            &self.completion_publication_gate,
+            &self.output_publication_gate,
             &self.send_wake,
+            &self.output_failed,
+            &self.shutdown,
         );
     }
 
-    /// Remove one unloaded agent's private receive/reaction authority while
-    /// retaining any Tau completion correlation for already-accepted sends.
+    /// Remove one unloaded agent's private receive/reaction authority.
     fn unload_agent(&self, agent_id: &AgentId) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.registered_agents.remove(agent_id);
@@ -1848,9 +1868,6 @@ impl Extension {
             .retain(|_, selected| selected != agent_id);
         state.remove_agent_reply_routes(agent_id);
         state.remove_agent_incoming_messages(agent_id);
-        state
-            .pending_ingress
-            .retain(|_, pending| &pending.agent_id != agent_id);
         state.posted_messages.remove_agent(agent_id);
         state.remove_agent_reaction_state(agent_id);
         drop(state);
@@ -1864,45 +1881,6 @@ impl Extension {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .config_frozen
-    }
-
-    /// Register the typed Slack capability for the current harness session.
-    fn request_transport_capability(&self) {
-        let (request_id, proactive_destinations) = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            state.capability_active = false;
-            state.capability_generation = state.capability_generation.wrapping_add(1);
-            if state.installation_mismatch {
-                state.pending_capability_request = None;
-                drop(state);
-                self.send_wake.notify_lifecycle_change();
-                return;
-            }
-            state.next_capability_request = state.next_capability_request.wrapping_add(1);
-            let request_id = format!(
-                "{CAPABILITY_REQUEST_PREFIX}{}",
-                state.next_capability_request
-            );
-            state.pending_capability_request = Some(request_id.clone());
-            let destinations = state.config.as_ref().map_or_else(Vec::new, |cfg| {
-                cfg.proactive_aliases
-                    .iter()
-                    .filter_map(|alias| cfg.conversations.get(alias))
-                    .map(send_destination_capability)
-                    .collect()
-            });
-            (request_id, destinations)
-        };
-        self.output
-            .send(HarnessInputMessage::RegisterTransportCapability(
-                RegisterTransportCapabilityRequest {
-                    request_id,
-                    transport_name: TRANSPORT_NAME.to_owned(),
-                    send_tool: Some(self.output.wire_tool_name(SEND_TOOL_NAME)),
-                    send_destinations: proactive_destinations,
-                },
-            ));
-        self.send_wake.notify_lifecycle_change();
     }
 
     /// Dispatch a Tau tool invocation owned by this extension.
@@ -2046,18 +2024,6 @@ impl Extension {
             Err(message) => return tool_error(invoke, message),
         };
         if enabled {
-            if !self
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .capability_active
-            {
-                return tool_error(
-                    invoke,
-                    "Slack typed transport capability is not active; check harness diagnostics"
-                        .to_owned(),
-                );
-            }
             let startup = {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if state.worker_started {
@@ -2110,10 +2076,6 @@ impl Extension {
             state.remove_agent_reply_routes(&invoke.agent_id);
             state.remove_agent_source_reaction_state(&invoke.agent_id);
             state.remove_agent_incoming_messages(&invoke.agent_id);
-            state
-                .pending_ingress
-                .retain(|_, pending| pending.agent_id != invoke.agent_id);
-            state.posted_messages.remove_agent(&invoke.agent_id);
             self.send_wake.notify_lifecycle_change();
         }
         let mut result = vec![example_field(
@@ -2230,8 +2192,9 @@ impl Extension {
         state.worker_startup_failure_reported = false;
         let send_retirement = SendRetirement {
             state: Arc::clone(&self.state),
-            completion_publication_gate: Arc::clone(&self.completion_publication_gate),
+            output_publication_gate: Arc::clone(&self.output_publication_gate),
             wake: Arc::clone(&self.send_wake),
+            output_failed: Arc::clone(&self.output_failed),
         };
         let output = self.output.clone();
         let client = Arc::clone(&self.client);
@@ -2432,7 +2395,7 @@ impl Extension {
             }
             let action = ReactionActionKind::parse(&action_text)
                 .ok_or_else(|| "`action` must be `add` or `remove`".to_owned())?;
-            Ok((message_ref, emoji, action))
+            Ok((MessageFactId::new(message_ref), emoji, action))
         })();
         let (message_ref, emoji, action) = match parsed {
             Ok(parsed) => parsed,
@@ -2440,6 +2403,16 @@ impl Extension {
         };
         let prepared = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if self.output_failed.load(Ordering::Acquire)
+                || self.shutdown.is_requested()
+                || !state.session_active
+            {
+                return self.finish_reaction_error_locked(
+                    &mut state,
+                    invoke,
+                    "Slack message reference is unknown, stale, or unauthorized".to_owned(),
+                );
+            }
             let Some(cfg) = state.config.clone() else {
                 return self.finish_reaction_error_locked(
                     &mut state,
@@ -2455,7 +2428,6 @@ impl Extension {
                 );
             };
             if target.agent_id != invoke.agent_id
-                || !state.capability_active
                 || !reaction_target_authorized(&state, &cfg, &target)
             {
                 return self.finish_reaction_error_locked(
@@ -2579,7 +2551,6 @@ impl Extension {
         let current = state.config_generation == generation
             && state.reaction_epoch == epoch
             && reservation_matches
-            && state.capability_active
             && state.config.as_ref().is_some_and(|current_cfg| {
                 state
                     .reaction_targets
@@ -2694,7 +2665,9 @@ impl Extension {
             PostedMessageKey::new(&conversation.channel_id, &post.ts),
             PostedMessageOwner {
                 agent_id,
-                thread_ts: conversation.thread_ts,
+                message_id: slack_message_fact_id(&conversation.channel_id, &post.ts),
+                thread_ts: conversation.thread_ts.clone(),
+                conversation,
                 installation_team_id,
             },
         );
@@ -2723,7 +2696,7 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let (cfg, agent_id, route) = {
+        let (cfg, agent_id, target_message_id, route) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
                 return;
@@ -2763,7 +2736,7 @@ impl Extension {
                 log_ingress_rejection("reaction_route");
                 return;
             };
-            (cfg, owner.agent_id.clone(), route)
+            (cfg, owner.agent_id.clone(), owner.message_id.clone(), route)
         };
         if let Some(event_id) = reaction.event_id.as_ref()
             && !self.insert_received_occurrence(format!("reaction:{event_id}"), admission)
@@ -2779,41 +2752,30 @@ impl Extension {
                 conversation: route,
                 agent_id,
                 sender: IngressSender {
-                    policy_status: cfg
-                        .sender_policy(&reaction.user_id)
-                        .expect("sender revalidated"),
                     user_id: reaction.user_id,
                     display_name: identity.display_name,
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                operation: MessageOperation::Reaction {
-                    target: MessageRef {
-                        message_id: None,
-                        external_message_id: Some(reaction.message_ts.clone()),
+                fact: match reaction.event_type {
+                    ReactionKind::Added => IngressFact::ReactionAdded {
+                        target: target_message_id.clone(),
+                        reaction: reaction.reaction,
                     },
-                    action: match reaction.event_type {
-                        ReactionKind::Added => ReactionAction::Add,
-                        ReactionKind::Removed => ReactionAction::Remove,
-                    },
-                    reaction: MessageReaction {
-                        name: reaction.reaction,
-                        display: None,
+                    ReactionKind::Removed => IngressFact::ReactionRemoved {
+                        target: target_message_id,
+                        reaction: reaction.reaction,
                     },
                 },
-                transport_identity_mentioned: false,
-                external_identity: ExternalMessageIdentity {
-                    event_id: reaction.event_id,
-                    message_id: Some(reaction.message_ts),
-                    revision_id: None,
-                },
+                native_message_ts: Some(reaction.message_ts),
             },
             admission,
         );
     }
 
-    /// Route a validated edit only when its original committed create is known.
+    /// Route a validated edit only when its original locally written create is
+    /// known.
     ///
-    /// This commit-confirmed ownership lookup and its fail-closed rejection
+    /// This locally written fact ownership lookup and its fail-closed rejection
     /// path implement `DESIGN-tau-ext-slack-edit-ownership`.
     #[cfg(test)]
     fn process_slack_edit(&self, edit: SlackEdit) {
@@ -2871,11 +2833,8 @@ impl Extension {
             log_ingress_rejection("malformed_text");
             return;
         }
-        let NormalizedTransportMention {
-            text,
-            mentioned,
-            leading: _,
-        } = normalize_transport_mentions(text, &bot_user_id);
+        let NormalizedTransportMention { text, leading: _ } =
+            normalize_transport_mentions(text, &bot_user_id);
         if text.is_empty() {
             log_ingress_rejection("malformed_text");
             return;
@@ -2899,32 +2858,178 @@ impl Extension {
                 conversation: owner.conversation,
                 agent_id: owner.agent_id,
                 sender: IngressSender {
-                    policy_status: cfg
-                        .sender_policy(&edit.editor_user_id)
-                        .expect("sender admitted"),
                     user_id: edit.editor_user_id,
                     display_name: identity.display_name,
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                operation: MessageOperation::Edit {
-                    target: MessageRef {
-                        message_id: Some(owner.message_id),
-                        external_message_id: Some(edit.message_ts.clone()),
-                    },
-                    payload: MessagePayload::Text {
-                        text,
-                        format: TextFormat::Plain,
-                    },
+                fact: IngressFact::Edited {
+                    target: owner.message_id,
+                    text,
                 },
-                transport_identity_mentioned: mentioned,
-                external_identity: ExternalMessageIdentity {
-                    event_id: edit.event_id,
-                    message_id: Some(edit.message_ts),
-                    revision_id: Some(edit.revision_ts),
-                },
+                native_message_ts: Some(edit.message_ts),
             },
             admission,
         );
+    }
+
+    /// Publish a deletion only for one locally retained delivered message.
+    #[cfg(test)]
+    fn process_slack_delete(&self, delete: SlackDelete) {
+        self.process_slack_delete_admitted(delete, None);
+    }
+
+    /// Publish a deletion only for one locally retained delivered message.
+    fn process_slack_delete_admitted(
+        &self,
+        delete: SlackDelete,
+        admission: Option<&AdmissionContext>,
+    ) {
+        if validate_conversation_id("delete.channel", &delete.channel_id).is_err()
+            || validate_slack_ts(&delete.message_ts).is_err()
+            || delete
+                .thread_ts
+                .as_deref()
+                .is_some_and(|thread| validate_slack_ts(thread).is_err())
+        {
+            log_ingress_rejection("malformed_event");
+            return;
+        }
+        let key = PostedMessageKey::new(&delete.channel_id, &delete.message_ts);
+        let (publisher, owner) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(cfg) = state.config.as_ref() else {
+                return;
+            };
+            let owner = state
+                .incoming_messages
+                .get(&key)
+                .cloned()
+                .map(DeleteOwner::Incoming)
+                .or_else(|| {
+                    state
+                        .posted_messages
+                        .get(&key)
+                        .cloned()
+                        .map(DeleteOwner::Posted)
+                });
+            let Some(owner) = owner else {
+                log_ingress_rejection("delete_unknown_target");
+                return;
+            };
+            let conversation = owner.conversation();
+            let thread_matches = conversation.thread_ts == delete.thread_ts
+                || (delete.thread_ts.is_none()
+                    && conversation.thread_ts.as_deref() == Some(delete.message_ts.as_str()));
+            if !thread_matches
+                || (matches!(owner, DeleteOwner::Incoming(_))
+                    && (!state.registered_agents.contains(owner.agent_id())
+                        || !conversation_has_receive_source(&state, cfg, &delete.channel_id)))
+                || matches!(
+                    &owner,
+                    DeleteOwner::Posted(posted)
+                        if state.installation_team_id.as_deref()
+                            != Some(posted.installation_team_id.as_str())
+                )
+                || admission.is_some_and(|context| !context.matches_state(&state))
+                || self.output_failed.load(Ordering::Acquire)
+                || self.shutdown.is_requested()
+            {
+                log_ingress_rejection("delete_owner_or_thread");
+                return;
+            }
+            let Some(instance_name) = state.instance_name.as_ref() else {
+                return;
+            };
+            (MessagePublisherId::new(instance_name.to_string()), owner)
+        };
+        let occurrence = delete
+            .event_id
+            .unwrap_or_else(|| format!("{}:{}", delete.channel_id, delete.message_ts));
+        if !self.admission_authority_is_current(admission)
+            || !self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .received_occurrences
+                .insert_new(format!("delete:{occurrence}"))
+        {
+            return;
+        }
+        let agent_id = owner.agent_id().clone();
+        let message_id = owner.message_id().clone();
+        let conversation = owner.conversation().clone();
+        let event = Event::MessageDeleted(MessageDeleted::new(
+            publisher.clone(),
+            MessageAgentTarget::new(agent_id.to_string()),
+            MessageFactRef {
+                publisher_extension_id: publisher,
+                message_id: message_id.clone(),
+            },
+            None,
+            Some(message_fact_conversation(&conversation)),
+        ));
+        // Revoke before the local write so a concurrently dispatched reply or
+        // reaction cannot begin after the deletion fact becomes visible. Writer
+        // failure keeps authority revoked because the remote deletion is already
+        // known and restoring a stale route would violate fail-closed behavior.
+        #[cfg(test)]
+        run_blocking_test_hook(&self.test_hooks.delete_publication_boundary);
+        let publication = self
+            .output_publication_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let lifecycle_current = admission
+            .is_none_or(|context| context.matches_state(&state) && state.session_active)
+            && !self.output_failed.load(Ordering::Acquire)
+            && !self.shutdown.is_requested();
+        let owner_current = match &owner {
+            DeleteOwner::Incoming(expected) => {
+                lifecycle_current
+                    && state.registered_agents.contains(&expected.agent_id)
+                    && state.config.as_ref().is_some_and(|cfg| {
+                        is_route_authorized(&state, cfg, &expected.conversation, &expected.user_id)
+                    })
+                    && state.incoming_messages.get(&key) == Some(expected)
+            }
+            DeleteOwner::Posted(expected) => {
+                lifecycle_current
+                    && state.installation_team_id.as_deref()
+                        == Some(expected.installation_team_id.as_str())
+                    && state.posted_messages.get(&key) == Some(expected)
+            }
+        };
+        if !owner_current {
+            log_ingress_rejection("delete_stale_owner");
+            return;
+        }
+        match owner {
+            DeleteOwner::Incoming(_) => {
+                state.incoming_messages.remove(&key);
+                state
+                    .incoming_message_order
+                    .retain(|candidate| candidate != &key);
+            }
+            DeleteOwner::Posted(_) => {
+                state.posted_messages.remove(&key);
+            }
+        }
+        state.revoke_message_authority(&message_id);
+        drop(state);
+        let sent = self.output.send_confirmed(HarnessInputMessage::emit(event));
+        if !sent {
+            self.output_failed.store(true, Ordering::Release);
+            #[cfg(test)]
+            run_blocking_test_hook(&self.test_hooks.output_failure_boundary);
+        }
+        drop(publication);
+        if !sent {
+            self.retire_after_output_failure();
+            return;
+        }
+        if let Some(admission) = admission {
+            admission.mark("submitted");
+        }
     }
 
     #[cfg(test)]
@@ -3016,7 +3121,6 @@ impl Extension {
         };
         let NormalizedTransportMention {
             text,
-            mentioned,
             leading: leading_mention,
         } = normalize_transport_mentions(&text, &bot_user_id);
         if text.is_empty() {
@@ -3053,13 +3157,12 @@ impl Extension {
             &cfg,
             &message,
             &identity,
-            mentioned,
             ParsedSlackCommand { name, rest },
             admission,
         ) {
             return;
         }
-        self.route_plain_text(&cfg, &message, &identity, &text, mentioned, admission);
+        self.route_plain_text(&cfg, &message, &identity, &text, admission);
     }
 
     /// Drop recently repeated Slack deliveries before local effects or ingress.
@@ -3214,7 +3317,6 @@ impl Extension {
         cfg: &RuntimeConfig,
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
-        transport_identity_mentioned: bool,
         parsed: ParsedSlackCommand<'_>,
         admission: Option<&AdmissionContext>,
     ) -> bool {
@@ -3237,14 +3339,7 @@ impl Extension {
                 true
             }
             Some("to" | "/to") => {
-                self.handle_to_command(
-                    cfg,
-                    message,
-                    identity,
-                    parsed.rest,
-                    transport_identity_mentioned,
-                    admission,
-                );
+                self.handle_to_command(cfg, message, identity, parsed.rest, admission);
                 true
             }
             Some(command) if command.starts_with('/') => {
@@ -3435,7 +3530,6 @@ impl Extension {
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
         rest: &str,
-        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let (target, body) = split_first(rest);
@@ -3450,14 +3544,7 @@ impl Extension {
             return;
         }
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => self.route_text(
-                message,
-                identity,
-                agent_id,
-                body.trim(),
-                transport_identity_mentioned,
-                admission,
-            ),
+            Ok(agent_id) => self.route_text(message, identity, agent_id, body.trim(), admission),
             Err(reply) => self.reply(
                 cfg,
                 &message.channel_id,
@@ -3474,7 +3561,6 @@ impl Extension {
         message: &SlackMessage,
         identity: &VerifiedSlackHuman,
         text: &str,
-        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let route_key = {
@@ -3486,14 +3572,7 @@ impl Extension {
             return;
         };
         match self.plain_text_target(&route_key) {
-            Ok(agent_id) => self.route_text(
-                message,
-                identity,
-                agent_id,
-                text,
-                transport_identity_mentioned,
-                admission,
-            ),
+            Ok(agent_id) => self.route_text(message, identity, agent_id, text, admission),
             Err(reply) => self.reply(
                 cfg,
                 &message.channel_id,
@@ -3543,7 +3622,9 @@ impl Extension {
         text: &str,
         admission: Option<&AdmissionContext>,
     ) {
-        if self.local_effect_authority_is_current(admission) {
+        if !self.output_failed.load(Ordering::Acquire)
+            && self.local_effect_authority_is_current(admission)
+        {
             self.post_message_traced(
                 cfg,
                 channel_id,
@@ -3619,7 +3700,6 @@ impl Extension {
         identity: &VerifiedSlackHuman,
         agent_id: AgentId,
         text: &str,
-        transport_identity_mentioned: bool,
         admission: Option<&AdmissionContext>,
     ) {
         let Some(cfg) = self
@@ -3653,35 +3733,28 @@ impl Extension {
                 conversation: route,
                 agent_id,
                 sender: IngressSender {
-                    policy_status: cfg
-                        .sender_policy(&message.user_id)
-                        .expect("sender admitted"),
                     user_id: message.user_id.clone(),
                     display_name: identity.display_name.clone(),
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                operation: MessageOperation::Create {
-                    payload: MessagePayload::Text {
-                        text: text.to_owned(),
-                        format: TextFormat::Plain,
-                    },
+                fact: IngressFact::Delivered {
+                    message_id: slack_message_fact_id(
+                        &message.channel_id,
+                        message
+                            .ts
+                            .as_deref()
+                            .or(message.event_id.as_deref())
+                            .expect("validated Slack message identity"),
+                    ),
+                    text: text.to_owned(),
                 },
-                transport_identity_mentioned,
-                external_identity: ExternalMessageIdentity {
-                    event_id: message
-                        .ts
-                        .is_none()
-                        .then(|| message.event_id.clone())
-                        .flatten(),
-                    message_id: message.ts.clone(),
-                    revision_id: None,
-                },
+                native_message_ts: message.ts.clone(),
             },
             admission,
         );
     }
 
-    /// Submit one normalized Slack occurrence through the canonical typed RPC.
+    /// Publish one normalized Slack occurrence as a direct immutable fact.
     fn submit_ingress(
         &self,
         cfg: &RuntimeConfig,
@@ -3692,9 +3765,8 @@ impl Extension {
             conversation,
             agent_id,
             sender,
-            operation,
-            transport_identity_mentioned,
-            external_identity,
+            fact,
+            native_message_ts,
         } = submission;
         if !self.admission_authority_is_current(admission) {
             log_ingress_rejection("stale_epoch");
@@ -3704,24 +3776,9 @@ impl Extension {
             user_id,
             display_name,
             identity_alias,
-            policy_status,
         } = sender;
-        let original_key = matches!(operation, MessageOperation::Create { .. })
-            .then(|| {
-                external_identity
-                    .message_id
-                    .as_ref()
-                    .map(|message_id| PostedMessageKey::new(&conversation.channel_id, message_id))
-            })
-            .flatten();
-        let reaction_message_ts = matches!(
-            operation,
-            MessageOperation::Create { .. } | MessageOperation::Edit { .. }
-        )
-        .then(|| external_identity.message_id.clone())
-        .flatten();
-        let request_id = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (publisher, installation_team_id) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if admission.is_some_and(|context| !context.matches_state(&state))
                 || self.shutdown.is_requested()
             {
@@ -3732,29 +3789,12 @@ impl Extension {
             }
             if !state.registered_agents.contains(&agent_id)
                 || !is_route_authorized(&state, cfg, &conversation, &user_id)
-                || !state.capability_active
             {
                 if let Some(admission) = admission {
                     admission.mark("rejected_route");
                 }
                 return;
             }
-            if state.pending_ingress.len() >= ROUTE_CORRELATION_LIMIT {
-                drop(state);
-                self.reply(
-                    cfg,
-                    &conversation.channel_id,
-                    conversation.thread_ts.as_deref(),
-                    "Tau has too many pending Slack prompts; try again later.",
-                    admission,
-                );
-                if let Some(admission) = admission {
-                    admission.mark("capacity");
-                }
-                return;
-            }
-            state.next_route_id = state.next_route_id.wrapping_add(1);
-            let request_id = format!("slack-in-{}", state.next_route_id);
             let installation_team_id = admission
                 .map(|context| context.installation_team_id.clone())
                 .or_else(|| state.installation_team_id.clone());
@@ -3764,70 +3804,155 @@ impl Extension {
                 }
                 return;
             };
-            state.pending_ingress.insert(
-                request_id.clone(),
-                PendingIngress {
-                    agent_id: agent_id.clone(),
-                    conversation: conversation.clone(),
-                    user_id: user_id.clone(),
-                    display_name: display_name.clone(),
-                    identity_alias: identity_alias.clone(),
-                    installation_team_id,
-                    policy_status,
-                    original_key,
-                    reaction_message_ts,
-                    submitted_at: Instant::now(),
-                    latency_trace: admission.map(|context| context.trace),
-                },
-            );
-            request_id
+            let Some(instance_name) = state.instance_name.as_ref() else {
+                if let Some(admission) = admission {
+                    admission.mark("rejected_route");
+                }
+                return;
+            };
+            (
+                MessagePublisherId::new(instance_name.to_string()),
+                installation_team_id,
+            )
         };
-        let request = HarnessInputMessage::TransportMessageIngress(Box::new(
-            TransportMessageIngressRequest {
-                request_id: request_id.clone(),
-                target_agent_id: agent_id,
-                draft: transport_draft(
-                    MessageEndpoint::External {
-                        stable_id: Some(user_id),
-                        display_name,
-                        identity_alias: identity_alias.map(|value| {
-                            tau_proto::ExternalIdentityAlias {
-                                value,
-                                authority:
-                                    tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
-                            }
-                        }),
-                        actor_kind: ExternalActorKind::Human,
+        let target = MessageAgentTarget::new(agent_id.to_string());
+        let party = MessageParty {
+            stable_id: user_id.clone(),
+            display_name: identity_alias.clone().or_else(|| display_name.clone()),
+        };
+        let fact_conversation = Some(message_fact_conversation(&conversation));
+        let (event, reply_message_id, original_key, reaction_message_ts) = match fact {
+            IngressFact::Delivered { message_id, text } => (
+                Event::MessageDelivered(MessageDelivered::new(
+                    publisher.clone(),
+                    target,
+                    message_id.clone(),
+                    party,
+                    fact_conversation,
+                    text,
+                )),
+                message_id.clone(),
+                native_message_ts
+                    .as_ref()
+                    .map(|native| PostedMessageKey::new(&conversation.channel_id, native)),
+                native_message_ts,
+            ),
+            IngressFact::Edited {
+                target: message_id,
+                text,
+            } => (
+                Event::MessageEdited(MessageEdited::new(
+                    publisher.clone(),
+                    target,
+                    MessageFactRef {
+                        publisher_extension_id: publisher.clone(),
+                        message_id: message_id.clone(),
                     },
-                    &conversation,
-                    operation,
-                    transport_identity_mentioned,
-                    external_identity,
-                    policy_status,
-                    self.output.wire_tool_name(SEND_TOOL_NAME),
-                ),
-            },
-        ));
-        let sent = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let still_current = state.pending_ingress.contains_key(&request_id)
-                && admission.is_none_or(|context| context.matches_state(&state))
-                && !self.shutdown.is_requested();
-            still_current && self.output.send(request)
+                    Some(party),
+                    fact_conversation,
+                    text,
+                )),
+                message_id,
+                None,
+                native_message_ts,
+            ),
+            IngressFact::ReactionAdded {
+                target: message_id,
+                reaction,
+            } => (
+                Event::MessageReactionAdded(MessageReactionAdded::new(
+                    publisher.clone(),
+                    target,
+                    MessageFactRef {
+                        publisher_extension_id: publisher.clone(),
+                        message_id: message_id.clone(),
+                    },
+                    Some(party),
+                    fact_conversation,
+                    reaction,
+                )),
+                message_id,
+                None,
+                None,
+            ),
+            IngressFact::ReactionRemoved {
+                target: message_id,
+                reaction,
+            } => (
+                Event::MessageReactionRemoved(MessageReactionRemoved::new(
+                    publisher.clone(),
+                    target,
+                    MessageFactRef {
+                        publisher_extension_id: publisher,
+                        message_id: message_id.clone(),
+                    },
+                    Some(party),
+                    fact_conversation,
+                    reaction,
+                )),
+                message_id,
+                None,
+                None,
+            ),
         };
+        let sent = self.output.send_confirmed(HarnessInputMessage::emit(event));
         if !sent {
-            self.state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .pending_ingress
-                .remove(&request_id);
-            self.shutdown.request();
+            self.retire_after_output_failure();
             if let Some(admission) = admission {
                 admission.mark("rejected_route");
             }
+            return;
+        }
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if admission.is_some_and(|context| !context.matches_state(&state))
+                || self.shutdown.is_requested()
+                || !state.registered_agents.contains(&agent_id)
+                || !is_route_authorized(&state, cfg, &conversation, &user_id)
+                || state.installation_team_id.as_deref() != Some(installation_team_id.as_str())
+            {
+                return;
+            }
+            if let Some(original_key) = original_key {
+                state.insert_incoming_message(
+                    original_key,
+                    IncomingMessageOwner {
+                        agent_id: agent_id.clone(),
+                        message_id: reply_message_id.clone(),
+                        conversation: conversation.clone(),
+                        user_id: user_id.clone(),
+                    },
+                );
+            }
+            state.insert_reply_route(
+                reply_message_id.clone(),
+                ReplyRoute {
+                    agent_id: agent_id.clone(),
+                    conversation: conversation.clone(),
+                    user_id: user_id.clone(),
+                    display_name,
+                    identity_alias,
+                    installation_team_id: installation_team_id.clone(),
+                },
+            );
+            if let Some(message_ts) = reaction_message_ts {
+                let _ = state.insert_reaction_target(
+                    reply_message_id.clone(),
+                    ReactionTarget {
+                        agent_id,
+                        conversation,
+                        message_ts,
+                        installation_team_id,
+                        authority: ReactionAuthority::Source {
+                            message_id: reply_message_id,
+                            user_id,
+                        },
+                    },
+                );
+            }
         }
         if let Some(admission) = admission {
-            admission.mark(if sent { "submitted" } else { "rejected_route" });
+            admission.mark("submitted");
             let trace = admission.trace;
             tracing::trace!(
                 target: LOG_TARGET,
@@ -3835,12 +3960,11 @@ impl Extension {
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
                 event_class = trace.event_class,
-                request_seq = request_id.as_str(),
                 frame_to_submit_us = elapsed_us(admission.trace_received_at()),
                 identity_us = admission.identity_us.get(),
                 queue_wait_us = admission.queue_wait_us,
-                output_outcome = if sent { "enqueued" } else { "writer_closed" },
-                "slack.ingress.submitted"
+                output_outcome = "flushed",
+                "slack.message_fact.published"
             );
         }
     }
@@ -4036,113 +4160,6 @@ fn is_route_authorized(
     policy.is_some_and(|policy| policy.alias == route.alias && policy.kind == route.kind)
 }
 
-/// Build the canonical conversation metadata used identically for ingress and
-/// successful-send completion.
-fn message_conversation(conversation: &SlackConversation) -> LegacyMessageConversation {
-    LegacyMessageConversation {
-        kind: match conversation.kind {
-            ConversationPolicyKind::Channel => ConversationKind::Channel,
-            ConversationPolicyKind::Mpim => ConversationKind::Group,
-            ConversationPolicyKind::Dm => ConversationKind::Direct,
-        },
-        stable_id: Some(conversation.channel_id.clone()),
-        display_name: Some(conversation.alias.clone()),
-        thread: conversation
-            .thread_ts
-            .as_ref()
-            .map(|thread_ts| MessageThread {
-                stable_id: thread_ts.clone(),
-                root: Some(MessageRef {
-                    message_id: None,
-                    external_message_id: Some(thread_ts.clone()),
-                }),
-            }),
-        reply_to: None,
-    }
-}
-
-fn send_destination_conversation(destination: &ConversationPolicy) -> LegacyMessageConversation {
-    LegacyMessageConversation {
-        kind: match destination.kind {
-            ConversationPolicyKind::Channel => ConversationKind::Channel,
-            ConversationPolicyKind::Mpim => ConversationKind::Group,
-            ConversationPolicyKind::Dm => ConversationKind::Direct,
-        },
-        stable_id: Some(destination.conversation_id.clone()),
-        display_name: Some(destination.alias.clone()),
-        thread: destination
-            .thread_ts
-            .as_ref()
-            .map(|thread_ts| MessageThread {
-                stable_id: thread_ts.clone(),
-                root: Some(MessageRef {
-                    message_id: None,
-                    external_message_id: Some(thread_ts.clone()),
-                }),
-            }),
-        reply_to: None,
-    }
-}
-
-fn send_destination_endpoint(destination: &ConversationPolicy) -> MessageEndpoint {
-    MessageEndpoint::External {
-        stable_id: None,
-        display_name: Some(destination.alias.clone()),
-        identity_alias: None,
-        actor_kind: ExternalActorKind::Unknown,
-    }
-}
-
-fn send_destination_capability(
-    destination: &ConversationPolicy,
-) -> TransportSendDestinationCapability {
-    TransportSendDestinationCapability {
-        alias: destination.alias.clone(),
-        external_endpoint: send_destination_endpoint(destination),
-        conversation: send_destination_conversation(destination),
-    }
-}
-
-/// Build a normalized Slack draft without any model-visible prefix text.
-fn transport_draft(
-    external_endpoint: MessageEndpoint,
-    conversation: &SlackConversation,
-    operation: MessageOperation,
-    transport_identity_mentioned: bool,
-    external_identity: ExternalMessageIdentity,
-    policy_status: SenderPolicyStatus,
-    send_tool: tau_proto::ToolName,
-) -> TransportMessageDraft {
-    TransportMessageDraft {
-        transport_name: TRANSPORT_NAME.to_owned(),
-        external_endpoint,
-        conversation: Some(message_conversation(conversation)),
-        operation,
-        transport_identity_mentioned,
-        identity_assurance: SenderIdentityAssurance::VerifiedAccount,
-        policy_status,
-        external_identity: Some(external_identity),
-        ordering: None,
-        occurred_at: None,
-        send_tool: Some(send_tool),
-    }
-}
-
-/// Return the exact external actor endpoint bound to a canonical reply route.
-fn external_endpoint_for_route(route: &ReplyRoute) -> MessageEndpoint {
-    MessageEndpoint::External {
-        stable_id: Some(route.user_id.clone()),
-        display_name: route.display_name.clone(),
-        identity_alias: route.identity_alias.clone().map(|value| {
-            tau_proto::ExternalIdentityAlias {
-                value,
-                authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
-            }
-        }),
-        actor_kind: ExternalActorKind::Human,
-    }
-}
-
 impl Drop for Extension {
     fn drop(&mut self) {
         self.retire_send_authority();
@@ -4333,6 +4350,9 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
                 }
                 DecodedSlackEvent::Edit(edit) => {
                     ext.process_slack_edit_admitted(edit, Some(&context));
+                }
+                DecodedSlackEvent::Delete(delete) => {
+                    ext.process_slack_delete_admitted(delete, Some(&context));
                 }
             }))
         });
@@ -4846,6 +4866,26 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
         });
     }
     if event_type == "message"
+        && event.get("subtype").and_then(|value| value.as_str()) == Some("message_deleted")
+    {
+        let previous = event.get("previous_message")?;
+        let message_ts = event.get("deleted_ts")?.as_str()?;
+        if previous.get("ts")?.as_str()? != message_ts {
+            return None;
+        }
+        validate_slack_ts(message_ts).ok()?;
+        let thread_ts = previous.get("thread_ts").and_then(|value| value.as_str());
+        if let Some(thread_ts) = thread_ts {
+            validate_slack_ts(thread_ts).ok()?;
+        }
+        return Some(DecodedSlackEvent::Delete(SlackDelete {
+            event_id,
+            channel_id: event.get("channel")?.as_str()?.to_owned(),
+            message_ts: message_ts.to_owned(),
+            thread_ts: thread_ts.map(str::to_owned),
+        }));
+    }
+    if event_type == "message"
         && event.get("subtype").and_then(|value| value.as_str()) == Some("message_changed")
     {
         let message = event.get("message")?;
@@ -4958,9 +4998,15 @@ where
 /// Exact send-state handles installed after initial Configure.
 #[derive(Clone)]
 struct SendRetirement {
+    /// Shared Slack lifecycle and delivery state.
     state: Arc<Mutex<State>>,
-    completion_publication_gate: Arc<Mutex<()>>,
+    /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
+    /// retirement barrier.
+    output_publication_gate: Arc<Mutex<()>>,
+    /// Wakes delivery workers after authority retirement.
     wake: Arc<SendWake>,
+    /// Early fail-closed protocol-output latch shared by every worker view.
+    output_failed: Arc<AtomicBool>,
 }
 
 /// Reader boundary that can synchronously revoke sends before tau-client
@@ -4977,8 +5023,9 @@ impl SendReaderBoundary {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(SendRetirement {
             state: Arc::clone(&extension.state),
-            completion_publication_gate: Arc::clone(&extension.completion_publication_gate),
+            output_publication_gate: Arc::clone(&extension.output_publication_gate),
             wake: Arc::clone(&extension.send_wake),
+            output_failed: Arc::clone(&extension.output_failed),
         });
     }
 
@@ -4991,7 +5038,7 @@ impl SendReaderBoundary {
         if let Some(retirement) = retirement {
             retire_send_state(
                 &retirement.state,
-                &retirement.completion_publication_gate,
+                &retirement.output_publication_gate,
                 &retirement.wake,
             );
         }
@@ -5016,21 +5063,49 @@ impl<R: Read> Read for RetiringReader<R> {
 
 fn retire_send_state(
     state: &Arc<Mutex<State>>,
-    completion_publication_gate: &Mutex<()>,
+    output_publication_gate: &Mutex<()>,
     wake: &SendWake,
 ) {
-    let _publication = completion_publication_gate
+    let _publication = output_publication_gate
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-        state.capability_active = false;
-        state.capability_generation = state.capability_generation.wrapping_add(1);
-        state.pending_posts.clear();
         state.clear_send_ledger();
     }
     wake.notify_lifecycle_change();
+}
+
+/// Enter the one fail-closed protocol-output retirement state before shutdown.
+fn retire_after_output_failure(
+    state: &Arc<Mutex<State>>,
+    output_publication_gate: &Mutex<()>,
+    wake: &SendWake,
+    output_failed: &AtomicBool,
+    shutdown: &ShutdownSignal,
+) {
+    output_failed.store(true, Ordering::Release);
+    let _publication = output_publication_gate
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+        state.agent_generation = state.agent_generation.wrapping_add(1);
+        state.session_generation = state.session_generation.wrapping_add(1);
+        state.session_active = false;
+        state.registered_agents.clear();
+        state.send_agent_generations.clear();
+        state.selected_agent_by_route.clear();
+        state.clear_reply_routes();
+        state.clear_incoming_messages();
+        state.clear_send_ledger();
+        state.posted_messages.clear();
+        state.clear_reaction_state();
+    }
+    wake.notify_lifecycle_change();
+    shutdown.request();
 }
 
 struct SlackExtension;
@@ -5086,7 +5161,7 @@ impl TauExtension for SlackExtension {
                     let conversations = scope.wire_tool(CONVERSATIONS_TOOL_NAME)?;
                     let react = scope.wire_tool(REACT_TOOL_NAME)?;
                     tool.description = Some(format!(
-                        "Reply through an opaque Slack reply_to, or send proactively to an operator-configured alias, optionally discoverable with {conversations}. A successful result returns a message_ref usable with separately authorized {react}. Native Slack conversation and thread IDs are never accepted."
+                        "Reply through a Tau-issued Slack reply_to, or send proactively to an operator-configured alias, optionally discoverable with {conversations}. A successful result returns a message_ref usable with separately authorized {react}. Native Slack conversation and thread IDs are never accepted."
                     ));
                     Ok(tau_proto::ToolRegister {
                         tool,
@@ -5102,7 +5177,7 @@ impl TauExtension for SlackExtension {
                     let mut tool = react_tool_spec();
                     let send = scope.wire_tool(SEND_TOOL_NAME)?;
                     tool.description = Some(format!(
-                        "Add or remove one emoji reaction on an exact Tau-issued Slack message_ref, including refs returned by {send}. Native Slack identifiers, aliases, toggle, list, and discovery are never accepted."
+                        "Add or remove one emoji reaction on an exact Tau-issued Slack message_ref, including refs returned by {send}. Channel IDs and timestamps are never accepted as separate route arguments; aliases, toggle, list, and discovery are also rejected."
                     ));
                     Ok(tau_proto::ToolRegister {
                         tool,
@@ -5173,220 +5248,24 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .instance_name = instance_name;
-    cx.state.ext.request_transport_capability();
     Ok(())
 }
 
-/// Apply commit-gated ingress/send results and capability registration results.
+/// Apply lifecycle output from the harness.
 fn handle_output_message(
     message: &tau_proto::HarnessOutputMessage,
     runtime: &mut SlackRuntime,
-    handle: &ClientHandle,
+    _handle: &ClientHandle,
 ) -> ClientResult<()> {
-    if let tau_proto::HarnessOutputMessage::RegisterTransportCapabilityResult(result) = message
-        && runtime
-            .ext
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pending_capability_request
-            .as_deref()
-            == Some(result.request_id.as_str())
-        && !result.accepted
-    {
-        handle.config_error(format!(
-            "Slack typed transport capability registration failed: {}",
-            result.error.as_deref().unwrap_or("rejected")
-        ))?;
-    }
     apply_output_message(message, &runtime.ext);
     Ok(())
 }
 
-/// Apply one correlated transport RPC result to private bridge state.
+/// Retire Slack-local authority when the harness disconnects.
 fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extension) {
-    match message {
-        tau_proto::HarnessOutputMessage::Disconnect(_) => {
-            ext.retire_send_authority();
-            ext.shutdown.request();
-        }
-        tau_proto::HarnessOutputMessage::RegisterTransportCapabilityResult(result) => {
-            let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.pending_capability_request.as_deref() == Some(result.request_id.as_str()) {
-                state.pending_capability_request = None;
-                state.capability_active = result.accepted && !state.installation_mismatch;
-                state.capability_generation = state.capability_generation.wrapping_add(1);
-                ext.send_wake.notify_lifecycle_change();
-            }
-        }
-        tau_proto::HarnessOutputMessage::TransportMessageIngressResult(result) => {
-            let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
-            let Some(pending) = state.pending_ingress.remove(&result.request_id) else {
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    schema = LATENCY_SCHEMA,
-                    outcome = "orphan",
-                    "slack.ingress.result_received"
-                );
-                return;
-            };
-            if let Some(trace) = pending.latency_trace {
-                let outcome = match result.outcome {
-                    Some(tau_proto::TransportMessageIngressOutcome::Accepted) => "accepted",
-                    None => "rejected",
-                };
-                tracing::trace!(
-                    target: LOG_TARGET,
-                    schema = LATENCY_SCHEMA,
-                    connection_generation = trace.connection_generation,
-                    trace_seq = trace.trace_seq,
-                    event_class = trace.event_class,
-                    submit_to_result_us = elapsed_us(pending.submitted_at),
-                    outcome,
-                    "slack.ingress.result_received"
-                );
-            }
-            if state.installation_team_id.as_deref() == Some(pending.installation_team_id.as_str())
-                && let (Some(message_id), Some(TransportMessageIngressOutcome::Accepted)) =
-                    (&result.message_id, result.outcome)
-            {
-                if let Some(original_key) = pending.original_key.clone() {
-                    state.insert_incoming_message(
-                        original_key,
-                        IncomingMessageOwner {
-                            agent_id: pending.agent_id.clone(),
-                            message_id: message_id.clone(),
-                            conversation: pending.conversation.clone(),
-                            user_id: pending.user_id.clone(),
-                        },
-                    );
-                }
-                state.insert_reply_route(
-                    message_id.clone(),
-                    ReplyRoute {
-                        agent_id: pending.agent_id.clone(),
-                        conversation: pending.conversation.clone(),
-                        user_id: pending.user_id.clone(),
-                        display_name: pending.display_name,
-                        identity_alias: pending.identity_alias,
-                        installation_team_id: pending.installation_team_id.clone(),
-                        policy_status: pending.policy_status,
-                    },
-                );
-                if let Some(message_ts) = pending.reaction_message_ts {
-                    let _ = state.insert_reaction_target(
-                        message_id.as_ref().to_owned(),
-                        ReactionTarget {
-                            agent_id: pending.agent_id,
-                            conversation: pending.conversation,
-                            message_ts,
-                            installation_team_id: pending.installation_team_id,
-                            authority: ReactionAuthority::Source {
-                                message_id: message_id.clone(),
-                                user_id: pending.user_id,
-                            },
-                        },
-                    );
-                }
-            }
-        }
-        tau_proto::HarnessOutputMessage::CompleteTransportSendResult(result) => {
-            let mut state = ext.state.lock().unwrap_or_else(|error| error.into_inner());
-            let pending = state.pending_posts.remove(&result.request_id);
-            if let Some(pending) = pending {
-                let completion = state
-                    .send_ledger
-                    .get(&pending.invoke.call_id)
-                    .and_then(|entry| {
-                        (entry.prepared.authority.token == pending.send_authority.token)
-                            .then_some(&entry.disposition)
-                    })
-                    .and_then(|disposition| match disposition {
-                        SendLedgerDisposition::AwaitingCompletion { request, copies } => {
-                            Some((request.tool_result.clone(), *copies))
-                        }
-                        _ => None,
-                    });
-                let (durable_result, copies) = completion.unwrap_or_else(|| {
-                    (
-                        successful_tool_result(&pending.invoke, ""),
-                        RemoteCopyPossibility::One,
-                    )
-                });
-                let reaction_authority_current = result.message_id.is_some()
-                    && state.capability_active
-                    && state.session_generation == pending.send_authority.session_generation
-                    && state.ingress_epoch == pending.send_authority.ingress_epoch
-                    && state.config_generation == pending.send_authority.config_generation
-                    && state.send_agent_generation(&pending.agent_id)
-                        == pending.send_authority.agent_generation
-                    && state.capability_generation == pending.send_authority.capability_generation
-                    && state.instance_name.as_ref()
-                        == pending.send_authority.instance_name.as_ref()
-                    && state.bot_user_id.as_deref()
-                        == Some(pending.send_authority.bot_user_id.as_str())
-                    && state.installation_team_id.as_deref()
-                        == Some(pending.send_authority.installation_team_id.as_str());
-                if result.accepted {
-                    if reaction_authority_current {
-                        let _ = state.insert_reaction_target(
-                            pending.message_ref,
-                            ReactionTarget {
-                                agent_id: pending.agent_id.clone(),
-                                conversation: pending.conversation.clone(),
-                                message_ts: pending.posted.ts.clone(),
-                                installation_team_id: pending
-                                    .send_authority
-                                    .installation_team_id
-                                    .clone(),
-                                authority: pending.authority,
-                            },
-                        );
-                        state.posted_messages.insert(
-                            PostedMessageKey::new(
-                                &pending.conversation.channel_id,
-                                &pending.posted.ts,
-                            ),
-                            PostedMessageOwner {
-                                agent_id: pending.agent_id,
-                                thread_ts: pending.conversation.thread_ts,
-                                installation_team_id: pending
-                                    .send_authority
-                                    .installation_team_id
-                                    .clone(),
-                            },
-                        );
-                    }
-                    if let Some(entry) = state.send_ledger.get_mut(&pending.invoke.call_id)
-                        && entry.prepared.authority.token == pending.send_authority.token
-                    {
-                        entry.disposition = SendLedgerDisposition::Completed {
-                            result: Box::new(durable_result),
-                            copies,
-                        };
-                    }
-                } else {
-                    if let Some(entry) = state.send_ledger.get_mut(&pending.invoke.call_id)
-                        && entry.prepared.authority.token == pending.send_authority.token
-                    {
-                        entry.disposition = SendLedgerDisposition::DefinitiveFailure {
-                            category: SendFailureCategory::CompletionRejected,
-                            copies,
-                        };
-                    }
-                    ext.output.emit(tool_error(
-                        pending.invoke,
-                        copies.caveat().map_or_else(
-                            || SendFailureCategory::CompletionRejected.to_string(),
-                            |caveat| {
-                                format!("{}; {caveat}", SendFailureCategory::CompletionRejected)
-                            },
-                        ),
-                    ));
-                }
-            }
-        }
-        _ => {}
+    if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
+        ext.retire_send_authority();
+        ext.shutdown.request();
     }
 }
 
@@ -5427,7 +5306,6 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
                 state.session_active = true;
             }
             cx.state.ext.send_wake.notify_lifecycle_change();
-            cx.state.ext.request_transport_capability();
         }
         Event::SessionAgentUnloaded(unloaded) => {
             cx.state.ext.unload_agent(&unloaded.agent_id);
@@ -5436,7 +5314,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             let _publication = cx
                 .state
                 .ext
-                .completion_publication_gate
+                .output_publication_gate
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -5448,14 +5326,9 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.send_agent_generations.clear();
             state.agent_labels.clear();
             state.selected_agent_by_route.clear();
-            state.pending_ingress.clear();
             state.clear_reply_routes();
             state.clear_incoming_messages();
-            state.pending_posts.clear();
             state.clear_send_ledger();
-            state.capability_active = false;
-            state.capability_generation = state.capability_generation.wrapping_add(1);
-            state.pending_capability_request = None;
             state.posted_messages.clear();
             state.clear_reaction_state();
             cx.state.ext.send_wake.notify_lifecycle_change();
@@ -5520,10 +5393,10 @@ fn send_tool_spec() -> ToolSpec {
         title: Some("Send a Slack reply".to_owned()),
         arguments: CborValue::Map(vec![
             example_field("message", example_text("Thanks, I’ll look into it.")),
-            example_field("reply_to", example_text("msg_01JEXAMPLE")),
+            example_field("reply_to", example_text("slack:C123:1712345678.123456")),
         ]),
         note: Some(
-            "reply_to is an opaque selector, not a channel or bearer capability.".to_owned(),
+            "reply_to is a Tau-issued fact selector, not a bearer capability or separate channel argument.".to_owned(),
         ),
         subcommand: None,
     }];
@@ -5531,7 +5404,7 @@ fn send_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
         description: Some(
-            "Send to exactly one authenticated Slack reply route or operator-configured destination alias. Native Slack conversation and thread identifiers are never accepted from the model."
+            "Send to exactly one authenticated Slack reply route or operator-configured destination alias. Native Slack conversation and thread identifiers are never accepted as separate route arguments from the model."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -5541,7 +5414,7 @@ fn send_tool_spec() -> ToolSpec {
                 "message": { "type": "string" },
                 "reply_to": {
                     "type": "string",
-                    "description": "Opaque canonical message id from the Tau message envelope; mutually exclusive with destination"
+                    "description": "Tau-issued selector from a locally written Slack message fact; mutually exclusive with destination"
                 },
                 "destination": {
                     "type": "string",
@@ -5572,7 +5445,7 @@ fn react_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(REACT_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(REACT_TOOL_NAME)),
         description: Some(
-            "Add or remove one emoji reaction on an exact Slack message reference issued by Tau. Native Slack identifiers, aliases, toggle, list, and discovery are not accepted."
+            "Add or remove one emoji reaction on an exact Slack message reference issued by Tau. Channel IDs and timestamps are not accepted as separate route arguments; aliases, toggle, list, and discovery are rejected."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -5583,7 +5456,7 @@ fn react_tool_spec() -> ToolSpec {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Opaque message reference from a Tau Slack message envelope or successful slack_send result; never a Slack ID"
+                    "description": "Tau-issued message fact ID from a locally written Slack fact or successful slack_send result"
                 },
                 "emoji": {
                     "type": "string",
@@ -5605,7 +5478,7 @@ fn react_tool_spec() -> ToolSpec {
             id: "react-eyes".to_owned(),
             title: Some("Add an eyes reaction".to_owned()),
             arguments: CborValue::Map(vec![
-                example_field("message_ref", example_text("slack-msg-v1-example")),
+                example_field("message_ref", example_text("slack:C123:1720000000.123456")),
                 example_field("emoji", example_text("eyes")),
                 example_field("action", example_text("add")),
             ]),
@@ -5809,16 +5682,6 @@ fn cbor_string_field(arguments: &CborValue, field: &str) -> Result<String, Strin
     Err(format!("missing required argument `{field}`"))
 }
 
-/// Mint a collision-resistant opaque reference without encoding routing data.
-fn mint_message_ref() -> String {
-    let mut bytes = [0_u8; 24];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    format!(
-        "slack-msg-v1-{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    )
-}
-
 /// Validate the strict outbound emoji grammar without normalization.
 fn valid_outbound_emoji(value: &str) -> bool {
     let (base, tone) = match value.split_once("::") {
@@ -5944,8 +5807,7 @@ fn structured_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
     Event::ToolResult(tool_result)
 }
 
-/// Construct the terminal success carried inside the durable send-completion
-/// RPC.
+/// Construct one ordinary terminal successful tool result.
 fn successful_tool_result(invoke: &ToolStarted, text: &str) -> ToolResult {
     ToolResult {
         call_id: invoke.call_id.clone(),

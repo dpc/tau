@@ -138,12 +138,6 @@ fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessI
                 redact_event_binary_content(event);
             }
         }
-        tau_proto::HarnessInputMessage::CompleteTransportSend(request) => {
-            for part in &mut request.tool_result.provider_content {
-                let tau_proto::ToolResultContentPart::Image(image) = part;
-                image.data = std::sync::Arc::from([]);
-            }
-        }
         _ => {}
     }
 }

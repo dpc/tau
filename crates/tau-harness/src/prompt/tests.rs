@@ -974,8 +974,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
     ];
     let tree = tau_core::AgentTree::from_events(agent_id, &events);
 
-    let assembled =
-        assemble_prompt_context_from(&tree, tree.head(), &std::collections::HashMap::new());
+    let assembled = assemble_prompt_context_from(&tree, tree.head());
 
     assert!(!assembled.contains_message_fact);
     let rendered = serde_json::to_string(&assembled.context).expect("serialize context");
@@ -1031,9 +1030,7 @@ pub(crate) fn assemble_conversation_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> Vec<ContextItem> {
-    assemble_prompt_context_from(tree, head, &std::collections::HashMap::new())
-        .context
-        .flatten()
+    assemble_prompt_context_from(tree, head).context.flatten()
 }
 
 /// Tool errors must surface their `details` payload to the LLM,

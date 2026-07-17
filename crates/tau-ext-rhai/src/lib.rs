@@ -531,10 +531,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::ExtensionDataResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
-        | HarnessOutputMessage::PeerSessionProbeResult(_)
-        | HarnessOutputMessage::RegisterTransportCapabilityResult(_)
-        | HarnessOutputMessage::TransportMessageIngressResult(_)
-        | HarnessOutputMessage::CompleteTransportSendResult(_) => false,
+        | HarnessOutputMessage::PeerSessionProbeResult(_) => false,
     }
 }
 

@@ -92,10 +92,10 @@ creates, edits, and reactions take bounded `profile.display_name` from the same
 live `users.info` verification call (80 scalars/256 bytes); it is mutable,
 untrusted UI presentation and is never the model's primary sender identity.
 
-Incoming exact mentions of the authenticated installation bot set the generic
-`transport_identity_mentioned` fact on the durable envelope. Exactly one
-eligible leading mention is removed for routing/command compatibility; every
-remaining eligible mention is represented to the model as `@slack_bridge`.
+For incoming exact mentions of the authenticated installation bot, exactly one
+eligible leading mention is removed for routing/command compatibility and every
+remaining eligible mention is represented in published text as `@slack_bridge`.
+The generic fact schema carries no separate mention flag.
 Complete equal-length backtick code ranges suppress recognition; escaped,
 labeled, partial, case-changed, and literal `@slack_bridge` text do not count.
 A successful `slack_register` returns exactly
@@ -107,7 +107,7 @@ Sending the token posts it literally.
 Agent replies and proactive sends contain only the supplied `message` text by
 default. Set `prefix_agent_id: true` to retain the earlier
 `[agent-id] message` presentation. This setting changes presentation only:
-authorization, opaque reply selection, destinations, threads, and the
+authorization, Tau-issued reply selection, destinations, threads, and the
 `max_message_bytes` check remain based on the original call. Tau submits one
 initial Slack post attempt and may retry that exact frozen route/body once after
 a bounded rate-limit or ambiguous transport/provider outcome. The initial call
@@ -116,10 +116,10 @@ process/session at-least-once delivery: if the first outcome was ambiguous, one
 or two Slack copies may exist; two ambiguous outcomes can leave zero, one, or
 two. Successful retry results include `delivery_copies: one_or_two_possible`.
 A live per-channel FIFO holds each logical call through provider I/O and its
-possible retry; unrelated channels remain independent. Tau completions use a
-background acknowledged write-and-flush path, and writer failure retires all
-later send authority. Same-`ToolCallId` replay within the retained session
-resubmits an awaiting completion or returns its durably completed result/error;
+possible retry; unrelated channels remain independent. After remote success,
+Slack writes `message.sent` and then the ordinary `tool.result` through one
+serialized write-and-flush gate; any confirmed writer failure latches output failure, retires the entire Slack session and all receive/send/reaction authority, wakes workers, and requests shutdown. Same-`ToolCallId` replay within the retained session returns its
+stable completed result/error without reposting or publishing a duplicate fact;
 a new call id is new intent.
 There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
 claim. Apart from the optional prefix, Tau does not split the supplied message.
@@ -182,19 +182,20 @@ proactive-only static DM does not.
 
 `slack_react {message_ref, emoji, action}` is disabled by default and uses the
 separate `slack:react` policy tag. It accepts only exact Tau-issued refs from
-committed incoming create/edit envelopes or successful `slack_send` results; it
-never accepts Slack IDs, timestamps, aliases, Unicode emoji, toggle, list, or
-discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
+locally written incoming create/edit facts or successful `slack_send` results.
+Refs have the documented `slack:<channel>:<message-ts>` fact-ID format, but the
+tool never accepts channel IDs or timestamps as separate route selectors, aliases,
+Unicode emoji, toggle, list, or discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
 fail-closed across route/config/session changes. Add `reactions:write` and
 reinstall the Slack app before enabling it. Whole-group `slack` grants include
 this new externally visible mutation surface.
 
 Successful `slack_send` calls now return
-`{"status":"sent","message_ref":"slack-msg-v1-...","delivery_copies":"one"|"one_or_two_possible"}`
+`{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}`
 rather than the former
-plain `sent Slack message` text. The opaque ref becomes usable only after Tau
-accepts durable send completion; the short returned-before-activation window
-fails closed, and rejected/missing-ID completions never activate it.
+plain `sent Slack message` text. The fact ref becomes usable only after the
+sent-fact and result frames are written and flushed locally. A writer failure
+does not activate it; this is not a harness commit acknowledgement.
 
 ## Slack events and scopes
 
@@ -246,8 +247,7 @@ timestamp)` cache key, so recent repeats are dropped. Commands are `start`,
 Selection is per configured receive route: parent-route threads share selection,
 receive-enabled fixed-thread routes are isolated, and dynamic DMs select per D id.
 
-An agent calls `slack_register(enabled: true)` to receive messages. Every
-accepted create, edit, or owned-post reaction gets its own opaque, source-bound
+An agent calls `slack_register(enabled: true)` to receive messages. Every published create, edit, or owned-post reaction gets its own source-bound
 reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
 alias-only `destination`; raw Slack ids and thread selectors are never accepted.
 Its fixed schema never enumerates configuration. Call `slack_conversations` for
@@ -273,13 +273,13 @@ therefore influence proactive sends available to that role. Keep destination
 sets and roles minimal; use separate roles or separately prefixed Slack instances
 when receive and proactive authority need isolation.
 
-Edits require a same-process committed original with matching sender, route, and
+Edits require a same-process locally published original with matching sender, route, and
 thread. Inbound human reaction events require a recent post created through `slack_send`, matching
 owner, verified actor, and a covering receive route. The 4,096-entry received-id
 cache is process-local; cached occurrence ids are nonempty, control-free, and at
 most 256 bytes. Reactions use the cache only when Slack supplies an event id.
 An occurrence is recorded before later identity lookup, local effects, capacity
-admission, or durable commit, so a transient failure consumes it until eviction
+admission, or local fact write, so a transient failure consumes it until eviction
 or restart. Eviction, races, or restart may duplicate delivery. All
 runtime links, selections, reply routes, reaction ownership, registrations, and
 the outbound call ledger clear on restart. The ledger is bounded at 1,024
@@ -299,10 +299,10 @@ or denied sends and failed synchronous preflight do not freeze configuration.
 Production API/socket endpoints require HTTPS/WSS (plaintext is loopback-test
 only). Shutdown, reconnect, and send-retry waits are event-driven. Slow
 `chat.postMessage`, rate-limit waits, and retry backoff do not block later
-protocol tools, capability/session changes, pings, reconnect, or shutdown. Logs
+protocol tools, session/lifecycle changes, pings, reconnect, or shutdown. Logs
 expose bounded, identifier-free connect/hello/ACK/degraded/reconnect states;
 Slack HTTP/identity/post failures expose only closed categories, never raw
-bodies, error strings, headers, tokens, websocket URLs, payloads, envelope ids,
+bodies, error strings, headers, tokens, websocket URLs, payloads, event ids,
 native identifiers, or mention text. A `users.info`
 outage rejects ingress and emits at most one warning per failure episode.
 
@@ -312,11 +312,7 @@ block websocket reads, ACKs, Ping/Pong, reconnect, or shutdown. Saturation is
 fail-closed: the bridge does not ACK the occurrence and reconnects so Slack can
 retry. The handoff is memory-only and does not add a post-ACK durability claim.
 
-`TRACE` enables `slack_latency_v1` monotonic stage markers for websocket receipt,
-decode, ACK, queue/admission, identity, post, ingress, harness activation/commit,
-and result timing. Markers contain bounded outcome classes and depth buckets plus
-process-local connection/occurrence/request correlation only; they contain no
-Slack identifiers, text, tokens, URLs, response bodies, or durable events.
-See
-[`DESIGN-tau-ext-slack-latency-observability`](specs/DESIGN-tau-ext-slack-latency-observability.md)
-for the exact privacy and correlation boundary.
+`TRACE` diagnostics remain local, bounded, and identifier-free. They may cover
+websocket receipt, ACK, admission, identity, post, fact publication, and result
+timing, but contain no Slack identifiers, text, tokens, URLs, response bodies,
+or durable diagnostic events.

@@ -69,22 +69,27 @@ transport itself adversarial. The boundary summary is recorded in
 [`ARCH-external-message-boundary`](specs/ARCH-external-message-boundary.md).
 
 The Slack bridge requires exact configured conversation/kind/thread policy and
-verified live-human admission. Receive permission creates only opaque
+verified live-human admission. Receive permission creates only Tau-issued
 source-bound reply authority; proactive permission is a separate alias-only
 grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
-Transport ingress has no adapter reply authority before durable commit.
-The Slack extension drops recently repeated native occurrence ids with a bounded
-process-local cache before ingress submission. The harness does no ingress
-deduplication or agent-history scan: each submitted request is a new durable
-occurrence. Cache eviction, restart, or races may therefore duplicate delivery.
+Slack publishes immutable message facts directly and keeps actionable reply and
+reaction authority in extension-local runtime state. The Slack extension drops
+recently repeated native occurrence ids with a bounded process-local cache before
+publication. Generic event infrastructure does no native deduplication or
+ownership resolution: each successfully emitted fact is a new immutable occurrence.
+Cache eviction, restart, or races may therefore duplicate delivery.
 Slack records an occurrence before identity lookup, local effects, capacity
-admission, and durable commit; a later transient failure consumes that
+admission, and local fact write; a later transient failure consumes that
 occurrence until eviction or restart rather than retrying it.
 Use one Slack extension instance for one receiving agent as specified by
 [`DESIGN-tau-ext-slack-single-agent-operating-model`](crates/tau-ext-slack/specs/DESIGN-tau-ext-slack-single-agent-operating-model.md).
-Re-check record-before-delivery ordering, Slack-local cache bounds, and
-disconnect/session route cleanup whenever transport ingress changes.
-The separately authorized, default-off Slack reaction tool accepts only commit-accepted opaque exact-message refs, requires current route and role authority, and permits removal only of same-agent runtime-owned reactions. It adds `reactions:write` without reaction listing; reactions are externally visible and can trigger notifications or workflows.
+Re-check record-before-publication ordering, Slack-local cache bounds, and
+disconnect/session route cleanup whenever Slack fact publication changes.
+The separately authorized, default-off Slack reaction tool accepts only locally
+retained exact-message refs from written facts/results, requires current route
+and role authority, and permits removal only of same-agent runtime-owned
+reactions. It adds `reactions:write` without reaction listing; reactions are
+externally visible and can trigger notifications or workflows.
 
 The separately authorized Slack discovery tool reveals all static model-facing
 aliases and configured policy, including receive-only routes, but excludes native

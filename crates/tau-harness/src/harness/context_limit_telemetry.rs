@@ -147,7 +147,6 @@ fn visit_agent_entry_images_mut(
             Some(())
         }
         AgentEntry::AgentMessage { .. }
-        | AgentEntry::MessageEnvelope { .. }
         | AgentEntry::MessageFact { .. }
         | AgentEntry::CompactionTrigger { .. } => Some(()),
     }

@@ -14,15 +14,14 @@ contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
-Protocol version 10 requires an extension's first harness response after
+Protocol version 11 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
 [DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
-Transport-ingress results use correlated optional
-`message_id`/`outcome`/`error` fields. Accepted results carry a newly minted
-message id; rejected results carry an error. Reply routes are adapter runtime
-state derived from the matching pending request. The protocol does not provide
-cross-request ingress deduplication.
+The configured extension instance name is required and supplies the stable
+harness-stamped publisher ID for extension-published `message.*` facts.
+The protocol deliberately provides no generic transport registration, ingress
+acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB
 before higher-level connection or activation queues receive it.
 
@@ -35,19 +34,13 @@ representations summarize byte length rather than formatting image bytes.
 
 Harness input and output messages are directionally typed. Keep request/response envelopes in the correct enum, and preserve existing serde names unless a migration plan updates all producers, consumers, docs, and recorded fixtures.
 
-Canonical external endpoints keep stable transport identity separate from
-mutable display presentation and an optional explicitly sourced operator alias.
-Provider presentation carries the harness-stamped transport instance and alias
-authority separately while retaining the stable id as the primary sender.
+Message facts keep stable publisher-domain party and conversation identities
+separate from optional mutable display presentation. Provider presentation
+retains stable IDs as primary and carries the harness-stamped publisher
+separately.
 Shared visible escaping covers controls, bidi/zero-width/default-ignorable
 structure, variation selectors, Hangul fillers, and noncharacters so UIs and
 provider XML never interpret hostile metadata.
-
-Incoming envelopes also carry a generic default-false
-`transport_identity_mentioned` fact. When true it projects as a true-only XML
-attribute and records that the normalized text addressed the receiving
-transport instance's own authenticated identity. It is immutable canonical
-content, not identity disclosure, capability, or routing authority.
 
 `encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
 

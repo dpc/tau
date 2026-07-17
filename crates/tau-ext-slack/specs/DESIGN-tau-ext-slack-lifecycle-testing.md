@@ -1,45 +1,28 @@
 # DESIGN-tau-ext-slack-lifecycle-testing: Slack lifecycle tests use local fakes
 
-Status: inferred
+Status: inferred; transport-RPC portions superseded 2026-07-17 by
+[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md)
 
-Protocol-consumer fixtures cover accepted, rejected, and orphaned correlated
-results. Accepted results may install pending reply/edit/reaction state; rejected
-and orphaned results do not. Adapter tests cover bounded process-local native-id
-suppression, dual wrappers, eviction, and lifecycle clearing.
+Slack lifecycle behavior is tested without live credentials. Unit tests use fake
+`SlackClient` implementations for Web API calls and loopback websocket servers
+for Socket Mode. Production URLs still require `wss`; tests may use loopback
+`ws` to exercise shutdown, reconnect, framing, and ACK behavior.
 
-Slack lifecycle behavior is tested without live Slack credentials. Unit tests use
-fake `SlackClient` implementations for Web API calls and loopback websocket
-servers for Socket Mode behavior. Production Socket Mode URLs still require
-`wss`, while tests may use `ws://127.0.0.1` so shutdown, reconnect, framing, and
-ack behavior can be exercised deterministically without external network access.
-Admission queue unit tests cover reservation release, the 64-occurrence
-queued-plus-in-flight bound, FIFO commit order, and closure draining. A loopback
-websocket plus blocking identity barrier proves that a later envelope ACK, Pong,
-and shutdown stay responsive; focused lifecycle and closed-writer tests prove late
-identity completion and failed output cannot create ingress. Send-delivery tests
-hold initial/retry waits across unrelated wakes, retire reserved work at
-Disconnect/EOF, enforce live same-channel FIFO and actual-start retry horizons,
-and prove initial/replayed completion writer failure retires later outbound I/O.
+Admission tests cover reservation release, the 64-occurrence bound, FIFO order,
+and closure draining. Lifecycle tests cover native duplicate suppression,
+identity failure, installation mismatch, route/config/session retirement, and
+writer closure. Direct message-fact tests cover delivered/edit/reaction/delete
+target identity, incoming and outgoing delete cleanup, sent-before-result frame
+order, and same-call replay without reposting.
 
-Regression tests should prefer this fake-client and loopback approach over real
-Slack workspaces. When testing shutdown paths, drive the worker to the blocked
-state being exercised, request shutdown through the shared signal, and bound the
-post-request wait below any removed polling interval so polling regressions fail.
+Send tests inject typed post outcomes and an event-driven scheduler rather than
+sleeping. Focused coverage includes the absolute retry horizon, lifecycle
+cancellation, active-worker admission, writer failure, and stable replay.
 
-Send-delivery tests inject typed post outcomes and an event-driven scheduler.
-They never sleep: barriers hold initial HTTP or retry waiting while a staged real
-tau-client reader processes later tools, unregister, and session shutdown.
-Fixtures assert exact frozen-body reuse, initial-plus-one budgeting,
-Retry-After/jitter bounds, lifecycle cancellation, terminal ledger replay, and
-one-or-two-copy ambiguity. Provider privacy fixtures use hostile bodies, tokens,
-native ids, mentions, newlines, and bidi sentinels and assert that only closed
-categories reach displays or protocol output.
+Reaction tests cover strict arguments, source/configured target authorization,
+same-agent add/remove ownership, idempotency outcomes, ambiguous failure,
+deletion cleanup, late completion, ownership-capacity rejection, and exact HTTP wire shape.
+Private native IDs must never appear as accepted route arguments.
 
-Identity fixtures cover missing/malformed bot/team responses, exact event-wrapper
-installation matching without top-level actor-team authority, reconnect pair
-mismatch/partial-state failure, no-cache per-occurrence lookup, alias mutation,
-and safe display filtering.
-Mention fixtures cover explicit and omitted false behavior, reply-only targeting,
-raw entity controls, exact generated wire text, and stale-installation failure.
-CLI fixtures cover compact reaction Add/Remove facts, actor, exact name, hostile
-Unicode, grapheme truncation, and final byte/column caps.
+Full workspace `selfci` owns compile, documentation, clippy, test/coverage, and
+CRAP-score regression gates.

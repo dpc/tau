@@ -27,8 +27,8 @@ disabled, and `next_cursor` is omitted on the final page.
 
 Discovery is informational, not a bearer capability. `slack_send` accepts a compact
 plain alias and resolves it against current configuration under the existing
-extension and harness authorization, typed-capability, exact-route, freeze, and
-completion checks. It intentionally has no configuration snapshot token:
-same-alias reuse is operator responsibility. Opaque replies remain independent.
+extension-scoped tool authorization plus exact-route, lifecycle, and freeze
+checks. It intentionally has no configuration snapshot token:
+same-alias reuse is operator responsibility. Tau-issued reply selectors remain independent.
 On-demand discovery trades one bounded tool call for removing O(route count) schema
 tokens from every model turn.

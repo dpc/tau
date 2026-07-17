@@ -2,10 +2,11 @@
 
 Status: unconfirmed
 
-Transport-ingress tests cover independent append-per-request behavior,
-record-before-delivery ordering, current-capability-bound reply routing, and
-correlated acceptance. Duplicate filtering is not a harness contract. The
-broader crate suite covers normal disconnect and lifecycle sequencing.
+Message-fact tests cover extension publisher stamping, persist-before-deliver
+ordering, post-commit prompt projection, invalid/unavailable targets, and
+replay-without-wake behavior. Transport duplicate filtering, native routing, and
+reply authority are not harness contracts. The broader crate suite covers normal
+disconnect and lifecycle sequencing.
 
 Harness lifecycle/startup changes should prefer focused unit or lifecycle tests
 that exercise the state machine directly, then rely on broader crate tests and

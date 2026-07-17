@@ -1109,147 +1109,6 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
     }
 }
 
-fn incoming_message(agent_id: AgentId) -> Event {
-    Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
-        recipient_id: agent_id.clone(),
-        envelope: tau_proto::MessageEnvelope {
-            message_id: tau_proto::MessageId::new("msg-during-tools"),
-            transport: tau_proto::MessageTransportRef {
-                name: "slack".to_owned(),
-                instance: Some(tau_proto::ExtensionName::from("std-slack")),
-            },
-            source: tau_proto::MessageEndpoint::External {
-                stable_id: Some("U1".to_owned()),
-                display_name: None,
-                identity_alias: None,
-                actor_kind: tau_proto::ExternalActorKind::Human,
-            },
-            destination: tau_proto::MessageEndpoint::Agent {
-                session_id: None,
-                agent_id,
-                display_name: None,
-            },
-            conversation: None,
-            operation: tau_proto::MessageOperation::Create {
-                payload: tau_proto::MessagePayload::Text {
-                    text: "during tools".to_owned(),
-                    format: tau_proto::TextFormat::Plain,
-                },
-            },
-            transport_identity_mentioned: false,
-            trust: tau_proto::MessageTrust {
-                content: tau_proto::MessageContentTrust::UntrustedExternal,
-                identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,
-                policy: tau_proto::SenderPolicyStatus::Allowlisted,
-            },
-            external_identity: None,
-            ordering: None,
-            occurred_at: None,
-            reply_path: None,
-        },
-    })
-}
-
-/// Slack sender labels preserve stable verified identity without changing the
-/// established display behavior of unrelated external transports.
-#[test]
-fn message_envelope_sender_labels_reflect_identity_assurance() {
-    let Event::AgentMessageIncoming(incoming) = incoming_message(agent_id()) else {
-        unreachable!("helper returns incoming message");
-    };
-    let mut envelope = incoming.envelope;
-    let cases = [
-        (
-            tau_proto::SenderIdentityAssurance::VerifiedAccount,
-            Some("U1"),
-            Some("Alice"),
-            "U1",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::VerifiedAccount,
-            Some("U1"),
-            None,
-            "U1",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::VerifiedAccount,
-            None,
-            Some("Alice"),
-            "unverified external sender",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::RoomMembership,
-            None,
-            Some("Alice"),
-            "room occupant Alice",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::DisplayOnly,
-            None,
-            Some("Alice"),
-            "unverified Alice",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::Unknown,
-            None,
-            None,
-            "unverified external sender",
-        ),
-        (
-            tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent,
-            Some("agent-a"),
-            None,
-            "agent-a",
-        ),
-    ];
-    for (identity, stable_id, display_name, expected) in cases {
-        envelope.trust.identity = identity;
-        envelope.source = tau_proto::MessageEndpoint::External {
-            stable_id: stable_id.map(str::to_owned),
-            display_name: display_name.map(str::to_owned),
-            identity_alias: None,
-            actor_kind: tau_proto::ExternalActorKind::Human,
-        };
-        let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
-        assert_eq!(item.model_presentation.source_label, expected);
-    }
-    envelope.trust.identity = tau_proto::SenderIdentityAssurance::VerifiedAccount;
-    envelope.source = tau_proto::MessageEndpoint::External {
-        stable_id: Some("U1".to_owned()),
-        display_name: Some("Mutable Alice".to_owned()),
-        identity_alias: Some(tau_proto::ExternalIdentityAlias {
-            value: "dpc".to_owned(),
-            authority: tau_proto::ExternalIdentityAliasAuthority::OperatorConfigured,
-        }),
-        actor_kind: tau_proto::ExternalActorKind::Human,
-    };
-    let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
-    assert_eq!(item.model_presentation.source_label, "U1");
-    assert_eq!(
-        item.model_presentation
-            .source_alias
-            .as_ref()
-            .map(|alias| alias.value.as_str()),
-        Some("dpc")
-    );
-    assert_eq!(
-        item.model_presentation.transport_instance_label.as_deref(),
-        Some("std-slack")
-    );
-    envelope.transport.name = "xmpp".to_owned();
-    envelope.source = tau_proto::MessageEndpoint::External {
-        stable_id: Some("acct@example.test".to_owned()),
-        display_name: Some("Alice".to_owned()),
-        identity_alias: None,
-        actor_kind: tau_proto::ExternalActorKind::Human,
-    };
-    let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
-    assert_eq!(
-        item.model_presentation.source_label,
-        "Alice (acct@example.test)"
-    );
-}
-
 /// Ensures metadata set/unset facts fold into side state without creating
 /// transcript nodes, preventing extension state from polluting prompts.
 #[test]
@@ -1301,8 +1160,8 @@ fn inheritable_metadata_filters_non_inheritable_entries() {
 }
 
 /// Ensures provider tool-call rounds fold only after every terminal result,
-/// preserving model call order and then flushing envelopes/message facts in one
-/// arrival-ordered pending-input FIFO.
+/// preserving model call order and then flushing message facts in the pending
+/// input FIFO.
 #[test]
 fn provider_tool_round_waits_for_all_terminal_results() {
     let agent_id = agent_id();
@@ -1350,14 +1209,6 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .expect("assistant response should fold");
 
     assert_eq!(tree.head(), Some(assistant_node_id));
-    assert!(
-        tree.apply_event_at(
-            AgentEventParent::InheritHead,
-            &incoming_message(tree.agent_id.clone()),
-        )
-        .is_none(),
-        "message must wait until the tool result preserves provider adjacency"
-    );
     assert!(
         tree.record_committed_message_fact(
             Box::new(tau_proto::MessageItem {
@@ -1415,19 +1266,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             ..
         } if durable_event_seq == PersistedAgentEventSeq::new(7)
     ));
-    let envelope_node = tree
-        .node(final_node.parent_id.expect("fact follows envelope"))
-        .expect("envelope node should exist");
-    assert!(matches!(
-        envelope_node.entry,
-        AgentEntry::MessageEnvelope { .. }
-    ));
     let tool_results_node = tree
-        .node(
-            envelope_node
-                .parent_id
-                .expect("envelope follows tool results"),
-        )
+        .node(final_node.parent_id.expect("fact follows tool results"))
         .expect("tool results node should exist");
     assert_eq!(tool_results_node.parent_id, Some(assistant_node_id));
 

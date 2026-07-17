@@ -104,8 +104,6 @@ pub(crate) enum SendFailureCategory {
     ConflictingRoute,
     /// The delivery worker could not be started.
     WorkerUnavailable,
-    /// Tau rejected the durable outgoing completion.
-    CompletionRejected,
 }
 
 impl SendFailureCategory {
@@ -126,7 +124,6 @@ impl SendFailureCategory {
             Self::MalformedResponse => "malformed_response",
             Self::ConflictingRoute => "conflicting_route",
             Self::WorkerUnavailable => "worker_unavailable",
-            Self::CompletionRejected => "completion_rejected",
         }
     }
 }
@@ -148,7 +145,6 @@ impl fmt::Display for SendFailureCategory {
             Self::MalformedResponse => "Slack delivery outcome is unknown",
             Self::ConflictingRoute => "Slack returned conflicting route metadata",
             Self::WorkerUnavailable => "Slack delivery worker is unavailable",
-            Self::CompletionRejected => "Tau rejected Slack delivery completion",
         })
     }
 }

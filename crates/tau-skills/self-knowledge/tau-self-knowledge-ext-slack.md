@@ -27,10 +27,10 @@ authoritative/model-primary; bounded `profile.display_name` from the same
 `users.info` call is untrusted UI-only presentation retained per accepted
 occurrence.
 
-Inbound exact mentions of the authenticated installation bot set the durable
-generic `transport_identity_mentioned` fact. Exactly one eligible leading
-mention is removed for routing/command compatibility; remaining eligible
-mentions become the semantic model token `@slack_bridge`. Complete
+For inbound exact mentions of the authenticated installation bot, exactly one
+eligible leading mention is removed for routing/command compatibility and
+remaining eligible mentions become the semantic token `@slack_bridge` in
+published text. The generic fact schema carries no separate mention field. Complete
 equal-length backtick code ranges suppress recognition. Escaped, labeled,
 partial, case-changed, and literal `@slack_bridge` text do not count. Successful
 registration returns exactly
@@ -69,17 +69,18 @@ Supported wrappers require matching `context_team_id` or one unambiguous
 matching authorization; missing/mixed/mismatched evidence is dropped before
 identity lookup. Slack Connect actor home team is not installation authority.
 
-Agents register to receive. `slack_send` requires `message` plus exactly one
-opaque `reply_to` or proactive `destination` alias. Accepted creates, edits, and
-owned reactions receive source-bound reply authority from the pending Slack
-route. Edits require a known
-committed original; reactions require a recent Tau-authored post and covering
+Agents register to receive. Accepted Slack creates, edits, deletes, and reactions
+publish direct immutable `message.*` facts. `slack_send` requires `message` plus
+exactly one Tau-issued `reply_to` or proactive `destination` alias. Successfully
+published creates and edits install source-bound reply authority in Slack-local
+runtime state. Edits require a known
+locally published original; reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
-harness capability and effective tool policy.
+extension/session authority and effective tool policy.
 
 Replies and proactive sends contain only the agent-supplied message by default.
 Set `prefix_agent_id: true` to opt into the legacy `[agent-id] message` format.
-This presentation setting does not change message limits, retry budget, opaque
+This presentation setting does not change message limits, retry budget, Tau-issued
 reply authority, routing, threads, authorization, or configuration freeze.
 Agent-authored text may use ordinary mrkdwn but raw `<@`, `<!`, and `<#` Slack
 native controls are rejected. Bridge help/control/error output is escaped,
@@ -118,10 +119,12 @@ byte-identical retry after bounded Retry-After or an ambiguous outcome. This is
 at-least-once notification delivery: an ambiguous first attempt followed by
 success may leave one or two Slack copies; two ambiguous outcomes can leave
 zero, one, or two. Successful retry results report
-`delivery_copies: one_or_two_possible`. Same-id/same-argument replay
-resubmits only the stable result; conflicting reuse errors and a new call id is
-new intent. Unregister, unload, capability/route/config/session change, and
-shutdown cancel retry and stale completion authority. The ledger clears on
+`delivery_copies: one_or_two_possible`. After remote success Slack publishes
+`message.sent` and then the ordinary `tool.result` through one serialized local
+write-and-flush gate. Same-id/same-argument replay returns only the stable result
+without reposting or republishing; conflicting reuse errors and a new call id is
+new intent. Unregister, unload, route/config/session changes, and shutdown cancel
+retry and stale publication authority. The ledger clears on
 session/process retirement, so there is no durable outbox, `client_msg_id`,
 restart guarantee, or exactly-once claim. Provider diagnostics are closed
 categories; raw bodies, Slack error text/headers, native ids, mentions, tokens,
@@ -149,9 +152,11 @@ message event or both reaction events plus `reactions:read`.
 ## Agent reactions
 
 Grant `slack_react` or `slack:react` separately (it is disabled by default). It
-accepts `{message_ref, emoji, action: add|remove}` only for exact committed
-incoming create/edit refs or opaque refs returned by successful `slack_send`.
-It accepts no native IDs, aliases, Unicode emoji, list, toggle, or discovery.
+accepts `{message_ref, emoji, action: add|remove}` only for exact locally written
+incoming create/edit refs or refs returned by successful `slack_send`. Refs use
+the documented `slack:<channel>:<message-ts>` fact-ID form, but it accepts no
+channel IDs or timestamps as separate route selectors, aliases, Unicode emoji,
+list, toggle, or discovery.
 Removal is limited to same-agent reactions unambiguously added in the current
 runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
 target conversations. Whole Slack-group grants now include this surface.
@@ -160,8 +165,7 @@ display/configured alias, and the exact custom/skin-tone name; it performs no
 Unicode emoji lookup.
 
 Successful `slack_send` results use
-`{"status":"sent","message_ref":"slack-msg-v1-...","delivery_copies":"one"|"one_or_two_possible"}`
+`{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}`
 (replacing the former
-plain-text success). The ref activates only after durable completion acceptance,
-so an immediate call can briefly fail closed and rejected completions remain
-permanently ineligible.
+plain-text success). The ref activates only after the sent-fact and result frames
+are written and flushed locally; this is not a harness commit acknowledgement.

@@ -282,10 +282,6 @@ impl EventName {
     pub const AGENT_MESSAGE_SENT: Self = Self::from_static(EventCategory::Agent, "message_sent");
     pub const AGENT_MESSAGE_RECEIVED: Self =
         Self::from_static(EventCategory::Agent, "message_received");
-    pub const AGENT_MESSAGE_INCOMING: Self =
-        Self::from_static(EventCategory::Agent, "message_incoming");
-    pub const AGENT_MESSAGE_OUTGOING: Self =
-        Self::from_static(EventCategory::Agent, "message_outgoing");
     pub const AGENT_STATE: Self = Self::from_static(EventCategory::Agent, "state");
     pub const AGENT_WATCHES_UPDATED: Self =
         Self::from_static(EventCategory::Agent, "watches_updated");

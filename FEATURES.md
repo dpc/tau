@@ -107,10 +107,11 @@ policy rules, and the selected role. Event subscriptions use harness policy and
 approval. The harness injects only each extension's declared Tau secrets;
 configured extensions remain trusted local executables.
 
-Slack external messages use canonical typed envelopes that preserve provenance
-and keep untrusted payloads distinct from user prompts. Telegram and XMPP still
-use legacy prompt adapters pending separate migrations, though the resulting
-transcript prompt facts remain harness-authored.
+Slack publishes immutable `message.*` facts directly. The harness stamps the
+configured extension publisher, commits each fact before consumers act, and
+projects valid facts as untrusted model context. Transport admission, native
+routing, replies, retries, and duplicate suppression remain Slack-local.
+Telegram and XMPP retain legacy prompt adapters pending separate migrations.
 
 See the [skills guide](docs/skills.md), [role guide](docs/agent-roles.md),
 [shell process lifecycle](crates/tau-ext-shell/specs/SPEC-tau-ext-shell-process-lifecycle.md),

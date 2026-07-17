@@ -19,11 +19,10 @@ use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
     ExtensionName, HarnessProviderQuotaChanged, MessageDeleted, MessageDelivered, MessageEdited,
-    MessageEnvelope, MessageId, MessagePhase, MessageReactionAdded, MessageReactionRemoved,
-    MessageSent, MessageTransportAcceptance, ModelId, ModelTag, PromptContext, PromptFragment,
-    PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace,
-    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
-    ToolGroupName, ToolName, ToolTag,
+    MessagePhase, MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag,
+    PromptContext, PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
+    ProviderQuotaReplace, ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId,
+    ToolDefinition, ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -2196,35 +2195,6 @@ pub struct AgentWatchTurnStateNotification {
     /// Harness-runtime-scoped watched-agent generation, incremented only when
     /// an idle agent starts an outer turn.
     pub turn_generation: u64,
-}
-
-/// Harness-owned durable incoming v2 message fact.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentMessageIncoming {
-    /// Agent receiving this canonical message.
-    pub recipient_id: AgentId,
-    /// Transport-neutral canonical envelope.
-    pub envelope: MessageEnvelope,
-}
-
-/// Harness-owned durable outgoing v2 message fact.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentMessageOutgoing {
-    /// Agent sending this canonical message.
-    pub sender_id: AgentId,
-    /// Transport-neutral canonical envelope.
-    pub envelope: MessageEnvelope,
-    /// Honest transport acceptance strength.
-    pub acceptance: MessageTransportAcceptance,
-    /// Canonical incoming occurrence whose authorized route selected this send.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub in_reply_to: Option<MessageId>,
-    /// Operator-configured alias when this was an authorized proactive send.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configured_destination: Option<String>,
-    /// Live tool call whose completion produced this durable fact.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<ToolCallId>,
 }
 
 /// Durable agent branch-state fact: the selected head moved, so the next
@@ -4511,10 +4481,6 @@ pub enum Event {
     AgentMessageSent(AgentMessageSent),
     #[serde(rename = "agent.message_received")]
     AgentMessageReceived(AgentMessageReceived),
-    #[serde(rename = "agent.message_incoming")]
-    AgentMessageIncoming(AgentMessageIncoming),
-    #[serde(rename = "agent.message_outgoing")]
-    AgentMessageOutgoing(AgentMessageOutgoing),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
@@ -4828,8 +4794,6 @@ impl Event {
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
             Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
-            Self::AgentMessageIncoming(_) => EventName::AGENT_MESSAGE_INCOMING,
-            Self::AgentMessageOutgoing(_) => EventName::AGENT_MESSAGE_OUTGOING,
             _ => return None,
         }
         .into()

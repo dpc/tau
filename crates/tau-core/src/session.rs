@@ -21,92 +21,6 @@ use tau_proto::{
 
 const MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT: u64 = 128 * 1024 * 1024;
 
-fn message_envelope_item(
-    direction: tau_proto::MessageDirection,
-    envelope: &tau_proto::MessageEnvelope,
-) -> tau_proto::MessageEnvelopeItem {
-    let source_label = match &envelope.source {
-        tau_proto::MessageEndpoint::Agent {
-            agent_id,
-            display_name,
-            ..
-        } => display_name.clone().unwrap_or_else(|| agent_id.to_string()),
-        tau_proto::MessageEndpoint::User => "user".to_owned(),
-        tau_proto::MessageEndpoint::External {
-            stable_id,
-            display_name,
-            identity_alias,
-            ..
-        } => {
-            if (envelope.transport.name == "slack" || identity_alias.is_some())
-                && envelope.trust.identity == tau_proto::SenderIdentityAssurance::VerifiedAccount
-            {
-                stable_id
-                    .clone()
-                    .unwrap_or_else(|| "unverified external sender".to_owned())
-            } else {
-                match envelope.trust.identity {
-                    tau_proto::SenderIdentityAssurance::VerifiedAccount => {
-                        match (display_name, stable_id) {
-                            (Some(display), Some(stable)) if display != stable => {
-                                format!("{display} ({stable})")
-                            }
-                            (_, Some(stable)) => stable.clone(),
-                            (Some(display), None) => format!("unverified {display}"),
-                            (None, None) => "unverified external sender".to_owned(),
-                        }
-                    }
-                    tau_proto::SenderIdentityAssurance::RoomMembership => format!(
-                        "room occupant {}",
-                        display_name
-                            .clone()
-                            .or_else(|| stable_id.clone())
-                            .unwrap_or_else(|| "unknown".to_owned())
-                    ),
-                    tau_proto::SenderIdentityAssurance::DisplayOnly
-                    | tau_proto::SenderIdentityAssurance::Unknown => format!(
-                        "unverified {}",
-                        display_name
-                            .clone()
-                            .or_else(|| stable_id.clone())
-                            .unwrap_or_else(|| "external sender".to_owned())
-                    ),
-                    tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent => display_name
-                        .clone()
-                        .or_else(|| stable_id.clone())
-                        .unwrap_or_else(|| "external sender".to_owned()),
-                }
-            }
-        }
-    };
-    tau_proto::MessageEnvelopeItem {
-        direction,
-        envelope: envelope.clone(),
-        model_presentation: tau_proto::MessageModelPresentation {
-            transport_label: envelope.transport.name.clone(),
-            source_label,
-            transport_instance_label: envelope
-                .transport
-                .instance
-                .as_ref()
-                .map(ToString::to_string),
-            source_alias: match &envelope.source {
-                tau_proto::MessageEndpoint::External { identity_alias, .. } => {
-                    identity_alias.clone()
-                }
-                _ => None,
-            },
-            live_send_tool: None,
-            conversation_label: envelope.conversation.as_ref().and_then(|conversation| {
-                conversation
-                    .display_name
-                    .clone()
-                    .or_else(|| conversation.stable_id.clone())
-            }),
-        },
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEventValidationError {
     message: String,
@@ -245,11 +159,6 @@ pub enum AgentEntry {
         /// Message body.
         message: String,
     },
-    /// Canonical v2 transport message preserved as a typed provider item.
-    MessageEnvelope {
-        /// Direction, envelope, and harness-derived presentation policy.
-        item: Box<tau_proto::MessageEnvelopeItem>,
-    },
     /// Escaped ordinary context message derived from a committed message fact.
     MessageFact {
         /// Model-facing message with user/assistant role fixed by fact type.
@@ -280,8 +189,6 @@ pub enum AgentEntry {
 /// One committed context input waiting behind an open provider tool round.
 #[derive(Clone, Debug, PartialEq)]
 enum PendingContextInput {
-    /// Existing typed transport envelope.
-    MessageEnvelope(Box<tau_proto::MessageEnvelopeItem>),
     /// Generic extension-published message fact projection.
     MessageFact {
         /// Projected ordinary context message.
@@ -805,25 +712,6 @@ impl AgentTree {
     /// independent of the currently selected branch.
     pub fn all_entries(&self) -> impl Iterator<Item = &AgentEntry> {
         self.nodes.iter().map(|node| &node.entry)
-    }
-
-    /// Returns canonical message items from materialized nodes and durable
-    /// facts deferred behind an open provider tool round.
-    pub fn all_message_envelopes(&self) -> impl Iterator<Item = &tau_proto::MessageEnvelopeItem> {
-        self.nodes
-            .iter()
-            .filter_map(|node| match &node.entry {
-                AgentEntry::MessageEnvelope { item } => Some(item.as_ref()),
-                _ => None,
-            })
-            .chain(
-                self.pending_context_inputs
-                    .iter()
-                    .filter_map(|input| match input {
-                        PendingContextInput::MessageEnvelope(item) => Some(item.as_ref()),
-                        PendingContextInput::MessageFact { .. } => None,
-                    }),
-            )
     }
 
     /// Returns the entries along the branch ending at `head` (root to
@@ -1412,22 +1300,6 @@ impl AgentTree {
             Event::AgentMessageReceived(message) => self
                 .agent_message_entry_from_received(message)
                 .map(|entry| self.append_node_at(parent, entry)),
-            Event::AgentMessageIncoming(message) if message.recipient_id == self.agent_id => self
-                .record_message_envelope(
-                    parent,
-                    Box::new(message_envelope_item(
-                        tau_proto::MessageDirection::Incoming,
-                        &message.envelope,
-                    )),
-                ),
-            Event::AgentMessageOutgoing(message) if message.sender_id == self.agent_id => self
-                .record_message_envelope(
-                    parent,
-                    Box::new(message_envelope_item(
-                        tau_proto::MessageDirection::Outgoing,
-                        &message.envelope,
-                    )),
-                ),
             Event::ProviderResponseFinished(response) => {
                 Some(self.apply_provider_response_finished(parent, response))
             }
@@ -1456,19 +1328,6 @@ impl AgentTree {
                 inference_activation,
             },
         )
-    }
-
-    fn record_message_envelope(
-        &mut self,
-        parent: Option<NodeId>,
-        item: Box<tau_proto::MessageEnvelopeItem>,
-    ) -> Option<NodeId> {
-        if !self.pending_tool_rounds.is_empty() {
-            self.pending_context_inputs
-                .push(PendingContextInput::MessageEnvelope(item));
-            return None;
-        }
-        Some(self.append_node_at(parent, AgentEntry::MessageEnvelope { item }))
     }
 
     /// Fold one valid committed message fact behind tool adjacency when needed.
@@ -1753,12 +1612,6 @@ impl AgentTree {
                         "watch payload must be present exactly for its matching watch message kind",
                     ))
                 })
-            }
-            Event::AgentMessageIncoming(message) if message.recipient_id == self.agent_id => {
-                Some(Ok(()))
-            }
-            Event::AgentMessageOutgoing(message) if message.sender_id == self.agent_id => {
-                Some(Ok(()))
             }
             _ => None,
         }
@@ -2257,8 +2110,6 @@ impl AgentTree {
                 | Event::AgentCompacted(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
-                | Event::AgentMessageIncoming(_)
-                | Event::AgentMessageOutgoing(_)
                 | Event::AgentHeadMoved(_)
                 | Event::ProviderResponseFinished(_)
         )
@@ -2377,7 +2228,6 @@ impl AgentTree {
         );
         for input in std::mem::take(&mut self.pending_context_inputs) {
             let entry = match input {
-                PendingContextInput::MessageEnvelope(item) => AgentEntry::MessageEnvelope { item },
                 PendingContextInput::MessageFact {
                     item,
                     durable_event_seq,

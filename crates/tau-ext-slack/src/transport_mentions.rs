@@ -3,12 +3,10 @@
 /// Model-visible semantic reference to this Slack transport instance.
 pub(super) const SLACK_BRIDGE_REFERENCE: &str = "@slack_bridge";
 
-/// Normalized Slack text plus transport-identity addressing facts.
+/// Normalized Slack text plus leading-mention command compatibility.
 pub(super) struct NormalizedTransportMention {
     /// Canonical logical/model text with eligible own mentions normalized.
     pub(super) text: String,
-    /// Whether any eligible exact own mention appeared.
-    pub(super) mentioned: bool,
     /// Whether exactly one leading eligible mention was removed.
     pub(super) leading: bool,
 }
@@ -36,7 +34,6 @@ pub(super) fn normalize_transport_mentions(
         0
     };
     let mut output = String::with_capacity(text.len());
-    let mut mentioned = leading;
     let mut index = start;
     let mut range_index = code_ranges.partition_point(|(_, end)| *end <= index);
     while index < text.len() {
@@ -51,7 +48,6 @@ pub(super) fn normalize_transport_mentions(
         if text[index..].starts_with(&native) {
             output.push_str(SLACK_BRIDGE_REFERENCE);
             index += native.len();
-            mentioned = true;
             continue;
         }
         let character = text[index..].chars().next().expect("valid text index");
@@ -60,7 +56,6 @@ pub(super) fn normalize_transport_mentions(
     }
     NormalizedTransportMention {
         text: output.trim().to_owned(),
-        mentioned,
         leading,
     }
 }

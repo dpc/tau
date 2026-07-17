@@ -18,46 +18,26 @@ Bare top-level `Event` values are not valid protocol items. Peers ask the
 harness to publish events with `emit`; the harness delivers events to peers with
 `deliver`.
 
-## Protocol v8 transport-message RPCs
+## Protocol v11 message-fact publication
 
-Protocol v8 adds three extension-to-harness RPC families:
-`register_transport_capability`, `transport_message_ingress`, and
-`complete_transport_send`, each with a same-`request_id` result. Standard
-`tau-client` runtimes can observe non-event results with
-`ExtensionBuilder::on_output_message`; manual runtimes receive them through the
-ordinary manual input queue.
+Protocol v11 has no special transport-message RPC family. Bridges publish
+`message.delivered`, `message.edited`, `message.deleted`,
+`message.reaction_added`, `message.reaction_removed`, and `message.sent` through
+the ordinary `emit` message. The harness stamps the authenticated extension's
+required configured instance name as publisher, persists each fact, and delivers
+the committed record through ordinary `deliver`.
 
-Registration binds a transport, optional send tool, and bounded exact proactive
-aliases to the authenticated connection and active session. Refresh replaces the
-route set; tool unregister, disconnect, and session rollover revoke it. Completion
-validates either live reply authorization or exact configured-destination
-authorization. Ingress acceptance is returned only after its
-protected incoming fact commits. Each submitted ingress request creates a new
-occurrence; adapters own transport-specific retry filtering. Successful-send completion first
-commits the outgoing fact, then publishes and commits the terminal tool result,
-then acknowledges. Remote API acceptance remains outside this local sequence and
-is not a delivery/read receipt.
+This keeps point-to-point protocol messages distinct from durable bus facts:
+`emit` is a request to publish, while the nested `message.*` event is the
+persisted semantic record. There is no message-specific result or synchronous
+commit acknowledgement. Transport admission, duplicate suppression, native
+routing, replies, proactive destinations, remote-send policy, and retries remain
+inside the bridge extension.
 
-Version 7 peers cannot negotiate these variants with version 8. Upgrade harness
-and extension together; the version bump does not make newer on-disk agent logs
-downgrade-safe. Built-in bridge adapters are not migrated by the protocol
-foundation alone.
-
-### Transport ingress results
-
-Ingress results retain the correlated optional
-`message_id`/`outcome`/`error` shape. Accepted results carry a new message id;
-rejected requests carry an error. Adapters install runtime-only reply state from
-the matching pending request. The harness does not deduplicate ingress or scan
-agent history.
-
-External endpoints may carry an optional operator-configured identity alias with
-explicit authority. It is presentation-only, requires a verified stable account,
-and does not affect adapter-local retry policy.
-Incoming envelopes may also carry the default-false
-`transport_identity_mentioned` fact. True means the adapter recognized its own
-authenticated receiving identity in normalized text; it is provider-visible
-context, not a capability or routing grant.
+For a successful remote send, an extension normally emits `message.sent` before
+its ordinary `tool.result`. Remote acceptance, fact persistence, and tool
+completion are not one transaction and the fact is not a generic delivery/read
+receipt.
 
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For

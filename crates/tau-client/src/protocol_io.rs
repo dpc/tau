@@ -311,15 +311,6 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::PeerSessionProbeResult(_) => {
             "message.peer_session_probe_result".to_owned()
         }
-        HarnessOutputMessage::RegisterTransportCapabilityResult(_) => {
-            "message.register_transport_capability_result".to_owned()
-        }
-        HarnessOutputMessage::TransportMessageIngressResult(_) => {
-            "message.transport_message_ingress_result".to_owned()
-        }
-        HarnessOutputMessage::CompleteTransportSendResult(_) => {
-            "message.complete_transport_send_result".to_owned()
-        }
     }
 }
 
@@ -343,9 +334,6 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",
         HarnessInputMessage::PeerSessionProbe(_) => "peer_session_probe",
-        HarnessInputMessage::RegisterTransportCapability(_) => "register_transport_capability",
-        HarnessInputMessage::TransportMessageIngress(_) => "transport_message_ingress",
-        HarnessInputMessage::CompleteTransportSend(_) => "complete_transport_send",
     }
 }
 

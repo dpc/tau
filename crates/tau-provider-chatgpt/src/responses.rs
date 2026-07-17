@@ -1955,20 +1955,6 @@ fn build_request(
                         {
                             return None;
                         }
-                        // Message-envelope presentation depends on transient
-                        // route and effective-tool liveness. An envelope in
-                        // the server-owned prefix may therefore have rendered
-                        // differently when the anchor was created (for
-                        // example, with a reply tool that has since gone
-                        // stale). Resend the full context rather than letting
-                        // an immutable server-side prefix contradict the
-                        // truthful current projection.
-                        if context_items[..next_item_index]
-                            .iter()
-                            .any(|item| matches!(item, ContextItem::MessageEnvelope(_)))
-                        {
-                            return None;
-                        }
                         return Some((id, next_item_index));
                     }
                     next_item_index = next_item_index.saturating_sub(response.output_items.len());
@@ -2309,14 +2295,6 @@ fn convert_context_item(
         }
         ContextItem::Message(msg) if msg.role == ContextRole::Assistant => {
             convert_assistant_message(msg, supports_phase, out);
-        }
-        ContextItem::MessageEnvelope(envelope) => {
-            let message = envelope.to_provider_message();
-            if message.role == ContextRole::User {
-                convert_user_message(&message, out);
-            } else if message.role == ContextRole::Assistant {
-                convert_assistant_message(&message, supports_phase, out);
-            }
         }
         ContextItem::ToolCall(call) => convert_tool_call_item(call, out),
         ContextItem::ToolResult(result) => convert_tool_result_item(result, image_budget, out),
