@@ -113,9 +113,7 @@ impl AgentNavigation {
             .count()
     }
 
-    /// Return whether the harness currently has an agent loaded in focused
-    /// tests.
-    #[cfg(test)]
+    /// Return whether the harness currently has an agent loaded.
     pub(crate) fn is_live(&self, agent_id: &str) -> bool {
         self.live_agents.contains(agent_id)
     }

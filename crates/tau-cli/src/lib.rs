@@ -14,6 +14,7 @@ mod daemon;
 mod dev_tmux;
 mod event_renderer;
 mod markdown_render;
+mod message_fact_render;
 mod print_prompt;
 mod print_tools;
 mod prompt_history;

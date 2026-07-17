@@ -2360,6 +2360,151 @@ fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
     assert!(!vt.screen_contains(80, "extension std-global starting"));
 }
 
+/// Message facts for unavailable or invalid targets stay in the no-agent
+/// snapshot, while facts for loaded targets belong to that target transcript.
+#[test]
+fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
+    let (_term, handle, vt) = setup(100, 30);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let message_fact = |target: &str, message_id: &str, text: &str| {
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge-main"),
+            tau_proto::MessageAgentTarget::new(target),
+            tau_proto::MessageFactId::new(message_id),
+            tau_proto::MessageParty {
+                stable_id: "sender-1".to_owned(),
+                display_name: None,
+            },
+            None,
+            text,
+        ))
+    };
+
+    renderer.switch_agent("selected-agent".to_owned());
+    renderer.handle(&message_fact(
+        "unavailable-agent",
+        "unavailable-message",
+        "unavailable body",
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "unavailable body"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "unavailable body"));
+    assert!(vt.screen_contains(100, "Tau target: unavailable-agent"));
+    renderer.switch_agent("fresh-after-global".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "unavailable body"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "unavailable body"));
+
+    renderer.switch_agent("selected-agent".to_owned());
+    renderer.handle(&message_fact(
+        "../invalid",
+        "invalid-message",
+        "private invalid body",
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "Unprojectable message fact"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Unprojectable message fact"));
+    assert!(!vt.screen_contains(100, "private invalid body"));
+
+    renderer
+        .agent_navigation()
+        .lock()
+        .expect("agent navigation lock")
+        .mark_live("loaded-agent");
+    renderer.switch_agent("selected-agent".to_owned());
+    renderer.handle(&message_fact(
+        "loaded-agent",
+        "loaded-message",
+        "loaded body",
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "loaded body"));
+    renderer.switch_agent("loaded-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(100, "loaded body"));
+    assert!(!vt.screen_contains(100, "Tau target: loaded-agent"));
+}
+
+/// A replayed global fact on the initial no-agent screen remains owned by that
+/// screen instead of being adopted into the first fresh agent transcript.
+#[test]
+fn initial_replayed_global_message_fact_survives_first_agent_selection() {
+    let (_term, handle, vt) = setup(100, 30);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("bridge-main"),
+        tau_proto::MessageAgentTarget::new("unavailable-agent"),
+        tau_proto::MessageFactId::new("replayed-message"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "initial replay body",
+    ));
+    let delivery = tau_proto::EventDelivery::replay(tau_proto::UnixMicros::new(1_000_000), fact);
+    let (event, replay, recorded_at) = delivery.into_parts();
+    assert!(replay);
+    renderer.handle_recorded_at(&event, recorded_at.expect("replay timestamp"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "initial replay body"));
+
+    renderer.switch_agent("first-fresh-agent".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "initial replay body"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "initial replay body"));
+}
+
+/// A live global fact received after explicit deselection stays in the
+/// no-agent snapshot when the user switches to a never-cached agent.
+#[test]
+fn deselected_live_global_message_fact_survives_fresh_agent_selection() {
+    let (_term, handle, vt) = setup(100, 30);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("existing-agent".to_owned());
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("bridge-main"),
+        tau_proto::MessageAgentTarget::new("unavailable-agent"),
+        tau_proto::MessageFactId::new("live-message"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "deselected live body",
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "deselected live body"));
+
+    renderer.switch_agent("never-cached-agent".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "deselected live body"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "deselected live body"));
+}
+
 /// Dynamic action results must render in the transcript that was viewed when
 /// the action was invoked. The result event itself has no agent id, so routing
 /// it by the currently selected agent would leak output into whichever

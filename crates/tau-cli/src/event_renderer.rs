@@ -112,6 +112,9 @@ pub(crate) struct EventRenderer {
     /// explicit `/agent none`/`/agent new` output remains a protected
     /// no-agent snapshot.
     preserve_on_fresh_agent_switch: bool,
+    /// Whether the visible snapshot contains a message fact owned by the global
+    /// no-agent view rather than an agent transcript.
+    contains_global_message_fact: bool,
     /// Agent ids known to the UI for `/agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Session-scoped authoritative display names keyed by local agent id.
@@ -425,6 +428,8 @@ struct AgentUiState {
     prompt_tool_summary: Option<tau_cli_term::BlockId>,
     prompt_tool_summary_active: bool,
     preserve_on_fresh_agent_switch: bool,
+    /// Whether this snapshot contains globally owned message-fact output.
+    contains_global_message_fact: bool,
     cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
 }
@@ -1311,6 +1316,7 @@ impl EventRenderer {
             no_agent_ui_state: AgentUiState::default(),
             agents_ui_state: HashMap::new(),
             preserve_on_fresh_agent_switch: false,
+            contains_global_message_fact: false,
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             agent_navigation: Arc::new(Mutex::new(AgentNavigation::default())),
@@ -1597,19 +1603,17 @@ impl EventRenderer {
     }
 
     fn visible_no_agent_snapshot_needs_preservation(&self) -> bool {
-        // Do not treat the initial start-new-agent screen as a separate
-        // transcript. Startup/status history rendered there is the beginning of
-        // the first user-created agent conversation, so selecting that first
-        // agent must append in-place instead of swapping to a fresh snapshot and
-        // clearing visible scrollback.
-        //
-        // The preservation path is only for the explicit no-agent screen reached
-        // after `/agent none`/`/agent new`, where the user has deliberately left
-        // a previous agent transcript and global no-agent output must remain
-        // available when they return to the no-agent view.
+        // Ordinary startup/status history on the initial start-new-agent screen
+        // begins the first user-created conversation and remains adoptable.
+        // Globally owned message facts are the exception: they never belong to an
+        // agent transcript, so their snapshot is preserved even on that initial
+        // screen. Other preservation state applies only after explicit
+        // `/agent none` or `/agent new`, when the user has deliberately left a
+        // previous transcript and the no-agent output must remain available.
         self.displayed_agent_id.is_none()
-            && self.awaiting_new_agent_selection
-            && (self.preserve_on_fresh_agent_switch || self.has_pending_no_agent_owner())
+            && (self.contains_global_message_fact
+                || (self.awaiting_new_agent_selection
+                    && (self.preserve_on_fresh_agent_switch || self.has_pending_no_agent_owner())))
     }
 
     fn has_pending_no_agent_owner(&self) -> bool {
@@ -1994,6 +1998,7 @@ impl EventRenderer {
             preserve_on_fresh_agent_switch: std::mem::take(
                 &mut self.preserve_on_fresh_agent_switch,
             ),
+            contains_global_message_fact: std::mem::take(&mut self.contains_global_message_fact),
             cumulative_agent_latency: std::mem::take(&mut self.cumulative_agent_latency),
             agent_activity: std::mem::take(&mut self.agent_activity),
         }
@@ -2047,6 +2052,7 @@ impl EventRenderer {
         self.prompt_tool_summary = state.prompt_tool_summary;
         self.prompt_tool_summary_active = state.prompt_tool_summary_active;
         self.preserve_on_fresh_agent_switch = state.preserve_on_fresh_agent_switch;
+        self.contains_global_message_fact = state.contains_global_message_fact;
         self.cumulative_agent_latency = state.cumulative_agent_latency;
         self.agent_activity = state.agent_activity;
     }
@@ -2858,6 +2864,7 @@ impl EventRenderer {
         self.prompt_tool_summary = None;
         self.prompt_tool_summary_active = false;
         self.preserve_on_fresh_agent_switch = false;
+        self.contains_global_message_fact = false;
         // Model selection and effort are harness-global, not
         // session-scoped. `/session new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessRoleSelected for the
@@ -3464,6 +3471,11 @@ impl EventRenderer {
             self.update_agent_in_progress();
             return;
         }
+        if let Some(owner) = self.message_fact_snapshot_owner(event) {
+            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
+            self.update_agent_in_progress();
+            return;
+        }
         let target_agent_id = self.agent_id_for_event(event);
         let Some(target_agent_id) = target_agent_id else {
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
@@ -3596,6 +3608,7 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         owner: UiSnapshotOwner,
     ) {
+        let is_global_message_fact = crate::message_fact_render::target_agent_id(event).is_some();
         match owner {
             UiSnapshotOwner::Agent(agent_id)
                 if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) =>
@@ -3603,13 +3616,18 @@ impl EventRenderer {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
             }
             UiSnapshotOwner::NoAgent if self.displayed_agent_id.is_none() => {
+                self.contains_global_message_fact |= is_global_message_fact;
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
             }
             UiSnapshotOwner::Agent(agent_id) => {
                 self.handle_recorded_at_for_hidden_agent(event, recorded_at, agent_id);
             }
             UiSnapshotOwner::NoAgent => {
-                self.handle_recorded_at_for_hidden_no_agent(event, recorded_at);
+                self.handle_recorded_at_for_hidden_no_agent(
+                    event,
+                    recorded_at,
+                    is_global_message_fact,
+                );
             }
         }
     }
@@ -3654,7 +3672,12 @@ impl EventRenderer {
         self.publish_editor_conversation_context();
     }
 
-    fn handle_recorded_at_for_hidden_no_agent(&mut self, event: &Event, recorded_at: UnixMicros) {
+    fn handle_recorded_at_for_hidden_no_agent(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        is_global_message_fact: bool,
+    ) {
         let handle = self.handle.clone();
         let visible_agent_id = self.displayed_agent_id.clone();
         handle.with_output_transaction(|| {
@@ -3670,6 +3693,7 @@ impl EventRenderer {
                 self.with_editor_context_publish_suppressed(|this| {
                     this.restore_hidden_agent_state(no_agent_state);
                     this.displayed_agent_id = None;
+                    this.contains_global_message_fact |= is_global_message_fact;
                     this.handle_recorded_at_for_visible_agent(event, recorded_at);
                     this.no_agent_ui_state = this.take_visible_agent_state();
                     let visible_state = visible_agent_id
@@ -4042,6 +4066,26 @@ impl EventRenderer {
             .into_agent_id(self.current_agent_id.as_deref())
     }
 
+    /// Resolve every message fact to its loaded transcript or the no-agent
+    /// snapshot, preserving unavailable and invalid facts as global output.
+    fn message_fact_snapshot_owner(&self, event: &Event) -> Option<UiSnapshotOwner> {
+        match crate::message_fact_render::target_agent_id(event)? {
+            crate::message_fact_render::MessageFactTarget::Valid(agent_id)
+                if self
+                    .agent_navigation
+                    .lock()
+                    .expect("agent navigation lock")
+                    .is_live(agent_id.as_str()) =>
+            {
+                Some(UiSnapshotOwner::Agent(agent_id.to_string()))
+            }
+            crate::message_fact_render::MessageFactTarget::Valid(_)
+            | crate::message_fact_render::MessageFactTarget::Invalid => {
+                Some(UiSnapshotOwner::NoAgent)
+            }
+        }
+    }
+
     fn tool_event_agent_id(&self, event: &Event) -> EventAgentIdResolution {
         match event {
             Event::ToolRequest(request) => EventAgentIdResolution::from_agent_id(
@@ -4232,6 +4276,9 @@ impl EventRenderer {
         if self.handle_agent_message_event(event) {
             return;
         }
+        if self.handle_message_fact_event(event) {
+            return;
+        }
 
         // Events are routed to the owning agent transcript before reaching this
         // point, so side-conversation events are rendered into their own hidden
@@ -4253,6 +4300,30 @@ impl EventRenderer {
         }
 
         Self::trace_unhandled_event(event);
+    }
+
+    /// Render one committed message fact in the current containing view.
+    fn handle_message_fact_event(&mut self, event: &Event) -> bool {
+        let target_context =
+            crate::message_fact_render::target_agent_id(event).is_some_and(|target| {
+                let crate::message_fact_render::MessageFactTarget::Valid(agent_id) = target else {
+                    return false;
+                };
+                self.displayed_agent_id.as_deref() == Some(agent_id.as_str())
+            });
+        let target_context = if target_context {
+            crate::message_fact_render::MessageFactTargetContext::Implied
+        } else {
+            crate::message_fact_render::MessageFactTargetContext::Explicit
+        };
+        let Some(rendered) = crate::message_fact_render::render(event, target_context) else {
+            return false;
+        };
+        self.handle.print_output(
+            "message-fact",
+            self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, rendered),
+        );
+        true
     }
 
     fn trace_unhandled_event(event: &Event) {
