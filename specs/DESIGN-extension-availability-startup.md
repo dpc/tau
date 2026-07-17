@@ -2,6 +2,10 @@
 
 Status: unconfirmed
 
+Functional changes to this harness-extension lifecycle contract require the
+prior standalone design and approval mandated by
+[DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
+
 Fresh harness startup resolves extension availability in one ordered pipeline:
 configuration, supported names-only `TAU_ENABLE_EXTENSIONS`, then argv-ordered
 CLI enable/disable operations. The public environment is parsed fail-closed

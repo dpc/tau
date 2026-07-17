@@ -1,5 +1,10 @@
 # ARCH-tau-proto: tau-proto architecture
 
+Architectural or externally meaningful functional changes to protocol-facing
+event persistence or the harness-extension interface require the prior
+standalone design and approval mandated by
+[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+
 Bounded provider quota records are transient current state. Provider
 replace/patch/clear events carry opaque profile epochs, strict sequences,
 complete stable-key window records with independent usage/timing clocks, and

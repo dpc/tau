@@ -1,5 +1,9 @@
 # SPEC-tau-harness-event-processing: Event Processing
 
+Changes to event persistence, sequencing authority, replay, or logging behavior
+are subject to
+[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+
 ## Event sequencing, interception, and persistence
 
 All ordinary event publication should flow through the central publish path:

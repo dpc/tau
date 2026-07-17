@@ -15,6 +15,11 @@
   inter-harness peers, and genuinely untrusted external ingress are distinct.
   Do not expand an unrelated feature into adversarial local-IPC hardening without
   an approved threat-model change.
+- Before any architectural or externally meaningful functional change to event
+  logs/journals or a harness-extension interface, read
+  `specs/DESIGN-persistence-and-extension-interface-change-approval.md`. Create a
+  standalone design record for that change and obtain explicit user or maintainer
+  approval before implementation; do not hide it in unrelated work.
 
 ## Verification
 

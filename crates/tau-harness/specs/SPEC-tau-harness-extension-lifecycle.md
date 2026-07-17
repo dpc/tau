@@ -1,5 +1,9 @@
 # SPEC-tau-harness-extension-lifecycle: Extension Lifecycle
 
+Architectural or externally meaningful functional changes to this
+harness-extension contract are subject to
+[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+
 ## Daemon listener and accept forwarding
 
 Daemon IPC sockets are bound or socket-activated before the harness event loop

@@ -14,3 +14,7 @@ Opt-in same-UID peer rendezvous authority is governed by
 [DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).
 
 Dependency direction is inward toward shared protocol/core/client libraries: the harness composes them, the CLI and extensions communicate through protocol/client APIs, and transport bridges translate external systems without granting external payloads internal authority. Provider adapters classify and stream backend results, but the harness retains session, routing, recovery, and durable-state authority.
+
+Architectural or externally meaningful functional changes to event logs or
+journals and harness-extension interfaces are gated by
+[DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
