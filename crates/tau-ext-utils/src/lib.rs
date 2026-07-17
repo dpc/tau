@@ -775,7 +775,10 @@ fn timer_tool_spec() -> ToolSpec {
                 "timer_id": {"type": "string", "maxLength": MAX_TIMER_ID_BYTES, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Path-safe id. Required for cancel; optional for schedule."},
                 "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS},
                 "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS},
-                "message": {"type": "string", "maxLength": MAX_MESSAGE_BYTES}
+                // Keep the byte limit in runtime validation: JSON Schema
+                // maxLength counts characters, and large values also produce
+                // grammar repetitions that llama.cpp refuses to parse.
+                "message": {"type": "string", "description": format!("Reminder text; maximum {MAX_MESSAGE_BYTES} bytes.")}
             },
             "required": ["action"],
             "additionalProperties": false
@@ -936,6 +939,26 @@ mod tests {
             pending_invocations: HashMap::new(),
             replay_complete_agents: HashSet::new(),
         }
+    }
+
+    /// Timer schemas describe the runtime byte limit without a large grammar
+    /// repetition.
+    #[test]
+    fn timer_tool_schema_omits_message_max_length() {
+        let spec = timer_tool_spec();
+        let parameters = spec.parameters.expect("timer parameters");
+        let message = parameters
+            .pointer("/properties/message")
+            .expect("timer message schema");
+        let expected_description = format!("Reminder text; maximum {MAX_MESSAGE_BYTES} bytes.");
+
+        assert!(message.get("maxLength").is_none());
+        assert_eq!(
+            message
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_description.as_str())
+        );
     }
 
     /// Restore folding waits for the agent replay boundary before firing an
@@ -1276,5 +1299,30 @@ mod tests {
             ("message", CborValue::Text("hello".to_owned())),
         ]);
         assert!(parse_action(&args, "call-1").is_err());
+    }
+
+    /// Timer validation retains the byte limit omitted from the model-visible
+    /// schema.
+    #[test]
+    fn schedule_validation_enforces_message_byte_limit() {
+        let schedule_args = |message| {
+            cbor_map(vec![
+                ("action", CborValue::Text("schedule".to_owned())),
+                ("delay_seconds", CborValue::Integer(10.into())),
+                ("message", CborValue::Text(message)),
+            ])
+        };
+        let bytes_per_character = "é".len();
+        let character_limit = MAX_MESSAGE_BYTES / bytes_per_character;
+        let at_limit = "é".repeat(character_limit);
+        let oversized = "é".repeat(character_limit + 1);
+
+        assert_eq!(at_limit.len(), MAX_MESSAGE_BYTES);
+        assert!(parse_action(&schedule_args(at_limit), "call-1").is_ok());
+        assert!(oversized.chars().count() < MAX_MESSAGE_BYTES);
+        assert_eq!(
+            parse_action(&schedule_args(oversized), "call-1").expect_err("oversized message"),
+            format!("message must be 1..={MAX_MESSAGE_BYTES} bytes")
+        );
     }
 }
