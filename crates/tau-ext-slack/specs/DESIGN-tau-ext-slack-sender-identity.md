@@ -5,7 +5,7 @@ Status: confirmed, 2026-07-15, dpc
 **Beads:** `tau-agent-qv6o`, `tau-agent-damy`
 **Related:** [DESIGN-tau-ext-slack-sender-admission](DESIGN-tau-ext-slack-sender-admission.md),
 [DESIGN-tau-ext-slack-safe-source-mentions](DESIGN-tau-ext-slack-safe-source-mentions.md),
-and [DESIGN-canonical-transport-ingress](../../../specs/DESIGN-canonical-transport-ingress.md)
+and [DESIGN-tau-ext-slack-single-agent-operating-model](DESIGN-tau-ext-slack-single-agent-operating-model.md)
 
 ## Decision
 
@@ -20,7 +20,7 @@ Slack sender identity has four deliberately separate layers:
 
 Display and alias never change allowlist status, commands, dynamic-DM linking,
 selection, routing, ownership, reply authority, reaction authority, or
-deduplication authority. `sender_allowlisted` remains independent.
+the received-id cache key. `sender_allowlisted` remains independent.
 
 The provider envelope keeps the native stable ID as `sender` and may add
 `sender_alias`, `sender_alias_authority="operator_configured"`, and
@@ -102,21 +102,22 @@ supplies transport-instance provenance.
 
 ## Persistence, duplicate handling, and replay
 
-The accepted occurrence stores display and alias in the canonical endpoint.
+The accepted occurrence stores display and alias in its durable endpoint.
 They are durable, visible to event subscribers, and replayed without any Slack
 API call, alias re-resolution, or profile refresh. Older records decode absent
 optional fields as `None`.
 
-Duplicate compatibility compares authority and operation fields while excluding
-endpoint display, identity alias, and conversation display. A compatible retry:
+The Slack extension keeps a bounded process-local FIFO set of recently received
+native occurrence ids. Cached ids are nonempty, control-free, and at most 256
+bytes. A repeat still in that set is dropped before harness submission. The
+occurrence is recorded before identity lookup or durable commit, so a later
+transient failure consumes it until eviction or restart. The set is not durable;
+eviction or restart may admit another occurrence with a new presentation
+snapshot and message id.
 
-- returns the original canonical message ID;
-- preserves the first committed presentation snapshot;
-- reconstructs live route presentation from that first canonical result; and
-- does not wake or append another occurrence.
-
-New edits and reactions are distinct occurrences and may carry a later display
-snapshot.
+Edits use their native occurrence ids or stable Slack message/revision
+coordinates. Reactions use only a Slack-supplied event id and are not cached
+when it is absent. Both may carry a later display snapshot.
 
 ## UI and reaction presentation
 

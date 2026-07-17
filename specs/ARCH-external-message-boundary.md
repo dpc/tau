@@ -25,26 +25,18 @@ contain bounded native sender, conversation/thread, event, and message ids
 visible to authorized event subscribers, but never transport credentials or raw
 private route capabilities.
 
-Transport-ingress deduplication is global to the authenticated extension
-instance, transport, and native dedup key across every retained agent journal.
-The first durable envelope fixes the original target and canonical route.
-Protocol v11 returns that exact snapshot with an explicit Active or typed
-Inactive reply disposition; adapters may install private reply authority only
-from Active. Presentation-only endpoint and conversation labels do not change
-dedup authority, while stable identity, destination, conversation/thread,
-operation, trust/policy, native identity, ordering/time, and send tool do.
-External endpoints may also carry an explicitly sourced operator identity alias.
-It is presentation-only, requires a stable verified account, and remains outside
-dedup authority; the first durable label/alias snapshot is nevertheless the only
-canonical presentation returned for every duplicate. Model projection keeps the
-stable id primary and separately exposes alias authority plus the
-harness-authenticated transport instance.
+The harness does not deduplicate transport ingress: each accepted RPC appends a
+new occurrence. Adapters may apply bounded transport-local retry suppression.
+Slack keeps only a process-local recent native-id cache, so cache eviction,
+restart, or races may duplicate delivery. External endpoints may also carry an
+explicitly sourced operator identity alias. It is presentation-only and requires
+a stable verified account. Model projection keeps the stable id primary and
+separately exposes alias authority plus the harness-authenticated transport
+instance.
 The generic default-false `transport_identity_mentioned` fact is likewise part
-of the first canonical ingress snapshot and duplicate compatibility. It records
+of each durable ingress snapshot. It records
 transport-own addressing without exposing the transport's native identifier and
 confers no authority or egress behavior.
-Retained-history uncertainty fails closed as specified by
-[DESIGN-canonical-transport-ingress](DESIGN-canonical-transport-ingress.md).
 
 ## Cross-harness messages
 

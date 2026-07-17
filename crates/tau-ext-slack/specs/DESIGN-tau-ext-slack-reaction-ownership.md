@@ -11,8 +11,8 @@ closed.
 
 The authoritative root comes from the authenticated outbound request. Omitted
 later response/reaction thread metadata is tolerated; conflicting metadata
-prevents ownership or routing. Every exact validated Committed+Active reaction
-gets opaque reply authority even though reaction presentation omits a redundant reply marker.
+prevents ownership or routing. Every accepted reaction gets opaque reply
+authority even though reaction presentation omits a redundant reply marker.
 The canonical actor snapshot and compact Add/Remove UI are governed by
 [DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md);
 presentation never changes post ownership or route authority.

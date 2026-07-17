@@ -1403,7 +1403,6 @@ impl SendDeliveryWorker {
                 event_id: None,
                 message_id: Some(posted.ts.clone()),
                 revision_id: None,
-                dedup_key: Some(format!("send:{}:{}", prepared.route.channel_id, posted.ts)),
             },
             prepared.policy_status,
             prepared.authority.send_tool.clone(),

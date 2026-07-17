@@ -24,8 +24,8 @@ Follow the [README migration procedure](../../tau-ext-slack/README.md#migration-
 Optional `sender_aliases` bind at most 64 exact U/W ids one-to-one to unique
 lowercase aliases. They are operator presentation only. The native U/W id stays
 authoritative/model-primary; bounded `profile.display_name` from the same
-`users.info` call is untrusted UI-only presentation. Durable retries keep the
-first committed display/alias snapshot.
+`users.info` call is untrusted UI-only presentation retained per accepted
+occurrence.
 
 Inbound exact mentions of the authenticated installation bot set the durable
 generic `transport_identity_mentioned` fact. Exactly one eligible leading
@@ -70,9 +70,9 @@ matching authorization; missing/mixed/mismatched evidence is dropped before
 identity lookup. Slack Connect actor home team is not installation authority.
 
 Agents register to receive. `slack_send` requires `message` plus exactly one
-opaque `reply_to` or proactive `destination` alias. Only exact validated
-protocol-v11 Committed+Active creates, edits, and owned reactions receive
-source-bound reply authority; historical Inactive duplicates restore nothing. Edits require a known
+opaque `reply_to` or proactive `destination` alias. Accepted creates, edits, and
+owned reactions receive source-bound reply authority from the pending Slack
+route. Edits require a known
 committed original; reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 harness capability and effective tool policy.
@@ -106,9 +106,10 @@ roles minimal; use separate roles or prefixed extension instances for isolation.
 
 Configuration freezes after successful Socket Mode preflight or immediately
 before an authorized post or reaction API attempt; restart Tau to change it. Failed preflight and denied
-sends remain reconfigurable. Runtime links/routes/selections clear on restart;
-durable native create dedup survives and Slack retries can restore edit
-ownership. Logs and notices omit payloads, ids, websocket URLs, and tokens.
+sends remain reconfigurable. A bounded process-local native-id cache drops recent
+Slack repeats; cache eviction or restart may duplicate delivery. Runtime
+links/routes/selections and edit ownership clear on restart. Logs and notices
+omit payloads, ids, websocket URLs, and tokens.
 
 `slack_send` reserves each accepted `ToolCallId` in a non-evicting 1,024-entry
 process/session ledger and moves initial HTTP plus retry waiting off the

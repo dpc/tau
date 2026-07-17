@@ -32,8 +32,8 @@ aliases to the authenticated connection and active session. Refresh replaces the
 route set; tool unregister, disconnect, and session rollover revoke it. Completion
 validates either live reply authorization or exact configured-destination
 authorization. Ingress acceptance is returned only after its
-protected incoming fact commits; exact committed duplicates preserve the
-canonical id without another model wake. Successful-send completion first
+protected incoming fact commits. Each submitted ingress request creates a new
+occurrence; adapters own transport-specific retry filtering. Successful-send completion first
 commits the outgoing fact, then publishes and commits the terminal tool result,
 then acknowledges. Remote API acceptance remains outside this local sequence and
 is not a delivery/read receipt.
@@ -43,32 +43,21 @@ and extension together; the version bump does not make newer on-disk agent logs
 downgrade-safe. Built-in bridge adapters are not migrated by the protocol
 foundation alone.
 
-### Protocol v11 ingress migration
+### Transport ingress results
 
-Version 11 replaces the ingress result's three optional
-`message_id`/`outcome`/`error` fields. A result is now exactly one of:
+Ingress results retain the correlated optional
+`message_id`/`outcome`/`error` shape. Accepted results carry a new message id;
+rejected requests carry an error. Adapters install runtime-only reply state from
+the matching pending request. The harness does not deduplicate ingress or scan
+agent history.
 
-- `committed`, containing the canonical id, Accepted or Duplicate outcome, exact
-  first committed route snapshot, and Active or typed Inactive reply activation;
-- `rejected`, containing one closed, non-secret rejection category.
-
-Adapters must not infer success from field presence and must not reconstruct
-reply identity from their pending retry. Only Active permits installation of
-private reply authority. Version 10 fixtures intentionally fail version 11
-decoding, so harness and extensions must be upgraded together. Existing durable
-message envelopes require no rewrite: the harness migrates an absent or obsolete
-derived locator by rebuilding it from retained incoming envelopes.
-
-Version 11 external endpoints may carry an optional operator-configured identity
-alias with explicit authority. It is presentation-only, requires a verified
-stable account, and does not change dedup equality. The exact first committed
-endpoint—including its display/alias snapshot—is returned on every duplicate;
-adapters must use that canonical endpoint rather than pending retry metadata.
+External endpoints may carry an optional operator-configured identity alias with
+explicit authority. It is presentation-only, requires a verified stable account,
+and does not affect adapter-local retry policy.
 Incoming envelopes may also carry the default-false
 `transport_identity_mentioned` fact. True means the adapter recognized its own
-authenticated receiving identity in normalized text; it is part of immutable
-duplicate compatibility and provider projection, not a capability or routing
-grant.
+authenticated receiving identity in normalized text; it is provider-visible
+context, not a capability or routing grant.
 
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For

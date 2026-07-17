@@ -30,7 +30,6 @@ blake3.workspace = true
 bon.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
-fs2.workspace = true
 handlebars.workspace = true
 json5.workspace = true
 libc.workspace = true
@@ -58,5 +57,6 @@ tracing.workspace = true
 built.workspace = true
 
 [dev-dependencies]
+fs2.workspace = true
 image.workspace = true
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }

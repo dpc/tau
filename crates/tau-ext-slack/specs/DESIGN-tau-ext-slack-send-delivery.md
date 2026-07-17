@@ -28,8 +28,7 @@ Lifecycle, capability, route, configuration/credential snapshot, session, agent,
 and reservation authority are revalidated immediately before each attempt and
 again before accepting its result. The authorized `ToolStarted` grants the
 logical call's scoped-tool lease; the harness revalidates that tool when
-accepting completion because protocol v11 has no separate mid-call role-revocation
-generation. Unregister, unload, capability loss, configuration replacement,
+accepting completion. Unregister, unload, capability loss, configuration replacement,
 session replacement/shutdown, disconnect/EOF, or process shutdown cancels
 provider/retry authority and prevents stale private reaction activation. Once
 Slack acceptance has created `AwaitingCompletion`, ordinary agent

@@ -1,24 +1,23 @@
 # tau-ext-slack security and reliability notes
 
-Private reply, edit, and reaction state is installed only from a protocol-v11
-Committed+Active result whose first canonical extension instance, target, native
-occurrence identity, stable human, conversation kind/id/thread, assurance, and
-policy exactly match the current pending occurrence. Inactive, rejected,
-orphaned, or mismatched results install nothing.
+Private reply, edit, and reaction state is installed only from a correlated
+accepted result while the pending Slack installation and session remain current.
+Rejected and orphaned results install nothing. A bounded process-local native-id
+cache drops recent Slack repeats; it has no restart or cross-agent guarantee.
 
 - `std-slack` is disabled by default. Enabling its tools is a role-policy decision; configuration is not a per-agent ACL.
 - App/bot tokens and Socket Mode URLs are secrets. Never log them or message bodies; diagnostics stay bounded and token/URL-redacted. Production endpoints require HTTPS/WSS.
 - Slack events, metadata, edits, reactions, and text are untrusted external ingress. ACK is transport behavior, not authorization. Text stays `UntrustedExternal` and may contain prompt injection.
 - `auth.test` must establish one exact bot U/W plus installing T workspace pair at startup/reconnect and before a proactive send that has no live worker observation. Supported Events API wrappers must match that installation via exact `context_team_id` or one unambiguous authorization record; missing, mixed, malformed, or conflicting evidence is dropped before `users.info` or any local/ingress effect. Top-level event team data is not authority, and a Slack Connect actor's home team may differ.
 - Mutable configuration replacement discards preflight installation evidence. Reconnect must exactly match the established bot/workspace pair, compared immediately after `auth.test` and before acquiring a socket ticket. A changed, incomplete, or malformed observation disables and process-lifetime latches capability, clears pending capability correlation, retires prior pending ingress, dynamic links/selections, reply/edit routes, post ownership, and reaction authority, marks the worker offline, emits one bounded categorical restart notice, terminates without retry, and requires restart instead of admitting the replacement installation. Delayed or later capability acceptance cannot reactivate it; old sends cannot retry or install private authority.
-- The exact U/W id remains sender authority and model-visible audit identity. Bounded `profile.display_name` is mutable untrusted UI-only presentation. An optional one-to-one operator `sender_aliases` binding is scoped by the harness-authenticated extension instance and has no admission/routing/reply/reaction/mention effect. Durable duplicates retain the first committed display/alias snapshot.
-- Any exact installation-bot mention outside complete backtick code ranges sets the generic durable mention fact. Exactly one eligible leading occurrence is removed for routing/command compatibility; remaining eligible occurrences normalize to the semantic `@slack_bridge` token. The fact and registration's advisory reference disclose no bot/workspace id, grant no capability or authority, and do not expand egress; duplicate compatibility preserves the first normalized text/fact snapshot.
+- The exact U/W id remains sender authority and model-visible audit identity. Bounded `profile.display_name` is mutable untrusted UI-only presentation. An optional one-to-one operator `sender_aliases` binding is scoped by the harness-authenticated extension instance and has no admission/routing/reply/reaction/mention effect.
+- Any exact installation-bot mention outside complete backtick code ranges sets the generic durable mention fact. Exactly one eligible leading occurrence is removed for routing/command compatibility; remaining eligible occurrences normalize to the semantic `@slack_bridge` token. The fact and registration's advisory reference disclose no bot/workspace id, grant no capability or authority, and do not expand egress.
 - Receive requires an exact configured kind/conversation/thread route or exact bounded dynamic D-to-U/W link plus live-human verification. Strict admits allowlisted humans; lax widens only static prompt ingress. Linking/control remain allowlist-only.
 - Receive grants completion-gated opaque source replies only. Proactive send is a separate current-alias capability and grants no receive, linking, control, edit, inbound-human-reaction routing, or source-reply authority. Native ids/roots are never model-selected.
 - `slack_conversations` is a separate role-authorized inventory surface. It reveals all static aliases plus operator descriptions and configured kind/scope/receive/proactive policy, including receive-only routes; it never reveals native ids/roots, dynamic links, identities, runtime state, or Slack metadata. Use exact tool policy or separate prefixed instances to isolate inventories.
 - Fixed threads use their configured root for creates, local replies, edits, reactions, and sends. Parent receive covers children; overlapping parent/child receive is rejected.
 - Harness capability/session/tool/agent checks and extension route checks are both required. Configuration freezes before an authorized post or reaction API attempt, or after successful worker preflight.
-- Runtime caches, routes, ownership, selections, and links are bounded. Committed creates are durably deduplicated/restorable by native conversation+timestamp when Slack retries; edits require restored create ownership and inbound human reactions require same-process post ownership. Crashes/API ambiguity do not provide exactly-once delivery.
+- Runtime caches, routes, ownership, selections, and links are bounded. Recent nonempty, control-free Slack occurrence ids of at most 256 bytes are kept in a 4,096-entry process-local FIFO set and repeated deliveries are dropped before ingress. Message and edit occurrences use native ids or stable Slack message coordinates; reactions are cached only when Slack supplies an event id. Eviction or restart may duplicate delivery. An occurrence is recorded before identity lookup, local effects, capacity admission, and durable commit, so a later transient failure consumes it until eviction or restart. Edits require same-process committed create ownership and inbound human reactions require same-process post ownership.
 - `slack_send` owns a 1,024-entry non-evicting session/process ledger. It
   reserves before I/O and admits at most 64 active delivery workers. Initial
   HTTP and the sole event-driven retry remain off the protocol reader; each
@@ -50,7 +49,7 @@ orphaned, or mismatched results install nothing.
   `mention_source_user` defaults false and can generate only the exact verified
   human bound to a live `reply_to`; it is invalid for configured destinations
   and for the bot/Slackbot. The generated mention is frozen with the exact
-  byte-identical retry body. Protocol-v11 `ToolStarted` is the scoped-tool lease
+  byte-identical retry body. Harness `ToolStarted` is the scoped-tool lease
   for one logical call, and the harness revalidates tool authority on completion.
 - Identity/API outages fail closed. Slack, workspace administrators, members, and Slack Connect participants may read transported text; this is not end-to-end encrypted.
 - Supported ingress uses one persistent serial in-memory FIFO bounded at 64 queued/in-flight occurrences. Capacity is reserved before ACK, retained through terminal processing, and released on ACK failure or terminal rejection/application. Saturation, actor failure, and harness-writer closure stop later ACK admission. Reconnect preserves accepted order; session/config/process teardown invalidates late authority. Process death after ACK can still lose work.

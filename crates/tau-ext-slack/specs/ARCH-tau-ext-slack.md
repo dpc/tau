@@ -41,8 +41,7 @@ receive-enabled fixed-thread routes and dynamic DMs isolate it.
 The same `users.info` response may contribute only a bounded
 `profile.display_name` UI snapshot. Exact U/W identity remains authoritative and
 model-primary. Optional one-to-one operator aliases are presentation-only,
-extension-instance scoped, and excluded from dedup authority. Duplicate retries
-return the first durable display/alias snapshot rather than rewriting history.
+extension-instance scoped, and do not affect the received-id cache.
 See
 [DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md).
 
@@ -50,25 +49,29 @@ Exact occurrences of the authenticated installation bot's native mention are
 recognized only outside complete equal-length backtick code ranges. One leading
 occurrence is removed for command compatibility and every remaining occurrence
 becomes the semantic `@slack_bridge` token. The generic
-`transport_identity_mentioned` fact records either case in the first durable
-snapshot; it is transport-instance context, not authority or an egress
+`transport_identity_mentioned` fact records either case in the durable
+occurrence; it is transport-instance context, not authority or an egress
 capability. See
 [DESIGN-tau-ext-slack-transport-identity-mentions](DESIGN-tau-ext-slack-transport-identity-mentions.md).
 
-The harness stamps trust, durably deduplicates, and commits ingress. Only a
-protocol-v11 Committed+Active result whose exact first canonical instance,
-target, native occurrence, human, conversation/thread, assurance, and policy
-match pending state installs source-bound reply/edit/reaction authority. Inactive,
-Rejected, orphaned, or mismatched results install nothing. Successful sends install
-bounded reaction ownership. Edits and reactions revalidate original/owner,
+The extension drops recently repeated native occurrence ids with a bounded
+4,096-entry process-local FIFO set. Cached ids are nonempty, control-free, and
+at most 256 bytes. Message and edit occurrences use native ids or stable message
+coordinates; reactions are cached only when Slack supplies an event id.
+The occurrence is recorded before identity lookup, local effects, capacity
+admission, or durable commit, so a later transient failure consumes it until
+eviction or restart. The harness stamps trust and commits every submitted
+ingress request before returning a correlated result. An accepted result installs
+source-bound reply/edit/reaction state from the pending Slack
+request while the installation and session remain current; rejected and orphaned
+results install nothing. Successful sends install bounded reaction ownership.
+Edits and reactions revalidate original/owner,
 sender, agent, receive route, thread, capability, and completion. Replay cannot
 wake or reactivate a route.
 These ownership flows follow
 [DESIGN-tau-ext-slack-canonical-reply-selectors](DESIGN-tau-ext-slack-canonical-reply-selectors.md),
 [DESIGN-tau-ext-slack-edit-ownership](DESIGN-tau-ext-slack-edit-ownership.md),
 and [DESIGN-tau-ext-slack-reaction-ownership](DESIGN-tau-ext-slack-reaction-ownership.md).
-The cross-adapter authority contract is
-[DESIGN-canonical-transport-ingress](../../../specs/DESIGN-canonical-transport-ingress.md).
 
 `slack_conversations` returns bounded pages of static aliases, operator
 descriptions, kinds, scopes, and configured receive/proactive policy; it excludes
@@ -113,11 +116,10 @@ See [DESIGN-tau-ext-slack-proactive-sends](DESIGN-tau-ext-slack-proactive-sends.
 and [DESIGN-tau-ext-slack-conversation-discovery](DESIGN-tau-ext-slack-conversation-discovery.md)
 and [DESIGN-tau-ext-slack-immutable-thread-destinations](DESIGN-tau-ext-slack-immutable-thread-destinations.md).
 
-Runtime links, selections, registrations, reply routes, post ownership, and
-worker state clear on restart. Durable create identity permits Slack retry after
-restart to deduplicate, but historical duplicates are Inactive and restore no
-private authority. Session/process retirement clears the outbound replay ledger
-and ends its at-least-once boundary.
+Runtime links, selections, registrations, reply routes, post ownership, received
+ids, and worker state clear on restart. Eviction, restart, or races may duplicate
+delivery. Session/process retirement clears the outbound replay
+ledger and ends its at-least-once boundary.
 
 Configuration has a monotonic freeze latch. Successful auth/socket preflight
 freezes the worker snapshot before activation; otherwise the first fully

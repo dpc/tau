@@ -692,8 +692,6 @@ struct TransportCapability {
     transport_name: String,
     send_tool: Option<ToolName>,
     session_generation: u64,
-    /// Monotonic identity changed by every registration replacement.
-    registration_epoch: u64,
     send_destinations: Vec<tau_proto::TransportSendDestinationCapability>,
 }
 
@@ -733,46 +731,16 @@ fn live_send_tools_for_prompt(
         .collect()
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-/// Canonical ingress state persisted in the rebuildable global locator.
-struct TransportDedupRecord {
-    /// Exact first normalized draft, including presentation snapshot.
-    draft: tau_proto::TransportMessageDraft,
-    /// Original target that retries cannot change.
-    target_agent_id: tau_proto::AgentId,
-    /// Harness-minted canonical occurrence selector.
-    message_id: tau_proto::MessageId,
-    /// Whether transcript and locator commits both completed.
-    committed: bool,
-    /// Session recorded in the canonical destination.
-    session_id: SessionId,
-}
-
 #[derive(Clone)]
 struct PendingIngressAck {
     connection_id: String,
     request_id: String,
     session_generation: u64,
-    /// Exact capability registration that admitted this waiter.
-    capability_epoch: u64,
-    /// Stable first-admission outcome for this correlated waiter.
-    outcome: tau_proto::TransportMessageIngressOutcome,
     /// Harness-local monotonic activation start retained until durable commit.
     activation_started_at: std::time::Instant,
     /// Harness-validated Slack process-local ordinal used only for TRACE
     /// correlation.
     request_seq: Option<u64>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
-/// Global dedup scope shared by every harness using one agents root.
-struct TransportDedupKey {
-    /// Authenticated configured extension instance.
-    extension_name: ExtensionName,
-    /// Stable transport family.
-    transport_name: String,
-    /// Adapter-provided stable occurrence key.
-    dedup_key: String,
 }
 
 /// Deferred events released after one extension's staged capabilities activate.
@@ -1503,7 +1471,6 @@ mod semantic_event_router;
 mod subagents_tool;
 pub(crate) use subagents_tool::PeerIoPermit;
 pub use subagents_tool::normalized_wait_timeout_minutes;
-mod transport_ingress_locator;
 mod transport_messages;
 mod user_skill_invocation;
 
@@ -1870,20 +1837,11 @@ pub struct Harness {
     active_ui_shell_command_ids: HashSet<tau_proto::ShellCommandId>,
     /// Source-bound transport capabilities for the active session.
     transport_capabilities: HashMap<String, Vec<TransportCapability>>,
-    /// Process-monotonic transport capability registration identity.
-    next_transport_capability_epoch: u64,
     /// Live opaque canonical-id reply routes. Raw destinations stay
     /// extension-private.
     transport_reply_routes: HashMap<tau_proto::MessageId, TransportReplyRoute>,
-    /// Bounded idempotency index keyed by extension instance, transport, and
-    /// dedup key.
-    transport_dedup: HashMap<TransportDedupKey, TransportDedupRecord>,
-    /// FIFO eviction order for committed ingress dedup records.
-    transport_dedup_order: VecDeque<TransportDedupKey>,
-    /// Durable non-evicting global locator for all retained canonical ingress.
-    transport_ingress_locator: transport_ingress_locator::TransportIngressLocator,
     /// Ingress callers awaiting durable commit acknowledgement.
-    pending_ingress_acks: HashMap<tau_proto::MessageId, Vec<PendingIngressAck>>,
+    pending_ingress_acks: HashMap<tau_proto::MessageId, PendingIngressAck>,
     /// Last accepted source sequence for each extension transport route.
     transport_route_sequences: HashMap<TransportOrderingRouteKey, u64>,
     /// Accepted source sequences awaiting durable commit.
@@ -2671,9 +2629,6 @@ impl Harness {
             state_dir: parts.state_dir,
             ignore_startup_environment: parts.ignore_startup_environment,
             store: parts.store,
-            transport_ingress_locator: transport_ingress_locator::TransportIngressLocator::new(
-                parts.agent_store.agents_dir(),
-            ),
             agent_store: parts.agent_store,
             session_persistence: parts.session_persistence,
             runtime_harness_path: None,
@@ -2690,10 +2645,7 @@ impl Harness {
             pending_ui_shell_commands: HashMap::new(),
             active_ui_shell_command_ids: HashSet::new(),
             transport_capabilities: HashMap::new(),
-            next_transport_capability_epoch: 1,
             transport_reply_routes: HashMap::new(),
-            transport_dedup: HashMap::new(),
-            transport_dedup_order: VecDeque::new(),
             pending_ingress_acks: HashMap::new(),
             transport_route_sequences: HashMap::new(),
             pending_transport_route_sequences: HashMap::new(),
@@ -5141,9 +5093,8 @@ impl Harness {
         if let Event::AgentMessageReceived(message) = event {
             self.deliver_agent_message(message);
         }
-        if let Event::AgentMessageIncoming(message) = event
-            && self.complete_ingress_commit(message)
-        {
+        if let Event::AgentMessageIncoming(message) = event {
+            self.complete_ingress_commit(message);
             self.deliver_typed_message(message);
         }
         if let Event::AgentMessageOutgoing(message) = event {
@@ -10496,14 +10447,13 @@ impl Harness {
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
-        // Revoke transport authority before draining parked interception work.
-        // Correlated ingress waiters remain so a resulting commit receives one
-        // typed Inactive terminal result rather than silence or stale Active.
+        self.fail_pending_intercept_for_disconnect(connection_id);
+        self.remove_extension_context_for_connection(connection_id);
         self.transport_capabilities.remove(connection_id);
         self.transport_reply_routes
             .retain(|_, route| route.connection_id != connection_id);
-        self.fail_pending_intercept_for_disconnect(connection_id);
-        self.remove_extension_context_for_connection(connection_id);
+        self.pending_ingress_acks
+            .retain(|_, waiter| waiter.connection_id != connection_id);
 
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
@@ -14187,9 +14137,7 @@ impl Harness {
         self.transport_reply_routes.clear();
         self.transport_route_sequences.clear();
         self.pending_transport_route_sequences.clear();
-        // In-flight canonical ingress keeps its correlated waiter through
-        // rollover so post-commit completion can return typed NonCurrent* rather
-        // than silently losing the terminal RPC result.
+        self.pending_ingress_acks.clear();
         self.pending_transport_send_acks.clear();
         self.completed_transport_sends.clear();
         self.completed_transport_send_order.clear();

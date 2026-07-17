@@ -5,7 +5,7 @@ Status: confirmed, 2026-07-15, dpc
 **Bead:** `tau-agent-d630`
 **Related:** [DESIGN-tau-ext-slack-sender-identity](DESIGN-tau-ext-slack-sender-identity.md),
 [DESIGN-tau-ext-slack-sender-admission](DESIGN-tau-ext-slack-sender-admission.md),
-and [DESIGN-canonical-transport-ingress](../../../specs/DESIGN-canonical-transport-ingress.md)
+and [DESIGN-tau-ext-slack-single-agent-operating-model](DESIGN-tau-ext-slack-single-agent-operating-model.md)
 
 ## Decision
 
@@ -46,12 +46,11 @@ installation because installation mismatch is terminally fail-closed.
 
 ## Durability and duplicate behavior
 
-The fact and normalized operation are immutable duplicate compatibility.
-Native dedup identity is unchanged. Dual wrappers and retries produce identical
-drafts; an otherwise identical retry that changes only the fact is incompatible.
-The first committed normalized text/fact remains canonical. Old envelopes decode
-absence as false, and cold replay uses the stored values without Slack lookup,
-reparsing, registration, or private-authority restoration.
+The fact and normalized operation are immutable occurrence content. Dual wrappers
+share one Slack-local native message-id cache key and recent repeats are dropped
+before submission. A repeat admitted after cache eviction or restart creates a
+new occurrence. Old envelopes decode absence as false, and replay uses each
+stored value without Slack lookup or reparsing.
 
 ## Registration and egress
 
@@ -77,7 +76,7 @@ installation identifiers or hostile message bodies.
 Slack unit/integration tests own exact entity parsing, code-range negatives,
 create/edit/command/route behavior, registration maps, reactions, and literal
 egress. Protocol tests own legacy CBOR defaults, round trips, and true/false XML
-projection. Harness tests own operation validation, immutable duplicate
-authority, and cold reconstruction from the canonical envelope. Prompt tests
+projection. Harness tests own operation validation. Slack tests own native-id
+cache suppression and bounds. Prompt tests
 own the model-visible non-authority explanation. Full workspace CI owns
 cross-crate constructor and serialization compatibility.

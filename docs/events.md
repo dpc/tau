@@ -6,8 +6,8 @@
 immutable durable v2 facts carrying a transport-neutral `MessageEnvelope`.
 Extensions register a source-bound capability and use dedicated correlated
 ingress/completion RPCs; they cannot emit either fact. Ingress success is sent
-only after commit. Identical stable-key retries return the original canonical
-id, while conflicting reuse fails closed.
+only after commit. Every submitted ingress request creates a distinct durable
+fact; transport adapters own any bounded retry suppression.
 
 An incoming fact folds directly into typed provider context and creates only a
 payload-free live wake marker. Replay restores and renders context but never
@@ -16,13 +16,13 @@ durable metadata. A canonical `reply_to` id is an opaque selector rather than a
 bearer capability and is reauthorized against the live source, session, agent,
 route, and tool at send completion.
 External stable ids remain audit identity. Optional display names and explicitly
-authorized aliases are presentation snapshots: they do not alter durable dedup
-authority, and replay preserves the first committed values. Provider projection
+authorized aliases are presentation snapshots retained with their occurrence.
+Provider projection
 keeps the stable id primary and separately labels an operator alias plus the
 harness-authenticated transport instance.
 Incoming envelopes may additionally record the default-false
-`transport_identity_mentioned` fact. It is immutable duplicate-compatible
-content indicating that normalized text addressed the receiving transport's own
+`transport_identity_mentioned` fact. It is immutable occurrence content
+indicating that normalized text addressed the receiving transport's own
 authenticated identity, not an identity disclosure, capability, or route grant.
 
 The tau bus mostly carries facts: components broadcast what happened, while the

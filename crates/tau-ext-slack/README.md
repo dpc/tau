@@ -240,15 +240,14 @@ separately.
 Outside DMs, commands are recognized only when raw trimmed text begins with the exact
 authenticated bot mention, regardless of whether Slack wrapped the occurrence
 as `message` or `app_mention`. Later command-looking text is prompt content.
-Slack's duplicate wrappers share `(conversation, message timestamp)` durable
-identity; local help/control side effects run once. Commands are `start`,
+Slack's duplicate wrappers share one process-local `(conversation, message
+timestamp)` cache key, so recent repeats are dropped. Commands are `start`,
 `agents`, `select <agent>`, and `to <agent> <message>` (with optional `/`).
 Selection is per configured receive route: parent-route threads share selection,
 receive-enabled fixed-thread routes are isolated, and dynamic DMs select per D id.
 
-An agent calls `slack_register(enabled: true)` to receive messages. Every exact
-validated protocol-v11 Committed+Active create, edit, or owned-post reaction gets
-its own opaque, source-bound
+An agent calls `slack_register(enabled: true)` to receive messages. Every
+accepted create, edit, or owned-post reaction gets its own opaque, source-bound
 reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
 alias-only `destination`; raw Slack ids and thread selectors are never accepted.
 Its fixed schema never enumerates configuration. Call `slack_conversations` for
@@ -274,10 +273,14 @@ therefore influence proactive sends available to that role. Keep destination
 sets and roles minimal; use separate roles or separately prefixed Slack instances
 when receive and proactive authority need isolation.
 
-Edits require a recent Active canonical original with matching sender, route, and
+Edits require a same-process committed original with matching sender, route, and
 thread. Inbound human reaction events require a recent post created through `slack_send`, matching
-owner, verified actor, and a covering receive route. Creates survive durable
-replay/restart dedup, but historical Inactive duplicates restore no private ownership;
+owner, verified actor, and a covering receive route. The 4,096-entry received-id
+cache is process-local; cached occurrence ids are nonempty, control-free, and at
+most 256 bytes. Reactions use the cache only when Slack supplies an event id.
+An occurrence is recorded before later identity lookup, local effects, capacity
+admission, or durable commit, so a transient failure consumes it until eviction
+or restart. Eviction, races, or restart may duplicate delivery. All
 runtime links, selections, reply routes, reaction ownership, registrations, and
 the outbound call ledger clear on restart. The ledger is bounded at 1,024
 non-evicting entries through the live session and rejects new calls before

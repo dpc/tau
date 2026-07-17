@@ -2,19 +2,10 @@
 
 Status: unconfirmed
 
-Durable transport-ingress tests cover cold journal rebuild, missing/dirty/corrupt
-derived state, in-process cross-instance lock contention, prospective count and
-per-record byte capacity, append/head failure retention, and exact
-capability/session waiter classification. They own multi-journal compatibility
-rebuild and global dedup/first-owner preservation; tau-core raw-CBOR tests own
-individual journal marker, sequence, discriminator, and selective-decode
-compatibility. The broader crate suite covers normal disconnect and lifecycle
-sequencing. See
-[`DESIGN-canonical-transport-ingress`](../../../specs/DESIGN-canonical-transport-ingress.md)
-and
-[`DESIGN-tau-core-semantic-store-durability`](../../tau-core/specs/DESIGN-tau-core-semantic-store-durability.md).
-Subprocess kill-at-phase and exhaustive filesystem failpoint simulation are
-future hardening layers, not current test claims.
+Transport-ingress tests cover independent append-per-request behavior,
+record-before-delivery ordering, current-capability-bound reply routing, and
+correlated acceptance. Duplicate filtering is not a harness contract. The
+broader crate suite covers normal disconnect and lifecycle sequencing.
 
 Harness lifecycle/startup changes should prefer focused unit or lifecycle tests
 that exercise the state machine directly, then rely on broader crate tests and

@@ -73,11 +73,7 @@ pub use tool_name_prefix::{
 /// Version 10 requires the harness to answer extension `Hello` with `Configure`
 /// before accepting declarations or `Ready`, and adds the optional immutable
 /// per-instance tool-name prefix carried by that configuration.
-///
-/// Version 11 replaces optional ingress-result fields with a closed disposition
-/// carrying the first committed canonical route and typed reply activation or
-/// rejection reasons.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

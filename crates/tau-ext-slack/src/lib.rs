@@ -30,8 +30,8 @@ use tau_proto::{
     MessageThread, MessageTransportAcceptance, NoticeLevel, ReactionAction,
     RegisterTransportCapabilityRequest, SenderIdentityAssurance, SenderPolicyStatus, TextFormat,
     ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus, TransportMessageDraft, TransportMessageIngressRequest,
-    TransportSendDestinationCapability,
+    ToolUseStatus, TransportMessageDraft, TransportMessageIngressOutcome,
+    TransportMessageIngressRequest, TransportSendDestinationCapability,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -112,7 +112,8 @@ const MAX_MESSAGE_BYTES: usize = 128 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const SEND_ATTEMPT_HORIZON: Duration = Duration::from_secs(60);
 const MAX_SLACK_API_RESPONSE_BYTES: u64 = 64 * 1024;
-const DUPLICATE_CACHE_SIZE: usize = 1024;
+const MAX_EVENT_ID_BYTES: usize = 256;
+const RECEIVED_OCCURRENCE_LIMIT: usize = 4096;
 const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
 const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
@@ -730,7 +731,7 @@ struct IngressSender {
     policy_status: SenderPolicyStatus,
 }
 
-/// Fully normalized Slack occurrence ready for canonical typed ingress.
+/// Fully normalized Slack occurrence ready for typed ingress.
 struct IngressSubmission {
     /// Exact currently authorized native conversation.
     conversation: SlackConversation,
@@ -743,7 +744,7 @@ struct IngressSubmission {
     /// Whether normalized text addressed this installation's receiving
     /// identity.
     transport_identity_mentioned: bool,
-    /// Native identity used by durable harness deduplication.
+    /// Native identity retained for transport audit and mutation correlation.
     external_identity: ExternalMessageIdentity,
 }
 
@@ -854,7 +855,7 @@ struct SlackReaction {
 /// Validated Slack `message_changed` mutation.
 #[derive(Clone)]
 struct SlackEdit {
-    /// Slack event id used for durable occurrence deduplication.
+    /// Slack event id used for process-local repeat suppression.
     event_id: Option<String>,
     /// Authorized conversation containing the original message.
     channel_id: String,
@@ -879,6 +880,7 @@ enum ReactionKind {
     Removed,
 }
 
+#[cfg(test)]
 impl ReactionKind {
     /// Return the stable Slack event name.
     fn as_str(self) -> &'static str {
@@ -1005,12 +1007,14 @@ struct PendingIngress {
     conversation: SlackConversation,
     /// Verified Slack account that authored the occurrence.
     user_id: String,
+    /// Bounded UI-only sender display snapshot.
+    display_name: Option<String>,
+    /// Operator-configured presentation-only sender alias.
+    identity_alias: Option<String>,
     /// Exact installation team which admitted the event wrapper.
     installation_team_id: String,
     /// Sender policy retained for the eventual source-bound reply route.
     policy_status: SenderPolicyStatus,
-    /// Exact native occurrence identity submitted for canonical correlation.
-    external_identity: ExternalMessageIdentity,
     /// Native create identity to bind after durable commit, when applicable.
     original_key: Option<PostedMessageKey>,
     /// Exact native item eligible for reaction after commit, if this is
@@ -1022,7 +1026,7 @@ struct PendingIngress {
     latency_trace: Option<LatencyTrace>,
 }
 
-/// Opaque canonical route returned only after durable ingress commit.
+/// Opaque source route installed only after durable ingress commit.
 #[derive(Clone)]
 struct ReplyRoute {
     /// Agent allowed to use this route.
@@ -1031,9 +1035,9 @@ struct ReplyRoute {
     conversation: SlackConversation,
     /// Verified Slack account bound to the original route.
     user_id: String,
-    /// First-canonical UI-only display snapshot.
+    /// UI-only display snapshot from the accepted source occurrence.
     display_name: Option<String>,
-    /// First-canonical operator alias snapshot.
+    /// Operator alias snapshot from the accepted source occurrence.
     identity_alias: Option<String>,
     /// Installation team bound to this source occurrence.
     installation_team_id: String,
@@ -1157,21 +1161,25 @@ struct IncomingMessageOwner {
     user_id: String,
 }
 
+/// Bounded FIFO membership set of recent Slack-native occurrence ids received
+/// by this extension process.
 #[derive(Default)]
-struct DuplicateCache {
+struct ReceivedOccurrenceCache {
+    /// Exact recent occurrence ids used for constant-time repeat checks.
     seen: HashSet<String>,
+    /// Oldest-first occurrence ids used to enforce the fixed entry limit.
     order: VecDeque<String>,
 }
 
-impl DuplicateCache {
-    /// Insert a duplicate key and return whether it was newly observed.
+impl ReceivedOccurrenceCache {
+    /// Record one Slack-native occurrence and return whether it is new.
     fn insert_new(&mut self, key: String) -> bool {
         if self.seen.contains(&key) {
             return false;
         }
         self.seen.insert(key.clone());
         self.order.push_back(key);
-        while self.order.len() > DUPLICATE_CACHE_SIZE {
+        while self.order.len() > RECEIVED_OCCURRENCE_LIMIT {
             if let Some(old) = self.order.pop_front() {
                 self.seen.remove(&old);
             }
@@ -1182,7 +1190,7 @@ impl DuplicateCache {
 
 #[derive(Default)]
 struct State {
-    /// Immutable harness-configured extension instance for canonical matching.
+    /// Immutable harness-configured extension instance for alias scoping.
     instance_name: Option<tau_proto::ExtensionName>,
     config: Option<RuntimeConfig>,
     registered_agents: HashSet<AgentId>,
@@ -1266,7 +1274,8 @@ struct State {
     installation_team_id: Option<String>,
     /// Process-lifetime fail-closed latch after an authenticated pair mismatch.
     installation_mismatch: bool,
-    duplicate_events: DuplicateCache,
+    /// Bounded process-local Slack occurrence ids already admitted.
+    received_occurrences: ReceivedOccurrenceCache,
     /// Recent bridge-authored Slack posts and their owning agents.
     posted_messages: PostedMessageCache,
     /// Opaque commit-accepted refs mapped to private exact targets.
@@ -1302,7 +1311,7 @@ impl State {
         self.posted_messages.clear();
         self.linked_dms.clear();
         self.selected_agent_by_route.clear();
-        self.duplicate_events = DuplicateCache::default();
+        self.received_occurrences = ReceivedOccurrenceCache::default();
     }
 
     /// Install the first authenticated pair or require an exact reconnect
@@ -1781,7 +1790,7 @@ impl Extension {
         state.capability_active = false;
         state.capability_generation = state.capability_generation.wrapping_add(1);
         state.pending_capability_request = None;
-        state.duplicate_events = DuplicateCache::default();
+        state.received_occurrences = ReceivedOccurrenceCache::default();
         self.send_wake.notify_lifecycle_change();
         Ok(())
     }
@@ -1811,7 +1820,7 @@ impl Extension {
         state.linked_dms.clear();
         state.bot_user_id = None;
         state.installation_team_id = None;
-        state.duplicate_events = DuplicateCache::default();
+        state.received_occurrences = ReceivedOccurrenceCache::default();
         state.clear_reaction_state();
         self.send_wake.notify_lifecycle_change();
     }
@@ -2714,23 +2723,6 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
-        let cfg = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(cfg) = state.config.clone() else {
-                return;
-            };
-            if cfg.sender_policy(&reaction.user_id).is_none()
-                || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
-                || !conversation_has_receive_source(&state, &cfg, &reaction.channel_id)
-            {
-                log_ingress_rejection("reaction_policy");
-                return;
-            }
-            cfg
-        };
-        let Some(identity) = self.verified_human_traced(&cfg, &reaction.user_id, admission) else {
-            return;
-        };
         let (cfg, agent_id, route) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
@@ -2773,16 +2765,14 @@ impl Extension {
             };
             (cfg, owner.agent_id.clone(), route)
         };
-        let dedup_key = reaction.event_id.clone().unwrap_or_else(|| {
-            format!(
-                "reaction:{}:{}:{}:{}:{}",
-                reaction.event_type.as_str(),
-                reaction.channel_id,
-                reaction.message_ts,
-                reaction.reaction,
-                reaction.user_id
-            )
-        });
+        if let Some(event_id) = reaction.event_id.as_ref()
+            && !self.insert_received_occurrence(format!("reaction:{event_id}"), admission)
+        {
+            return;
+        }
+        let Some(identity) = self.verified_human_traced(&cfg, &reaction.user_id, admission) else {
+            return;
+        };
         self.submit_ingress(
             &cfg,
             IngressSubmission {
@@ -2815,7 +2805,6 @@ impl Extension {
                     event_id: reaction.event_id,
                     message_id: Some(reaction.message_ts),
                     revision_id: None,
-                    dedup_key: Some(dedup_key),
                 },
             },
             admission,
@@ -2877,10 +2866,6 @@ impl Extension {
             };
             (cfg, owner, bot_user_id)
         };
-        let Some(identity) = self.verified_human_traced(&cfg, &edit.editor_user_id, admission)
-        else {
-            return;
-        };
         let text = edit.text.trim();
         if text.is_empty() || text.len() > cfg.max_message_bytes {
             log_ingress_rejection("malformed_text");
@@ -2895,12 +2880,19 @@ impl Extension {
             log_ingress_rejection("malformed_text");
             return;
         }
-        let dedup_key = edit.event_id.clone().unwrap_or_else(|| {
+        let received_key = edit.event_id.clone().unwrap_or_else(|| {
             format!(
                 "edit:{}:{}:{}",
                 edit.channel_id, edit.message_ts, edit.revision_ts
             )
         });
+        if !self.insert_received_occurrence(format!("edit:{received_key}"), admission) {
+            return;
+        }
+        let Some(identity) = self.verified_human_traced(&cfg, &edit.editor_user_id, admission)
+        else {
+            return;
+        };
         self.submit_ingress(
             &cfg,
             IngressSubmission {
@@ -2929,7 +2921,6 @@ impl Extension {
                     event_id: edit.event_id,
                     message_id: Some(edit.message_ts),
                     revision_id: Some(edit.revision_ts),
-                    dedup_key: Some(dedup_key),
                 },
             },
             admission,
@@ -3001,6 +2992,12 @@ impl Extension {
         } {
             message.thread_ts = route.thread_ts;
         }
+        if !self.insert_received_message(&message, admission) {
+            if let Some(admission) = admission {
+                admission.mark("duplicate_ingress");
+            }
+            return;
+        }
         let Some(identity) = self.verified_human_traced(&cfg, &message.user_id, admission) else {
             return;
         };
@@ -3023,9 +3020,6 @@ impl Extension {
             leading: leading_mention,
         } = normalize_transport_mentions(&text, &bot_user_id);
         if text.is_empty() {
-            if !self.insert_command_duplicate(&message, admission) {
-                return;
-            }
             self.reply(
                 &cfg,
                 &message.channel_id,
@@ -3052,13 +3046,6 @@ impl Extension {
             log_ingress_rejection("sender_control_policy");
             return;
         }
-        if name.is_some()
-            && !matches!(name, Some("to" | "/to"))
-            && !self.insert_command_duplicate(&message, admission)
-        {
-            log_ingress_rejection("command_dedup");
-            return;
-        }
         if self.rejects_unlinked_command(&cfg, &message, name, admission) {
             return;
         }
@@ -3075,34 +3062,34 @@ impl Extension {
         self.route_plain_text(&cfg, &message, &identity, &text, mentioned, admission);
     }
 
-    /// Suppress retry side effects for bridge-local commands only.
-    ///
-    /// Routed occurrences deliberately bypass this cache because durable
-    /// harness deduplication must observe reconnect/retry submissions.
-    fn insert_command_duplicate(
+    /// Drop recently repeated Slack deliveries before local effects or ingress.
+    fn insert_received_message(
         &self,
         message: &SlackMessage,
+        admission: Option<&AdmissionContext>,
+    ) -> bool {
+        let key = message
+            .ts
+            .as_ref()
+            .map(|ts| format!("message:{}:{ts}", message.channel_id))
+            .or_else(|| message.event_id.as_ref().map(|id| format!("event:{id}")));
+        key.is_some_and(|key| self.insert_received_occurrence(key, admission))
+    }
+
+    /// Insert one already-authorized native occurrence into the bounded cache.
+    fn insert_received_occurrence(
+        &self,
+        key: String,
         admission: Option<&AdmissionContext>,
     ) -> bool {
         if !self.local_effect_authority_is_current(admission) {
             return false;
         }
-        let key = message
-            .ts
-            .as_ref()
-            .map(|ts| format!("local:{}:{ts}", message.channel_id))
-            .or_else(|| message.event_id.clone());
-        let inserted = key.is_none_or(|key| {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .duplicate_events
-                .insert_new(key)
-        });
-        if !inserted && let Some(admission) = admission {
-            admission.mark("duplicate_local");
-        }
-        inserted
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .received_occurrences
+            .insert_new(key)
     }
 
     fn config_for_allowed_message(&self, message: &SlackMessage) -> Option<RuntimeConfig> {
@@ -3172,9 +3159,6 @@ impl Extension {
     ) -> Option<String> {
         let text = message.text.trim();
         if text.is_empty() {
-            if !self.insert_command_duplicate(message, admission) {
-                return None;
-            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -3184,9 +3168,6 @@ impl Extension {
             );
             None
         } else if text.len() > cfg.max_message_bytes {
-            if !self.insert_command_duplicate(message, admission) {
-                return None;
-            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -3459,9 +3440,6 @@ impl Extension {
     ) {
         let (target, body) = split_first(rest);
         if target.is_empty() || body.trim().is_empty() {
-            if !self.insert_command_duplicate(message, admission) {
-                return;
-            }
             self.reply(
                 cfg,
                 &message.channel_id,
@@ -3480,17 +3458,13 @@ impl Extension {
                 transport_identity_mentioned,
                 admission,
             ),
-            Err(reply) => {
-                if self.insert_command_duplicate(message, admission) {
-                    self.reply(
-                        cfg,
-                        &message.channel_id,
-                        message.thread_ts.as_deref(),
-                        &reply,
-                        admission,
-                    );
-                }
-            }
+            Err(reply) => self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                &reply,
+                admission,
+            ),
         }
     }
 
@@ -3520,17 +3494,13 @@ impl Extension {
                 transport_identity_mentioned,
                 admission,
             ),
-            Err(reply) => {
-                if self.insert_command_duplicate(message, admission) {
-                    self.reply(
-                        cfg,
-                        &message.channel_id,
-                        message.thread_ts.as_deref(),
-                        &reply,
-                        admission,
-                    );
-                }
-            }
+            Err(reply) => self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                &reply,
+                admission,
+            ),
         }
     }
 
@@ -3661,16 +3631,6 @@ impl Extension {
         else {
             return;
         };
-        // Slack may deliver the same mentioned post through both `message` and
-        // `app_mention`; native message identity, not event kind/id, is canonical.
-        let dedup_key = message
-            .ts
-            .as_ref()
-            .map(|ts| format!("message:{}:{ts}", message.channel_id))
-            .or_else(|| message.event_id.clone());
-        let Some(dedup_key) = dedup_key else {
-            return;
-        };
         let route = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             static_receive_route_for_message(&cfg, message).or_else(|| {
@@ -3715,7 +3675,6 @@ impl Extension {
                         .flatten(),
                     message_id: message.ts.clone(),
                     revision_id: None,
-                    dedup_key: Some(dedup_key),
                 },
             },
             admission,
@@ -3811,9 +3770,10 @@ impl Extension {
                     agent_id: agent_id.clone(),
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
+                    display_name: display_name.clone(),
+                    identity_alias: identity_alias.clone(),
                     installation_team_id,
                     policy_status,
-                    external_identity: external_identity.clone(),
                     original_key,
                     reaction_message_ts,
                     submitted_at: Instant::now(),
@@ -4035,7 +3995,7 @@ fn static_parent_receive_covers_dm(cfg: &RuntimeConfig, channel_id: &str) -> boo
 }
 
 /// Coarse conversation-id prefilter; callers must still resolve or revalidate
-/// the exact stable route, kind, thread, sender, and owner.
+/// the exact alias, kind, thread, sender, and owner.
 fn conversation_has_receive_source(state: &State, cfg: &RuntimeConfig, channel_id: &str) -> bool {
     cfg.parent_receives.contains_key(channel_id)
         || cfg
@@ -4073,7 +4033,7 @@ fn is_route_authorized(
                 .get(&route.channel_id)
                 .and_then(|alias| cfg.conversations.get(alias))
         });
-    policy.is_some_and(|policy| policy.kind == route.kind)
+    policy.is_some_and(|policy| policy.alias == route.alias && policy.kind == route.kind)
 }
 
 /// Build the canonical conversation metadata used identically for ingress and
@@ -4845,10 +4805,17 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
     }
     let event = payload.get("event")?;
     let event_type = event.get("type").and_then(|value| value.as_str())?;
-    let event_id = payload
-        .get("event_id")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned);
+    let event_id = match payload.get("event_id") {
+        None => None,
+        Some(serde_json::Value::String(value))
+            if !value.is_empty()
+                && value.len() <= MAX_EVENT_ID_BYTES
+                && !value.chars().any(char::is_control) =>
+        {
+            Some(value.clone())
+        }
+        Some(_) => return None,
+    };
     if matches!(event_type, "reaction_added" | "reaction_removed") {
         let item = event.get("item");
         if item
@@ -5263,24 +5230,10 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                 );
                 return;
             };
-            let instance_name = state.instance_name.clone();
             if let Some(trace) = pending.latency_trace {
-                let outcome = match &result.disposition {
-                    tau_proto::TransportMessageIngressDisposition::Committed {
-                        message_id: _,
-                        outcome: tau_proto::TransportMessageIngressOutcome::Accepted,
-                        canonical: _,
-                        reply_activation: _,
-                    } => "accepted",
-                    tau_proto::TransportMessageIngressDisposition::Committed {
-                        message_id: _,
-                        outcome: tau_proto::TransportMessageIngressOutcome::Duplicate,
-                        canonical: _,
-                        reply_activation: _,
-                    } => "duplicate",
-                    tau_proto::TransportMessageIngressDisposition::Rejected { reason: _ } => {
-                        "rejected"
-                    }
+                let outcome = match result.outcome {
+                    Some(tau_proto::TransportMessageIngressOutcome::Accepted) => "accepted",
+                    None => "rejected",
                 };
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -5293,17 +5246,9 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                     "slack.ingress.result_received"
                 );
             }
-            if let tau_proto::TransportMessageIngressDisposition::Committed {
-                message_id,
-                outcome: _,
-                canonical,
-                reply_activation: tau_proto::TransportReplyActivation::Active,
-            } = &result.disposition
-                && state.installation_team_id.as_deref()
-                    == Some(pending.installation_team_id.as_str())
-                && let Some((conversation, user_id, display_name, identity_alias)) = instance_name
-                    .as_ref()
-                    .and_then(|instance| canonical_slack_reply_route(canonical, &pending, instance))
+            if state.installation_team_id.as_deref() == Some(pending.installation_team_id.as_str())
+                && let (Some(message_id), Some(TransportMessageIngressOutcome::Accepted)) =
+                    (&result.message_id, result.outcome)
             {
                 if let Some(original_key) = pending.original_key.clone() {
                     state.insert_incoming_message(
@@ -5311,8 +5256,8 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                         IncomingMessageOwner {
                             agent_id: pending.agent_id.clone(),
                             message_id: message_id.clone(),
-                            conversation: conversation.clone(),
-                            user_id: user_id.clone(),
+                            conversation: pending.conversation.clone(),
+                            user_id: pending.user_id.clone(),
                         },
                     );
                 }
@@ -5320,12 +5265,12 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                     message_id.clone(),
                     ReplyRoute {
                         agent_id: pending.agent_id.clone(),
-                        conversation: conversation.clone(),
-                        user_id: user_id.clone(),
-                        display_name,
-                        identity_alias,
+                        conversation: pending.conversation.clone(),
+                        user_id: pending.user_id.clone(),
+                        display_name: pending.display_name,
+                        identity_alias: pending.identity_alias,
                         installation_team_id: pending.installation_team_id.clone(),
-                        policy_status: canonical.policy_status,
+                        policy_status: pending.policy_status,
                     },
                 );
                 if let Some(message_ts) = pending.reaction_message_ts {
@@ -5333,12 +5278,12 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                         message_id.as_ref().to_owned(),
                         ReactionTarget {
                             agent_id: pending.agent_id,
-                            conversation,
+                            conversation: pending.conversation,
                             message_ts,
                             installation_team_id: pending.installation_team_id,
                             authority: ReactionAuthority::Source {
                                 message_id: message_id.clone(),
-                                user_id,
+                                user_id: pending.user_id,
                             },
                         },
                     );
@@ -5443,125 +5388,6 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
         }
         _ => {}
     }
-}
-
-/// Validates and lowers only an Active first-canonical Slack source route.
-///
-/// Presentation comes exclusively from the committed snapshot; pending state is
-/// used only to prove that stable native authority did not change in flight.
-fn canonical_slack_reply_route(
-    canonical: &tau_proto::CommittedTransportIngressRoute,
-    pending: &PendingIngress,
-    instance_name: &tau_proto::ExtensionName,
-) -> Option<(SlackConversation, String, Option<String>, Option<String>)> {
-    let tau_proto::CommittedTransportIngressRoute {
-        target_agent_id,
-        transport,
-        external_endpoint,
-        conversation,
-        external_identity,
-        identity_assurance,
-        policy_status,
-    } = canonical;
-    let tau_proto::MessageTransportRef { name, instance } = transport;
-    if target_agent_id != &pending.agent_id
-        || name != "slack"
-        || instance.as_ref() != Some(instance_name)
-        || *identity_assurance != SenderIdentityAssurance::VerifiedAccount
-        || *policy_status != pending.policy_status
-        || external_identity != &pending.external_identity
-    {
-        return None;
-    }
-    let (user_id, source_display_name, identity_alias) = match external_endpoint {
-        MessageEndpoint::External {
-            stable_id: Some(stable_id),
-            display_name,
-            identity_alias,
-            actor_kind: tau_proto::ExternalActorKind::Human,
-        } if stable_id == &pending.user_id => (
-            stable_id.clone(),
-            display_name.clone(),
-            identity_alias.as_ref().map(|alias| alias.value.clone()),
-        ),
-        MessageEndpoint::External {
-            stable_id: _,
-            display_name: _,
-            identity_alias: _,
-            actor_kind: _,
-        }
-        | MessageEndpoint::Agent {
-            session_id: _,
-            agent_id: _,
-            display_name: _,
-        }
-        | MessageEndpoint::User => return None,
-    };
-    let MessageConversation {
-        kind: canonical_kind,
-        stable_id,
-        display_name,
-        thread,
-        reply_to,
-    } = conversation.as_ref()?;
-    let channel_id = stable_id.as_ref()?;
-    let alias = display_name.as_ref()?;
-    let kind = match canonical_kind {
-        ConversationKind::Channel => ConversationPolicyKind::Channel,
-        ConversationKind::Group => ConversationPolicyKind::Mpim,
-        ConversationKind::Direct => ConversationPolicyKind::Dm,
-        ConversationKind::Room | ConversationKind::Unknown => return None,
-    };
-    let thread_ts = match thread {
-        None => None,
-        Some(MessageThread {
-            stable_id,
-            root:
-                Some(MessageRef {
-                    message_id: None,
-                    external_message_id: Some(root_id),
-                }),
-        }) if root_id == stable_id => Some(stable_id.clone()),
-        Some(MessageThread {
-            stable_id: _,
-            root:
-                Some(MessageRef {
-                    message_id: None,
-                    external_message_id: Some(_),
-                }),
-        }) => return None,
-        Some(MessageThread {
-            stable_id: _,
-            root:
-                None
-                | Some(MessageRef {
-                    message_id: Some(_),
-                    external_message_id: _,
-                })
-                | Some(MessageRef {
-                    message_id: None,
-                    external_message_id: None,
-                }),
-        }) => return None,
-    };
-    if channel_id != &pending.conversation.channel_id
-        || thread_ts != pending.conversation.thread_ts
-        || kind != pending.conversation.kind
-        || reply_to.is_some()
-    {
-        return None;
-    }
-    Some((
-        SlackConversation {
-            channel_id: channel_id.clone(),
-            thread_ts,
-            kind,
-            alias: alias.clone(),
-        },
-        user_id,
-        source_display_name,
-        identity_alias,
-    ))
 }
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> ClientResult<()> {

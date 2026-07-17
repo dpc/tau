@@ -2,10 +2,10 @@
 
 Status: inferred
 
-Protocol-consumer fixtures cover Active and fail-closed Inactive, Rejected,
-orphaned, foreign-instance, and mismatched canonical authority. Only exact
-Active may install reply, edit, or reaction state, and presentation-only retries
-use the first canonical snapshot.
+Protocol-consumer fixtures cover accepted, rejected, and orphaned correlated
+results. Accepted results may install pending reply/edit/reaction state; rejected
+and orphaned results do not. Adapter tests cover bounded process-local native-id
+suppression, dual wrappers, eviction, and lifecycle clearing.
 
 Slack lifecycle behavior is tested without live Slack credentials. Unit tests use
 fake `SlackClient` implementations for Web API calls and loopback websocket
@@ -37,8 +37,8 @@ categories reach displays or protocol output.
 
 Identity fixtures cover missing/malformed bot/team responses, exact event-wrapper
 installation matching without top-level actor-team authority, reconnect pair
-mismatch/partial-state failure, no-cache per-occurrence lookup, alias mutation
-across a duplicate, safe display filtering, and first-canonical presentation.
+mismatch/partial-state failure, no-cache per-occurrence lookup, alias mutation,
+and safe display filtering.
 Mention fixtures cover explicit and omitted false behavior, reply-only targeting,
 raw entity controls, exact generated wire text, and stale-installation failure.
 CLI fixtures cover compact reaction Add/Remove facts, actor, exact name, hostile
