@@ -8,6 +8,12 @@ default-off `slack_react` tools. Configuration validates one exact
 conversation-route list into alias, parent-receive, thread-receive, and
 proactive-alias indexes. Routes carry explicit channel/MPIM/DM kind and optional
 fixed root. A bounded runtime map holds exact dynamic D-to-U/W links.
+Each configured extension instance is intended for one receiving Tau agent at a
+time. Multi-agent sharing or retargeting remains ad hoc best-effort behavior and
+must not be treated as exact routing, permanent ownership, once-only delivery, or
+cross-agent deduplication. This operating model is documented in
+[DESIGN-tau-ext-slack-single-agent-operating-model](DESIGN-tau-ext-slack-single-agent-operating-model.md);
+it is not newly runtime-enforced.
 
 Supported Socket events reserve one of 64 process-local outstanding slots before
 ACK. A successful local ACK write commits the occurrence to one persistent serial

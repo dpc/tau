@@ -4,6 +4,14 @@ First-party, disabled-by-default Slack Socket Mode text bridge (`std-slack`). It
 exposes `slack_register`, `slack_conversations`, `slack_send`, and the separately
 authorized `slack_react`; a per-instance `tool_prefix` scopes all four tools and their group for multi-account deployments.
 
+Use one configured Slack extension instance for one receiving Tau agent at a
+time. Sharing or retargeting one instance across agents is ad hoc best-effort
+behavior: do not rely on it for exact cross-agent routing, permanent ownership,
+once-only delivery, or cross-agent deduplication. This is an operating
+recommendation rather than a runtime-enforced prohibition. Configure separate
+extension instances with distinct tool prefixes and route policy when agents need
+independent bridges.
+
 ## Configuration
 
 Create a Slack app, install it to the workspace, invite it to every configured
