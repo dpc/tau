@@ -1323,6 +1323,32 @@ pub(super) fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<Ro
     connect_test_client(h, name, tau_proto::ClientKind::Tool)
 }
 
+/// Connect one ready tool extension with a stable configured publisher name.
+fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &str) {
+    let _sink = connect_test_tool(h, connection_id);
+    let connection_id: tau_proto::ConnectionId = connection_id.into();
+    h.extensions.entries.insert(
+        connection_id.clone(),
+        crate::extension::ExtensionEntry {
+            tool_prefix: None,
+            name: name.to_owned(),
+            instance_id: 42.into(),
+            connection_id: connection_id.clone(),
+            kind: tau_proto::ClientKind::Tool,
+            require: true,
+            respawn_allowed: true,
+            pid: None,
+            in_process_thread: None,
+            supervised_config: None,
+            secrets: std::collections::BTreeMap::new(),
+            restart_attempt: 0,
+            state: crate::extension::ExtensionState::Ready,
+            protocol_io: tau_client::ProtocolIoMeter::default(),
+        },
+    );
+    h.extensions.order.push(connection_id);
+}
+
 /// Pre-seed the per-conversation `AgentThinking` state for tests that
 /// bypass `dispatch_prompt_for_agent` and call response handlers
 /// directly.

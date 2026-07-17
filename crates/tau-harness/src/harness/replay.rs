@@ -139,18 +139,62 @@ impl Harness {
             self.bus.connections().iter().any(|meta| {
                 meta.id.as_str() == client_id && meta.kind == tau_proto::ClientKind::Ui
             });
-        let loaded_agents: Vec<tau_proto::AgentId> = {
-            match self.store.load_session(self.current_session_id.as_str()) {
-                Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    let message = format!("failed to load session events for replay: {error}");
-                    self.send_replay_error(client_id, &message);
-                    outcome.add_session_error(message);
-                    Vec::new()
+        let (loaded_agents, session_events) = match self
+            .store
+            .session_events(self.current_session_id.as_str())
+        {
+            Ok(events) => {
+                // Derive membership and every delivery from this one fully
+                // validated snapshot so a stale cached fold cannot authorize
+                // partial replay after later journal corruption. Only after
+                // that succeeds, merge the store's strictly filtered
+                // process-local overlay for ephemeral agents.
+                let mut membership = tau_core::SessionMembership::from_events(
+                    self.current_session_id.clone(),
+                    &events,
+                );
+                match self
+                    .store
+                    .ephemeral_membership_events(self.current_session_id.as_str())
+                {
+                    Ok(overlay) => match membership.apply_ephemeral_membership_overlay(&overlay) {
+                        Ok(()) => (
+                            membership.loaded_agents().into_iter().cloned().collect(),
+                            events,
+                        ),
+                        Err(error) => {
+                            let message =
+                                format!("failed to apply ephemeral membership for replay: {error}");
+                            self.send_replay_error(client_id, &message);
+                            outcome.add_session_error(message);
+                            (Vec::new(), Vec::new())
+                        }
+                    },
+                    Err(error) => {
+                        let message =
+                            format!("failed to load ephemeral membership for replay: {error}");
+                        self.send_replay_error(client_id, &message);
+                        outcome.add_session_error(message);
+                        (Vec::new(), Vec::new())
+                    }
                 }
             }
+            Err(error) => {
+                let message = format!("failed to load session events for replay: {error}");
+                self.send_replay_error(client_id, &message);
+                outcome.add_session_error(message);
+                (Vec::new(), Vec::new())
+            }
         };
+        for entry in session_events {
+            if entry.event.name().category() != &tau_proto::EventCategory::Message
+                || !selector_matches_event(selectors, &entry.event)
+            {
+                continue;
+            }
+            let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
+            let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+        }
 
         match self
             .store
@@ -172,9 +216,11 @@ impl Harness {
             }
         }
 
+        let mut validated_agent_events = std::collections::HashMap::new();
         for agent_id in &loaded_agents {
-            match self.agent_store.load_agent(agent_id.as_str()) {
-                Ok(Some(tree)) => {
+            match self.agent_store.agent_events(agent_id.as_str()) {
+                Ok(events) => {
+                    let tree = tau_core::AgentTree::from_events(agent_id.clone(), &events);
                     let metadata_events = tree
                         .metadata()
                         .iter()
@@ -193,8 +239,8 @@ impl Harness {
                             self.send_catch_up_event(client_id, None, event);
                         }
                     }
+                    validated_agent_events.insert(agent_id.clone(), events);
                 }
-                Ok(None) => {}
                 Err(error) => {
                     let message = format!("failed to load agent `{agent_id}` for replay: {error}");
                     self.send_replay_error(client_id, &message);
@@ -212,15 +258,8 @@ impl Harness {
         }
 
         for agent_id in &loaded_agents {
-            let events = match self.agent_store.agent_events(agent_id.as_str()) {
-                Ok(events) => events,
-                Err(error) => {
-                    let message =
-                        format!("failed to load agent `{agent_id}` events for replay: {error}");
-                    self.send_replay_error(client_id, &message);
-                    outcome.add_agent_error(agent_id.clone(), message);
-                    continue;
-                }
+            let Some(events) = validated_agent_events.remove(agent_id) else {
+                continue;
             };
             for entry in events {
                 if should_replay_agent_event_to_late_subscriber(&entry.event) {
@@ -331,10 +370,18 @@ impl Harness {
                 Some((meta.id.to_string(), meta.kind, selectors.to_vec()))
             })
             .collect();
+        let snapshot = self
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .map(|events| {
+                let tree = tau_core::AgentTree::from_events(agent_id.clone(), &events);
+                (tree, events)
+            })
+            .map_err(|error| format!("failed to load agent `{agent_id}` for replay: {error}"));
         for (client_id, kind, selectors) in subscribers {
             let mut errors = Vec::new();
-            match self.agent_store.load_agent(agent_id.as_str()) {
-                Ok(Some(tree)) => {
+            match &snapshot {
+                Ok((tree, events)) => {
                     let metadata_events = tree
                         .metadata()
                         .iter()
@@ -353,20 +400,10 @@ impl Harness {
                             self.send_catch_up_event(&client_id, None, event);
                         }
                     }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let message = format!("failed to load agent `{agent_id}` for replay: {error}");
-                    self.send_replay_error(&client_id, &message);
-                    errors.push(message);
-                }
-            }
-            match self.agent_store.agent_events(agent_id.as_str()) {
-                Ok(events) => {
                     for entry in events {
                         if should_replay_agent_event_to_late_subscriber(&entry.event) {
                             let event = project_agent_replay_event(
-                                entry.event,
+                                entry.event.clone(),
                                 kind == tau_proto::ClientKind::Ui,
                             );
                             if !selector_matches_event(&selectors, &event) {
@@ -378,11 +415,9 @@ impl Harness {
                         }
                     }
                 }
-                Err(error) => {
-                    let message =
-                        format!("failed to load agent `{agent_id}` events for replay: {error}");
+                Err(message) => {
                     self.send_replay_error(&client_id, &message);
-                    errors.push(message);
+                    errors.push(message.clone());
                 }
             }
             self.emit_agent_replay_complete(
@@ -716,6 +751,12 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::AgentMessageReceived(_)
             | Event::AgentMessageIncoming(_)
             | Event::AgentMessageOutgoing(_)
+            | Event::MessageDelivered(_)
+            | Event::MessageEdited(_)
+            | Event::MessageDeleted(_)
+            | Event::MessageReactionAdded(_)
+            | Event::MessageReactionRemoved(_)
+            | Event::MessageSent(_)
             | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::ToolError(_)

@@ -346,6 +346,22 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
             originator: tau_proto::PromptOriginator::User,
         }),
     );
+    let message_fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("ephemeral-message"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "message-debug-secret",
+    ));
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "bridge-connection".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit(message_fact.clone())),
+    });
+    h.commit_message_fact(Some("bridge-connection"), message_fact);
 
     let jsonl = std::fs::read_to_string(
         tau_config::settings::sessions_dir_of(&sp)
@@ -368,6 +384,10 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     assert!(
         !jsonl.contains("tool-result-debug-secret"),
         "tool results owned by an ephemeral agent must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("message-debug-secret") && !jsonl.contains("ephemeral-message"),
+        "raw and committed ephemeral message facts must not be mirrored into debug JSONL"
     );
 }
 

@@ -741,9 +741,9 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
 }
 
 /// Message fact intake overwrites claimed provenance with a configured name
-/// distinct from the connection identity and classifies the publish as durable.
+/// distinct from the connection identity and ignores transient emit metadata.
 #[test]
-fn extension_message_fact_provenance_is_stamped_and_requests_durable_intake() {
+fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let conn_id = "bridge-main";
@@ -765,10 +765,9 @@ fn extension_message_fact_provenance_is_stamped_and_requests_durable_intake() {
         extension_data: tau_proto::MessageExtensionData::default(),
     };
 
-    let (prepared, transient) = h
+    let prepared = h
         .prepare_extension_message_fact(conn_id, Event::MessageDelivered(fact.clone()))
         .expect("authenticated message fact");
-    assert!(!transient, "message facts must request durable intake");
     assert!(matches!(
         prepared,
         Event::MessageDelivered(prepared)
@@ -782,6 +781,16 @@ fn extension_message_fact_provenance_is_stamped_and_requests_durable_intake() {
     )
     .expect("fact intake");
 
+    assert!(matches!(
+        h.store
+            .session_events("s1")
+            .expect("durable fallback journal")
+            .as_slice(),
+        [tau_core::PersistedSessionEvent {
+            event: Event::MessageDelivered(fact),
+            ..
+        }] if fact.publisher_extension_id.as_str() == configured_name
+    ));
     assert!(event_log_contains_source_event(
         &h,
         conn_id,

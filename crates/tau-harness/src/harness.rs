@@ -4201,6 +4201,97 @@ impl Harness {
         }
     }
 
+    /// Queue a message fact behind an in-flight publish or commit it directly.
+    fn enqueue_message_fact(&mut self, source_id: &str, event: Event) {
+        if self.pending_intercept.is_some() {
+            self.deferred_publishes
+                .push_back(DeferredPublish::MessageFact {
+                    source: source_id.to_owned(),
+                    event,
+                });
+            return;
+        }
+        self.commit_message_fact(Some(source_id), event);
+    }
+
+    /// Persist one stamped message fact before exposing it to any consumer.
+    ///
+    /// This path never consults the interceptor registry. If another publish is
+    /// currently parked in interception, [`Self::enqueue_message_fact`] retains
+    /// FIFO order and this method runs when that earlier publish resolves.
+    pub(crate) fn commit_message_fact(&mut self, source: Option<&str>, event: Event) {
+        debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
+        let recorded_at = tau_proto::UnixMicros::now();
+        if let Err(error) = self.persist_message_fact_record(source, &event, recorded_at) {
+            tracing::warn!(
+                target: "tau_harness",
+                event = %event.name(),
+                %error,
+                "message fact append failed before delivery"
+            );
+            self.emit_harness_failure(&format!(
+                "message fact {} failed to persist: {error}",
+                event.name()
+            ));
+            return;
+        }
+
+        let source_id = source.map(tau_proto::ConnectionId::from);
+        let seq = self.event_log.reserve_seq();
+        #[cfg(test)]
+        self.event_log
+            .record_for_test(seq, recorded_at, source_id.clone(), event.clone());
+        #[cfg(not(test))]
+        let _ = seq;
+        let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
+        if !skip_debug_log && let Some(log) = &mut self.debug_log {
+            log.log_published_event(source_id.as_ref(), &event, recorded_at);
+        }
+        let frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
+        let _ = self.bus.publish_from(source, frame);
+        self.react_to_committed_event(&event);
+    }
+
+    /// Select and append the canonical journal record for one stamped fact.
+    fn persist_message_fact_record(
+        &mut self,
+        source: Option<&str>,
+        event: &Event,
+        recorded_at: tau_proto::UnixMicros,
+    ) -> Result<(), HarnessError> {
+        let source = source.map(tau_proto::ConnectionId::from);
+        let known_agent = event.message_agent_target().and_then(|target| {
+            let agent_id = tau_proto::AgentId::parse(target.as_str()).ok()?;
+            let in_membership = self
+                .store
+                .session(self.current_session_id.as_str())
+                .is_some_and(|membership| membership.contains_agent(&agent_id));
+            let has_live_route = self
+                .agents
+                .values()
+                .any(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()));
+            (in_membership || has_live_route || self.agent_store.agent_exists(agent_id.as_str()))
+                .then_some(agent_id)
+        });
+        if let Some(agent_id) = known_agent {
+            self.agent_store.append_agent_message_fact_at(
+                agent_id.as_str(),
+                source,
+                event.clone(),
+                recorded_at,
+            )?;
+        } else {
+            self.store.append_session_event_at_with_persistence(
+                self.current_session_id.as_str(),
+                source,
+                event.clone(),
+                recorded_at,
+                self.session_persistence,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Final commit: persist (when applicable), append to the event
     /// log, and broadcast on the bus. Does not consult interception
     /// state — the caller is responsible for getting here only when
@@ -5564,10 +5655,19 @@ impl Harness {
         sync_head_for: Option<&ConversationHeadSync>,
     ) -> bool {
         self.agent_creation_event_targets_ephemeral_agent(event)
+            || self.message_fact_targets_ephemeral_agent(event)
             || self.agent_addressed_event_targets_ephemeral_agent(event)
             || self.agent_operational_event_targets_ephemeral_agent(event)
             || self.tool_event_targets_ephemeral_agent(event)
             || self.agent_scoped_event_targets_ephemeral_agent(event, sync_head_for)
+    }
+
+    /// Return whether a message fact selects an ephemeral agent journal.
+    fn message_fact_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        event
+            .message_agent_target()
+            .and_then(|target| tau_proto::AgentId::parse(target.as_str()).ok())
+            .is_some_and(|agent_id| self.agent_is_ephemeral(&agent_id))
     }
 
     fn agent_operational_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
@@ -7119,7 +7219,11 @@ impl Harness {
             );
         }
         for staged in stage.emitted_events {
-            self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
+            if staged.event.name().category() == &tau_proto::EventCategory::Message {
+                self.enqueue_message_fact(source_id, staged.event);
+            } else {
+                self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
+            }
         }
         ActivatedExtensionEvents {
             context_ready: stage.context_ready_events,
@@ -7805,11 +7909,14 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
         if event_name.category() == &tau_proto::EventCategory::Message {
-            let Some((event, transient)) = self.prepare_extension_message_fact(source_id, event)
-            else {
+            let Some(event) = self.prepare_extension_message_fact(source_id, event) else {
                 return Ok(());
             };
-            self.handle_extension_fallback_event(source_id, event, Some(transient));
+            if self.should_stage_extension_capabilities(source_id) {
+                self.stage_extension_publish(source_id, event, false);
+            } else {
+                self.enqueue_message_fact(source_id, event);
+            }
             return Ok(());
         }
         if event_name.category() == &tau_proto::EventCategory::Provider
@@ -7843,23 +7950,15 @@ impl Harness {
         Ok(())
     }
 
-    /// Stamp authenticated message-fact provenance and force durable intake.
-    ///
-    /// The returned boolean is the transient classification consumed by the
-    /// generic phase-1 publication path. Phase 2 replaces that path with direct
-    /// append-before-delivery persistence.
-    fn prepare_extension_message_fact(
-        &self,
-        source_id: &str,
-        mut event: Event,
-    ) -> Option<(Event, bool)> {
+    /// Stamp authenticated message-fact provenance for direct durable intake.
+    fn prepare_extension_message_fact(&self, source_id: &str, mut event: Event) -> Option<Event> {
         let publisher = self
             .extensions
             .entries
             .get(source_id)
             .map(|entry| tau_proto::MessagePublisherId::new(entry.name.clone()))?;
         event.stamp_message_publisher(publisher);
-        Some((event, false))
+        Some(event)
     }
 
     fn handle_extension_action_event(&mut self, source_id: &str, event: Event) -> Option<Event> {

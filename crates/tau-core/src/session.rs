@@ -1089,6 +1089,26 @@ impl AgentTree {
             inference_dispatch_order: Vec::new(),
         };
         for entry in events {
+            if entry.event.name().category() == &tau_proto::EventCategory::Message {
+                if entry.parent != AgentEventParent::InheritHead {
+                    return Err(AgentEventValidationError::new(
+                        "raw message fact record has a noncanonical fold parent",
+                    ));
+                }
+                let target = entry.event.message_agent_target().ok_or_else(|| {
+                    AgentEventValidationError::new("message category record has no agent target")
+                })?;
+                if target.as_str() != tree.agent_id.as_str() {
+                    return Err(AgentEventValidationError::new(
+                        "raw message fact target does not match agent journal owner",
+                    ));
+                }
+                // Message facts are canonical raw journal records. Their
+                // transcript projection is a post-commit consumer and therefore
+                // cannot participate in append-time semantic validation.
+                tree.next_event_seq = entry.seq.next();
+                continue;
+            }
             tree.validate_event_at(entry.parent, &entry.event)?;
             tree.apply_event_at(entry.parent, &entry.event);
             tree.next_event_seq = entry.seq.next();

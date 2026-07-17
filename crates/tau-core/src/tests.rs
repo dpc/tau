@@ -2,17 +2,19 @@ use std::path::PathBuf;
 
 use tau_proto::{
     AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptId, AgentPromptSubmitted,
-    CborValue, ContextItem, Event, EventSelector, HarnessNotice, HarnessOutputMessage, NoticeLevel,
-    PromptMessageClass, PromptOriginator, ProviderResponseFinished, ProviderStopReason,
-    SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError, ToolBackgroundResult,
-    ToolCallId, ToolCallItem, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolStarted,
-    ToolType,
+    CborValue, ContextItem, Event, EventSelector, HarnessNotice, HarnessOutputMessage,
+    MessageAgentTarget, MessageDeleted, MessageDelivered, MessageEdited, MessageFactId,
+    MessageFactRef, MessageParty, MessagePublisherId, MessageReactionAdded, MessageReactionRemoved,
+    MessageSent, NoticeLevel, PromptMessageClass, PromptOriginator, ProviderResponseFinished,
+    ProviderStopReason, SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolRequest, ToolResult,
+    ToolResultKind, ToolStarted, ToolType,
 };
 
 use crate::{
     AgentEntry, AgentEventParent, AgentStore, AgentStoreError, EventBus, NodeId,
     PersistedAgentEvent, PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq,
-    SessionStore, SessionStoreError, list_session_metas, memory_connection,
+    SessionMembership, SessionStore, SessionStoreError, list_session_metas, memory_connection,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -41,6 +43,73 @@ fn append_raw_cbor<T: serde::Serialize>(path: &std::path::Path, record: &T) {
     file.write_all(&(encoded.len() as u64).to_le_bytes())
         .expect("write record length");
     file.write_all(&encoded).expect("write record body");
+}
+
+/// Construct one representative canonical message fact.
+fn delivered_message_fact(agent_id: &str, message_id: &str) -> Event {
+    Event::MessageDelivered(MessageDelivered::new(
+        MessagePublisherId::new("bridge-main"),
+        MessageAgentTarget::new(agent_id),
+        MessageFactId::new(message_id),
+        MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: Some("Sender".to_owned()),
+        },
+        None,
+        "hello",
+    ))
+}
+
+/// Construct all six message fact variants, including unresolved references.
+fn all_message_facts(agent_id: &str) -> Vec<Event> {
+    let publisher = MessagePublisherId::new("bridge-main");
+    let agent = MessageAgentTarget::new(agent_id);
+    let target = MessageFactRef {
+        publisher_extension_id: MessagePublisherId::new("other-bridge"),
+        message_id: MessageFactId::new("unresolved"),
+    };
+    vec![
+        delivered_message_fact(agent_id, "m1"),
+        Event::MessageEdited(MessageEdited::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            None,
+            None,
+            "edited",
+        )),
+        Event::MessageDeleted(MessageDeleted::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            None,
+            None,
+        )),
+        Event::MessageReactionAdded(MessageReactionAdded::new(
+            publisher.clone(),
+            agent.clone(),
+            target.clone(),
+            None,
+            None,
+            "👍",
+        )),
+        Event::MessageReactionRemoved(MessageReactionRemoved::new(
+            publisher.clone(),
+            agent.clone(),
+            target,
+            None,
+            None,
+            "👍",
+        )),
+        Event::MessageSent(MessageSent::new(
+            publisher,
+            agent,
+            MessageFactId::new("m2"),
+            None,
+            None,
+            "sent",
+        )),
+    ]
 }
 
 /// Buffered live delivery records the publish-time live selector match so a
@@ -873,8 +942,9 @@ fn agent_store_restores_root_head_move_before_next_append() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Durable session membership facts retain their fold and replay behavior.
 #[test]
-fn session_store_persists_only_membership_facts() {
+fn session_store_persists_membership_facts() {
     let sessions_dir = temp_dir("sessions");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
@@ -917,6 +987,227 @@ fn session_store_persists_only_membership_facts() {
     assert_eq!(events[0].event, loaded);
 
     let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Raw agent message-fact append persists before semantic fold and remains
+/// replayable without creating a transcript node.
+#[test]
+fn agent_store_raw_message_fact_append_is_unfolded_and_replayable() {
+    let agents_dir = temp_dir("agent-raw-message");
+    let fact = delivered_message_fact("agent-1", "m1");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    let outcome = store
+        .append_agent_message_fact_at("agent-1", None, fact.clone(), tau_proto::UnixMicros::now())
+        .expect("append raw message fact");
+    assert_eq!(outcome.seq.get(), 0);
+    assert_eq!(outcome.folded_node_id, None);
+    assert!(
+        store
+            .agent("agent-1")
+            .expect("loaded agent")
+            .nodes()
+            .is_empty()
+    );
+    assert_eq!(
+        store.agent_events("agent-1").expect("agent events")[0].event,
+        fact
+    );
+
+    drop(store);
+    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let prompt = reopened
+        .append_agent_event("agent-1", None, agent_prompt("agent-1", "after fact"))
+        .expect("append after raw fact");
+    assert_eq!(prompt.seq.get(), 1);
+    assert_eq!(
+        reopened
+            .agent("agent-1")
+            .expect("replayed agent")
+            .nodes()
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Raw agent append rejects non-message events and a fact whose claimed target
+/// differs from the selected journal before creating any record.
+#[test]
+fn agent_store_raw_message_fact_append_enforces_category_and_owner() {
+    let agents_dir = temp_dir("agent-raw-message-owner");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let wrong_category = store
+        .append_agent_message_fact_at(
+            "agent-1",
+            None,
+            agent_prompt("agent-1", "not a fact"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect_err("non-message raw append must fail");
+    assert!(matches!(
+        wrong_category,
+        AgentStoreError::UnsupportedRawEvent { .. }
+    ));
+    let wrong_owner = store
+        .append_agent_message_fact_at(
+            "agent-1",
+            None,
+            delivered_message_fact("agent-2", "m1"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect_err("mismatched owner must fail");
+    assert!(matches!(
+        wrong_owner,
+        AgentStoreError::MessageFactTargetMismatch { .. }
+    ));
+    assert!(!agents_dir.join("agent-1").join("events.cbor").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Durable replay rejects a raw message record with a noncanonical fold parent
+/// instead of silently ignoring its structural ownership metadata.
+#[test]
+fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
+    let agents_dir = temp_dir("agent-raw-message-parent");
+    append_raw_cbor(
+        &agents_dir.join("agent-1").join("events.cbor"),
+        &PersistedAgentEvent {
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: delivered_message_fact("agent-1", "m1"),
+            parent: AgentEventParent::Under(NodeId::new(99)),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+
+    let error = AgentStore::open(&agents_dir).expect_err("noncanonical raw parent must fail");
+    assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Ephemeral agent raw facts replay from memory without creating an agent
+/// journal, metadata sidecar, or lock file.
+#[test]
+fn ephemeral_agent_raw_message_fact_replays_without_files() {
+    let agents_dir = temp_dir("ephemeral-agent-raw-message");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    store
+        .mark_agent_ephemeral("agent-1")
+        .expect("mark ephemeral");
+    let fact = delivered_message_fact("agent-1", "m1");
+    store
+        .append_agent_message_fact_at("agent-1", None, fact.clone(), tau_proto::UnixMicros::now())
+        .expect("append ephemeral raw fact");
+
+    assert_eq!(
+        store.agent_events("agent-1").expect("memory replay")[0].event,
+        fact
+    );
+    assert!(!agents_dir.join("agent-1").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Session journals retain unrouteable message facts without changing the
+/// folded loaded-agent membership and keep one contiguous sequence.
+#[test]
+fn session_store_persists_fallback_message_facts_without_membership_fold() {
+    let sessions_dir = temp_dir("session-fallback-message");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::SessionAgentLoaded(SessionAgentLoaded {
+                session_id: SessionId::from("session-1"),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        )
+        .expect("append membership");
+    let fact = delivered_message_fact("invalid target", "m1");
+    let outcome = store
+        .append_session_event("session-1", None, fact.clone())
+        .expect("append fallback fact");
+    assert_eq!(outcome.seq.get(), 1);
+    assert!(
+        store
+            .session("session-1")
+            .expect("membership")
+            .contains_agent(&agent_id)
+    );
+
+    drop(store);
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    assert!(
+        reopened
+            .session("session-1")
+            .expect("replayed membership")
+            .contains_agent(&agent_id)
+    );
+    let events = reopened
+        .session_events("session-1")
+        .expect("session events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].seq.get(), 1);
+    assert_eq!(events[1].event, fact);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Session fallback accepts every message variant and preserves unresolved
+/// references exactly without attempting native-message validation.
+#[test]
+fn session_store_preserves_all_message_fact_variants_and_unresolved_refs() {
+    let sessions_dir = temp_dir("session-all-message-facts");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let facts = all_message_facts("invalid target");
+    for (index, fact) in facts.iter().cloned().enumerate() {
+        let outcome = store
+            .append_session_event("session-1", None, fact)
+            .expect("append fallback fact");
+        assert_eq!(outcome.seq.get(), index as u64);
+    }
+    let records = store.session_events("session-1").expect("fallback records");
+    assert_eq!(
+        records
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>(),
+        facts
+    );
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Ephemeral sessions retain ordinary membership and fallback records for
+/// same-daemon replay while creating no session files.
+#[test]
+fn ephemeral_session_retains_fallback_message_facts_in_memory() {
+    let sessions_dir = temp_dir("ephemeral-session-fallback");
+    let mut store = SessionStore::open_ephemeral(&sessions_dir).expect("open ephemeral store");
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::SessionAgentLoaded(SessionAgentLoaded {
+                session_id: SessionId::from("session-1"),
+                agent_id: AgentId::parse("agent-1").expect("agent id"),
+                ephemeral: true,
+            }),
+        )
+        .expect("retain membership");
+    let fact = delivered_message_fact("invalid target", "m1");
+    let outcome = store
+        .append_session_event("session-1", None, fact.clone())
+        .expect("retain fallback");
+
+    assert_eq!(outcome.seq.get(), 1);
+    let events = store.session_events("session-1").expect("memory events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].event, fact);
+    assert!(!sessions_dir.exists());
 }
 
 /// Session restore facts keep execution correlation out of agent transcript
@@ -1113,7 +1404,7 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
         .append_session_event_at_with_persistence(
             "session-1",
             None,
-            event,
+            event.clone(),
             tau_proto::UnixMicros::now(),
             crate::SessionPersistenceMode::Ephemeral,
         )
@@ -1128,6 +1419,16 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
     assert!(
         !sessions_dir.join("session-1").exists(),
         "memory-only membership must not create a session directory"
+    );
+    assert_eq!(
+        store
+            .ephemeral_membership_events("session-1")
+            .expect("process-local membership")
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>(),
+        vec![event],
+        "same-daemon replay must retain the ephemeral membership overlay"
     );
     let reopened = SessionStore::open_lazy(&sessions_dir).expect("reopen session store");
     assert!(
@@ -1212,6 +1513,115 @@ fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguou
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].seq.get(), 0);
     assert_eq!(events[1].seq.get(), 1);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Durable-session ephemeral membership uses an independent contiguous overlay,
+/// enforces its restricted lifecycle, and never consumes durable sequences.
+#[test]
+fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequenced() {
+    let sessions_dir = temp_dir("sessions-strict-ephemeral-overlay");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let first_durable = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-durable-one", false),
+        )
+        .expect("first durable membership");
+    assert_eq!(first_durable.seq.get(), 0);
+
+    let unmatched = store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                session_id: SessionId::from("session-1"),
+                agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
+            }),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect_err("unmatched process-local unload must fail");
+    assert!(matches!(unmatched, SessionStoreError::InvalidEvent { .. }));
+    for invalid in [
+        session_loaded("session-1", "agent-not-ephemeral", false),
+        delivered_message_fact("invalid target", "overlay-message"),
+    ] {
+        let error = store
+            .append_session_event_at_with_persistence(
+                "session-1",
+                None,
+                invalid,
+                tau_proto::UnixMicros::now(),
+                crate::SessionPersistenceMode::Ephemeral,
+            )
+            .expect_err("invalid process-local overlay event must fail");
+        assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+    }
+
+    let load = store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-ephemeral", true),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("overlay load");
+    let unload = store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                session_id: SessionId::from("session-1"),
+                agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
+            }),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("overlay unload");
+    let reload = store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-ephemeral", true),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("overlay reload");
+    assert_eq!(
+        [load.seq.get(), unload.seq.get(), reload.seq.get()],
+        [0, 1, 2]
+    );
+
+    let second_durable = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-durable-two", false),
+        )
+        .expect("second durable membership");
+    assert_eq!(second_durable.seq.get(), 1);
+    let overlay = store
+        .ephemeral_membership_events("session-1")
+        .expect("validated overlay");
+    let durable = store.session_events("session-1").expect("durable records");
+    assert_eq!(
+        durable
+            .iter()
+            .map(|record| record.seq.get())
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let mut membership = SessionMembership::from_events(SessionId::from("session-1"), &durable);
+    membership
+        .apply_ephemeral_membership_overlay(&overlay)
+        .expect("compose overlay");
+    assert!(
+        membership.contains_agent(&AgentId::parse("agent-ephemeral").expect("ephemeral agent id"))
+    );
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }

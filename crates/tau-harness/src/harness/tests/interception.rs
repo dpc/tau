@@ -2,6 +2,166 @@ use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::{PendingTool, background_completion_prompt};
 
+/// Construct one forged-provenance fact for direct extension intake.
+fn extension_message_fact(message_id: &str) -> Event {
+    Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::MessageAgentTarget::new("invalid target"),
+        tau_proto::MessageFactId::new(message_id),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ))
+}
+
+/// Assert one selector cannot observe a pre-commit interception request or
+/// alter the exact stamped canonical fact.
+fn assert_message_fact_bypasses_interceptor(selector: EventSelector) {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let interceptor_sink = connect_test_tool(&mut h, "message-interceptor");
+    h.handle_extension_event(
+        "message-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![selector],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    connect_ready_message_publisher(&mut h, "bridge-connection", "configured-bridge");
+
+    h.handle_extension_event_inner_with_transient(
+        "bridge-connection",
+        extension_message_fact("m1"),
+        Some(true),
+    )
+    .expect("message fact intake");
+
+    assert!(h.pending_intercept.is_none());
+    assert!(
+        interceptor_sink
+            .lock()
+            .expect("interceptor sink")
+            .iter()
+            .all(|frame| !matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_))),
+        "message fact must never produce an InterceptRequest"
+    );
+    let records = h.store.session_events("s1").expect("fallback records");
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        &records[0].event,
+        Event::MessageDelivered(fact)
+            if fact.publisher_extension_id.as_str() == "configured-bridge"
+                && fact.message_id.as_str() == "m1"
+    ));
+}
+
+/// An exact message selector cannot intercept a direct message fact.
+#[test]
+fn message_fact_bypasses_exact_interceptor() {
+    assert_message_fact_bypasses_interceptor(EventSelector::Exact(
+        tau_proto::EventName::MESSAGE_DELIVERED,
+    ));
+}
+
+/// A category prefix selector cannot intercept a direct message fact.
+#[test]
+fn message_fact_bypasses_prefix_interceptor() {
+    assert_message_fact_bypasses_interceptor(EventSelector::Prefix("message".to_owned()));
+}
+
+/// A direct fact arriving behind an unrelated intercepted publish waits for
+/// that earlier publish, then appends without entering its own interception
+/// chain.
+#[test]
+fn message_fact_bypass_preserves_deferred_publish_fifo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "draft-interceptor");
+    h.handle_extension_event(
+        "draft-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    connect_ready_message_publisher(&mut h, "bridge-connection", "configured-bridge");
+    let observer = connect_test_client(&mut h, "fifo-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "fifo-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
+                EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+            ],
+        })),
+    )
+    .expect("subscribe observer");
+    h.publish_event(None, draft_event("held"));
+    assert!(h.pending_intercept.is_some());
+
+    h.handle_extension_event_inner_with_transient(
+        "bridge-connection",
+        extension_message_fact("m1"),
+        None,
+    )
+    .expect("queue message fact");
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("fallback records")
+            .is_empty()
+    );
+
+    h.handle_extension_event(
+        "draft-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release intercepted publish");
+
+    assert_eq!(
+        h.store
+            .session_events("s1")
+            .expect("fallback records")
+            .len(),
+        1
+    );
+    assert!(
+        interceptor
+            .lock()
+            .expect("interceptor sink")
+            .iter()
+            .filter(|frame| matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_)))
+            .count()
+            == 1,
+        "only the earlier draft may be intercepted"
+    );
+    let delivered_names = observer
+        .lock()
+        .expect("observer sink")
+        .iter()
+        .filter_map(|frame| peel_inner_event(&frame.frame).map(Event::name))
+        .filter(|name| {
+            *name == tau_proto::EventName::UI_PROMPT_DRAFT
+                || *name == tau_proto::EventName::MESSAGE_DELIVERED
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered_names,
+        vec![
+            tau_proto::EventName::UI_PROMPT_DRAFT,
+            tau_proto::EventName::MESSAGE_DELIVERED
+        ]
+    );
+}
+
 fn prompt_created_count(h: &Harness) -> u64 {
     let mut cursor = crate::event_log::EventLogSeq::new(0);
     let mut count = 0;

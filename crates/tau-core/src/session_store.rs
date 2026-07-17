@@ -1,9 +1,10 @@
-//! Session membership store for loaded-agent facts.
+//! Session event store for loaded-agent and fallback message facts.
 //!
-//! Durable sessions are membership containers backed by append-only on-disk
-//! logs. Ephemeral sessions keep the same folded membership view in memory
-//! only. Agent transcripts live in [`crate::AgentStore`] under the global
-//! agents directory in both modes.
+//! Durable sessions are append-only event containers. Their folded view tracks
+//! membership while retaining unrouteable message facts in the same journal.
+//! Ephemeral sessions keep both records and the folded membership view in
+//! memory only. Agent transcripts live in [`crate::AgentStore`] under the
+//! global agents directory in both modes.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -19,39 +20,41 @@ use tau_proto::{AgentId, ConnectionId, Event, SessionId, UnixMicros};
 
 use crate::session::SessionMeta;
 
-/// Persistence policy for session membership and sidecar state.
+/// Persistence policy for session events and sidecar state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SessionPersistenceMode {
-    /// Write membership events, metadata, and locks under the sessions root.
+    /// Write session events, metadata, and locks under the sessions root.
     #[default]
     Durable,
-    /// Keep membership state in memory only and never create session files.
+    /// Keep session events in memory only and never create session files.
     Ephemeral,
 }
 
 impl SessionPersistenceMode {
-    /// Returns true when session membership and sidecars should be written to
-    /// disk.
+    /// Returns true when session events and sidecars should be written to disk.
     #[must_use]
     pub const fn is_durable(self) -> bool {
         matches!(self, Self::Durable)
     }
 
-    /// Returns true when session membership should remain process-local only.
+    /// Returns true when session events should remain process-local only.
     #[must_use]
     pub const fn is_ephemeral(self) -> bool {
         matches!(self, Self::Ephemeral)
     }
 }
 
-/// Monotonic sequence number in one persisted session membership log.
+/// Monotonic sequence number in one session-event sequence domain.
 ///
-/// This sequence is relative only to one session's `events.cbor` stream: the
-/// first membership record in that file has sequence 0, the second has sequence
-/// 1, and so on. It is not comparable to the harness runtime event sequence or
-/// to [`crate::PersistedAgentEventSeq`]. The value is persisted as corruption
-/// detection metadata; replay semantics are still defined by file order, so
-/// load code verifies that stored values match their implied position.
+/// Ordinary records use their zero-based position in a session's logical
+/// ordinary stream, persisted as `events.cbor` only in durable mode. Restore
+/// records independently use their position in the logical restore stream,
+/// persisted as `restore-events.cbor` only in durable mode. A durable session's
+/// memory-only ephemeral-agent membership overlay uses a third zero-based
+/// process-local domain. These domains are not comparable to one another, the
+/// harness runtime event sequence, or [`crate::PersistedAgentEventSeq`]. Stored
+/// values provide corruption detection; ordering remains defined by position
+/// within the corresponding stream.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PersistedSessionEventSeq(u64);
@@ -69,7 +72,7 @@ impl PersistedSessionEventSeq {
         self.0
     }
 
-    /// Returns the next sequence in the same session membership log.
+    /// Returns the next value in the same session-event sequence domain.
     #[must_use]
     pub fn next(self) -> Self {
         Self(self.0 + 1)
@@ -109,7 +112,7 @@ pub enum SessionStoreError {
     InvalidSessionDir { path: PathBuf },
     /// A session id is not safe to use as one store directory name.
     InvalidSessionId { session_id: String, message: String },
-    /// The event is not a session membership fact for this session.
+    /// The event is not an accepted session membership or fallback fact.
     InvalidEvent { message: String },
     /// A persisted record sequence does not match its position in the log.
     InvalidSequence {
@@ -168,7 +171,7 @@ impl fmt::Display for SessionStoreError {
                 message,
             } => write!(f, "invalid session id `{session_id}`: {message}"),
             Self::InvalidEvent { message } => {
-                write!(f, "invalid session membership event: {message}")
+                write!(f, "invalid session event: {message}")
             }
             Self::InvalidSequence {
                 path,
@@ -201,30 +204,28 @@ impl Error for SessionStoreError {
     }
 }
 
-/// Result of one session membership append.
+/// Result of one session event append.
 #[derive(Clone, Debug)]
 pub struct AppendOutcome {
-    /// Sequence assigned to the appended membership fact within this session
-    /// log.
+    /// Sequence assigned within the selected durable or process-local domain.
     pub seq: PersistedSessionEventSeq,
-    /// Session membership events never fold transcript nodes.
+    /// Session events never fold transcript nodes.
     pub folded_node_id: Option<tau_proto::NodeId>,
 }
 
-/// One durable session-owned membership fact.
+/// One durable or process-local session-owned fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PersistedSessionEvent {
-    /// Sequence within this session's durable `events.cbor` membership stream.
+    /// Sequence within this record's ordinary, restore, or overlay stream.
     ///
-    /// This is persisted to catch reordered, duplicated, or spliced logs during
-    /// load. The implied sequence from file order is still authoritative for
-    /// replay; load rejects records where this stored value disagrees with the
-    /// record's zero-based position.
+    /// Durable records persist this value to catch reordered, duplicated, or
+    /// spliced logs. Ephemeral-agent overlay records use the same positional
+    /// check in their independent memory-only stream.
     pub seq: PersistedSessionEventSeq,
     /// Connection that published the fact, when known.
     pub source: Option<ConnectionId>,
-    /// Membership protocol event (`session.agent_loaded` or
-    /// `session.agent_unloaded`).
+    /// Membership/fallback fact for an ordinary stream, or an execution fact
+    /// for a restore stream.
     pub event: Event,
     /// Wall-clock micros since UNIX epoch when the event was appended.
     #[serde(default)]
@@ -240,13 +241,13 @@ pub struct SessionMembership {
 }
 
 impl SessionMembership {
-    /// Builds a session membership view from durable membership facts.
+    /// Builds a session membership view from durable session facts.
     ///
     /// # Panics
     ///
-    /// Panics if `events` contains a record that is not a valid membership fact
-    /// for `session_id`. [`SessionStore`] uses the fallible replay path when
-    /// loading durable state from disk.
+    /// Panics if `events` contains a record that is not a valid membership or
+    /// fallback fact for `session_id`. [`SessionStore`] uses the fallible
+    /// replay path when loading durable state from disk.
     #[must_use]
     pub fn from_events(session_id: SessionId, events: &[PersistedSessionEvent]) -> Self {
         Self::try_from_events(session_id, events).expect("validated session events")
@@ -262,7 +263,7 @@ impl SessionMembership {
             next_event_seq: PersistedSessionEventSeq::new(0),
         };
         for record in events {
-            validate_membership_event(session_id.as_str(), &record.event)?;
+            validate_session_event(session_id.as_str(), &record.event)?;
             tree.apply_event(&record.event);
             tree.next_event_seq = record.seq.next();
         }
@@ -289,6 +290,28 @@ impl SessionMembership {
         agents
     }
 
+    /// Applies a validated process-local ephemeral membership overlay.
+    ///
+    /// Overlay records do not advance the durable sequence cursor. They exist
+    /// only to reconstruct same-daemon membership after the durable journal has
+    /// independently passed validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] when the overlay contains non-membership
+    /// events, durable loaded-agent markers, invalid session targets, sequence
+    /// gaps, or an unload without a preceding process-local load.
+    pub fn apply_ephemeral_membership_overlay(
+        &mut self,
+        events: &[PersistedSessionEvent],
+    ) -> Result<(), SessionStoreError> {
+        validate_ephemeral_membership_overlay(self.session_id.as_str(), events)?;
+        for record in events {
+            self.apply_event(&record.event);
+        }
+        Ok(())
+    }
+
     fn next_event_seq(&self) -> PersistedSessionEventSeq {
         self.next_event_seq
     }
@@ -310,14 +333,17 @@ impl SessionMembership {
     }
 }
 
-/// Session membership store for loaded-agent facts.
+/// Session event store for loaded-agent and fallback message facts.
 ///
-/// Durable stores append membership facts to `<sessions_dir>/<session_id>` and
-/// maintain the corresponding metadata/lock sidecars. Ephemeral stores keep the
-/// folded membership view and session-scoped execution/restore facts in memory
-/// only: they never create the sessions root, session directories, event logs,
-/// metadata, or locks, `session_events` reports no durable records, and
-/// `session_restore_events` returns same-daemon in-memory restore facts.
+/// Durable stores append session facts to `<sessions_dir>/<session_id>` and
+/// maintain the corresponding metadata/lock sidecars. A durable store also
+/// keeps ephemeral-agent membership in a separately sequenced process-local
+/// overlay: it composes that overlay only after durable validation for
+/// same-daemon replay, and restart discards it. Wholly ephemeral stores keep
+/// the folded membership view and session-scoped execution/restore facts in
+/// memory only: they never create the sessions root, session directories, event
+/// logs, metadata, or locks. Both ordinary session events and execution/restore
+/// facts remain available for same-daemon replay.
 ///
 /// Durable replay and memory-only parity follow
 /// `DESIGN-tau-core-semantic-store-durability`.
@@ -325,13 +351,20 @@ impl SessionMembership {
 pub struct SessionStore {
     sessions_dir: PathBuf,
     sessions: HashMap<SessionId, SessionMembership>,
+    /// Ordinary replay records retained by a wholly ephemeral session.
+    ephemeral_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
+    /// Memory-only membership overlay for ephemeral agents in durable sessions.
+    ///
+    /// These records use an independent process-local sequence so they cannot
+    /// introduce gaps into the durable session journal.
+    ephemeral_membership_overlay: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     restore_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     locks: HashMap<SessionId, File>,
     mode: SessionPersistenceMode,
 }
 
 impl SessionStore {
-    /// Opens the session store and eagerly loads existing membership logs.
+    /// Opens the session store and eagerly loads existing session logs.
     pub fn open(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
         let mut store = Self::open_lazy(sessions_dir.clone())?;
@@ -356,7 +389,7 @@ impl SessionStore {
         Ok(store)
     }
 
-    /// Opens the session store without loading existing membership logs.
+    /// Opens the session store without loading existing session logs.
     pub fn open_lazy(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
         fs::create_dir_all(&sessions_dir).map_err(|source| {
@@ -368,6 +401,8 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             sessions: HashMap::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
             mode: SessionPersistenceMode::Durable,
@@ -375,7 +410,7 @@ impl SessionStore {
     }
 
     /// Opens an in-memory session store that never reads or writes session
-    /// membership state, metadata, or locks below `sessions_dir`.
+    /// event state, metadata, or locks below `sessions_dir`.
     ///
     /// The path is retained only so callers can keep using the same layout
     /// helpers for diagnostics; no directory is created by this constructor.
@@ -383,6 +418,8 @@ impl SessionStore {
         Ok(Self {
             sessions_dir: sessions_dir.into(),
             sessions: HashMap::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
             mode: SessionPersistenceMode::Ephemeral,
@@ -466,7 +503,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Appends one session membership event.
+    /// Appends one session membership or fallback event.
     pub fn append_session_event(
         &mut self,
         session_id: &str,
@@ -493,8 +530,20 @@ impl SessionStore {
         )
     }
 
-    /// Like [`Self::append_session_event_at`] but lets callers keep a single
-    /// membership fact memory-only even when the store itself is durable.
+    /// Like [`Self::append_session_event_at`] with an explicit event policy.
+    ///
+    /// In a wholly ephemeral store, all accepted session facts remain in
+    /// memory. In a durable store, an ephemeral event is restricted to
+    /// `SessionAgentLoaded { ephemeral: true }` and a matched unload lifecycle.
+    /// Such records enter a separately sequenced process-local overlay and
+    /// never consume a durable journal sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] for invalid session facts or identifiers,
+    /// non-membership/durable-agent facts requested as ephemeral in a durable
+    /// store, unmatched overlay unloads, lock failures, or durable I/O
+    /// failures.
     pub fn append_session_event_at_with_persistence(
         &mut self,
         session_id: &str,
@@ -504,8 +553,13 @@ impl SessionStore {
         event_persistence: SessionPersistenceMode,
     ) -> Result<AppendOutcome, SessionStoreError> {
         let sid = validate_session_id(session_id)?;
-        validate_membership_event(session_id, &event)?;
+        validate_session_event(session_id, &event)?;
         let write_to_disk = self.mode.is_durable() && event_persistence.is_durable();
+        let retain_in_memory = self.mode.is_ephemeral();
+        let retain_membership_overlay = self.mode.is_durable() && event_persistence.is_ephemeral();
+        if retain_membership_overlay {
+            validate_ephemeral_membership_overlay_event(session_id, &event)?;
+        }
         if write_to_disk {
             self.ensure_locked(session_id)?;
         }
@@ -522,19 +576,46 @@ impl SessionStore {
         let tree = self
             .sessions
             .entry(sid.clone())
-            .or_insert_with(|| SessionMembership::from_events(sid, &[]));
-        let seq = tree.next_event_seq();
+            .or_insert_with(|| SessionMembership::from_events(sid.clone(), &[]));
+        let seq = if retain_membership_overlay {
+            PersistedSessionEventSeq::new(
+                self.ephemeral_membership_overlay
+                    .get(&sid)
+                    .map_or(0, Vec::len) as u64,
+            )
+        } else {
+            tree.next_event_seq()
+        };
         let record = PersistedSessionEvent {
             seq,
             source,
             event: event.clone(),
             recorded_at,
         };
+        if retain_membership_overlay {
+            let mut candidate = self
+                .ephemeral_membership_overlay
+                .get(&sid)
+                .cloned()
+                .unwrap_or_default();
+            candidate.push(record.clone());
+            validate_ephemeral_membership_overlay(session_id, &candidate)?;
+        }
         if write_to_disk {
             append_cbor_record(&session_dir.join("events.cbor"), &record)?;
+        } else if retain_in_memory {
+            self.ephemeral_events
+                .entry(sid.clone())
+                .or_default()
+                .push(record);
+        } else if retain_membership_overlay {
+            self.ephemeral_membership_overlay
+                .entry(sid.clone())
+                .or_default()
+                .push(record);
         }
         tree.apply_event(&event);
-        if write_to_disk {
+        if write_to_disk || retain_in_memory {
             tree.advance_next_event_seq();
         }
         // Sidecar metadata is derived from the durable event stream. Do not let
@@ -549,16 +630,54 @@ impl SessionStore {
         })
     }
 
-    /// Loads durable session membership events.
+    /// Loads durable or same-daemon ephemeral session events.
     pub fn session_events(
         &self,
         session_id: &str,
     ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
         if self.mode.is_ephemeral() {
-            return Ok(Vec::new());
+            let session_id = validate_session_id(session_id)?;
+            let events = self
+                .ephemeral_events
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default();
+            SessionMembership::try_from_events(session_id, &events)?;
+            return Ok(events);
         }
         let session_id = validate_session_id(session_id)?;
-        load_session_events(&self.session_dir(&session_id).join("events.cbor"))
+        let events = load_session_events(&self.session_dir(&session_id).join("events.cbor"))?;
+        SessionMembership::try_from_events(session_id, &events)?;
+        Ok(events)
+    }
+
+    /// Returns the validated process-local ephemeral-agent membership overlay.
+    ///
+    /// Durable session replay validates its on-disk snapshot independently,
+    /// then applies this strictly membership-only overlay so late
+    /// subscribers in the same daemon still see ephemeral agents without
+    /// allowing cached durable members to bypass journal validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] for an invalid session id or an internally
+    /// inconsistent overlay sequence, event category, session target, or
+    /// load/unload lifecycle.
+    pub fn ephemeral_membership_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        let session_id = validate_session_id(session_id)?;
+        if self.mode.is_ephemeral() {
+            return Ok(Vec::new());
+        }
+        let events = self
+            .ephemeral_membership_overlay
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        validate_ephemeral_membership_overlay(session_id.as_str(), &events)?;
+        Ok(events)
     }
 
     /// Appends one session-scoped execution/restore fact.
@@ -629,7 +748,7 @@ impl SessionStore {
         Ok(events)
     }
 
-    /// Returns the storage root for session membership containers.
+    /// Returns the storage root for session event containers.
     #[must_use]
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
@@ -716,7 +835,7 @@ fn invalid_session_id(session_id: &str, message: impl Into<String>) -> SessionSt
     }
 }
 
-fn validate_membership_event(session_id: &str, event: &Event) -> Result<(), SessionStoreError> {
+fn validate_session_event(session_id: &str, event: &Event) -> Result<(), SessionStoreError> {
     match event {
         Event::SessionAgentLoaded(loaded) if loaded.session_id == session_id => Ok(()),
         Event::SessionAgentUnloaded(unloaded) if unloaded.session_id == session_id => Ok(()),
@@ -725,11 +844,60 @@ fn validate_membership_event(session_id: &str, event: &Event) -> Result<(), Sess
                 message: "membership event session_id did not match target session".to_owned(),
             })
         }
+        _ if event.name().category() == &tau_proto::EventCategory::Message => Ok(()),
         _ => Err(SessionStoreError::InvalidEvent {
-            message: "session store only persists session.agent_loaded/session.agent_unloaded"
-                .to_owned(),
+            message: "session store only persists membership or fallback message facts".to_owned(),
         }),
     }
+}
+
+/// Restrict a durable session's process-local overlay to ephemeral membership.
+fn validate_ephemeral_membership_overlay_event(
+    session_id: &str,
+    event: &Event,
+) -> Result<(), SessionStoreError> {
+    validate_session_event(session_id, event)?;
+    match event {
+        Event::SessionAgentLoaded(loaded) if loaded.ephemeral => Ok(()),
+        Event::SessionAgentLoaded(_) => Err(SessionStoreError::InvalidEvent {
+            message: "process-local membership overlay requires ephemeral loaded agents".to_owned(),
+        }),
+        Event::SessionAgentUnloaded(_) => Ok(()),
+        _ => Err(SessionStoreError::InvalidEvent {
+            message: "process-local membership overlay accepts only membership events".to_owned(),
+        }),
+    }
+}
+
+/// Validate one complete process-local overlay, including its local lifecycle.
+fn validate_ephemeral_membership_overlay(
+    session_id: &str,
+    events: &[PersistedSessionEvent],
+) -> Result<(), SessionStoreError> {
+    let mut loaded = std::collections::HashSet::new();
+    for (index, record) in events.iter().enumerate() {
+        if record.seq.get() != index as u64 {
+            return Err(SessionStoreError::InvalidEvent {
+                message: "ephemeral membership overlay has non-sequential records".to_owned(),
+            });
+        }
+        validate_ephemeral_membership_overlay_event(session_id, &record.event)?;
+        match &record.event {
+            Event::SessionAgentLoaded(event) => {
+                loaded.insert(event.agent_id.clone());
+            }
+            Event::SessionAgentUnloaded(event) if loaded.remove(&event.agent_id) => {}
+            Event::SessionAgentUnloaded(_) => {
+                return Err(SessionStoreError::InvalidEvent {
+                    message:
+                        "ephemeral membership overlay unload has no process-local loaded agent"
+                            .to_owned(),
+                });
+            }
+            _ => unreachable!("overlay validation accepts only membership events"),
+        }
+    }
+    Ok(())
 }
 
 fn validate_restore_event(event: &Event) -> Result<(), SessionStoreError> {

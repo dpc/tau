@@ -1,5 +1,671 @@
 use super::*;
 
+/// Append one framed CBOR record to a semantic-store test journal.
+fn append_persisted_record<T: serde::Serialize>(path: &Path, record: &T) {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(record, &mut encoded).expect("encode persisted record");
+    std::fs::create_dir_all(path.parent().expect("journal parent")).expect("create journal parent");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open journal");
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .expect("write record length");
+    file.write_all(&encoded).expect("write record");
+}
+
+/// Collect message-category deliveries with the requested replay marker.
+fn message_deliveries(sink: &Arc<Mutex<Vec<RoutedFrame>>>, replay: bool) -> Vec<Event> {
+    sink.lock()
+        .expect("delivery sink")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery)
+                if delivery.replay == replay
+                    && delivery.event.name().category() == &tau_proto::EventCategory::Message =>
+            {
+                Some((*delivery.event).clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Construct one stamped fallback message fact for persistence/replay tests.
+fn replay_message_fact() -> Event {
+    Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new("unknown-agent"),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: Some("Sender".to_owned()),
+        },
+        None,
+        "hello",
+    ))
+}
+
+/// Durable fallback facts publish live only after append and replay with exact
+/// payload/provenance; duplicate emits remain two independent records.
+#[test]
+fn fallback_message_fact_live_and_restart_replay_are_exact() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut emitted_fact = replay_message_fact();
+    emitted_fact.stamp_message_publisher(tau_proto::MessagePublisherId::new("forged"));
+    let fact = replay_message_fact();
+    {
+        let mut h = quiet_provider_harness(&state_dir).expect("start");
+        connect_ready_message_publisher(&mut h, "bridge-connection", "configured-bridge");
+        let live_sink = connect_test_client(&mut h, "live-ui", tau_proto::ClientKind::Ui);
+        h.handle_client_event(
+            "live-ui",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: Vec::new(),
+                live_selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::MESSAGE_DELIVERED,
+                )],
+            })),
+        )
+        .expect("subscribe live");
+
+        h.handle_extension_event(
+            "bridge-connection",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
+                emitted_fact.clone(),
+                true,
+            ))),
+        )
+        .expect("first extension emit");
+        h.handle_extension_event(
+            "bridge-connection",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
+                emitted_fact,
+                false,
+            ))),
+        )
+        .expect("duplicate extension emit");
+
+        assert_eq!(
+            message_deliveries(&live_sink, false),
+            vec![fact.clone(), fact.clone()]
+        );
+        let records = h.store.session_events("s1").expect("fallback records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].event, fact);
+        assert_eq!(records[1].event, fact);
+        h.shutdown().expect("shutdown");
+    }
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let replay_sink = connect_test_client(&mut resumed, "late-ui", tau_proto::ClientKind::Ui);
+    resumed
+        .handle_client_event(
+            "late-ui",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::MESSAGE_DELIVERED,
+                )],
+                live_selectors: Vec::new(),
+            })),
+        )
+        .expect("subscribe replay");
+    assert_eq!(
+        message_deliveries(&replay_sink, true),
+        vec![fact.clone(), fact]
+    );
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Ephemeral fallback facts remain available for same-daemon ordinary replay
+/// without creating a session event file.
+#[test]
+fn ephemeral_fallback_message_fact_replays_in_same_daemon() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness_ephemeral(&state_dir).expect("start ephemeral");
+    let fact = replay_message_fact();
+    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+
+    let replay_sink = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "late-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED,
+            )],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe replay");
+
+    assert_eq!(message_deliveries(&replay_sink, true), vec![fact]);
+    assert!(
+        !state_dir
+            .join("sessions")
+            .join("s1")
+            .join("events.cbor")
+            .exists(),
+        "ephemeral fallback must not create session files"
+    );
+}
+
+/// A durable session retains ephemeral-agent membership and history only in
+/// process memory, while a late same-daemon subscriber receives the same roster
+/// and replay-marked agent facts as an already-connected subscriber.
+#[test]
+fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create ephemeral agent through harness lifecycle");
+    let agent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("ephemeral agent id");
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .cloned()
+        .expect("ephemeral runtime route");
+    let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id.clone(),
+        text: "ephemeral history".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    });
+    h.publish_for_agent(&cid, prompt.clone());
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("ephemeral-message"),
+        tau_proto::MessageParty {
+            stable_id: "sender".to_owned(),
+            display_name: None,
+        },
+        None,
+        "ephemeral body",
+    ));
+    h.commit_message_fact(None, fact.clone());
+
+    let sink = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "late-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+                EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe late");
+
+    let frames = sink.lock().expect("sink");
+    assert!(frames.iter().any(|routed| {
+        matches!(
+            peel_inner_event(&routed.frame),
+            Some(Event::SessionAgentLoaded(loaded))
+                if loaded.agent_id == agent_id && loaded.ephemeral
+        )
+    }));
+    assert!(frames.iter().any(|routed| {
+        peel_delivery(&routed.frame)
+            .is_some_and(|delivery| delivery.is_replay() && delivery.event() == &prompt)
+    }));
+    assert!(frames.iter().any(|routed| {
+        peel_delivery(&routed.frame)
+            .is_some_and(|delivery| delivery.is_replay() && delivery.event() == &fact)
+    }));
+    drop(frames);
+
+    let durable_session_events = h.store.session_events("s1").expect("durable events");
+    assert!(durable_session_events.iter().all(|record| {
+        !matches!(
+            &record.event,
+            Event::SessionAgentLoaded(loaded) if loaded.agent_id == agent_id
+        )
+    }));
+    assert!(
+        !state_dir.join("agents").join(agent_id.as_str()).exists(),
+        "ephemeral agent must not create durable files"
+    );
+
+    h.remove_agent(&cid);
+    let after_unload = connect_test_client(&mut h, "after-unload", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "after-unload",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+                EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe after unload");
+    assert!(
+        after_unload
+            .lock()
+            .expect("after-unload sink")
+            .iter()
+            .all(|routed| {
+                peel_inner_event(&routed.frame).is_none_or(|event| match event {
+                    Event::SessionAgentLoaded(loaded) => loaded.agent_id != agent_id,
+                    Event::AgentPromptSubmitted(submitted) => submitted.agent_id != agent_id,
+                    Event::MessageDelivered(delivered) => {
+                        delivered.agent_id.as_str() != agent_id.as_str()
+                    }
+                    _ => true,
+                })
+            }),
+        "matched process-local unload must remove roster and history traversal"
+    );
+}
+
+/// A known non-runnable agent selected only by existing store metadata receives
+/// its message fact in the agent journal rather than session fallback.
+#[test]
+fn known_offline_agent_message_fact_uses_agent_journal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.agent_store
+        .record_agent_meta("offline-agent")
+        .expect("reserve offline agent");
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new("offline-agent"),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+
+    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+
+    let agent_records = h
+        .agent_store
+        .agent_events("offline-agent")
+        .expect("offline agent records");
+    assert_eq!(agent_records.len(), 1);
+    assert_eq!(agent_records[0].event, fact);
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("session records")
+            .iter()
+            .all(|record| record.event.name().category() != &tau_proto::EventCategory::Message)
+    );
+}
+
+/// Current-session membership is sufficient to select an agent journal even
+/// before that agent has a live route or existing store metadata.
+#[test]
+fn member_agent_message_fact_uses_agent_journal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let agent_id = tau_proto::AgentId::parse("member-agent").expect("agent id");
+    h.store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed membership");
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+
+    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+
+    assert_eq!(
+        h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("member agent records")[0]
+            .event,
+        fact
+    );
+}
+
+/// A live conversation route alone selects an agent journal when membership
+/// and pre-existing store state are absent.
+#[test]
+fn live_route_only_message_fact_uses_agent_journal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid).clone();
+    h.store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+            }),
+        )
+        .expect("remove membership");
+    h.agent_store =
+        AgentStore::open(td.path().join("isolated-agent-store")).expect("empty agent store");
+    assert!(!h.agent_store.agent_exists(agent_id.as_str()));
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+
+    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+
+    assert_eq!(
+        h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("live-route agent records")[0]
+            .event,
+        fact
+    );
+}
+
+/// A selected-journal append failure produces no committed runtime fact and no
+/// subscriber delivery.
+#[test]
+fn fallback_message_fact_storage_failure_prevents_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    let live_sink = connect_test_client(&mut h, "live-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "live-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED,
+            )],
+        })),
+    )
+    .expect("subscribe live");
+    let event_path = state_dir.join("sessions").join("s1").join("events.cbor");
+    if event_path.exists() {
+        std::fs::remove_file(&event_path).expect("remove empty session stream");
+    }
+    std::fs::create_dir_all(&event_path).expect("block event stream with directory");
+
+    h.commit_message_fact(Some("bridge-connection"), replay_message_fact());
+
+    assert!(message_deliveries(&live_sink, false).is_empty());
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| event.name() != tau_proto::EventName::MESSAGE_DELIVERED)
+    );
+}
+
+/// A known-agent journal append failure likewise prevents runtime commit and
+/// delivery instead of falling back to the session journal.
+#[test]
+fn known_agent_message_fact_storage_failure_prevents_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    h.agent_store
+        .record_agent_meta("offline-agent")
+        .expect("reserve agent");
+    let live_sink = connect_test_client(&mut h, "live-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "live-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED,
+            )],
+        })),
+    )
+    .expect("subscribe live");
+    let event_path = state_dir
+        .join("agents")
+        .join("offline-agent")
+        .join("events.cbor");
+    std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new("offline-agent"),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+
+    h.commit_message_fact(Some("bridge-connection"), fact);
+
+    assert!(message_deliveries(&live_sink, false).is_empty());
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("session records")
+            .iter()
+            .all(|record| record.event.name().category() != &tau_proto::EventCategory::Message),
+        "known-agent failure must not reroute to session fallback"
+    );
+}
+
+/// A semantically invalid later session record prevents replay of every earlier
+/// fallback fact from that journal.
+#[test]
+fn invalid_later_session_record_prevents_partial_message_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    h.store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        )
+        .expect("cache loaded membership");
+    h.agent_store
+        .record_agent_meta(agent_id.as_str())
+        .expect("reserve agent");
+    h.commit_message_fact(
+        Some("bridge-connection"),
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("configured-bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("agent-message"),
+            tau_proto::MessageParty {
+                stable_id: "sender-1".to_owned(),
+                display_name: None,
+            },
+            None,
+            "agent history",
+        )),
+    );
+    h.commit_message_fact(Some("bridge-connection"), replay_message_fact());
+    append_persisted_record(
+        &state_dir.join("sessions").join("s1").join("events.cbor"),
+        &tau_core::PersistedSessionEvent {
+            seq: tau_core::PersistedSessionEventSeq::new(2),
+            source: None,
+            event: Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "wrong-session".into(),
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                ephemeral: false,
+            }),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+    let sink = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
+
+    h.handle_client_event(
+        "late-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe replay");
+
+    assert!(message_deliveries(&sink, true).is_empty());
+    assert!(
+        sink.lock()
+            .expect("replay sink")
+            .iter()
+            .all(|frame| !matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::SessionAgentLoaded(_))
+            )),
+        "invalid session journal must not expose cached roster or traverse agents"
+    );
+}
+
+/// A structurally invalid later agent record prevents replay of every earlier
+/// message fact from that agent journal.
+#[test]
+fn invalid_later_agent_record_prevents_partial_message_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    h.agent_store
+        .record_agent_meta("agent-1")
+        .expect("reserve agent");
+    h.store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                ephemeral: false,
+            }),
+        )
+        .expect("load agent in session");
+    h.agent_store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                key: "cached-key".into(),
+                value: CborValue::Text("cached-value".to_owned()),
+                mutation_id: None,
+                inheritable: true,
+            }),
+        )
+        .expect("cache agent metadata");
+    let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessageAgentTarget::new("agent-1"),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+        },
+        None,
+        "hello",
+    ));
+    h.commit_message_fact(Some("bridge-connection"), fact);
+    append_persisted_record(
+        &state_dir.join("agents").join("agent-1").join("events.cbor"),
+        &tau_core::PersistedAgentEvent {
+            seq: tau_core::PersistedAgentEventSeq::new(2),
+            source: None,
+            event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::new("configured-bridge"),
+                tau_proto::MessageAgentTarget::new("agent-2"),
+                tau_proto::MessageFactId::new("m2"),
+                tau_proto::MessageParty {
+                    stable_id: "sender-1".to_owned(),
+                    display_name: None,
+                },
+                None,
+                "bad owner",
+            )),
+            parent: tau_core::AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+    let sink = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
+
+    h.handle_client_event(
+        "late-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe replay");
+
+    assert!(message_deliveries(&sink, true).is_empty());
+    assert!(
+        sink.lock()
+            .expect("replay sink")
+            .iter()
+            .all(|frame| !matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::AgentMetadataSet(_))
+            )),
+        "invalid agent journal must not expose cached metadata"
+    );
+}
+
 /// Ensures every late subscriber receives a byte-free durable-result
 /// projection, with UI clients additionally receiving the generic `tool.result`
 /// event shape.

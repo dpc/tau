@@ -4,8 +4,9 @@
 //! agents use the same in-memory [`AgentTree`] and replay event records, but
 //! those records live only inside the currently running store. Writers go
 //! through [`AgentStore::append_agent_event`], which applies each accepted
-//! event to the cached tree after either writing it to disk or retaining it in
-//! memory.
+//! transcript event to the cached tree after persistence. Raw message facts use
+//! [`AgentStore::append_agent_message_fact_at`] so their canonical append
+//! precedes and cannot be vetoed by post-commit projection.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -17,7 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{AgentId, AgentIdParseError, ConnectionId, Event, NodeId, UnixMicros};
+use tau_proto::{
+    AgentId, AgentIdParseError, ConnectionId, Event, EventName, MessageAgentTarget, NodeId,
+    UnixMicros,
+};
 
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
@@ -71,6 +75,18 @@ pub enum AgentStoreError {
     },
     InvalidEvent {
         source: AgentEventValidationError,
+    },
+    /// A caller attempted raw append for an event outside the message category.
+    UnsupportedRawEvent {
+        /// Event name rejected by the raw message-fact append API.
+        event_name: EventName,
+    },
+    /// A raw message fact claimed a target other than its selected journal.
+    MessageFactTargetMismatch {
+        /// Agent journal selected by the append caller.
+        journal_agent_id: AgentId,
+        /// Raw target carried by the fact, if the category supplied one.
+        claimed_agent_id: Option<MessageAgentTarget>,
     },
     InvalidSequence {
         path: PathBuf,
@@ -142,6 +158,19 @@ impl fmt::Display for AgentStoreError {
                 write!(f, "invalid agent id `{agent_id}`: {source}")
             }
             Self::InvalidEvent { source } => write!(f, "invalid agent event: {source}"),
+            Self::UnsupportedRawEvent { event_name } => {
+                write!(f, "raw append only accepts message facts, got {event_name}")
+            }
+            Self::MessageFactTargetMismatch {
+                journal_agent_id,
+                claimed_agent_id,
+            } => write!(
+                f,
+                "message fact target `{}` does not match agent journal `{journal_agent_id}`",
+                claimed_agent_id
+                    .as_ref()
+                    .map_or("<missing>", MessageAgentTarget::as_str)
+            ),
             Self::InvalidSequence {
                 path,
                 expected,
@@ -175,7 +204,9 @@ impl Error for AgentStoreError {
             | Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
-            | Self::PersistenceConflict { .. } => None,
+            | Self::PersistenceConflict { .. }
+            | Self::UnsupportedRawEvent { .. }
+            | Self::MessageFactTargetMismatch { .. } => None,
         }
     }
 }
@@ -564,6 +595,77 @@ impl AgentStore {
         })
     }
 
+    /// Append one message fact before any semantic projection consumes it.
+    ///
+    /// Unlike [`Self::append_agent_event_at`], this path deliberately performs
+    /// no [`AgentTree`] semantic validation or fold. The exact fact becomes the
+    /// canonical record first; a post-commit consumer may derive transcript
+    /// state later but cannot veto or replace the appended record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentStoreError`] when `event` is not a `message.*` fact, the
+    /// target agent id is invalid, the fact's target differs from the selected
+    /// journal owner, or the selected durable or memory-only stream cannot
+    /// append the record.
+    pub fn append_agent_message_fact_at(
+        &mut self,
+        agent_id: &str,
+        source: Option<ConnectionId>,
+        event: Event,
+        recorded_at: UnixMicros,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        if event.name().category() != &tau_proto::EventCategory::Message {
+            return Err(AgentStoreError::UnsupportedRawEvent {
+                event_name: event.name(),
+            });
+        }
+        let aid = parse_agent_id_for_store(agent_id)?;
+        let claimed_agent_id = event.message_agent_target().cloned();
+        if claimed_agent_id.as_ref().map(MessageAgentTarget::as_str) != Some(aid.as_str()) {
+            return Err(AgentStoreError::MessageFactTargetMismatch {
+                journal_agent_id: aid,
+                claimed_agent_id,
+            });
+        }
+        let persistence = self.agent_persistence(agent_id);
+        if persistence.is_durable() {
+            self.ensure_locked(agent_id)?;
+        }
+        self.load_agent_if_needed(agent_id)?;
+        let agent_dir = self.agent_dir(agent_id);
+        if persistence.is_durable() {
+            fs::create_dir_all(&agent_dir).map_err(|source| {
+                AgentStoreError::CreateParentDirectory {
+                    path: agent_dir.clone(),
+                    source,
+                }
+            })?;
+        }
+        let tree = self
+            .agents
+            .entry(aid.clone())
+            .or_insert_with(|| AgentTree::from_events(aid.clone(), &[]));
+        let seq = tree.next_event_seq();
+        let record = PersistedAgentEvent {
+            seq,
+            source,
+            event,
+            parent: AgentEventParent::InheritHead,
+            recorded_at,
+        };
+        if persistence.is_durable() {
+            append_cbor_record(&agent_dir.join("events.cbor"), &record)?;
+        } else {
+            self.ephemeral_events.entry(aid).or_default().push(record);
+        }
+        tree.advance_next_event_seq();
+        Ok(AgentAppendOutcome {
+            seq,
+            folded_node_id: None,
+        })
+    }
+
     /// Validates one prospective event against the currently retained agent
     /// transcript without appending or folding it.
     ///
@@ -618,14 +720,20 @@ impl AgentStore {
                 source,
             })?;
         if self.ephemeral_agents.contains(&parsed_agent_id) {
-            return Ok(self
+            let events = self
                 .ephemeral_events
                 .get(&parsed_agent_id)
                 .cloned()
-                .unwrap_or_default());
+                .unwrap_or_default();
+            AgentTree::try_from_events(parsed_agent_id, &events)
+                .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+            return Ok(events);
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("events.cbor");
-        load_agent_events(&path)
+        let events = load_agent_events(&path)?;
+        AgentTree::try_from_events(parsed_agent_id, &events)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        Ok(events)
     }
 
     /// Returns the per-agent storage root this store is rooted at

@@ -75,15 +75,37 @@ pub(crate) struct PendingIntercept {
     pub(crate) cursor: InterceptorCursor,
 }
 
-/// A publish that arrived while another publish was in interception
-/// limbo. Replayed through the normal entry point once the in-flight
-/// interception resolves.
-pub(crate) struct DeferredPublish {
-    pub(crate) source: Option<String>,
-    pub(crate) event: Event,
-    pub(crate) transient: bool,
-    pub(crate) must_pass: bool,
-    pub(crate) sync_head_for: Option<ConversationHeadSync>,
+/// A publish that arrived while another publish was in interception limbo.
+pub(crate) enum DeferredPublish {
+    /// Ordinary publish that resumes at the start of its interception chain.
+    Interceptable {
+        /// Original source connection id for persistence and delivery.
+        source: Option<String>,
+        /// Event waiting behind the currently intercepted publish.
+        event: Event,
+        /// Whether ordinary semantic persistence should be skipped.
+        transient: bool,
+        /// Whether an interceptor drop must preserve the original event.
+        must_pass: bool,
+        /// Conversation cursor synchronized after an ordinary transcript fold.
+        sync_head_for: Option<ConversationHeadSync>,
+    },
+    /// Canonical message fact that bypasses interception after the FIFO wait.
+    MessageFact {
+        /// Authenticated extension source connection.
+        source: String,
+        /// Stamped fact awaiting raw append.
+        event: Event,
+    },
+}
+
+impl DeferredPublish {
+    /// Borrow the event independent of its eventual commit path.
+    fn event(&self) -> &Event {
+        match self {
+            Self::Interceptable { event, .. } | Self::MessageFact { event, .. } => event,
+        }
+    }
 }
 
 /// Carried on a publish so that, once the event commits and the
@@ -457,7 +479,7 @@ impl Harness {
         }
         self.deferred_publishes.retain(|deferred| {
             !matches!(
-                &deferred.event,
+                deferred.event(),
                 Event::AgentMessageReceived(received)
                     if canceled.contains(&received.message_id)
             )
@@ -684,13 +706,14 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
     ) {
         if self.pending_intercept.is_some() {
-            self.deferred_publishes.push_back(DeferredPublish {
-                source: source.map(str::to_owned),
-                event,
-                transient,
-                must_pass,
-                sync_head_for,
-            });
+            self.deferred_publishes
+                .push_back(DeferredPublish::Interceptable {
+                    source: source.map(str::to_owned),
+                    event,
+                    transient,
+                    must_pass,
+                    sync_head_for,
+                });
             return;
         }
         self.dispatch_publish_step(
@@ -958,14 +981,25 @@ impl Harness {
             let Some(deferred) = self.deferred_publishes.pop_front() else {
                 break;
             };
-            self.dispatch_publish_step(
-                deferred.source,
-                deferred.event,
-                deferred.transient,
-                deferred.must_pass,
-                deferred.sync_head_for,
-                None,
-            );
+            match deferred {
+                DeferredPublish::MessageFact { source, event } => {
+                    self.commit_message_fact(Some(&source), event);
+                }
+                DeferredPublish::Interceptable {
+                    source,
+                    event,
+                    transient,
+                    must_pass,
+                    sync_head_for,
+                } => self.dispatch_publish_step(
+                    source,
+                    event,
+                    transient,
+                    must_pass,
+                    sync_head_for,
+                    None,
+                ),
+            }
         }
     }
 
