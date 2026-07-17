@@ -83,9 +83,17 @@ unpersistable canonical state rejects intake rather than falling back to a new
 occurrence. A committed result activates at most one exact current
 connection/session-generation/capability-epoch waiter. Re-check these invariants,
 the focused locator state-machine tests, and the cold-reopen/waiter regressions
-whenever agent retention, journal format, session rollover, capability
-revocation, or locator storage changes. Subprocess power-loss testing remains a
-future hardening layer rather than a current release claim.
+whenever agent retention, journal wrapper/event schema, session rollover,
+capability revocation, or locator storage changes. Locator rebuild may skip only
+a uniformly legacy journal carrying pre-sequence `id` markers because typed
+incoming envelopes postdate per-agent `seq` records. Mixed, malformed, or
+duplicate markers, bad explicit sequences or event discriminators, and malformed
+selected incoming records remain fail-closed. Reassess this chronology and
+selective-decode boundary whenever the journal wrapper or event schema changes;
+the authority contract is recorded in
+[`DESIGN-canonical-transport-ingress`](specs/DESIGN-canonical-transport-ingress.md).
+Subprocess power-loss testing remains a future hardening layer rather than a
+current release claim.
 The separately authorized, default-off Slack reaction tool accepts only commit-accepted opaque exact-message refs, requires current route and role authority, and permits removal only of same-agent runtime-owned reactions. It adds `reactions:write` without reaction listing; reactions are externally visible and can trigger notifications or workflows.
 
 The separately authorized Slack discovery tool reveals all static model-facing

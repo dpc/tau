@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{AgentId, AgentIdParseError, ConnectionId, Event, NodeId, UnixMicros};
+use tau_proto::{AgentId, AgentIdParseError, ConnectionId, Event, EventName, NodeId, UnixMicros};
 
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
@@ -77,6 +77,11 @@ pub enum AgentStoreError {
         expected: PersistedAgentEventSeq,
         actual: PersistedAgentEventSeq,
     },
+    /// One journal has malformed or inconsistent retained-history markers.
+    InvalidRetainedEncoding {
+        /// Agent event-log path containing the invalid record.
+        path: PathBuf,
+    },
     /// Requested memory-only storage for an id already reserved on disk.
     PersistenceConflict {
         agent_id: AgentId,
@@ -85,26 +90,7 @@ pub enum AgentStoreError {
 }
 
 #[cfg(test)]
-mod record_limit_tests {
-    use super::*;
-
-    /// Ensures the writer rejects a record length that the matching loader
-    /// would reject, before opening or mutating the journal.
-    #[test]
-    fn write_record_limit_matches_read_limit() {
-        let error =
-            validate_record_length(Path::new("/not/opened/events.cbor"), MAX_RECORD_BYTES + 1)
-                .expect_err("oversized record must be rejected");
-        assert!(matches!(
-            error,
-            AgentStoreError::RecordTooLarge {
-                record_length,
-                maximum: MAX_RECORD_BYTES,
-                ..
-            } if record_length == MAX_RECORD_BYTES + 1
-        ));
-    }
-}
+mod tests;
 
 impl fmt::Display for AgentStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -170,6 +156,11 @@ impl fmt::Display for AgentStoreError {
                 "invalid agent event sequence in {}: expected {expected}, got {actual}",
                 path.display()
             ),
+            Self::InvalidRetainedEncoding { path } => write!(
+                f,
+                "agent event journal has invalid retained-history encoding: {}",
+                path.display()
+            ),
             Self::PersistenceConflict { agent_id, path } => write!(
                 f,
                 "cannot mark agent `{agent_id}` ephemeral because durable state already exists at {}",
@@ -194,9 +185,30 @@ impl Error for AgentStoreError {
             | Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
+            | Self::InvalidRetainedEncoding { .. }
             | Self::PersistenceConflict { .. } => None,
         }
     }
+}
+
+/// Top-level durable record encoding relevant to transport-history scans.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RetainedJournalEncoding {
+    /// Record carries the historical global `id` written before agent
+    /// sequences.
+    Legacy,
+    /// Record carries the current per-agent `seq`.
+    Sequenced,
+}
+
+/// Presence and validity of one top-level retained-history marker.
+enum RetainedMarker {
+    /// The map has no field with this name.
+    Absent,
+    /// The map has exactly one field containing a valid non-negative integer.
+    Valid(u64),
+    /// The field is duplicated or has the wrong CBOR type/range.
+    Invalid,
 }
 
 /// Persistence policy for one agent transcript.
@@ -664,15 +676,35 @@ impl AgentStore {
         load_agent_events(&path)
     }
 
-    /// Streams one retained agent journal while excluding concurrent record
-    /// appends from other harness processes. The visitor returns `true` to
-    /// continue or `false` to stop successfully; sequence validation then
-    /// covers the visited prefix only, not the intentionally unscanned
-    /// suffix.
-    pub fn visit_retained_agent_events(
+    /// Streams typed transport-ingress events from one retained agent journal
+    /// while excluding concurrent record appends from other harness processes.
+    ///
+    /// The scan reads top-level record and event-name markers without decoding
+    /// unrelated event payloads whose historical schemas may no longer be
+    /// current. Uniform records carrying the legacy `id` marker are skipped
+    /// because typed transport ingress was introduced only after per-agent
+    /// `seq` metadata. Sequenced records validate their explicit file-order
+    /// sequence, and only `agent.message_incoming` records undergo full
+    /// semantic decode. Mixed, unmarked, or malformed structural records
+    /// fail closed. Ordinary agent replay remains strict and does not gain
+    /// this compatibility path.
+    ///
+    /// The visitor runs while the shared append-exclusion lock is held and
+    /// should not block or attempt a reentrant write to this journal. Its
+    /// observations are provisional until this method returns `Ok(())`: an
+    /// error in a later record invalidates the scan. Returning `false` stops
+    /// successfully, but validates only the visited prefix rather than the
+    /// intentionally unscanned suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`AgentStoreError`] when the journal cannot be opened,
+    /// locked, framed, structurally validated, sequence-validated, or when a
+    /// selected transport-ingress record cannot be decoded.
+    pub fn visit_retained_transport_ingress_events(
         &self,
         agent_id: &AgentId,
-        mut visitor: impl FnMut(PersistedAgentEvent) -> bool,
+        mut visitor: impl FnMut(tau_proto::AgentMessageIncoming) -> bool,
     ) -> Result<(), AgentStoreError> {
         let agent_dir = self.agent_dir(agent_id.as_str());
         let lock_path = agent_dir.join("events.scan.lock");
@@ -691,17 +723,61 @@ impl AgentStore {
             source,
         })?;
         let path = agent_dir.join("events.cbor");
-        let mut expected = 0_u64;
-        let mut invalid = None;
-        read_cbor_records(&path, |record: PersistedAgentEvent| {
-            let expected_seq = PersistedAgentEventSeq::new(expected);
-            if invalid.is_none() && record.seq != expected_seq {
-                invalid = Some((expected_seq, record.seq));
+        let mut journal_encoding = None;
+        let mut expected = PersistedAgentEventSeq::new(0);
+        let mut invalid_sequence = None;
+        let mut invalid_encoding = false;
+        let mut record_error = None;
+        read_cbor_records(&path, |record: tau_proto::CborValue| {
+            let Some(encoding) = retained_journal_encoding(&record) else {
+                invalid_encoding = true;
+                return false;
+            };
+            if journal_encoding.is_some_and(|candidate| candidate != encoding) {
+                invalid_encoding = true;
+                return false;
             }
-            expected = expected.saturating_add(1);
-            visitor(record)
+            journal_encoding.get_or_insert(encoding);
+            match encoding {
+                RetainedJournalEncoding::Legacy => true,
+                RetainedJournalEncoding::Sequenced => {
+                    let Some(actual) = retained_sequence(&record) else {
+                        invalid_encoding = true;
+                        return false;
+                    };
+                    if invalid_sequence.is_none() && actual != expected {
+                        invalid_sequence = Some((expected, actual));
+                    }
+                    expected = PersistedAgentEventSeq::new(expected.get().saturating_add(1));
+                    let Some(event_name) = retained_event_name(&record) else {
+                        invalid_encoding = true;
+                        return false;
+                    };
+                    if event_name != EventName::AGENT_MESSAGE_INCOMING {
+                        return true;
+                    }
+                    let persisted = match decode_retained_agent_event(&path, &record) {
+                        Ok(persisted) => persisted,
+                        Err(error) => {
+                            record_error = Some(error);
+                            return false;
+                        }
+                    };
+                    let Event::AgentMessageIncoming(message) = persisted.event else {
+                        invalid_encoding = true;
+                        return false;
+                    };
+                    visitor(message)
+                }
+            }
         })?;
-        if let Some((expected, actual)) = invalid {
+        if let Some(error) = record_error {
+            return Err(error);
+        }
+        if invalid_encoding {
+            return Err(AgentStoreError::InvalidRetainedEncoding { path });
+        }
+        if let Some((expected, actual)) = invalid_sequence {
             return Err(AgentStoreError::InvalidSequence {
                 path,
                 expected,
@@ -1077,6 +1153,93 @@ fn validate_record_length(path: &Path, record_length: u64) -> Result<(), AgentSt
     } else {
         Ok(())
     }
+}
+
+/// Classifies one durable record from top-level compatibility markers.
+///
+/// Requiring exactly one marker prevents a damaged or hand-edited current
+/// record from being mistaken for safely pre-transport legacy history.
+fn retained_journal_encoding(record: &tau_proto::CborValue) -> Option<RetainedJournalEncoding> {
+    match (cbor_u64_field(record, "id"), cbor_u64_field(record, "seq")) {
+        (RetainedMarker::Valid(_), RetainedMarker::Absent) => Some(RetainedJournalEncoding::Legacy),
+        (RetainedMarker::Absent, RetainedMarker::Valid(_)) => {
+            Some(RetainedJournalEncoding::Sequenced)
+        }
+        _ => None,
+    }
+}
+
+/// Distinguishes an absent marker from malformed or duplicate marker fields.
+fn cbor_u64_field(record: &tau_proto::CborValue, name: &str) -> RetainedMarker {
+    let tau_proto::CborValue::Map(fields) = record else {
+        return RetainedMarker::Invalid;
+    };
+    let mut matches = fields.iter().filter_map(|(key, value)| {
+        matches!(key, tau_proto::CborValue::Text(key) if key == name).then_some(value)
+    });
+    let Some(field) = matches.next() else {
+        return RetainedMarker::Absent;
+    };
+    if matches.next().is_some() {
+        return RetainedMarker::Invalid;
+    }
+    cbor_u64(field).map_or(RetainedMarker::Invalid, RetainedMarker::Valid)
+}
+
+/// Reads one uniquely named CBOR map field.
+fn cbor_map_field<'a>(
+    value: &'a tau_proto::CborValue,
+    name: &str,
+) -> Option<&'a tau_proto::CborValue> {
+    let tau_proto::CborValue::Map(fields) = value else {
+        return None;
+    };
+    let mut matches = fields.iter().filter_map(|(key, value)| {
+        matches!(key, tau_proto::CborValue::Text(key) if key == name).then_some(value)
+    });
+    let field = matches.next()?;
+    matches.next().is_none().then_some(field)
+}
+
+/// Reads one non-negative bounded CBOR integer as `u64`.
+fn cbor_u64(value: &tau_proto::CborValue) -> Option<u64> {
+    let tau_proto::CborValue::Integer(value) = value else {
+        return None;
+    };
+    u64::try_from(*value).ok()
+}
+
+/// Reads the explicit sequence marker from one current durable record.
+fn retained_sequence(record: &tau_proto::CborValue) -> Option<PersistedAgentEventSeq> {
+    match cbor_u64_field(record, "seq") {
+        RetainedMarker::Valid(sequence) => Some(PersistedAgentEventSeq::new(sequence)),
+        RetainedMarker::Absent | RetainedMarker::Invalid => None,
+    }
+}
+
+/// Reads one typed event's wire discriminator without decoding its payload.
+fn retained_event_name(record: &tau_proto::CborValue) -> Option<EventName> {
+    let event = cbor_map_field(record, "event")?;
+    let tau_proto::CborValue::Text(name) = cbor_map_field(event, "event")? else {
+        return None;
+    };
+    name.parse().ok()
+}
+
+/// Fully decodes a raw retained record selected as typed transport ingress.
+fn decode_retained_agent_event(
+    path: &Path,
+    record: &tau_proto::CborValue,
+) -> Result<PersistedAgentEvent, AgentStoreError> {
+    let bytes =
+        tau_proto::encode_message_to_vec(record).map_err(|source| AgentStoreError::Encode {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tau_proto::decode_message_from_slice(&bytes).map_err(|source| AgentStoreError::Decode {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn load_agent_events(path: &Path) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {

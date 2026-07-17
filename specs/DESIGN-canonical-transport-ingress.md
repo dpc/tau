@@ -1,6 +1,6 @@
 # DESIGN-canonical-transport-ingress: Canonical transport ingress authority
 
-Status: confirmed, 2026-07-15, dpc
+Status: unconfirmed
 
 The harness owns transport-ingress deduplication across all retained durable
 agent history. Its scope is authenticated extension instance, transport family,
@@ -22,8 +22,14 @@ serialize a transaction lock from prospective count/byte reservation and a
 parent-fsynced dirty marker through journal publication, locator append/head
 commit, and marker removal. Ambiguous journal failure retains dirty state.
 Missing, dirty, corrupt, or older locator state rebuilds once from every retained
-journal; failures latch for the process. Runtime acceleration may evict committed
-entries, but the global locator does not. Unreadable canonical history, ambiguous
+journal; failures latch for the process. Uniform agent journals from before
+per-journal durable sequences carry a historical `id` marker and are
+structurally validated but skipped because they predate typed transport
+ingress. This compatibility does not make them resumable agent transcripts;
+sequenced history decodes only event discriminators plus typed incoming records.
+Mixed or unmarked encodings, invalid explicit sequences, and unreadable incoming
+records still fail closed. Runtime acceleration may evict committed entries, but
+the global locator does not. Unreadable canonical history, ambiguous
 ownership, a pruned referenced envelope, locator persistence failure, concurrent
 reservation pressure, or prospective count/byte capacity fails closed. Retention,
 import, or pruning must take the same transaction lock and rebuild atomically.
@@ -48,4 +54,8 @@ This decision refines
 [ARCH-external-message-boundary](ARCH-external-message-boundary.md) and is
 implemented by
 [ARCH-tau-harness](../crates/tau-harness/specs/ARCH-tau-harness.md) and
-[ARCH-tau-proto](../crates/tau-proto/specs/ARCH-tau-proto.md).
+[ARCH-tau-proto](../crates/tau-proto/specs/ARCH-tau-proto.md). Structural journal
+compatibility and its raw-CBOR tests are owned by
+[DESIGN-tau-core-semantic-store-durability](../crates/tau-core/specs/DESIGN-tau-core-semantic-store-durability.md);
+multi-journal rebuild and dedup ownership tests are owned by
+[DESIGN-tau-harness-lifecycle-testing](../crates/tau-harness/specs/DESIGN-tau-harness-lifecycle-testing.md).

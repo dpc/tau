@@ -34,7 +34,12 @@ Deduplication precedes publication. A harness-owned, non-evicting global locator
 under the agents root covers every retained durable agent journal, not merely
 loaded trees or the requested target. A missing, dirty, corrupt, or old locator
 is rebuilt once from typed incoming transcript entries; subsequent misses are
-indexed. A checksummed append-only log and atomic head avoid full-index rewrites.
+indexed. Rebuild structurally validates and skips uniform journals carrying the
+legacy `id` marker because they predate typed transport ingress; this prevents
+unrelated historical event-schema drift from globally disabling intake. Mixed
+or unmarked encodings, invalid explicit sequences, malformed event
+discriminators, and unreadable typed incoming records still fail closed. A
+checksummed append-only log and atomic head avoid full-index rewrites.
 An agents-root process lock serializes harness daemons. A parent-fsynced dirty
 marker precedes incoming publication, remains after ambiguous journal failure,
 and clears only after locator append/head commit, so a crash window forces a

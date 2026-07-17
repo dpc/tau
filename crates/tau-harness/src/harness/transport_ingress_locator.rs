@@ -28,7 +28,7 @@ use disk::*;
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tau_core::AgentStore;
-use tau_proto::{AgentId, Event, MessageEndpoint};
+use tau_proto::{AgentId, MessageEndpoint};
 
 use super::{TransportDedupKey, TransportDedupRecord};
 
@@ -293,10 +293,7 @@ impl TransportIngressLocator {
         let mut found = HashSet::new();
         let mut scan_failure = None;
         store
-            .visit_retained_agent_events(agent_id, |persisted| {
-                let Event::AgentMessageIncoming(message) = persisted.event else {
-                    return true;
-                };
+            .visit_retained_transport_ingress_events(agent_id, |message| {
                 let Some((key, record)) = entry_from_message(message) else {
                     scan_failure = Some(LocatorFailure::Unavailable);
                     return false;
@@ -382,10 +379,7 @@ impl TransportIngressLocator {
         {
             let mut scan_failure = false;
             store
-                .visit_retained_agent_events(&agent_id, |persisted| {
-                    let Event::AgentMessageIncoming(message) = persisted.event else {
-                        return true;
-                    };
+                .visit_retained_transport_ingress_events(&agent_id, |message| {
                     let Some((key, record)) = entry_from_message(message) else {
                         scan_failure = true;
                         return false;
