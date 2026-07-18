@@ -2,12 +2,6 @@
 
 Authority: confirmed, 2026-07-18, dpc
 
-## Status
-
-The implementation is not yet fully aligned: some internal format-version
-fields are nonzero, and some internal formats retain compatibility or migration
-paths.
-
 ## Decision
 
 Tau provides no backward-compatibility support or migrations for its internal

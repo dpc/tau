@@ -1,10 +1,10 @@
-version: 1
-redaction_version: 1
+version: 0
+redaction_version: 0
 cassettes:
 - key: curated-success-http-sse
   provider: chatgpt
   cassette_schema: provider-stream
-  cassette_version: 1
+  cassette_version: 0
   surface: responses
   transport: http-sse
   source: synthetic
@@ -14,7 +14,7 @@ cassettes:
 - key: curated-success-websocket
   provider: chatgpt
   cassette_schema: provider-stream
-  cassette_version: 1
+  cassette_version: 0
   surface: responses
   transport: websocket
   source: synthetic

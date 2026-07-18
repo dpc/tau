@@ -41,7 +41,7 @@ fn load_ignores_history_files_over_size_limit() {
     append_raw_record(
         &path,
         &PromptHistoryRecord {
-            version: 1,
+            version: PROMPT_HISTORY_VERSION,
             recorded_at_micros: 1,
             text: "old".to_owned(),
         },
@@ -135,7 +135,7 @@ fn append_repair_truncates_history_files_over_size_limit() {
     append_raw_record(
         &path,
         &PromptHistoryRecord {
-            version: 1,
+            version: PROMPT_HISTORY_VERSION,
             recorded_at_micros: 1,
             text: "old".to_owned(),
         },
@@ -242,7 +242,7 @@ fn append_after_oversized_tail_keeps_new_entry_reachable() {
 #[test]
 fn prompt_history_record_rejects_unknown_fields() {
     let error = serde_json::from_value::<PromptHistoryRecord>(serde_json::json!({
-        "version": 1,
+        "version": PROMPT_HISTORY_VERSION,
         "recorded_at_micros": 42,
         "text": "prompt",
         "extra": true,

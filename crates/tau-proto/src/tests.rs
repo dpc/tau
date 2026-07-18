@@ -367,9 +367,8 @@ fn tool_call_item_replay_sidecars_are_optional_and_round_trip() {
     assert_eq!(round_trip.responses_envelope, call.responses_envelope);
 }
 
-/// Ensures opaque provider items keep their raw JSON replay sidecar while still
-/// accepting the old transparent CBOR wire shape for persisted records that
-/// predate raw provider-item preservation.
+/// Ensures opaque provider items keep their optional raw JSON replay sidecar
+/// across the current serialized representation.
 #[test]
 fn opaque_provider_item_raw_json_is_optional_and_round_trips() {
     let raw_json = r#"{"type":"compaction","z":1.2300,"a":1e+03}"#;
@@ -382,33 +381,6 @@ fn opaque_provider_item_raw_json_is_optional_and_round_trips() {
     ]);
     let item = OpaqueProviderItem::with_raw_json(value.clone(), raw_json);
 
-    let legacy_item: OpaqueProviderItem =
-        serde_json::from_value(serde_json::to_value(&value).expect("legacy cbor value"))
-            .expect("legacy opaque provider item");
-    assert_eq!(legacy_item.value, value);
-    assert_eq!(legacy_item.raw_json, None);
-
-    let legacy_value_key_map = CborValue::Map(vec![
-        (
-            CborValue::Text("type".to_owned()),
-            CborValue::Text("future_provider_item".to_owned()),
-        ),
-        (
-            CborValue::Text("value".to_owned()),
-            CborValue::Integer(123.into()),
-        ),
-        (
-            CborValue::Text("z".to_owned()),
-            CborValue::Integer(1.into()),
-        ),
-    ]);
-    let legacy_value_key_item: OpaqueProviderItem = serde_json::from_value(
-        serde_json::to_value(&legacy_value_key_map).expect("legacy value-key provider item"),
-    )
-    .expect("legacy opaque provider item with value key");
-    assert_eq!(legacy_value_key_item.value, legacy_value_key_map);
-    assert_eq!(legacy_value_key_item.raw_json, None);
-
     let round_trip: OpaqueProviderItem =
         serde_json::from_value(serde_json::to_value(&item).expect("serialize opaque item"))
             .expect("deserialize opaque item");
@@ -416,7 +388,7 @@ fn opaque_provider_item_raw_json_is_optional_and_round_trips() {
     assert_eq!(round_trip.raw_json.as_deref(), Some(raw_json));
 
     let serialized = serde_json::to_value(&item).expect("serialize opaque item");
-    assert_eq!(serialized["tau_opaque_provider_item_version"], 1);
+    assert_eq!(serialized["tau_opaque_provider_item_version"], 0);
 }
 
 fn action_schema_fixture() -> ActionSchema {
@@ -2183,8 +2155,8 @@ fn bare_event_is_not_a_protocol_item_in_either_direction() {
     assert!(decode_harness_output_from_slice(&bytes).is_err());
 }
 
-/// Ensures v11 requires stable publisher provenance while retaining the
-/// independently optional extension state directory.
+/// Ensures configuration requires stable publisher provenance while retaining
+/// the independently optional extension state directory.
 #[test]
 fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert!(
@@ -2197,7 +2169,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
         "config": null,
         "instance_name": "demo"
     }))
-    .expect("v11 configure decodes");
+    .expect("configure decodes");
 
     assert_eq!(parsed.config, CborValue::Null);
     assert_eq!(parsed.instance_name.as_str(), "demo");
@@ -2299,7 +2271,7 @@ fn event_wire_form_uses_dotted_event_tag() {
 }
 
 /// Internal extension prompt requests are a narrow control request, not a
-/// durable transcript fact. This locks in the v12 wire name and field set.
+/// durable transcript fact. This locks in the current wire name and field set.
 #[test]
 fn extension_internal_prompt_submit_request_wire_form() {
     let event = Event::ExtInternalPromptSubmitRequest(ExtInternalPromptSubmitRequest {
@@ -2318,19 +2290,19 @@ fn extension_internal_prompt_submit_request_wire_form() {
     );
 }
 
-/// Protocol v12 must not retain a decoder for the removed extension
-/// user-message prompt request.
+/// The removed extension user-message prompt request must not be a protocol
+/// event.
 #[test]
-fn legacy_extension_prompt_submit_request_has_no_v12_decoder() {
-    let legacy = serde_json::json!({
+fn removed_extension_prompt_submit_request_has_no_decoder() {
+    let removed = serde_json::json!({
         "event": "extension.prompt_submit_request",
         "payload": {
             "agent_id": "agent-1",
-            "text": "legacy user message",
+            "text": "removed user message",
             "message_class": "user"
         }
     });
-    assert!(serde_json::from_value::<Event>(legacy).is_err());
+    assert!(serde_json::from_value::<Event>(removed).is_err());
 }
 
 /// Ensures model ids split only on the first slash so provider model names may

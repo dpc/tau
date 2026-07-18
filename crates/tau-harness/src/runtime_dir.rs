@@ -26,6 +26,8 @@ const SESSION_DISCOVERY_MAX_PROBES: usize = 8;
 const SESSION_DISCOVERY_MAX_CALLS: usize = 8;
 const SESSION_DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const SESSION_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
+// Keep at zero per `DECISION-no-backward-compatibility`.
+const DAEMON_METADATA_VERSION: u32 = 0;
 
 /// Maximum number of sessions returned by one discovery request.
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
@@ -372,7 +374,7 @@ pub(crate) fn discover_peer_sessions(
             .into_iter()
             .filter_map(|path| {
                 let metadata = read_metadata_bounded(&path, deadline, &scan_cancelled)?;
-                (metadata.version >= 2 && metadata.peer_entrypoint).then_some((path, metadata))
+                metadata.peer_entrypoint.then_some((path, metadata))
             })
             .collect::<Vec<_>>();
         drop(_permit);
@@ -659,7 +661,7 @@ pub fn prepare_harness_paths(
     Ok(HarnessPaths {
         path,
         metadata: DaemonMetadata {
-            version: 2,
+            version: DAEMON_METADATA_VERSION,
             pid,
             project_root: Some(project_root.to_path_buf()),
             session_id: session_id.to_owned(),
@@ -1278,7 +1280,7 @@ mod tests {
         std::fs::write(
             metadata_path(path),
             serde_json::to_vec(&DaemonMetadata {
-                version: 2,
+                version: DAEMON_METADATA_VERSION,
                 pid: std::process::id(),
                 project_root: Some(project_root.to_path_buf()),
                 session_id: session_id.to_owned(),
@@ -1513,7 +1515,7 @@ mod tests {
         std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
         let path = harnesses_dir().join("metadata-boundary");
         let base = serde_json::to_vec(&DaemonMetadata {
-            version: 2,
+            version: DAEMON_METADATA_VERSION,
             pid: std::process::id(),
             project_root: None,
             session_id: "boundary".to_owned(),
@@ -2050,7 +2052,7 @@ mod tests {
             std::fs::write(
                 metadata_path(path),
                 serde_json::to_vec(&DaemonMetadata {
-                    version: 1,
+                    version: DAEMON_METADATA_VERSION,
                     pid: std::process::id(),
                     project_root: None,
                     session_id: "same-session".to_owned(),
@@ -2089,7 +2091,7 @@ mod tests {
             std::fs::write(
                 metadata_path(&path),
                 serde_json::to_vec(&DaemonMetadata {
-                    version: 2,
+                    version: DAEMON_METADATA_VERSION,
                     pid: std::process::id(),
                     project_root: None,
                     session_id: "bounded-session".to_owned(),
@@ -2125,7 +2127,7 @@ mod tests {
             std::fs::write(
                 metadata_path(path),
                 serde_json::to_vec(&DaemonMetadata {
-                    version: 2,
+                    version: DAEMON_METADATA_VERSION,
                     pid: std::process::id(),
                     project_root: None,
                     session_id: "same-session".to_owned(),
@@ -2198,7 +2200,7 @@ mod tests {
         std::fs::write(
             metadata_path(path),
             serde_json::to_vec(&DaemonMetadata {
-                version: 1,
+                version: DAEMON_METADATA_VERSION,
                 pid,
                 project_root: Some(project_root.to_path_buf()),
                 session_id: session_id.to_owned(),

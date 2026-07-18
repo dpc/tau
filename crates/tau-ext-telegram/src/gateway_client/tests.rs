@@ -49,6 +49,20 @@ fn protocol_version_mismatch_is_rejected() {
     assert!(error.contains("protocol version"), "{error}");
 }
 
+/// Gateway-client responses must include the current protocol version rather
+/// than silently substituting one.
+#[test]
+fn missing_protocol_version_is_rejected() {
+    let error = connect_error_with_response(
+        serde_json::json!({
+            "ok": true,
+            "deliveries": [],
+        })
+        .to_string(),
+    );
+    assert!(error.contains("protocol_version"), "{error}");
+}
+
 /// Gateway `ok:false` responses surface the provided error instead of being
 /// treated as successful lease or delivery acknowledgements.
 #[test]
@@ -65,7 +79,7 @@ fn gateway_error_response_is_rejected() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 3,
+                "protocol_version": 0,
                 "ok": false,
                 "error": "denied",
             })
@@ -104,7 +118,7 @@ fn heartbeat_interval_is_updated_from_response() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 3,
+                "protocol_version": 0,
                 "ok": true,
                 "heartbeat_interval_seconds": 2,
                 "deliveries": [],

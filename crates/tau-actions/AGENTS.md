@@ -2,7 +2,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 ## Crate role
 
-`tau-actions` owns the shared v1 schema for extension-published slash actions
+`tau-actions` owns the shared schema for extension-published slash actions
 and the parser that turns a whitespace-tokenized slash line into a typed action
 invocation.
 

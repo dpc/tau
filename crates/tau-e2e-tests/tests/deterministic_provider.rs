@@ -84,7 +84,7 @@ fn deterministic_bad_config_fails_startup() -> Result<(), Box<dyn std::error::Er
         .expect_err("required provider must reject bad config before Ready");
     let diagnostic = error.to_string();
     assert!(
-        diagnostic.contains("ScenarioV1 version must be 1"),
+        diagnostic.contains("ScenarioV1 version must be 0"),
         "unexpected startup diagnostic: {diagnostic}"
     );
     assert!(fixture.root().join("artifacts/scenario.json").is_file());

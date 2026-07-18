@@ -7,16 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::{SharedStorage, StorageCreateError, file_name};
 
-const LOG_SCHEMA: u32 = 1;
-const CHANGE_SCHEMA: u32 = 1;
+// Persisted schemas stay at zero per `DECISION-no-backward-compatibility`.
+const LOG_SCHEMA: u32 = 0;
+const CHANGE_SCHEMA: u32 = 0;
 const CHANGE_KIND: &str = "calendar_change";
 const CHANGE_APPROVAL_KIND: &str = "calendar-change";
 const MAX_CHANGE_FIELD_CHARS: usize = 512;
 const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTION_LINES: usize = 1000;
 const MAX_ATTENDEES_HARD: usize = 200;
-const GOOGLE_AUTH_SCHEMA: u32 = 1;
-const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 1;
+const GOOGLE_AUTH_SCHEMA: u32 = 0;
+const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 0;
 const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 /// One persisted calendar audit log entry.
@@ -59,7 +60,7 @@ pub(crate) struct CalendarLogEntry {
 }
 
 impl CalendarLogEntry {
-    /// Build a schema-v1 tool audit entry.
+    /// Build a current-format tool audit entry.
     pub(crate) fn tool(command: &str, status: &str) -> Self {
         Self {
             schema: LOG_SCHEMA,
@@ -135,7 +136,7 @@ pub(crate) struct CalendarChangeApproval {
 }
 
 impl CalendarChangeApproval {
-    /// Build a pending schema-v1 calendar change approval.
+    /// Build a pending current-format calendar change approval.
     pub(crate) fn pending(command: &str, account: &str, calendar: &str) -> Self {
         Self {
             schema: CHANGE_SCHEMA,

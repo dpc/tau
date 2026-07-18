@@ -1639,7 +1639,7 @@ fn provider_cassette_recording_rejects_resource_limit_violations() {
 #[test]
 fn provider_cassette_schema_rejects_unknown_fields() {
     let yaml = r#"
-version: 1
+version: 0
 unexpected_private_value: short-secret
 request: {}
 stream:

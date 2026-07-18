@@ -118,9 +118,9 @@ TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
 Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
 `--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The private
 same-UID local socket accepts a one-shot JSON-line
-`{"protocol_version":3,"kind":"status"}` request and returns a status snapshot.
-Gateway and sidecar must be upgraded together: socket protocol v3 replaces
-v2's prefixed-text delivery records with transport-neutral message-fact identity
+`{"protocol_version":0,"kind":"status"}` request and returns a status snapshot.
+Gateway and sidecar must run the same current socket protocol, which uses
+transport-neutral message-fact identity
 fields and original message bodies.
 It also accepts persistent sidecar requests: `hello`, `heartbeat`,
 `register_agent`, `unregister_agent`, `send_message`, and `goodbye`. The gateway

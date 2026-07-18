@@ -20099,7 +20099,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     std::fs::write(
         crate::runtime_dir::metadata_path(&target_path),
         serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 2,
+            version: 0,
             pid: std::process::id(),
             project_root: Some(PathBuf::from("/secret/root/redacted-project")),
             session_id: target.current_session_id.to_string(),
@@ -20122,7 +20122,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     std::fs::write(
         crate::runtime_dir::metadata_path(&private_path),
         serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 2,
+            version: 0,
             pid: std::process::id(),
             project_root: Some(PathBuf::from("/secret/root/private-project")),
             session_id: "private-session".to_owned(),
@@ -20921,7 +20921,7 @@ fn switch_session_updates_runtime_metadata_active_session() {
     std::fs::write(
         crate::runtime_dir::metadata_path(&harness_path),
         serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 1,
+            version: 0,
             pid: std::process::id(),
             project_root: Some(td.path().to_path_buf()),
             session_id: "s1".to_owned(),

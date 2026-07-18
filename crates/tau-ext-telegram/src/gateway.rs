@@ -54,7 +54,9 @@ const OUTBOUND_SEND_RATE_WINDOW: Duration = Duration::from_secs(60);
 const RECENT_UPDATE_LIMIT: usize = 128;
 
 /// Version of the local gateway status socket protocol.
-const SOCKET_PROTOCOL_VERSION: u32 = 3;
+///
+/// This stays at zero under `DECISION-no-backward-compatibility`.
+const SOCKET_PROTOCOL_VERSION: u32 = 0;
 
 /// Maximum bytes read from one local socket request.
 const MAX_SOCKET_REQUEST_BYTES: usize = 8192;
@@ -1599,10 +1601,10 @@ struct GatewayRegistration {
 
 /// Parsed JSON request from a gateway local socket client.
 #[derive(Debug, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct GatewaySocketRequest {
     /// Protocol version expected by the client.
-    protocol_version: Option<u32>,
+    protocol_version: u32,
     /// Request kind such as `status`, `hello`, `heartbeat`,
     /// `register_agent`, `unregister_agent`, `send_message`, or `goodbye`.
     kind: String,
@@ -1616,10 +1618,11 @@ struct GatewaySocketRequest {
     display_name: Option<String>,
 }
 
+#[cfg(test)]
 impl Default for GatewaySocketRequest {
     fn default() -> Self {
         Self {
-            protocol_version: None,
+            protocol_version: SOCKET_PROTOCOL_VERSION,
             kind: "status".to_owned(),
             session_id: None,
             agent_id: None,
@@ -1872,10 +1875,10 @@ fn read_gateway_socket_request(
         .map_err(|error| format!("gateway socket request is not UTF-8: {error}"))?;
     let parsed: GatewaySocketRequest = serde_json::from_str(line)
         .map_err(|error| format!("invalid gateway socket JSON request: {error}"))?;
-    if parsed.protocol_version.unwrap_or(SOCKET_PROTOCOL_VERSION) != SOCKET_PROTOCOL_VERSION {
+    if parsed.protocol_version != SOCKET_PROTOCOL_VERSION {
         return Err(format!(
             "unsupported gateway socket protocol version {}",
-            parsed.protocol_version.unwrap_or_default()
+            parsed.protocol_version
         ));
     }
     Ok(Some(parsed))

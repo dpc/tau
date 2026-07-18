@@ -1390,7 +1390,9 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
             agent_prompt_id: "sp-1".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![
-                ContextItem::Reasoning(serde_json::from_str(&blob).expect("opaque reasoning item")),
+                ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
+                    serde_json::from_str(&blob).expect("opaque reasoning item"),
+                )),
                 assistant_message("here's what I found"),
             ],
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -1438,9 +1440,9 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
         tau_proto::ProviderResponseFinished {
             agent_prompt_id: "sp-1".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            output_items: vec![ContextItem::Reasoning(
+            output_items: vec![ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
                 serde_json::from_str(&blob).expect("opaque reasoning item"),
-            )],
+            ))],
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             error: None,
             failure_kind: None,

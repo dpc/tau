@@ -17,7 +17,8 @@ use super::{
     dirs_overlap, normalize_lock_dirs, paths_overlap,
 };
 
-const FS_REGISTRY_VERSION: u32 = 1;
+// Keep at zero per `DECISION-no-backward-compatibility`.
+const FS_REGISTRY_VERSION: u32 = 0;
 const FS_WAIT_POLL_INITIAL_INTERVAL: Duration = Duration::from_millis(50);
 const FS_WAIT_POLL_MAX_INTERVAL: Duration = Duration::from_secs(1);
 

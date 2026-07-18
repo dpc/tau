@@ -7,7 +7,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// Version of the private gateway socket protocol used by sidecars.
-const SOCKET_PROTOCOL_VERSION: u32 = 3;
+///
+/// This stays at zero under `DECISION-no-backward-compatibility`.
+const SOCKET_PROTOCOL_VERSION: u32 = 0;
 
 /// Maximum bytes accepted from one gateway response line.
 const MAX_GATEWAY_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -258,10 +260,9 @@ struct GatewayWireRequest<'a> {
 }
 
 /// JSON-line response returned by the gateway socket.
-#[derive(Default, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub(crate) struct GatewaySocketResponse {
     /// Local socket protocol version.
-    #[serde(default)]
     protocol_version: u32,
     /// Whether the gateway accepted the request.
     #[serde(default)]

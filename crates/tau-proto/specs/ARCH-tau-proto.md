@@ -14,13 +14,13 @@ contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
-Protocol version 12 requires an extension's first harness response after
+Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
 [DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
 The configured extension instance name is required and supplies the stable
 harness-stamped publisher ID for extension-published `message.*` facts.
-V12 removes the extension user-message prompt request; the only extension prompt
+The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
 with `agent_id`, `text`, and optional `ctx_id`.
 The protocol deliberately provides no generic transport registration, ingress
@@ -35,7 +35,9 @@ representations summarize byte length rather than formatting image bytes.
 
 ## Directional messages and CBOR
 
-Harness input and output messages are directionally typed. Keep request/response envelopes in the correct enum, and preserve existing serde names unless a migration plan updates all producers, consumers, docs, and recorded fixtures.
+Harness input and output messages are directionally typed. Keep request/response
+envelopes in the correct enum. The internal protocol compatibility policy is
+[DECISION-no-backward-compatibility](../../../specs/DECISION-no-backward-compatibility.md).
 
 Message facts keep stable publisher-domain party and conversation identities
 separate from optional mutable display presentation. Provider presentation

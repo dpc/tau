@@ -491,14 +491,14 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
             seen_requests_thread.lock().expect("requests").push(request);
             let response = match index {
                 0 => serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "gateway_generation": "test",
                     "reannounce_required": true,
                     "deliveries": [],
                 }),
                 1 => serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [{
                         "request_id": "telegram-1",
@@ -512,7 +512,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                     }],
                 }),
                 _ => serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 }),
@@ -589,7 +589,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -642,13 +642,13 @@ fn gateway_client_send_failure_does_not_publish_sent_fact() {
             reader.read_line(&mut line).expect("read gateway request");
             let response = if index == 0 {
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 })
             } else {
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": false,
                     "error": "gateway send failed",
                     "keep_connection": true,
@@ -705,7 +705,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -848,7 +848,7 @@ fn gateway_client_config_error_sends_goodbye() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 })
@@ -897,7 +897,7 @@ fn gateway_client_agent_unload_sends_unregister() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 3,
+                    "protocol_version": 0,
                     "ok": true,
                     "deliveries": [],
                 })

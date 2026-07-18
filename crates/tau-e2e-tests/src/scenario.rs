@@ -10,7 +10,7 @@ pub const FAKE_MODEL_ID: &str = "fake/test";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioV1 {
-    /// Schema version. Version one is the only accepted value.
+    /// Schema version, fixed at zero by `DECISION-no-backward-compatibility`.
     pub version: u8,
     /// Stable diagnostic scenario name.
     pub name: String,
@@ -22,7 +22,7 @@ pub struct ScenarioV1 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioV2 {
-    /// Schema version. Must be two.
+    /// Schema version, fixed at zero by `DECISION-no-backward-compatibility`.
     pub version: u8,
     /// Stable diagnostic scenario name.
     pub name: String,
@@ -155,7 +155,7 @@ impl ScenarioV2 {
     #[must_use]
     pub fn new(name: impl Into<String>, lanes: Vec<ScenarioLaneV2>) -> Self {
         Self {
-            version: 2,
+            version: 0,
             name: name.into(),
             lanes,
         }
@@ -206,7 +206,7 @@ impl ScenarioV1 {
             .last()
             .unwrap_or(0);
         Self {
-            version: 1,
+            version: 0,
             name: "text_v1".to_owned(),
             turns: vec![ScenarioTurnV1::Text {
                 user_text: user_text.into(),
@@ -220,7 +220,7 @@ impl ScenarioV1 {
     #[must_use]
     pub fn dummy_tool_round_v1(user_text: impl Into<String>) -> Self {
         Self {
-            version: 1,
+            version: 0,
             name: "dummy_tool_round_v1".to_owned(),
             turns: vec![
                 ScenarioTurnV1::ToolCall {

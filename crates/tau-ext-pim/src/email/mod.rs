@@ -46,8 +46,10 @@ const EMAIL_LOG_TITLE_MAX_CHARS: usize = 80;
 const ACCESS_FULL: &str = "full";
 const ACCESS_PREVIEW: &str = "preview";
 const ACCESS_NONE: &str = "none";
-const GOOGLE_AUTH_SCHEMA: u32 = 1;
-const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 2;
+// Persisted schemas stay at zero per `DECISION-no-backward-compatibility`.
+const STATE_SCHEMA: u32 = 0;
+const GOOGLE_AUTH_SCHEMA: u32 = 0;
+const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 0;
 const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 use tau_proto::{
@@ -1389,7 +1391,10 @@ impl StateStore {
         storage: SharedStorage,
     ) -> Result<Self, String> {
         let store = Self { storage, state_dir };
-        store.write_json("state-v1.json", &serde_json::json!({"schema":1}))?;
+        store.write_json(
+            "state-v0.json",
+            &serde_json::json!({"schema": STATE_SCHEMA}),
+        )?;
         Ok(store)
     }
 
@@ -1512,7 +1517,7 @@ impl StateStore {
             let Ok(entry) = serde_json::from_str::<EmailLogEntry>(&line) else {
                 continue;
             };
-            if entry.schema != 1 {
+            if entry.schema != STATE_SCHEMA {
                 continue;
             }
             entries.push_back(entry);
@@ -1612,7 +1617,7 @@ impl StateStore {
         };
         let file: PolicyFile = serde_json::from_slice(&bytes)
             .map_err(|error| format!("failed to parse {path}: {error}"))?;
-        if file.schema != 1 {
+        if file.schema != STATE_SCHEMA {
             return Err(format!(
                 "unsupported policy schema {} in {path}",
                 file.schema
@@ -1623,7 +1628,7 @@ impl StateStore {
 
     fn save_allow_file(&self, name: &str, records: &[StatePattern]) -> Result<(), String> {
         let file = PolicyFile {
-            schema: 1,
+            schema: STATE_SCHEMA,
             patterns: records.to_vec(),
         };
         self.write_json(&format!("policy/{name}"), &file)
@@ -2020,7 +2025,7 @@ fn validate_incoming_approval(
     expected_status: &str,
     expected_id: Option<&str>,
 ) -> Result<(), String> {
-    if approval.schema != 1 {
+    if approval.schema != STATE_SCHEMA {
         return Err(format!("approval `{}` has unsupported schema", approval.id));
     }
     validate_approval_id(&approval.id)?;
@@ -2082,7 +2087,7 @@ fn validate_outgoing_approval_identity(
     expected_status: &str,
     expected_id: Option<&str>,
 ) -> Result<(), String> {
-    if approval.schema != 1 {
+    if approval.schema != STATE_SCHEMA {
         return Err(format!("approval `{}` has unsupported schema", approval.id));
     }
     validate_approval_id(&approval.id)?;
@@ -2248,7 +2253,7 @@ fn validate_approval_record(
         "outgoing" => "outgoing_send",
         _ => return Err(format!("invalid approval kind `{kind}`")),
     };
-    if record.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
+    if record.get("schema").and_then(serde_json::Value::as_u64) != Some(u64::from(STATE_SCHEMA)) {
         return Err(format!("approval `{id}` has unsupported schema"));
     }
     let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str);
@@ -3418,7 +3423,7 @@ impl<B: EmailBackend> Engine<B> {
             }
         });
         let mut entry = EmailLogEntry {
-            schema: 1,
+            schema: STATE_SCHEMA,
             ts_unix_ms: current_unix_millis(),
             kind: kind.to_owned(),
             command: email_command_name(command).to_owned(),
@@ -3992,7 +3997,7 @@ impl<B: EmailBackend> Engine<B> {
             );
         }
         let approval = IncomingApproval {
-            schema: 1,
+            schema: STATE_SCHEMA,
             id: String::new(),
             kind: "incoming_read".to_owned(),
             status: "pending".to_owned(),
@@ -4257,7 +4262,7 @@ impl<B: EmailBackend> Engine<B> {
         blocked: Vec<String>,
     ) -> CborValue {
         let approval = OutgoingApproval {
-            schema: 1,
+            schema: STATE_SCHEMA,
             id: String::new(),
             kind: "outgoing_send".to_owned(),
             status: "pending".to_owned(),

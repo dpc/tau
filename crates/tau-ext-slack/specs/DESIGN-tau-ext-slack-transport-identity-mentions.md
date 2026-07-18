@@ -22,7 +22,7 @@ compatibility. Remaining eligible occurrences become literal `@slack_bridge` in
 the published text. Bridge-local commands publish no fact. Creates and edits
 classify their own current text; reactions and deletes carry no text.
 
-The generic v11 message-fact schema has no transport-identity-mentioned field.
+The generic message-fact schema has no transport-identity-mentioned field.
 Slack currently does not persist the classifier result in `extension_data`; only
 the normalized text survives publication. The removed envelope attribute and
 its protocol/harness projection tests are not current requirements.

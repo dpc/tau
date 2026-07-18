@@ -43,7 +43,7 @@ pub enum ContentPart {
 /// Opaque provider-owned payload preserved without semantic authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpaqueProviderItem {
-    /// Parsed provider item for semantic inspection and legacy replay.
+    /// Parsed provider item for semantic inspection and replay.
     pub value: CborValue,
     /// Raw provider item JSON used for cache-identity-preserving replay.
     ///
@@ -86,7 +86,8 @@ impl Serialize for OpaqueProviderItem {
         }
 
         Repr {
-            tau_opaque_provider_item_version: 1,
+            // Keep at zero per `DECISION-no-backward-compatibility`.
+            tau_opaque_provider_item_version: 0,
             value: &self.value,
             raw_json: self.raw_json.as_deref(),
         }
@@ -108,26 +109,18 @@ impl<'de> Deserialize<'de> for OpaqueProviderItem {
             raw_json: Option<String>,
         }
 
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Current(Current),
-            Legacy(CborValue),
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Current(Current {
-                tau_opaque_provider_item_version: 1,
+        match Current::deserialize(deserializer)? {
+            Current {
+                tau_opaque_provider_item_version: 0,
                 value,
                 raw_json,
-            }) => Ok(Self { value, raw_json }),
-            Repr::Current(Current {
+            } => Ok(Self { value, raw_json }),
+            Current {
                 tau_opaque_provider_item_version,
                 ..
-            }) => Err(de::Error::custom(format!(
+            } => Err(de::Error::custom(format!(
                 "unsupported opaque provider item version {tau_opaque_provider_item_version}"
             ))),
-            Repr::Legacy(value) => Ok(Self::new(value)),
         }
     }
 }

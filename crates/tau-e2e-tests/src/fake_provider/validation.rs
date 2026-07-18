@@ -3,8 +3,8 @@
 use super::*;
 
 pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
-    if scenario.version != 1 {
-        return Err(ClientError::handler("ScenarioV1 version must be 1"));
+    if scenario.version != 0 {
+        return Err(ClientError::handler("ScenarioV1 version must be 0"));
     }
     if scenario.turns.is_empty() || scenario.turns.len() > MAX_TURNS {
         return Err(ClientError::handler("scenario must contain 1..=8 turns"));
@@ -59,8 +59,8 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
 
 /// Validates the closed version-two lane grammar and its resource bounds.
 pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
-    if scenario.version != 2 {
-        return Err(ClientError::handler("ScenarioV2 version must be 2"));
+    if scenario.version != 0 {
+        return Err(ClientError::handler("ScenarioV2 version must be 0"));
     }
     if scenario.lanes.is_empty() || scenario.lanes.len() > 8 {
         return Err(ClientError::handler("scenario must contain 1..=8 lanes"));

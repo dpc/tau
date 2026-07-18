@@ -13,7 +13,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Current action schema version understood by this crate.
-pub const ACTION_SCHEMA_VERSION: u32 = 1;
+///
+/// This stays at zero under `DECISION-no-backward-compatibility`.
+pub const ACTION_SCHEMA_VERSION: u32 = 0;
 
 /// Maximum UTF-8 byte length accepted for command tokens, argument names,
 /// action identifiers, and static choice values in extension-published schemas.
@@ -43,7 +45,8 @@ pub const MAX_ACTION_TOTAL_TEXT_BYTES: usize = 64 * 1024;
 /// Complete action tree published by one extension instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionSchema {
-    /// Schema version. Version `1` is the initial Tau action schema.
+    /// Schema version, fixed at zero while Tau supports only its current
+    /// format.
     pub version: u32,
     /// Root slash commands, such as `/email`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -70,7 +73,7 @@ impl ActionSchema {
 
     /// Validate this schema.
     ///
-    /// Validation enforces the v1 token grammar, leaf/namespace invariants,
+    /// Validation enforces the token grammar, leaf/namespace invariants,
     /// duplicate detection, per-field byte limits, and aggregate resource
     /// budgets for command nodes, arguments, choices, and schema-controlled
     /// text.

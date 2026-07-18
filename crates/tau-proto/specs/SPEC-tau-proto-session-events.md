@@ -47,9 +47,11 @@ Wire identifiers such as `ToolName` and `ToolGroupName` are validated newtypes. 
 
 `ModelTag` and `ToolTag` are also validated wire identifiers. They are metadata, not policy: providers/extensions publish tags, while the harness interprets them when assembling prompt tool surfaces.
 
-## Compatibility expectations
+## Format changes
 
-Prefer additive optional fields with serde defaults for backward compatibility. Required fields should be intentional and covered by tests when missing data would make downstream UI, harness, or provider behavior ambiguous.
+Internal protocol changes follow
+[DECISION-no-backward-compatibility](../../../specs/DECISION-no-backward-compatibility.md).
+Required and optional fields express only the current protocol semantics.
 
 ## Agent metadata protocol
 
@@ -90,6 +92,5 @@ and carries the harness-runtime-scoped watched-agent turn generation.
 contentful user input. Consumers that store, restore, synchronize, autocomplete,
 or otherwise maintain state from prompt drafts must key that state by both
 `session_id` and `target_agent_id`. A missing `target_agent_id` means an
-unscoped/session-level draft, normally the start-new-agent prompt, and is also
-the compatibility shape for legacy peers; consumers must not infer the current
-agent from absence.
+unscoped/session-level draft, normally the start-new-agent prompt; consumers
+must not infer the current agent from absence.

@@ -29,7 +29,7 @@ fn sender_auth_outcomes_round_trip_with_stable_spellings() {
 }
 
 /// All client constructors emit the required opaque field as CBOR null while
-/// retaining each fact's distinct v11 wire shape.
+/// retaining each fact's distinct current wire shape.
 #[test]
 fn constructors_default_required_extension_data_to_null() {
     let publisher = MessagePublisherId::new("bridge-main");
@@ -421,7 +421,7 @@ fn publisher_id_grammar_is_bounded_ascii() {
 }
 
 /// Representative Telegram and XMPP deliveries fit the universal schema without
-/// transport-specific typed fields, reserving live bridge migration for v12.
+/// transport-specific typed fields.
 #[test]
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [

@@ -48,7 +48,7 @@ final argument and joins the remaining tokens with single spaces.
 
 ## Sensitive argument gap
 
-The v1 schema does not mark arguments as sensitive. Extensions that implement
+The current schema does not mark arguments as sensitive. Extensions that implement
 actions accepting secrets or private authorization material must avoid echoing
 those values in action output, notices, logs, and validation messages until the
 schema grows a first-class sensitive-argument mechanism.

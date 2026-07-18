@@ -21,6 +21,8 @@ const LOCK_FILE: &str = "prompt-history.lock";
 const MAX_HISTORY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = MAX_HISTORY_FILE_BYTES;
 const MAX_PROMPT_HISTORY_ENTRIES: usize = 1000;
+// Keep at zero per `DECISION-no-backward-compatibility`.
+const PROMPT_HISTORY_VERSION: u8 = 0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PromptHistoryStore {
@@ -144,7 +146,7 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<Vec<String>> {
                 continue;
             }
         };
-        if record.version != 1 {
+        if record.version != PROMPT_HISTORY_VERSION {
             tracing::warn!(
                 target: "tau_cli::prompt_history",
                 path = %path.display(),
@@ -186,7 +188,7 @@ fn append_prompt_history_locked_with_limit(
     max_file_bytes: u64,
 ) -> io::Result<()> {
     let record = PromptHistoryRecord {
-        version: 1,
+        version: PROMPT_HISTORY_VERSION,
         recorded_at_micros: UnixMicros::now().get(),
         text: text.to_owned(),
     };

@@ -1861,10 +1861,10 @@ fn empty_extension_set_completes_initial_activation_barrier() {
     h.shutdown().expect("shutdown");
 }
 
-/// Protocol-v11 peers are strictly rejected after the atomic v12 cutover while
-/// preserving required/optional extension availability policy.
+/// Protocol-version mismatches preserve required/optional extension
+/// availability policy.
 #[test]
-fn optional_v11_protocol_is_disabled_but_required_v11_protocol_is_fatal() {
+fn optional_mismatched_protocol_is_disabled_but_required_mismatch_is_fatal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.initial_extension_tool_preflight_complete = false;
@@ -1878,23 +1878,23 @@ fn optional_v11_protocol_is_disabled_but_required_v11_protocol_is_fatal() {
         entry.state = ExtensionState::Spawning;
         entry.require = required;
     }
-    let old_hello = |name: &str| {
+    let mismatched_hello = |name: &str| {
         TestMessage::Hello(tau_proto::Hello {
-            protocol_version: 11,
+            protocol_version: tau_proto::PROTOCOL_VERSION + 1,
             client_name: name.to_owned().into(),
             client_kind: tau_proto::ClientKind::Tool,
         })
     };
 
-    h.handle_extension_message("optional-old", old_hello("optional-old"))
-        .expect("optional old peer is disabled");
+    h.handle_extension_message("optional-old", mismatched_hello("optional-old"))
+        .expect("optional mismatched peer is disabled");
     assert_eq!(
         h.extensions.entries["optional-old"].state,
         ExtensionState::Disconnected
     );
     let error = h
-        .handle_extension_message("required-old", old_hello("required-old"))
-        .expect_err("required old peer is fatal");
+        .handle_extension_message("required-old", mismatched_hello("required-old"))
+        .expect_err("required mismatched peer is fatal");
     assert!(error.to_string().contains("protocol"));
     h.shutdown().expect("shutdown");
 }

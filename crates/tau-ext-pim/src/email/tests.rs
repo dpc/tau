@@ -770,7 +770,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
     };
 
     assert_eq!(progress, 1);
-    assert!(temp.path().join("state/state-v1.json").exists());
+    assert!(temp.path().join("state/state-v0.json").exists());
     match terminal {
         Event::ToolError(error) => {
             assert_eq!(error.call_id.as_str(), "call-1");
@@ -4030,8 +4030,8 @@ fn approval_file_creation_refuses_to_overwrite_existing_ids() {
     let path = state
         .approval_path("outgoing", "pending", "1")
         .expect("path");
-    let first = serde_json::json!({"schema": 1, "id": "1"});
-    let second = serde_json::json!({"schema": 1, "id": "1", "subject": "other"});
+    let first = serde_json::json!({"schema": 0, "id": "1"});
+    let second = serde_json::json!({"schema": 0, "id": "1", "subject": "other"});
 
     state.create_json(&path, &first).expect("first create");
     let second_result = state.create_json(&path, &second);
@@ -4250,14 +4250,14 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755))
         .expect("chmod state");
     let allow_path = state_dir.join("policy").join("incoming-allow.json");
-    std::fs::write(&allow_path, r#"{"schema":1,"patterns":[]}"#).expect("allow");
+    std::fs::write(&allow_path, r#"{"schema":0,"patterns":[]}"#).expect("allow");
     std::fs::set_permissions(&allow_path, std::fs::Permissions::from_mode(0o644))
         .expect("chmod allow");
 
     let state = StateStore::open(state_dir.clone()).expect("state");
 
     assert_eq!(file_mode(&state_dir), 0o700);
-    assert_eq!(file_mode(&state_dir.join("state-v1.json")), 0o600);
+    assert_eq!(file_mode(&state_dir.join("state-v0.json")), 0o600);
 
     state.load_incoming_allow().expect("load allow");
     assert_eq!(file_mode(&state_dir.join("policy")), 0o700);
@@ -4278,7 +4278,7 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     );
 
     let approval = OutgoingApproval {
-        schema: 1,
+        schema: 0,
         id: String::new(),
         kind: "outgoing".to_owned(),
         status: "pending".to_owned(),
@@ -4313,7 +4313,7 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
     state
         .append_email_log(&EmailLogEntry {
-            schema: 1,
+            schema: 0,
             ts_unix_ms: 1,
             kind: "tool".to_owned(),
             command: "send".to_owned(),
@@ -4346,7 +4346,7 @@ fn recent_email_log_hardens_existing_log_file_on_read() {
     std::fs::create_dir_all(temp.path().join("state/logs")).expect("mkdir logs");
     std::fs::write(
         &log_path,
-        br#"{"schema":1,"ts_unix_ms":1,"kind":"tool","command":"send","status":"ok","to":[],"title_redacted":false}
+        br#"{"schema":0,"ts_unix_ms":1,"kind":"tool","command":"send","status":"ok","to":[],"title_redacted":false}
 "#,
     )
     .expect("log");

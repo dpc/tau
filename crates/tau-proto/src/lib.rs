@@ -56,35 +56,9 @@ pub use tool_name_prefix::{
 
 /// Current protocol version implemented by this crate.
 ///
-/// Version 3 removes the old top-level event frame lane. Events sent by peers
-/// must be wrapped in [`HarnessInputMessage::Emit`], and events sent by the
-/// harness are wrapped in [`HarnessOutputMessage::Deliver`].
-///
-/// Version 4 removes the ack lane (`Ack`, delivery `seq`) — the harness never
-/// consumed acknowledgements — and replaces the implicit seq/recorded_at
-/// replay encoding with an explicit [`EventDelivery::replay`] marker.
-/// Subscribe-time catch-up is uniform across UI clients and extensions.
-///
-/// Version 5 adds `quota_exceeded` for extension data RPC failures.
-///
-/// Version 6 wraps opaque provider items with parsed CBOR plus an optional raw
-/// JSON replay sidecar.
-/// Version 8 adds typed message-envelope facts plus dedicated ingress and
-/// successful-send completion RPCs.
-///
-/// Version 9 adds transient bounded provider quota current-state events.
-///
-/// Version 10 requires the harness to answer extension `Hello` with `Configure`
-/// before accepting declarations or `Ready`, and adds the optional immutable
-/// per-instance tool-name prefix carried by that configuration.
-///
-/// Version 11 replaces harness-managed transport messages with six immutable
-/// extension-published message fact events and requires a stable configured
-/// extension instance name.
-///
-/// Version 12 removes the extension user-message prompt request and replaces
-/// its remaining control use with a narrow internal-prompt request.
-pub const PROTOCOL_VERSION: u32 = 12;
+/// This stays at zero under
+/// `DECISION-no-backward-compatibility`; Tau does not support old protocols.
+pub const PROTOCOL_VERSION: u32 = 0;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

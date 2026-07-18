@@ -23,7 +23,7 @@ fn recent_calendar_log_ignores_invalid_entries_and_keeps_limit() {
         .expect("append first");
     fs::write(
         temp.path().join("state/logs/calendar.jsonl"),
-        b"not-json\n{\"schema\":2}\n{\"schema\":1,\"ts_unix_ms\":2,\"kind\":\"tool\",\"command\":\"read_event\",\"status\":\"ok\"}\n{\"schema\":1,\"ts_unix_ms\":3,\"kind\":\"tool\",\"command\":\"free_busy\",\"status\":\"ok\"}\n",
+        b"not-json\n{\"schema\":1}\n{\"schema\":0,\"ts_unix_ms\":2,\"kind\":\"tool\",\"command\":\"read_event\",\"status\":\"ok\"}\n{\"schema\":0,\"ts_unix_ms\":3,\"kind\":\"tool\",\"command\":\"free_busy\",\"status\":\"ok\"}\n",
     )
     .expect("rewrite log");
 
