@@ -2,6 +2,13 @@
 
 Status: confirmed, 2026-07-17, dpc
 
+## Status
+
+The model presentation below still describes the current implementation, but
+its envelope choice transitions to
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+The rest of this design remains authoritative.
+
 This design is the implementation authority for `tau-agent-1eun` and for the
 dependent bridge-migration scope of `tau-agent-a10r`. It is governed by
 [DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
