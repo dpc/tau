@@ -1,6 +1,5 @@
-# DESIGN-typed-image-tool-results: Typed local image tool results
+# SPEC-typed-image-tool-results: Typed local image tool results
 
-Status: confirmed, 2026-07-14, dpc
 
 Local image inspection is a native tool-result capability, not text containing
 base64 and not a synthesized user message. A successful image-producing
@@ -68,7 +67,10 @@ allocation; WebP receives a stricter 4,194,304-pixel/32-MiB decoded-output bound
 because its decoder has additional workspace allocations, and only one image
 decode may run concurrently in the shell extension.
 
-This decision refines [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md)
+The native typed-result choice is recorded by
+[DECISION-typed-image-tool-results](DECISION-typed-image-tool-results.md).
+This behavior refines
+[SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md)
 and is implemented at the component boundaries described by
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
 [SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md),

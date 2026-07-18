@@ -57,7 +57,7 @@ the target agent's admission-time workdir. With no instance they fail; with
 several instances they fail until an explicit selection mechanism exists rather
 than broadcasting ambiguously.
 
-This design implements
+This behavior implements
 [REQ-independent-manipulation-extension-instances](REQ-independent-manipulation-extension-instances.md)
 and preserves the configured-extension trust boundary documented in
 [SECURITY.md](../SECURITY.md).

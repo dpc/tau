@@ -29,8 +29,11 @@ hide an incoherent first frame; race regressions may use a deterministic midpoin
 hook.
 
 Event-wiring regressions lock historical and live selector sets, payload
-dependencies, and catch-up/lifecycle orderings. The chat UI's intentional history
-exception is governed by
-[`DESIGN-exact-event-subscriptions`](../../specs/DESIGN-exact-event-subscriptions.md).
+dependencies, and catch-up/lifecycle orderings. The chat UI receives
+`tool.request` and `tool.started` live but intentionally omits them from
+append-only restore history, where replaying a completed call's start would
+transiently resurrect it as pending before its durable terminal result arrives.
+This exception refines the exact-by-default policy in
+[`DECISION-exact-event-subscriptions`](../../specs/DECISION-exact-event-subscriptions.md).
 Cross-crate boundaries pair harness subscription/catch-up coverage with CLI
 renderer ordering coverage using the same protocol event shapes.

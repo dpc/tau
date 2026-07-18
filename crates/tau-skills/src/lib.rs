@@ -751,7 +751,7 @@ impl DiscoveryState {
 /// 4. Skip dot-prefixed entries and `node_modules`.
 /// 5. Follow symlinked roots and entries while using canonical directory paths
 ///    to avoid recursing forever through symlink cycles, as chosen by
-///    `DESIGN-instruction-symlink-discovery`.
+///    `DECISION-instruction-symlink-discovery`.
 /// 6. Bound traversal by directory, entry, and depth budgets; diagnostics are
 ///    available to loading callers when a budget is exceeded.
 ///

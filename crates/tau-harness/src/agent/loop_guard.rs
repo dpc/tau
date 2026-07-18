@@ -1,6 +1,6 @@
 //! Runtime-only conservative loop guard state for loaded agents.
 //!
-//! Detection and breaker policy follow `DESIGN-tau-harness-runtime-loop-guard`.
+//! Detection and breaker policy follow `SPEC-tau-harness-runtime-loop-guard`.
 
 use std::collections::VecDeque;
 

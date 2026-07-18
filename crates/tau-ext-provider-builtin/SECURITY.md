@@ -62,5 +62,5 @@ only enqueue a transport wake or invalidate a pool generation. Guard
 unregistration joins an already-started callback and is the socket-publication
 boundary; callback code must never re-enter that registry.
 
-The worker and transport cancellation design is recorded by
+The worker and transport cancellation choice is recorded by
 [DECISION-tau-ext-provider-builtin-bounded-prompt-workers](specs/DECISION-tau-ext-provider-builtin-bounded-prompt-workers.md).

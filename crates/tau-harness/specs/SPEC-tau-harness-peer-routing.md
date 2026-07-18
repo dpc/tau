@@ -66,5 +66,5 @@ are revalidated. Authority loss reselects once; a second loss fails. Exact route
 never redirect.
 
 Policy and trust are governed by
-[DESIGN-peer-entrypoints](../../../specs/DESIGN-peer-entrypoints.md) and
-[DESIGN-tau-harness-cross-harness-messaging](DESIGN-tau-harness-cross-harness-messaging.md).
+[DECISION-peer-entrypoints](../../../specs/DECISION-peer-entrypoints.md) and
+[DECISION-tau-harness-cross-harness-messaging](DECISION-tau-harness-cross-harness-messaging.md).

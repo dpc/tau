@@ -11,7 +11,7 @@ select the applicable boundary through [`SECURITY.md`](../SECURITY.md) before
 turning robustness observations into feature-blocking security requirements.
 
 Opt-in same-UID peer rendezvous authority is governed by
-[DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).
+[DECISION-peer-entrypoints](DECISION-peer-entrypoints.md).
 
 Dependency direction is inward toward shared protocol/core/client libraries: the harness composes them, the CLI and extensions communicate through protocol/client APIs, and transport bridges translate external systems without granting external payloads internal authority. Provider adapters classify and stream backend results, but the harness retains session, routing, recovery, and durable-state authority.
 

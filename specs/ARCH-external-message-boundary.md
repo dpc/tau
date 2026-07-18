@@ -83,4 +83,4 @@ only to select bounded probe candidates. A live target RPC confirms the active
 session and effective entrypoint before a session is returned. Discovery never
 exposes socket paths, pids, full project roots, agent ids, prompts, tasks,
 models, tools, or provider state. The authority split is confirmed by
-[DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).
+[DECISION-peer-entrypoints](DECISION-peer-entrypoints.md).

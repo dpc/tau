@@ -1,9 +1,9 @@
 //! Harness-owned `agent_start`, `wait`, `cancel`, and `message` tools.
 //!
 //! Watch turn-state transitions follow
-//! `DESIGN-tau-harness-agent-watch-turn-lifecycle`.
+//! `SPEC-agent-watch`.
 //! Cross-session delivery and sender authentication follow
-//! `DESIGN-tau-harness-cross-harness-messaging`.
+//! `DECISION-tau-harness-cross-harness-messaging`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -614,7 +614,7 @@ impl Harness {
     /// Surviving watchers receive an authoritative replacement snapshot;
     /// the unloaded watcher does not receive another event addressed to it.
     ///
-    /// See `DESIGN-tau-harness-watch-endpoint-retirement`.
+    /// See `SPEC-agent-watch`.
     pub(crate) fn retire_agent_watch_endpoint(&mut self, agent_id: &str) {
         let outgoing = self.agent_watches.remove(agent_id).unwrap_or_default();
         let incoming = self.agent_watchers.remove(agent_id).unwrap_or_default();

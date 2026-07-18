@@ -7,7 +7,7 @@ accounting includes encoded bytes and conservative 32-by-32 image patches;
 provider adapters separately enforce aggregate canonical-image and generated
 data-URL request bounds. A compacted replacement may summarize an old image
 away like any other input fact. This behavior is confirmed by
-[DESIGN-typed-image-tool-results](DESIGN-typed-image-tool-results.md).
+[DECISION-typed-image-tool-results](DECISION-typed-image-tool-results.md).
 
 ## Recovery authority
 

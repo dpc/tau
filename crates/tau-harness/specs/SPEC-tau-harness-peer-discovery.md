@@ -32,4 +32,4 @@ Possessing either discovery tool does not grant messaging, watching, starting,
 or compaction authority. Sending always revalidates its selected destination.
 
 The policy and trust model are confirmed by
-[DESIGN-peer-entrypoints](../../../specs/DESIGN-peer-entrypoints.md).
+[DECISION-peer-entrypoints](../../../specs/DECISION-peer-entrypoints.md).

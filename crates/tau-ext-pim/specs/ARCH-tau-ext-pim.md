@@ -1,9 +1,8 @@
 # ARCH-tau-ext-pim: tau-ext-pim architecture
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
-Successful tool-result display metadata follows
-[DESIGN-tool-result-ok-status](../../../specs/DESIGN-tool-result-ok-status.md):
-emitted `ToolResult.result.status` retains operation-specific outcomes, while
+For successful tool-result display metadata, emitted
+`ToolResult.result.status` retains operation-specific outcomes, while
 completed operations use `ToolUseState.status = Success` and
 `ToolUseState.status_text = "ok"`. `approval_required` is the sole PIM
 `status_text` exception because it documents a non-success lifecycle state: the

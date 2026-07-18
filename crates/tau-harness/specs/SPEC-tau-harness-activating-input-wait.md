@@ -3,7 +3,7 @@
 ## Activating-input waits
 
 This specification implements
-[DESIGN-tau-harness-activating-input-wait](DESIGN-tau-harness-activating-input-wait.md).
+[DECISION-tau-harness-activating-input-wait](DECISION-tau-harness-activating-input-wait.md).
 
 `wait({"timeout_minutes":N})` is a runtime-only, target-scoped suspension inside
 an existing tool round. `N` must be a positive CBOR integer; zero, negatives,

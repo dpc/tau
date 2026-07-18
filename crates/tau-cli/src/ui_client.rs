@@ -76,7 +76,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
     use EventName as E;
 
     // Keep this as an exact allow-list. Read the repository-root
-    // `specs/DESIGN-exact-event-subscriptions.md` policy before adding broad
+    // `specs/DECISION-exact-event-subscriptions.md` policy before adding broad
     // prefix selectors.
     vec![
         // Locally-originated UI echoes rendered by the transcript and activity

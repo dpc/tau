@@ -137,11 +137,11 @@ rules above.
 
 The universal release binary's accepted build-time, memory, size, and runtime
 tradeoffs are documented in
-[`DESIGN-release-build-profile`](specs/DESIGN-release-build-profile.md) with
+[`DECISION-release-build-profile`](specs/DECISION-release-build-profile.md) with
 measurement details in
-[`docs/release-builds.md`](docs/release-builds.md). The design record owns the
-reliability limits and revisit triggers; the evidence document owns the
-measurements.
+[`docs/release-builds.md`](docs/release-builds.md). The decision record owns the
+profile tradeoff; the evidence document owns the recorded temporary adoption
+limits, measurements, and re-evaluation triggers.
 
 ## Reporting guidance
 

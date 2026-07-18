@@ -2941,8 +2941,8 @@ fn success_display(result: &CborValue) -> ToolUseState {
 }
 
 fn success_status_text(result: &CborValue) -> &'static str {
-    // DESIGN-tool-result-ok-status permits a documented non-success lifecycle
-    // state; PIM preserves only the policy-gated pending state.
+    // `approval_required` describes pending rather than completed work, so it
+    // keeps its lifecycle label instead of using `ok`.
     if cbor_text_field(result, "status") == Some("approval_required") {
         "approval_required"
     } else {

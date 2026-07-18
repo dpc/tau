@@ -1556,8 +1556,9 @@ pub struct ToolUseState {
     pub info_chips: Vec<String>,
     /// Severity of the trailing status chip. Picks its themed color.
     pub status: ToolUseStatus,
-    /// Status word/message rendered as the last chip (e.g. `"ok"`,
-    /// `"regex parse error"`). For
+    /// Status word/message rendered as the last chip. Successfully completed
+    /// tools use the shared short `"ok"` label unless a different label
+    /// represents a documented non-success lifecycle state. For
     /// [`ToolUseStatus::Error`], this is the label without the
     /// generic `"err:"` prefix; renderers add that prefix and handle any
     /// width abbreviation needed for the current UI.

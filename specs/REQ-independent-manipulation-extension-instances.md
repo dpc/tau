@@ -13,6 +13,5 @@ inheritance must preserve instance independence. A path originating in the
 harness namespace must not be copied into another configured extension's
 namespace merely because that extension implements shell tools.
 
-The approved implementation design is recorded in
+The approved implementation choice is recorded in
 [DECISION-per-agent-extension-workdirs](DECISION-per-agent-extension-workdirs.md).
-
