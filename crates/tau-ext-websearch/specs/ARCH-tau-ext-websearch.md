@@ -1,5 +1,11 @@
 # ARCH-tau-ext-websearch: tau-ext-websearch architecture
 
+Provider trust, endpoint, and redaction behavior remains in
+[DESIGN-tau-ext-websearch-provider-boundary](DESIGN-tau-ext-websearch-provider-boundary.md)
+pending resolution of redirect enforcement.
+Concurrency and independent resource caps are
+[SPEC-tau-ext-websearch-runtime-safeguards](SPEC-tau-ext-websearch-runtime-safeguards.md).
+
 `std-websearch` / `tau-ext-websearch` is enabled by default and sends model tool
 arguments to external hosted MCP web providers. Treat provider responses as
 untrusted web content that can contain prompt injection, misleading text, or large

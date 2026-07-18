@@ -1,0 +1,52 @@
+# SPEC-tau-ext-slack-ingress: Slack ingress identity and admission
+
+Sender admission, route trigger, and content trust are independent. Strict mode
+admits only allowlisted verified humans; lax adds verified humans only on static
+receive routes. Payload remains untrusted. Dynamic links still require exact
+allowlisting. Each occurrence uses live `users.info` with no positive cache.
+Wrapper team/bot identity must exact-match installed `auth.test` authority or one
+unambiguous authorization; top-level event/actor team fields are not authority.
+Missing, malformed, mixed, ambiguous, or conflicting evidence fails before
+identity lookup, local effects, or publication.
+
+Verified U/W identity is authoritative. `users.info` response ID must exactly
+equal the requested U/W ID, and the user must be non-deleted, non-bot, and
+non-app. Display is nonempty and at most 80 Unicode
+scalars/256 UTF-8 bytes. Config aliases are one-to-one, at most 64 entries, and
+use exact U/W ID keys with values matching `[a-z][a-z0-9_-]{0,63}`. Displays
+and aliases are presentation only.
+Display text must also be free of unsafe control or format structure. A
+configured alias takes display precedence over the bounded Slack display.
+Published stable identity is opaque and installation-scoped; native IDs remain
+private. Reconnect identity mismatch retires installation authority until
+restart. Replay uses stored universal fields only, performs no Slack lookup or
+alias re-resolution, and reconstructs no actionable route. Occurrence FIFO
+capacity is 4,096; recording precedes effects and
+transient failure consumes the occurrence until eviction/restart.
+Operational logs and categorical failures omit actor IDs, displays, aliases,
+reaction names, message text, and installation identifiers.
+
+Admission uses a 64-item successful-ACK FIFO with generation checks. Shutdown or
+config change invalidates late work; reconnect preserves queued authority.
+Mention-only/all-message triggers remain exact, and non-DM commands require a
+leading authenticated bot mention. Only successful fact publication installs a
+source reply selector and never proactive authority.
+
+Bot mentions classify only exact case-sensitive `<@U…>`/`<@W…>` for the
+installed bot outside complete equal-length backtick spans. Escaped, labeled,
+partial, malformed, differently cased, lookalike, other, and literal orientation
+tokens do not classify. Routing/commands remove exactly one eligible leading
+mention; remaining eligible mentions normalize to `@slack_bridge` in create/edit
+text. Commands publish no fact; reactions/deletes carry no text. No native
+mention field or opaque data persists; replay sees only normalized text.
+Registration JSON never exposes bot/workspace IDs. Egress rejects raw native
+controls; authored `@slack_bridge` stays literal, and the safe source-mention
+path is the sole generator. Successful registration returns exactly
+`{"status":"registered","incoming_transport_reference":"@slack_bridge"}`;
+unregister returns exactly `{"status":"unregistered"}`.
+
+This behavior refines
+[DECISION-tau-ext-slack-sender-admission](DECISION-tau-ext-slack-sender-admission.md),
+[DECISION-tau-ext-slack-sender-identity](DECISION-tau-ext-slack-sender-identity.md),
+and
+[DECISION-tau-ext-slack-transport-identity-mentions](DECISION-tau-ext-slack-transport-identity-mentions.md).

@@ -3,13 +3,13 @@
 //! The extension declares logical `slack_register`, `slack_conversations`,
 //! `slack_send`, and separately authorized `slack_react` tools,
 //! which `ToolNameScope` maps to final per-instance wire names. Proactive
-//! destination authorization follows `DESIGN-tau-ext-slack-proactive-sends`. It
-//! is disabled by default, requires Slack token secrets plus a non-empty
+//! destination authorization follows `SPEC-tau-ext-slack-conversation-routing`.
+//! It is disabled by default, requires Slack token secrets plus a non-empty
 //! allowlist, and treats Slack text as external untrusted prompt input.
 //! Reply routing follows
-//! `DESIGN-tau-ext-slack-canonical-reply-selectors`.
+//! `SPEC-tau-ext-slack-conversation-routing`.
 //! Outbound retry and replay follow
-//! `DESIGN-tau-ext-slack-send-delivery`.
+//! `SPEC-tau-ext-slack-send-delivery`.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -730,7 +730,7 @@ impl RuntimeConfig {
     /// Classify an admitted sender, or deny it under the configured policy.
     ///
     /// Kept independent from listening scope per
-    /// `DESIGN-tau-ext-slack-sender-admission`.
+    /// `SPEC-tau-ext-slack-ingress`.
     fn sender_policy(&self, user_id: &str) -> Option<SenderPolicyStatus> {
         if self.allowed_user_ids.contains(user_id) {
             Some(SenderPolicyStatus::Allowlisted)
@@ -860,7 +860,7 @@ struct SlackMessage {
 /// The conversation is configured or linked when captured, and `thread_ts` is
 /// absent or passed `validate_slack_ts`; neither value comes from model input.
 /// Route authorization is checked again immediately before every send. See
-/// `DESIGN-tau-ext-slack-immutable-thread-destinations`.
+/// `SPEC-tau-ext-slack-conversation-routing`.
 #[derive(Clone, Eq, PartialEq)]
 struct SlackConversation {
     /// Exact configured or linked native conversation id.
@@ -2793,7 +2793,7 @@ impl Extension {
     /// known.
     ///
     /// This locally written fact ownership lookup and its fail-closed rejection
-    /// path implement `DESIGN-tau-ext-slack-edit-ownership`.
+    /// path implement `SPEC-tau-ext-slack-message-mutations`.
     #[cfg(test)]
     fn process_slack_edit(&self, edit: SlackEdit) {
         self.process_slack_edit_admitted(edit, None);

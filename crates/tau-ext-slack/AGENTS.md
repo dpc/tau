@@ -12,3 +12,4 @@ After user-visible capability, configuration, Slack scope/event, or operational
 changes, update the built-in `tau-self-knowledge-ext-slack` skill.
 
 - `SECURITY.md` — required reading for Slack-specific trust boundaries, secrets, replay/failure behavior, and review triggers.
+- [`testing.md`](testing.md) — hermetic Slack test boundaries and coverage.

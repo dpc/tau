@@ -2,7 +2,7 @@
 //! helpers.
 //!
 //! The intentional Gmail/Calendar flow split is recorded in
-//! `DESIGN-tau-ext-pim-google-oauth-flow`.
+//! `DECISION-tau-ext-pim-google-oauth-flow`.
 
 use std::collections::BTreeMap;
 use std::io::Read;

@@ -8,7 +8,7 @@
 //! `ARCH-tau-ext-websearch`.
 //! Provider trust, transport sanitization, and test isolation follow
 //! `DESIGN-tau-ext-websearch-provider-boundary` and
-//! `DESIGN-tau-ext-websearch-testing-strategy`.
+//! `testing.md`.
 
 use std::error::Error;
 use std::io::{Read, Write};

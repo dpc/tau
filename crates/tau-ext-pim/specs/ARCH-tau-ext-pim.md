@@ -143,4 +143,7 @@ create misleading columns, extra lines, terminal control effects, or secret
 leakage. List outputs retain the standard header-then-payload shape and sanitize fields so untrusted text cannot forge rows or columns. Diagnostics that may contain provider error text must redact known
 secrets and bearer tokens before they can reach logs or users.
 
-OAuth and testing decisions are recorded in [DESIGN-tau-ext-pim-google-oauth-flow](DESIGN-tau-ext-pim-google-oauth-flow.md) and [DESIGN-tau-ext-pim-testing-strategy](DESIGN-tau-ext-pim-testing-strategy.md).
+OAuth behavior is governed by
+[DECISION-tau-ext-pim-google-oauth-flow](DECISION-tau-ext-pim-google-oauth-flow.md)
+and [SPEC-tau-ext-pim-google-oauth](SPEC-tau-ext-pim-google-oauth.md).
+Testing guidance is in [`testing.md`](../testing.md).

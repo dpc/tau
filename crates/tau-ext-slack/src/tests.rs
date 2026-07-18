@@ -1,6 +1,6 @@
 //! Local-fake and loopback lifecycle coverage follows
-//! `DESIGN-tau-ext-slack-lifecycle-testing`; route/security matrices follow
-//! `DESIGN-tau-ext-slack-conversation-policy`.
+//! `testing.md`; route/security matrices follow
+//! `SPEC-tau-ext-slack-conversation-routing`.
 
 mod send_delivery_tests;
 

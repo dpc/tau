@@ -1,7 +1,10 @@
 # ARCH-tau-telegram-gateway: Telegram gateway daemon
 
 The gateway shape implements the unconfirmed choice in
-[DESIGN-tau-ext-telegram-single-token-gateway](DESIGN-tau-ext-telegram-single-token-gateway.md).
+[DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).
+Its socket, lease, durable-state, loss-window, routing, and resource contracts
+are [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md). Shared stream
+ownership is [SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).
 
 `tau-telegram-gateway` is the standalone single-process stream owner, status endpoint,
 live sidecar registry, and command router for multi-session Telegram. It resolves the

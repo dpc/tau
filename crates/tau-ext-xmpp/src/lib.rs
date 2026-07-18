@@ -2,19 +2,19 @@
 //!
 //! The extension declares logical `xmpp_register` and `xmpp_send` tools, which
 //! `ToolNameScope` maps to final per-instance wire names. Under
-//! `DESIGN-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also uses
-//! a mandatory JID allowlist and treats XMPP text as external untrusted prompt
-//! input.
+//! `DECISION-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also
+//! uses a mandatory JID allowlist and treats XMPP text as external untrusted
+//! prompt input.
 //! Allowlist matching and default-recipient validation follow
-//! `DESIGN-tau-ext-xmpp-allowlist-and-default-recipient`.
+//! `SPEC-tau-ext-xmpp-allowlist-and-default-recipient`.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
 //! The plaintext-over-TLS limitation is recorded in
-//! `DESIGN-tau-ext-xmpp-tls-security-model`.
+//! `DECISION-tau-ext-xmpp-tls-security-model`.
 //! Resource generation, MUC identity, and failed-registration cleanup follow
-//! `DESIGN-tau-ext-xmpp-generated-resources`,
-//! `DESIGN-tau-ext-xmpp-muc-identity`, and
-//! `DESIGN-tau-ext-xmpp-registration-rollback`.
+//! `DECISION-tau-ext-xmpp-generated-resources`,
+//! `DECISION-tau-ext-xmpp-muc-identity`, and
+//! `DECISION-tau-ext-xmpp-registration-rollback`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -78,7 +78,7 @@ const OUTBOUND_BODY_LIMIT_BYTES: usize = 4096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 // Keep command readiness semantics aligned with
-// `DESIGN-tau-ext-xmpp-readiness-waits`.
+// `SPEC-tau-ext-xmpp-readiness-waits`.
 const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1507,7 +1507,7 @@ impl WorkerState {
     }
 
     /// Send the best-effort invitation and fallback notice described by
-    /// `DESIGN-tau-ext-xmpp-muc-lifecycle` after registration has already
+    /// `DECISION-tau-ext-xmpp-muc-lifecycle` after registration has already
     /// succeeded for the tool caller.
     async fn send_post_register_notice(&self, agent_id: &AgentId, client: &mut Client) {
         if !self.cfg.muc.invite_default_recipient || self.shutdown_requested() {
@@ -1776,7 +1776,7 @@ impl WorkerState {
 
     /// Apply state changes for a newly online stream and return direct-resource
     /// registrations whose externally visible address changed, following
-    /// `DESIGN-tau-ext-xmpp-direct-resource-fallback`.
+    /// `DECISION-tau-ext-xmpp-direct-resource-fallback`.
     fn apply_online_state(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
         self.bound_jid = Some(bound_jid.clone());
         self.occupant_real_jids.clear();
@@ -2341,7 +2341,7 @@ fn muc_presence_from(presence: &Presence, occupant: &Jid) -> bool {
 }
 
 async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Result<(), String> {
-    // See `DESIGN-tau-ext-xmpp-muc-preconditions` for the deliberately limited
+    // See `DECISION-tau-ext-xmpp-muc-preconditions` for the deliberately limited
     // room configuration and its deployment implications.
     // XEP-0045 instant-room setup: an empty owner data-form submit unlocks a
     // newly-created room using server defaults. This is intentionally not a

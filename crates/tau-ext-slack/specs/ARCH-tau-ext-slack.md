@@ -5,7 +5,16 @@ External messages follow
 and the extension-published fact interface in
 [SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
 Conversation policy follows
-[DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
+[DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md).
+Exact routing, ingress, and mutation behavior is specified by
+[SPEC-tau-ext-slack-conversation-routing](SPEC-tau-ext-slack-conversation-routing.md),
+[SPEC-tau-ext-slack-ingress](SPEC-tau-ext-slack-ingress.md), and
+[SPEC-tau-ext-slack-message-mutations](SPEC-tau-ext-slack-message-mutations.md).
+Focused boundaries are
+[SPEC-tau-ext-slack-send-delivery](SPEC-tau-ext-slack-send-delivery.md),
+[SPEC-tau-ext-slack-source-mentions](SPEC-tau-ext-slack-source-mentions.md),
+[SPEC-tau-ext-slack-agent-reactions](SPEC-tau-ext-slack-agent-reactions.md), and
+[SPEC-tau-ext-slack-latency-observability](SPEC-tau-ext-slack-latency-observability.md).
 
 `std-slack` is a disabled-by-default Socket Mode text bridge exposing scoped
 `slack_register`, `slack_conversations`, `slack_send`, and separately authorized
@@ -46,11 +55,13 @@ projection. There is no Slack-specific ingress acknowledgement or harness
 transport-registration state.
 
 Slack installs and revalidates reply, edit, and reaction routes locally. A
-locally written create establishes source reply/edit authority keyed by its
-`MessageFactId`; a locally written outgoing send establishes posted-message reaction
-authority keyed by its sent fact ID. Delete publication revokes the matching
-local source/reply/reaction target state. These maps are bounded, process-local,
-agent- and lifecycle-scoped, and never reconstructed by fact replay.
+locally written create establishes source reply authority under its Tau-issued
+`MessageFactId`, while edit lookup uses the private native `(channel, ts)` tuple
+bound to that fact. A locally written outgoing send establishes posted-message
+reaction authority under its sent fact ID while retaining private native
+coordinates for API routing. Delete publication revokes matching local
+source/reply/edit/reaction state. These maps are bounded, process-local, agent-
+and lifecycle-scoped, and never reconstructed by fact replay.
 
 The extension drops recently repeated native occurrence IDs with a bounded
 4,096-entry process-local FIFO set. Cache eviction, races, or restart may

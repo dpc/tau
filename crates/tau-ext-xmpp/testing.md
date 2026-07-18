@@ -1,12 +1,21 @@
-# tau-ext-xmpp testing
+# XMPP testing
 
-Use `cargo test -p tau-ext-xmpp` for the crate's fast regression suite. The
-unit tests cover configuration validation, tool schemas, registration/send
-gating, bounded readiness waits, default and custom room-template derivation,
-strict helper/runtime validation, replayed role metadata, MUC join
-confirmation, history suppression, real-JID allowlist enforcement, model-visible
-fact metadata privacy, direct-resource routing, sent-fact ordering, and shutdown
-handling.
+Tests are unit-first and use fake or state-only XMPP surfaces. They cover config
+validation, opt-in metadata, send-before-register rejection, registration state,
+bounded readiness and timeout propagation, disconnect cache invalidation,
+multiple MUC agents, room identity/collision handling, status-201 room config,
+long-agent-ID and nodeprep/case-fold non-collapse, distinct active and pending
+room collisions, join errors and exact self-presence correlation, mediated
+invite payloads and leave presence, real-JID allowlist routing,
+hidden-real-JID fail-closed and explicit membership trust behavior, exact
+transport-neutral delivered-fact mapping, sent-before-result ordering,
+own/delayed/history/oversize drops, strict tool arguments, direct exact-to
+full-JID routing, and reconnect state updates.
+
+Live Prosody testing is a manual smoke test. Follow the existing checklist below;
+never put live credentials into automated fixtures.
+
+## Live Prosody smoke test
 
 For a live Prosody smoke test, use a private test account and MUC component:
 

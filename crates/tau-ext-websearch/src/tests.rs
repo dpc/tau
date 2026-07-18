@@ -600,7 +600,7 @@ fn rejects_num_results_out_of_range() {
 /// Ensures excess concurrent searches return a busy error instead of blocking
 /// the protocol reader behind the in-flight limit.
 ///
-/// See `DESIGN-tau-ext-websearch-runtime-safeguards`.
+/// See `SPEC-tau-ext-websearch-runtime-safeguards`.
 #[test]
 fn returns_busy_error_when_in_flight_limit_is_full() {
     let searcher = BlockingSearcher::new();

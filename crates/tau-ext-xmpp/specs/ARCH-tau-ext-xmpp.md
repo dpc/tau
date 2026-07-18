@@ -1,6 +1,11 @@
 # ARCH-tau-ext-xmpp: tau-ext-xmpp architecture
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
+Fail-closed admission and readiness behavior is specified by
+[SPEC-tau-ext-xmpp-allowlist-and-default-recipient](SPEC-tau-ext-xmpp-allowlist-and-default-recipient.md)
+and [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md).
+MUC join, authorization, rollback, and cleanup behavior is
+[SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).
 
 `std-xmpp` is a disabled-by-default personal XMPP text bridge. It exposes only
 `xmpp_register` and `xmpp_send`; the model never supplies arbitrary destination

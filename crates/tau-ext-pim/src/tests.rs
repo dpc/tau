@@ -1,4 +1,4 @@
-//! Boundary-focused coverage follows `DESIGN-tau-ext-pim-testing-strategy`.
+//! Boundary-focused coverage follows `testing.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
