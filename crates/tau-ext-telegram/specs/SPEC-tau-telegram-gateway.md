@@ -34,3 +34,5 @@ bounded ordinary send failures keep it live.
 
 The topology choice is
 [DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).
+Heartbeat timing and local coordination are constrained by
+[DECISION-tau-ext-telegram-long-polling](DECISION-tau-ext-telegram-long-polling.md).

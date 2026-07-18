@@ -5,6 +5,8 @@ publication are specified by
 [SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).
 The optional shared-token gateway contract is
 [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md).
+The inbound transport and local-wait boundary follow
+[DECISION-tau-ext-telegram-long-polling](DECISION-tau-ext-telegram-long-polling.md).
 
 `std-telegram` is a personal text bridge, not a generic chat abstraction. The extension process starts to register tools, but it does not contact Telegram until a Tau agent calls this instance's register tool (`telegram_register` without a generic tool prefix) with `enabled: true`.
 
