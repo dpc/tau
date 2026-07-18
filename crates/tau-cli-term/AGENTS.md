@@ -4,7 +4,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 - Read the repository root `AGENTS.md` first.
 - For non-trivial CLI UI changes, also read `specs/ARCH-tau-cli-term.md` in this crate.
-- Read the applicable `specs/DESIGN-*.md` records before changing test strategy, bounded subprocess behavior,
+- Read the applicable Linked Specs under `specs/` before changing test strategy, bounded subprocess behavior,
   or other durable crate-level decisions.
 - Keep bounded subprocess ownership centralized in `src/bounded_command.rs`;
   do not add ad-hoc command timeout/output handling in completion or prompt

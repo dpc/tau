@@ -1,9 +1,9 @@
 # ARCH-tau-harness: tau-harness architecture
 
 Architectural or externally meaningful functional changes to harness event
-logs/journals or interfaces with extensions require the prior standalone design
-and approval mandated by
-[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+logs/journals or interfaces with extensions require the separately reviewed,
+human-confirmed decision mandated by
+[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 Provider account quota is an ephemeral current-state cache. The harness accepts
 it only when every effective model route in the provider namespace has one

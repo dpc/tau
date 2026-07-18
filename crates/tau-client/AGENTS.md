@@ -15,5 +15,6 @@ When changing this crate:
 - update `specs/ARCH-tau-client.md` when changing lifecycle, replay, writer-thread,
   config, or intercept semantics.
 - Harness-extension interface changes are governed by
-  `../../specs/DESIGN-persistence-and-extension-interface-change-approval.md`;
-  obtain the required standalone design approval before functional changes.
+  `../../specs/DECISION-persistence-and-extension-interface-change-approval.md`;
+  obtain the required separately reviewed, human-confirmed `DECISION-*` before
+  functional changes.

@@ -2,7 +2,7 @@
 
 Changes to event persistence, sequencing authority, replay, or logging behavior
 are subject to
-[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 ## Event sequencing, interception, and persistence
 

@@ -2,7 +2,7 @@
 
 Architectural or externally meaningful functional changes to this
 harness-extension contract are subject to
-[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 ## Daemon listener and accept forwarding
 

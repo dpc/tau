@@ -17,4 +17,4 @@ Dependency direction is inward toward shared protocol/core/client libraries: the
 
 Architectural or externally meaningful functional changes to event logs or
 journals and harness-extension interfaces are gated by
-[DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
+[DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).

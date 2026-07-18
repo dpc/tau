@@ -2,7 +2,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-core notes for agents
 
-- Read the applicable `specs/DESIGN-*.md` records before changing tool registration, routing, validation, or
+- Read the applicable Linked Specs under `specs/` before changing tool registration, routing, validation, or
   model-visible diagnostics.
 - Keep protocol-adjacent validation behavior deterministic and bounded.
 - Put focused `tool_registry` tests in `src/tool_registry/tests.rs`; every test
@@ -11,5 +11,6 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
   shared crate such as `tau-proto`, not be copied between `tau-core` and
   extensions.
 - `AgentStore` and `SessionStore` event-log or journal changes are governed by
-  `../../specs/DESIGN-persistence-and-extension-interface-change-approval.md`;
-  obtain the required standalone design approval before functional changes.
+  `../../specs/DECISION-persistence-and-extension-interface-change-approval.md`;
+  obtain the required separately reviewed, human-confirmed `DECISION-*` before
+  functional changes.

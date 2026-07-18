@@ -2,7 +2,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-ext-provider-builtin
 
-Read the applicable `specs/DESIGN-*.md` records and the applicable trust-boundary records under `specs/` before changing provider profile ownership/model publication, prompt worker/cancellation/retry behavior, diagnostics/persistence boundaries, event-driven worker wakeups, or this crate's testing boundary.
+Read the applicable Linked Specs under `specs/` and the applicable trust-boundary records under `specs/` before changing provider profile ownership/model publication, prompt worker/cancellation/retry behavior, diagnostics/persistence boundaries, event-driven worker wakeups, or this crate's testing boundary.
 Read `SECURITY.md` before changing quota credentials, epochs, refresh scheduling,
 or worker-to-main-loop quota reconciliation.
 

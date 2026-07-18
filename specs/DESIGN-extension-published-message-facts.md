@@ -3,7 +3,7 @@
 Status: confirmed, 2026-07-17, dpc
 
 This design is governed by
-[DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
+[DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
 
 ## Summary
 

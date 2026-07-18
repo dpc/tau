@@ -1,9 +1,9 @@
 # ARCH-tau-client: tau-client architecture
 
 Architectural or externally meaningful functional changes to this shared
-harness-extension interface require the prior standalone design and approval
-mandated by
-[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+harness-extension interface require the separately reviewed, human-confirmed
+decision mandated by
+[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 `tau-client` is the shared runtime for Tau extension protocol peers. It sits
 above `tau-proto`, which owns the wire messages. First-party extensions now use

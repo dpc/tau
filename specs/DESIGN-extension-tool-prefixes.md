@@ -3,8 +3,8 @@
 Status: confirmed, 2026-07-13, dpc
 
 Functional changes to this harness-extension capability and tool-routing
-contract require the prior standalone design and approval mandated by
-[DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
+contract require the separately reviewed, human-confirmed decision mandated by
+[DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
 
 Each extension instance may set an optional `tool_prefix`. With prefix `work`,
 logical tool `slack_send` is exposed as `work_slack_send`. The same additive

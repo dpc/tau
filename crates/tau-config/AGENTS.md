@@ -2,4 +2,4 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-config agent notes
 
-Before modifying `crates/tau-config`, read `specs/ARCH-tau-config.md`, the applicable local `specs/DESIGN-*.md` records, and applicable trust-boundary records in the repository-root `specs/` directory. Preserve the documented config layering, explicit error, alias normalization, role merge, extension-name, and atomic write contracts.
+Before modifying `crates/tau-config`, read `specs/ARCH-tau-config.md`, the applicable local Linked Specs under `specs/`, and applicable trust-boundary records in the repository-root `specs/` directory. Preserve the documented config layering, explicit error, alias normalization, role merge, extension-name, and atomic write contracts.

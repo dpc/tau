@@ -9,7 +9,7 @@ approval/policy logic, tool/action output, or backend network behavior.
 Read `specs/ARCH-tau-ext-pim.md` before changing or reviewing provider/runtime wiring,
 storage layout, shared OAuth helpers, or cross-module email/calendar boundaries.
 
-Read the applicable `specs/DESIGN-*.md` records before changing or reviewing test strategy decisions.
+Read the applicable Linked Specs under `specs/` before changing or reviewing test strategy decisions.
 
 After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-pim` so Tau can accurately explain the current extension behavior. For email-specific configuration, policy, approval, or security changes, also update `tau-self-knowledge-email`.
 

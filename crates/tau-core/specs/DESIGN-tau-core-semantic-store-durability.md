@@ -3,9 +3,9 @@
 Status: unconfirmed
 
 Architectural or externally meaningful functional changes to `AgentStore` or
-`SessionStore` event persistence require the prior standalone design and
-approval mandated by
-[DESIGN-persistence-and-extension-interface-change-approval](../../../specs/DESIGN-persistence-and-extension-interface-change-approval.md).
+`SessionStore` event persistence require the separately reviewed,
+human-confirmed decision mandated by
+[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 `AgentStore` and `SessionStore` both support normal durable event streams and
 selected memory-only streams used by ephemeral agents/sessions. The memory-only

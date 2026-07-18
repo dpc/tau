@@ -2,7 +2,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-ext-slack
 
-This extension bridges untrusted external Slack text into Tau. Before changing routing, configuration, secrets, connection lifecycle, or tool behavior, read `specs/ARCH-tau-ext-slack.md`, the applicable local `specs/DESIGN-*.md` records, and `../../specs/ARCH-external-message-boundary.md`.
+This extension bridges untrusted external Slack text into Tau. Before changing routing, configuration, secrets, connection lifecycle, or tool behavior, read `specs/ARCH-tau-ext-slack.md`, the applicable local Linked Specs under `specs/`, and `../../specs/ARCH-external-message-boundary.md`.
 
 Keep configuration keys snake_case and reject unknown fields. Never log Slack
 app tokens, bot tokens, Socket Mode websocket URLs, or private message bodies
