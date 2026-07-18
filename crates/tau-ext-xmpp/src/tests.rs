@@ -43,7 +43,7 @@ struct FakeBridge {
     wait_recorded: Condvar,
     registered: Mutex<HashMap<AgentId, String>>,
     sent: Mutex<Vec<(AgentId, String)>>,
-    send_error: Mutex<Option<String>>,
+    send_error: Mutex<Option<(usize, String)>>,
 }
 
 impl FakeBridge {
@@ -61,7 +61,11 @@ impl FakeBridge {
     }
 
     fn set_send_error(&self, message: &str) {
-        *self.send_error.lock().expect("lock") = Some(message.to_owned());
+        self.set_send_error_after(0, message);
+    }
+
+    fn set_send_error_after(&self, successful_sends: usize, message: &str) {
+        *self.send_error.lock().expect("lock") = Some((successful_sends, message.to_owned()));
     }
 
     fn wait_for_wait_calls(&self, count: usize) -> Vec<Duration> {
@@ -137,13 +141,13 @@ impl XmppBridge for FakeBridge {
     }
 
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String> {
-        if let Some(message) = self.send_error.lock().expect("lock").clone() {
+        let mut sent = self.sent.lock().expect("lock");
+        if let Some((successful_sends, message)) = self.send_error.lock().expect("lock").clone()
+            && sent.len() >= successful_sends
+        {
             return Err(message);
         }
-        self.sent
-            .lock()
-            .expect("lock")
-            .push((agent_id.clone(), text.to_owned()));
+        sent.push((agent_id.clone(), text.to_owned()));
         Ok(())
     }
 
@@ -964,6 +968,163 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     assert!(matches!(*emit.event, Event::ToolResult(_)));
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
+}
+
+/// Tau's conservative 4096-byte policy must remain inclusive so a message that
+/// exactly fits is sent as one unnumbered body.
+#[test]
+fn xmpp_send_keeps_exact_outbound_body_limit_in_one_message() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("registration progress");
+    let _result = rx.recv().expect("registration result");
+
+    let prefix = "[agent-1] ";
+    let message = "a".repeat(OUTBOUND_BODY_LIMIT_BYTES - prefix.len());
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args(&message)));
+    let _progress = rx.recv().expect("send progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+        panic!("emit")
+    };
+    let Event::MessageSent(fact) = *emit.event else {
+        panic!("message.sent fact")
+    };
+    assert_eq!(fact.text, message);
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::ToolResult(_)));
+
+    let sent = bridge.sent.lock().expect("lock");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.len(), OUTBOUND_BODY_LIMIT_BYTES);
+    assert_eq!(sent[0].1, format!("{prefix}{message}"));
+}
+
+/// A body one byte beyond the effective outbound limit must be split with
+/// visible numbering rather than silently losing its final byte.
+#[test]
+fn xmpp_send_numbers_message_beyond_outbound_body_limit() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("registration progress");
+    let _result = rx.recv().expect("registration result");
+
+    let prefix = "[agent-1] ";
+    let message = "a".repeat(OUTBOUND_BODY_LIMIT_BYTES - prefix.len() + 1);
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args(&message)));
+    let _progress = rx.recv().expect("send progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+        panic!("emit")
+    };
+    let Event::MessageSent(fact) = *emit.event else {
+        panic!("message.sent fact")
+    };
+    assert_eq!(fact.text, message);
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::ToolResult(_)));
+
+    let sent = bridge.sent.lock().expect("lock");
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].1.starts_with("[agent-1] [part 1/2] "));
+    assert!(sent[1].1.starts_with("[agent-1] [part 2/2] "));
+    assert!(
+        sent.iter()
+            .all(|(_, text)| text.len() <= OUTBOUND_BODY_LIMIT_BYTES)
+    );
+    assert_eq!(reconstruct_multipart_payload(&sent, prefix), message);
+    assert!(rx.try_recv().is_err());
+}
+
+/// Multipart splitting must preserve every byte of multibyte UTF-8 text while
+/// keeping each numbered body within the interoperability limit.
+#[test]
+fn outbound_message_parts_split_only_at_utf8_boundaries() {
+    let agent_id = agent_id("agent-1");
+    let message = "🙂é".repeat(1_000);
+    let parts = outbound_message_parts(&agent_id, &message).expect("split message");
+    assert!(parts.len() > 1);
+    assert!(
+        parts
+            .iter()
+            .all(|part| part.len() <= OUTBOUND_BODY_LIMIT_BYTES)
+    );
+
+    let prefix = "[agent-1] ";
+    let sent = parts
+        .into_iter()
+        .map(|part| (agent_id.clone(), part))
+        .collect::<Vec<_>>();
+    let reconstructed = reconstruct_multipart_payload(&sent, prefix);
+    assert_eq!(reconstructed, message);
+}
+
+/// Denominator-width recomputation must converge when the payload grows from
+/// nine to ten parts without overflowing a body or misnumbering a marker.
+#[test]
+fn outbound_message_parts_converge_across_ten_part_boundary() {
+    let agent_id = agent_id("agent-1");
+    let prefix = "[agent-1] ";
+    let first_pass_nine_capacity = (1..=9)
+        .map(|index| OUTBOUND_BODY_LIMIT_BYTES - prefix.len() - format!("[part {index}/2] ").len())
+        .sum::<usize>();
+    let message = "a".repeat(first_pass_nine_capacity + 1);
+    let parts = outbound_message_parts(&agent_id, &message).expect("split message");
+
+    assert_eq!(parts.len(), 10);
+    for (index, part) in parts.iter().enumerate() {
+        assert!(part.starts_with(&format!("{prefix}[part {}/10] ", index + 1)));
+        assert!(part.len() <= OUTBOUND_BODY_LIMIT_BYTES);
+    }
+    let sent = parts
+        .into_iter()
+        .map(|part| (agent_id.clone(), part))
+        .collect::<Vec<_>>();
+    assert_eq!(reconstruct_multipart_payload(&sent, prefix), message);
+}
+
+/// A failure after the first multipart write must report partial delivery,
+/// stop sending, and avoid publishing an all-message `message.sent` fact.
+#[test]
+fn xmpp_send_reports_partial_multipart_failure_without_sent_fact() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("registration progress");
+    let _result = rx.recv().expect("registration result");
+    bridge.set_send_error_after(1, "xmpp transport failed");
+
+    let message = "a".repeat(OUTBOUND_BODY_LIMIT_BYTES);
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args(&message)));
+    let _progress = rx.recv().expect("send progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("tool error") else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert_eq!(
+        error.message,
+        "failed to send XMPP message part 2/2 after 1 complete part(s): xmpp transport failed"
+    );
+    assert_eq!(bridge.sent.lock().expect("lock").len(), 1);
+    assert!(
+        rx.try_recv().is_err(),
+        "unexpected message.sent or later write"
+    );
+}
+
+fn reconstruct_multipart_payload(sent: &[(AgentId, String)], prefix: &str) -> String {
+    sent.iter()
+        .map(|(_, part)| {
+            let numbered = part.strip_prefix(prefix).expect("agent prefix");
+            numbered
+                .split_once("] ")
+                .map(|(_, payload)| payload)
+                .expect("part marker")
+        })
+        .collect()
 }
 
 /// An XMPP transport send failure must return a tool error without publishing a

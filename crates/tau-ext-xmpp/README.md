@@ -109,6 +109,16 @@ room occupants. Registration and sends wait up to 30 seconds for the XMPP stream
 to become online/authenticated before returning a readiness error; `xmpp_send`
 still requires an existing registered conversation after that wait.
 
+`max_message_bytes` bounds the complete text accepted by one `xmpp_send` call.
+The reported client cutoff was 4096 Unicode scalar values, so Tau conservatively
+sends at most 4096 UTF-8 bytes in each XMPP message body. Longer accepted text is
+split at UTF-8 boundaries into sequential messages with visible `[part N/M]`
+markers; the agent label and marker are included within each 4096-byte body.
+Multipart delivery is sequential and non-atomic: if a later part fails, earlier
+parts remain visible and the tool error reports the failed, total, and completed
+part counts. Partial delivery emits no `message.sent`; complete delivery emits
+one fact containing the original unsplit tool text.
+
 ## Routing modes
 
 - `muc` (recommended): creates/joins one room per globally unique Tau agent id.

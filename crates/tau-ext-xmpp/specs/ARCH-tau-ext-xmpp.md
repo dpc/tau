@@ -80,7 +80,13 @@ transport prefix according to
 Successful `xmpp_send` calls emit `message.sent` before their ordinary terminal
 tool result. The fact uses the original body and a bounded identity derived from
 the unique tool call and locally authoritative conversation. Full-resource
-routes, membership proof, and send authorization remain extension-local.
+routes, membership proof, and send authorization remain extension-local. Each
+outbound stanza body is at most 4096 UTF-8 bytes; larger accepted tool messages
+are split at character boundaries and carry visible part numbering so deployed
+clients cannot silently discard the suffix. Multipart delivery is sequential
+and non-atomic: a later failure leaves earlier parts visible, reports failed,
+total, and completed part counts, and emits no `message.sent`. All-part success
+emits one `message.sent` fact containing the original unsplit tool text.
 
 - The built-in extension is disabled by default and requires an explicit
   password secret plus a non-empty `allowed_jids` allowlist.

@@ -68,6 +68,13 @@ const DEFAULT_RESOURCE_PREFIX: &str = "tau";
 const DEFAULT_ROOM_PREFIX: &str = "tau";
 const DEFAULT_MESSAGE_LIMIT: usize = 16 * 1024;
 const MAX_MESSAGE_LIMIT: usize = 128 * 1024;
+/// Maximum UTF-8 size of one outbound message body.
+///
+/// The reported truncation occurred at 4096 Unicode scalar values. Tau uses a
+/// conservative 4096-byte policy so multibyte text cannot cross that observed
+/// display boundary, and visibly numbers messages that require multiple
+/// stanzas.
+const OUTBOUND_BODY_LIMIT_BYTES: usize = 4096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 // Keep command readiness semantics aligned with
@@ -917,26 +924,85 @@ impl Extension {
                 RoutingMode::DirectResource => cfg.default_recipient.to_bare().to_string(),
             };
             drop(state);
-            let text = format!("[{}] {message}", invoke.agent_id.as_ref());
-            match self.bridge.send_message(&invoke.agent_id, &text) {
-                Ok(()) => {
-                    self.output.emit(Event::MessageSent(MessageSent::new(
-                        MessagePublisherId::default(),
-                        MessageAgentTarget::new(invoke.agent_id.as_ref()),
-                        generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
-                        None,
-                        Some(MessageConversation {
-                            stable_id: conversation,
-                            display_name: None,
-                            alias: None,
-                        }),
-                        &message,
-                    )));
-                    tool_result(invoke, "sent XMPP message")
+            let parts = match outbound_message_parts(&invoke.agent_id, &message) {
+                Ok(parts) => parts,
+                Err(error) => return tool_error(invoke, error),
+            };
+            for (index, text) in parts.iter().enumerate() {
+                if let Err(error) = self.bridge.send_message(&invoke.agent_id, text) {
+                    let error = if parts.len() == 1 {
+                        error
+                    } else {
+                        format!(
+                            "failed to send XMPP message part {}/{} after {} complete part(s): {error}",
+                            index + 1,
+                            parts.len(),
+                            index
+                        )
+                    };
+                    return tool_error(invoke, error);
                 }
-                Err(message) => tool_error(invoke, message),
             }
+            self.output.emit(Event::MessageSent(MessageSent::new(
+                MessagePublisherId::default(),
+                MessageAgentTarget::new(invoke.agent_id.as_ref()),
+                generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
+                None,
+                Some(MessageConversation {
+                    stable_id: conversation,
+                    display_name: None,
+                    alias: None,
+                }),
+                &message,
+            )));
+            tool_result(invoke, "sent XMPP message")
         }
+    }
+}
+
+/// Format an outbound tool message into UTF-8-safe, visibly numbered bodies.
+fn outbound_message_parts(agent_id: &AgentId, message: &str) -> Result<Vec<String>, String> {
+    let prefix = format!("[{}] ", agent_id.as_ref());
+    if prefix.len() + message.len() <= OUTBOUND_BODY_LIMIT_BYTES {
+        return Ok(vec![format!("{prefix}{message}")]);
+    }
+
+    let mut expected_parts = 2;
+    loop {
+        let mut parts = Vec::with_capacity(expected_parts);
+        let mut remaining = message;
+        while !remaining.is_empty() {
+            let marker = format!("[part {}/{}] ", parts.len() + 1, expected_parts);
+            let overhead = prefix.len() + marker.len();
+            let Some(capacity) = OUTBOUND_BODY_LIMIT_BYTES.checked_sub(overhead) else {
+                return Err(format!(
+                    "XMPP agent prefix and multipart marker exceed the {OUTBOUND_BODY_LIMIT_BYTES}-byte outbound body limit"
+                ));
+            };
+            if capacity == 0 {
+                return Err(format!(
+                    "XMPP agent prefix and multipart marker leave no payload space within the {OUTBOUND_BODY_LIMIT_BYTES}-byte outbound body limit"
+                ));
+            }
+            let mut end = remaining.len().min(capacity);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == 0 {
+                return Err(format!(
+                    "XMPP multipart payload cannot fit one UTF-8 character within the {OUTBOUND_BODY_LIMIT_BYTES}-byte outbound body limit"
+                ));
+            }
+            let (chunk, rest) = remaining.split_at(end);
+            parts.push(format!("{prefix}{marker}{chunk}"));
+            remaining = rest;
+        }
+        if parts.len() == expected_parts {
+            return Ok(parts);
+        }
+        // The denominator can widen its own marker at a power-of-ten boundary.
+        // Re-split until the advertised and actual counts reach a fixed point.
+        expected_parts = parts.len();
     }
 }
 
