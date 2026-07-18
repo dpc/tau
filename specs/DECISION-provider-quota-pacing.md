@@ -20,3 +20,6 @@ fresh applicability and timing evidence exists.
 
 Exact applicability, freshness, pacing, hysteresis, and presentation behavior is
 specified by [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
+The approved Codex WebSocket-only cutover narrows its sparse observation source as
+recorded by
+[DECISION-provider-backend-split-and-codex-ws-only](DECISION-provider-backend-split-and-codex-ws-only.md).

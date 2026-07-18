@@ -38,3 +38,5 @@ application is recorded by
 [DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).
 The confirmed default for extension-owned state derivable from committed facts is
 [DECISION-event-log-first-extension-state](DECISION-event-log-first-extension-state.md).
+The approved provider-backend boundary cutover is recorded by
+[DECISION-provider-backend-split-and-codex-ws-only](DECISION-provider-backend-split-and-codex-ws-only.md).
