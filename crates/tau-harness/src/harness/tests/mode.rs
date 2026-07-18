@@ -353,6 +353,7 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "message-debug-secret",

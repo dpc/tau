@@ -39,8 +39,9 @@ Harness input and output messages are directionally typed. Keep request/response
 
 Message facts keep stable publisher-domain party and conversation identities
 separate from optional mutable display presentation. Provider presentation
-retains stable IDs as primary and carries the harness-stamped publisher
-separately.
+uses the opaque references and optional typed metadata specified by
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md),
+and carries the harness-stamped publisher separately.
 Shared visible escaping covers controls, bidi/zero-width/default-ignorable
 structure, variation selectors, Hangul fillers, and noncharacters so UIs and
 provider XML never interpret hostile metadata.

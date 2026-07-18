@@ -14,12 +14,14 @@ Slack sender identity has three separate publisher-owned layers:
 | Slack display | the same response's bounded `profile.display_name` | untrusted presentation only |
 | Semantic alias | operator `sender_aliases` configuration | presentation only |
 
-The extension publishes native U/W as `MessageParty.stable_id` and chooses the
-display hint as the configured alias when present, otherwise the bounded Slack
-display. The harness stamps the configured extension instance separately as
-`publisher_extension_id`. Neither display source affects allowlisting, commands,
-dynamic-DM linking, selection, routing, reply authority, reaction authority, or
-duplicate keys.
+The extension retains native U/W locally for authority and publishes an
+installation-scoped opaque `MessageParty.stable_id` as required by
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
+It chooses the display hint as the configured alias when present, otherwise the
+bounded Slack display. The harness stamps the configured extension instance
+separately as `publisher_extension_id`. Neither display source affects
+allowlisting, commands, dynamic-DM linking, selection, routing, reply authority,
+reaction authority, or duplicate keys.
 
 ## Installation and verification
 
@@ -47,11 +49,11 @@ changed, incomplete, or malformed observation permanently retires publication,
 routes, links, selections, ownership, duplicate state, and workers until restart.
 Already-started sends cannot retry or install private authority afterward.
 
-The locally written fact retains stable ID and the selected optional display hint.
-Replay uses those stored universal fields without Slack lookup or alias
-re-resolution. Publisher-private details may use bounded `extension_data`, but
-Slack currently emits CBOR null and never stores credentials or actionable
-routes there.
+The locally written fact retains the opaque sender reference, selected optional
+display hint, typed authentication outcome, and configured conversation alias
+when one exists. Replay uses those stored universal fields without Slack lookup
+or alias re-resolution. Slack emits CBOR-null `extension_data` and never stores
+credentials or actionable routes there.
 
 Slack keeps a bounded process-local FIFO of native occurrence IDs before
 publication. Recording precedes identity lookup and local fact write, so transient

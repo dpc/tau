@@ -37,10 +37,13 @@ keeps only a process-local recent native-id cache, so cache eviction, restart, o
 races may duplicate delivery.
 
 Valid committed facts project to an escaped `<tau_message event="…">` boundary
-that keeps stable IDs primary and optional display labels secondary. Incoming
-facts can activate a live target after transcript placement; replay reconstructs
-context without waking the model. Publisher metadata and message content remain
-untrusted and confer no identity, instruction, route, tool, or egress authority.
+with opaque message/sender references and optional display, authentication, and
+configured-alias metadata as specified by
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+Incoming facts can activate a live target after transcript placement; replay
+reconstructs context without waking the model. Publisher metadata and message
+content remain untrusted and confer no identity, instruction, route, tool, or
+egress authority.
 
 ## Cross-harness messages
 

@@ -26,8 +26,8 @@ use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
     MessageConversation, MessageDeleted, MessageDelivered, MessageEdited, MessageFactId,
     MessageFactRef, MessageParty, MessagePublisherId, MessageReactionAdded, MessageReactionRemoved,
-    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
-    ToolStarted, ToolUseState, ToolUseStatus,
+    MessageSenderAuth, MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult,
+    ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -889,13 +889,30 @@ fn message_fact_conversation(conversation: &SlackConversation) -> MessageConvers
     MessageConversation {
         stable_id: conversation.channel_id.clone(),
         display_name: Some(conversation.alias.clone()),
+        alias: (conversation.alias != DYNAMIC_DM_LABEL).then(|| conversation.alias.clone()),
     }
 }
 
-/// Compose Slack conversation and native occurrence identity into one
-/// publisher-scoped Slack fact identifier.
+/// Derive the opaque model/tool reference required by
+/// `DECISION-common-external-message-envelope`.
 fn slack_message_fact_id(channel_id: &str, native_id: &str) -> MessageFactId {
-    MessageFactId::new(format!("slack:{channel_id}:{native_id}"))
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-slack/message-ref/v1\0");
+    hasher.update(channel_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(native_id.as_bytes());
+    MessageFactId::new(format!("slack-message:{}", hasher.finalize().to_hex()))
+}
+
+/// Derive an opaque canonical sender reference without exposing a Slack user
+/// ID.
+fn slack_sender_ref(installation_team_id: &str, user_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-slack/sender-ref/v1\0");
+    hasher.update(installation_team_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(user_id.as_bytes());
+    format!("slack-sender:{}", hasher.finalize().to_hex())
 }
 
 /// Exact policy scope owning one selected-agent choice.
@@ -3817,8 +3834,14 @@ impl Extension {
         };
         let target = MessageAgentTarget::new(agent_id.to_string());
         let party = MessageParty {
-            stable_id: user_id.clone(),
+            stable_id: slack_sender_ref(&installation_team_id, &user_id),
             display_name: identity_alias.clone().or_else(|| display_name.clone()),
+            sender_auth: cfg.sender_policy(&user_id).map(|status| match status {
+                SenderPolicyStatus::Allowlisted => MessageSenderAuth::VerifiedAllowlisted,
+                SenderPolicyStatus::LaxPermitted => {
+                    MessageSenderAuth::VerifiedConversationAuthorized
+                }
+            }),
         };
         let fact_conversation = Some(message_fact_conversation(&conversation));
         let (event, reply_message_id, original_key, reaction_message_ts) = match fact {
@@ -5393,7 +5416,7 @@ fn send_tool_spec() -> ToolSpec {
         title: Some("Send a Slack reply".to_owned()),
         arguments: CborValue::Map(vec![
             example_field("message", example_text("Thanks, I’ll look into it.")),
-            example_field("reply_to", example_text("slack:C123:1712345678.123456")),
+            example_field("reply_to", example_text("slack-message:0123456789abcdef")),
         ]),
         note: Some(
             "reply_to is a Tau-issued fact selector, not a bearer capability or separate channel argument.".to_owned(),
@@ -5478,7 +5501,7 @@ fn react_tool_spec() -> ToolSpec {
             id: "react-eyes".to_owned(),
             title: Some("Add an eyes reaction".to_owned()),
             arguments: CborValue::Map(vec![
-                example_field("message_ref", example_text("slack:C123:1720000000.123456")),
+                example_field("message_ref", example_text("slack-message:0123456789abcdef")),
                 example_field("emoji", example_text("eyes")),
                 example_field("action", example_text("add")),
             ]),

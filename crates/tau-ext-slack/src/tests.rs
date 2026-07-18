@@ -7,7 +7,7 @@ mod send_delivery_tests;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
-use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
+use tau_proto::{ContentPart, HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
 use super::send_delivery::ImmediateSendScheduler;
 use super::*;
@@ -814,6 +814,87 @@ fn slack_conversation(channel_id: &str, thread_ts: Option<&str>) -> SlackConvers
     }
 }
 
+/// Dynamic DM routes have no configured alias, so incoming and sent projections
+/// must omit `conversation` rather than expose the internal fallback label.
+#[test]
+fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
+    let conversation = SlackConversation {
+        channel_id: "D123".to_owned(),
+        thread_ts: None,
+        kind: ConversationPolicyKind::Dm,
+        alias: DYNAMIC_DM_LABEL.to_owned(),
+    };
+    let metadata = message_fact_conversation(&conversation);
+    assert_eq!(metadata.alias, None);
+    let fact = Event::MessageDelivered(MessageDelivered::new(
+        MessagePublisherId::new("std-slack"),
+        MessageAgentTarget::new("agent-a"),
+        slack_message_fact_id("D123", "1.0"),
+        MessageParty {
+            stable_id: slack_sender_ref("T123", "U123"),
+            display_name: None,
+            sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+        },
+        Some(metadata),
+        "hello",
+    ));
+    let projection = tau_proto::project_message_fact(&fact)
+        .expect("message fact")
+        .expect("valid projection");
+    let ContentPart::Text { text } = &projection.item.content[0];
+    assert!(!text.contains(" conversation="), "{text}");
+    assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
+
+    let sent = Event::MessageSent(MessageSent::new(
+        MessagePublisherId::new("std-slack"),
+        MessageAgentTarget::new("agent-a"),
+        slack_message_fact_id("D123", "2.0"),
+        Some(MessageParty {
+            stable_id: slack_sender_ref("T123", "U123"),
+            display_name: None,
+            sender_auth: None,
+        }),
+        Some(message_fact_conversation(&conversation)),
+        "reply",
+    ));
+    let projection = tau_proto::project_message_fact(&sent)
+        .expect("message fact")
+        .expect("valid projection");
+    let ContentPart::Text { text } = &projection.item.content[0];
+    assert!(!text.contains(" conversation="), "{text}");
+    assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
+}
+
+/// Slack references are stable opaque values whose visible spelling neither
+/// contains native coordinates nor collides across relevant identity inputs.
+#[test]
+fn slack_prompt_references_are_opaque_and_domain_separated() {
+    let message = slack_message_fact_id("C-NATIVE-CHANNEL", "native.timestamp");
+    assert_eq!(
+        message,
+        slack_message_fact_id("C-NATIVE-CHANNEL", "native.timestamp")
+    );
+    assert_ne!(
+        message,
+        slack_message_fact_id("C-OTHER-CHANNEL", "native.timestamp")
+    );
+    assert_ne!(
+        message,
+        slack_message_fact_id("C-NATIVE-CHANNEL", "other.timestamp")
+    );
+    assert!(message.as_str().starts_with("slack-message:"));
+    assert!(message.as_str().len() <= 128);
+    assert!(!message.as_str().contains("NATIVE"));
+    assert!(!message.as_str().contains("timestamp"));
+
+    let sender = slack_sender_ref("T123", "U123");
+    assert_eq!(sender, slack_sender_ref("T123", "U123"));
+    assert_ne!(sender, slack_sender_ref("T999", "U123"));
+    assert_ne!(sender, slack_sender_ref("T123", "U999"));
+    assert!(sender.starts_with("slack-sender:"));
+    assert_eq!(sender.len(), "slack-sender:".len() + 64);
+}
+
 fn slack_reaction(
     event_id: &str,
     event_type: &str,
@@ -966,7 +1047,19 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
     assert_eq!(delivered.text, "hello");
     assert_eq!(
         delivered.message_id.as_str(),
-        format!("slack:C123:{native_id}")
+        slack_message_fact_id("C123", &native_id).as_str()
+    );
+    assert_eq!(
+        delivered.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedAllowlisted)
+    );
+    assert!(delivered.sender.stable_id.starts_with("slack-sender:"));
+    assert_eq!(
+        delivered
+            .conversation
+            .as_ref()
+            .and_then(|value| value.alias.as_deref()),
+        Some("team")
     );
 
     ext.process_slack_edit(slack_edit("edit-1", "C123", &native_id, None, "updated"));
@@ -1052,6 +1145,27 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
     assert!(!state.reaction_targets.contains_key(&delivered.message_id));
     assert!(state.reaction_owners.is_empty());
     assert!(state.reaction_in_flight.is_empty());
+}
+
+/// Lax static-route ingress reports its existing verified conversation
+/// admission without upgrading the sender to allowlisted.
+#[test]
+fn lax_static_ingress_reports_conversation_authorization() {
+    let (ext, rx, _client) = extension();
+    let mut config = cfg();
+    config.security_mode = SecurityMode::Lax;
+    apply_test_config(&ext, config);
+    register_agent(&ext, "agent-a");
+    let mut message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    message.user_id = "U999".to_owned();
+    ext.process_slack_message(message);
+    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
+        panic!("expected delivered fact");
+    };
+    assert_eq!(
+        delivered.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedConversationAuthorized)
+    );
 }
 
 /// Deleting a bridge-authored post publishes against its sent fact and revokes
@@ -1156,7 +1270,10 @@ fn outgoing_message_delete_survives_receive_unregister() {
     else {
         panic!("expected deleted fact");
     };
-    assert_eq!(deleted.target.message_id.as_str(), "slack:C123:10.0");
+    assert_eq!(
+        deleted.target.message_id,
+        slack_message_fact_id("C123", "10.0")
+    );
 }
 
 /// Receive-registration generation changes after ACK do not invalidate exact
@@ -1194,7 +1311,10 @@ fn admitted_outgoing_delete_ignores_receive_registration_churn() {
     let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "churned outgoing deleted") else {
         panic!("expected deleted fact");
     };
-    assert_eq!(deleted.target.message_id.as_str(), "slack:C123:11.0");
+    assert_eq!(
+        deleted.target.message_id,
+        slack_message_fact_id("C123", "11.0")
+    );
 }
 
 /// An ACK-era incoming owner cannot publish deletion after unregister removes
@@ -1203,8 +1323,10 @@ fn admitted_outgoing_delete_ignores_receive_registration_churn() {
 fn admitted_incoming_delete_fails_closed_after_unregister() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", Some("channel"), "<@UBOT123> hello"));
-    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    let message_ts = message.ts.clone().expect("native Slack timestamp");
+    ext.process_slack_message(message);
+    let Event::MessageDelivered(_) = recv_message_fact(&rx, "delivered") else {
         panic!("expected delivered fact");
     };
     ext.state.lock().expect("state").session_active = true;
@@ -1214,16 +1336,11 @@ fn admitted_incoming_delete_fails_closed_after_unregister() {
         Event::ToolResult(_)
     ));
 
-    let message_ts = delivered
-        .message_id
-        .as_str()
-        .strip_prefix("slack:C123:")
-        .expect("Slack fact id");
     ext.process_slack_delete_admitted(
         SlackDelete {
             event_id: Some("stale-incoming-delete".to_owned()),
             channel_id: "C123".to_owned(),
-            message_ts: message_ts.to_owned(),
+            message_ts,
             thread_ts: None,
         },
         Some(&admission),
@@ -1260,7 +1377,7 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     {
         let mut state = ext.state.lock().expect("state");
         assert!(state.insert_reaction_target(
-            MessageFactId::new("slack:C123:12.0"),
+            MessageFactId::new("slack-message:test-c123-12.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
                 conversation: slack_conversation("C123", None),
@@ -1321,7 +1438,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
         state.instance_name = Some("std-slack".into());
         state.session_active = true;
         assert!(state.insert_reaction_target(
-            MessageFactId::new("slack:C456:1.0"),
+            MessageFactId::new("slack-message:test-c456-1.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
                 conversation: SlackConversation {
@@ -1359,7 +1476,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
             REACT_TOOL_NAME,
             "agent-a",
             tau_proto::json_to_cbor(
-                &serde_json::json!({"message_ref":"slack:C456:1.0","emoji":"eyes","action":"add"}),
+                &serde_json::json!({"message_ref":"slack-message:test-c456-1.0","emoji":"eyes","action":"add"}),
             ),
         ))
     });
@@ -1397,7 +1514,7 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
         state.instance_name = Some("std-slack".into());
     }
     register_agent(&ext, "agent-a");
-    let message_ref = "slack:C123:13.0";
+    let message_ref = "slack-message:test-c123-13.0";
     install_source_reaction_target(&ext, message_ref);
     ext.remember_posted_message(
         slack_conversation("C123", None),
@@ -1961,7 +2078,7 @@ fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
 fn reaction_ownership_capacity_is_enforced_before_io() {
     let (ext, _rx, client) = extension();
     register_agent(&ext, "agent-a");
-    install_source_reaction_target(&ext, "slack:C123:1.0");
+    install_source_reaction_target(&ext, "slack-message:test-c123-1.0");
     {
         let mut state = ext.state.lock().expect("state");
         for index in 0..REACTION_OWNERSHIP_LIMIT {
@@ -1973,7 +2090,7 @@ fn reaction_ownership_capacity_is_enforced_before_io() {
                 },
                 ReactionOwner {
                     agent_id: agent_id("agent-a"),
-                    message_ref: MessageFactId::new(format!("slack:C999:{index}.0")),
+                    message_ref: MessageFactId::new(format!("slack-message:test-c999-{index}.0")),
                 },
             );
         }
@@ -1983,7 +2100,7 @@ fn reaction_ownership_capacity_is_enforced_before_io() {
             REACT_TOOL_NAME,
             "agent-a",
             "capacity-add",
-            reaction_args("slack:C123:1.0", "eyes", "add"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         )),
         Event::ToolError(_)
     ));
@@ -2006,7 +2123,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
     let mut state = State::default();
     for index in 0..REACTION_TARGET_LIMIT {
         assert!(state.insert_reaction_target(
-            MessageFactId::new(format!("slack:C123:{index}.0")),
+            MessageFactId::new(format!("slack-message:test-c123-{index}.0")),
             target.clone()
         ));
     }
@@ -2019,26 +2136,29 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         ReactionReservation {
             agent_id: agent_id("agent-a"),
             token: 1,
-            message_ref: MessageFactId::new("slack:C123:0.0"),
+            message_ref: MessageFactId::new("slack-message:test-c123-0.0"),
             unowned_add: false,
         },
     );
-    assert!(state.insert_reaction_target(MessageFactId::new("slack:C123:new"), target.clone()));
+    assert!(state.insert_reaction_target(
+        MessageFactId::new("slack-message:test-c123-new"),
+        target.clone()
+    ));
     assert!(
         state
             .reaction_targets
-            .contains_key(&MessageFactId::new("slack:C123:0.0"))
+            .contains_key(&MessageFactId::new("slack-message:test-c123-0.0"))
     );
     assert!(
         !state
             .reaction_targets
-            .contains_key(&MessageFactId::new("slack:C123:1.0"))
+            .contains_key(&MessageFactId::new("slack-message:test-c123-1.0"))
     );
     assert_eq!(state.reaction_targets.len(), REACTION_TARGET_LIMIT);
 
     state.clear_reaction_state();
     for index in 0..REACTION_TARGET_LIMIT {
-        let message_ref = MessageFactId::new(format!("slack:C123:{index}.0"));
+        let message_ref = MessageFactId::new(format!("slack-message:test-c123-{index}.0"));
         assert!(state.insert_reaction_target(message_ref.clone(), target.clone()));
         state.reaction_owners.insert(
             ReactionKey {
@@ -2052,7 +2172,10 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             },
         );
     }
-    assert!(!state.insert_reaction_target(MessageFactId::new("slack:C123:blocked"), target));
+    assert!(!state.insert_reaction_target(
+        MessageFactId::new("slack-message:test-c123-blocked"),
+        target
+    ));
 
     state.clear_reaction_state();
     for index in 0..REACTION_ATTEMPT_LIMIT {
@@ -2060,7 +2183,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             REACT_TOOL_NAME,
             "agent-a",
             &format!("completed-{index}"),
-            reaction_args("slack:C123:1.0", "eyes", "add"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         );
         assert!(state.remember_reaction_attempt(
             &invoke,
@@ -2071,7 +2194,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         REACT_TOOL_NAME,
         "agent-a",
         "completed-new",
-        reaction_args("slack:C123:1.0", "eyes", "add"),
+        reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
     assert!(state.remember_reaction_attempt(
         &replacement,
@@ -2090,7 +2213,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             REACT_TOOL_NAME,
             "agent-a",
             &format!("in-flight-{index}"),
-            reaction_args("slack:C123:1.0", "eyes", "add"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         );
         assert!(state.remember_reaction_attempt(&invoke, ReactionAttemptDisposition::InFlight));
     }
@@ -2098,7 +2221,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         REACT_TOOL_NAME,
         "agent-a",
         "in-flight-blocked",
-        reaction_args("slack:C123:1.0", "eyes", "add"),
+        reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
     assert!(!state.remember_reaction_attempt(&blocked, ReactionAttemptDisposition::InFlight));
 }
@@ -2109,19 +2232,19 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
 fn successful_send_uses_local_reply_selector() {
     let (ext, rx, client) = extension();
     register_agent(&ext, "agent-a");
-    install_source_reaction_target(&ext, "slack:C123:1.0");
+    install_source_reaction_target(&ext, "slack-message:test-c123-1.0");
     assert!(
         ext.handle_send(tool_call(
             SEND_TOOL_NAME,
             "agent-a",
             "successful-local-reply",
             tau_proto::json_to_cbor(
-                &serde_json::json!({"message":"reply","reply_to":"slack:C123:1.0"}),
+                &serde_json::json!({"message":"reply","reply_to":"slack-message:test-c123-1.0"}),
             ),
         ))
         .is_none()
     );
-    let mut sent_publisher = None;
+    let mut sent_fact = None;
     loop {
         let message = rx
             .recv_timeout(Duration::from_secs(1))
@@ -2129,14 +2252,30 @@ fn successful_send_uses_local_reply_selector() {
         if let HarnessInputMessage::Emit(emit) = message {
             match *emit.event {
                 Event::MessageSent(fact) => {
-                    sent_publisher = Some(fact.publisher_extension_id);
+                    sent_fact = Some(fact);
                 }
                 Event::ToolResult(_) => break,
                 _ => {}
             }
         }
     }
-    assert_eq!(sent_publisher.expect("sent fact").as_str(), "std-slack");
+    let sent_fact = sent_fact.expect("sent fact");
+    assert_eq!(sent_fact.publisher_extension_id.as_str(), "std-slack");
+    assert_eq!(
+        sent_fact
+            .recipient
+            .as_ref()
+            .map(|party| party.stable_id.as_str()),
+        Some(slack_sender_ref("T123", "U123").as_str())
+    );
+    let projection = tau_proto::project_message_fact(&Event::MessageSent(sent_fact))
+        .expect("message fact")
+        .expect("valid projection");
+    let ContentPart::Text { text } = &projection.item.content[0];
+    assert!(text.contains(" recipient_ref=\"slack-sender:"), "{text}");
+    assert!(text.contains(" conversation=\"team\""), "{text}");
+    assert!(!text.contains(" sender_ref="), "{text}");
+    assert!(!text.contains("content_trust="), "{text}");
     let sent = client.sent.lock().expect("sent");
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].channel_id, "C123");
@@ -2149,13 +2288,13 @@ fn successful_send_uses_local_reply_selector() {
 fn reaction_target_ownership_and_replay_are_enforced() {
     let (ext, _rx, client) = extension();
     register_agent(&ext, "agent-a");
-    install_source_reaction_target(&ext, "slack:C123:1.0");
+    install_source_reaction_target(&ext, "slack-message:test-c123-1.0");
 
     let add = tool_call(
         REACT_TOOL_NAME,
         "agent-a",
         "react-add",
-        reaction_args("slack:C123:1.0", "eyes", "add"),
+        reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
     assert!(matches!(
         ext.handle_react(add.clone()),
@@ -2177,7 +2316,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
             REACT_TOOL_NAME,
             "agent-b",
             "react-other",
-            reaction_args("slack:C123:1.0", "eyes", "remove"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "remove"),
         )),
         Event::ToolError(_)
     ));
@@ -2187,7 +2326,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
             REACT_TOOL_NAME,
             "agent-a",
             "react-remove",
-            reaction_args("slack:C123:1.0", "eyes", "remove"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "remove"),
         )),
         Event::ToolResult(_)
     ));
@@ -2201,7 +2340,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
 fn reaction_idempotency_errors_respect_local_ownership() {
     let (ext, _rx, client) = extension();
     register_agent(&ext, "agent-a");
-    install_source_reaction_target(&ext, "slack:C123:1.0");
+    install_source_reaction_target(&ext, "slack-message:test-c123-1.0");
 
     client.push_reaction_result(Err(ReactionApiError::AlreadyReacted));
     assert!(matches!(
@@ -2209,7 +2348,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "already",
-            reaction_args("slack:C123:1.0", "eyes", "add"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         )),
         Event::ToolError(_)
     ));
@@ -2221,7 +2360,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "add-ok",
-            reaction_args("slack:C123:1.0", "eyes", "add"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         )),
         Event::ToolResult(_)
     ));
@@ -2231,7 +2370,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "remove-missing",
-            reaction_args("slack:C123:1.0", "eyes", "remove"),
+            reaction_args("slack-message:test-c123-1.0", "eyes", "remove"),
         )),
         Event::ToolResult(_)
     ));
@@ -2243,7 +2382,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
             REACT_TOOL_NAME,
             "agent-a",
             "ambiguous-add",
-            reaction_args("slack:C123:1.0", "wave", "add"),
+            reaction_args("slack-message:test-c123-1.0", "wave", "add"),
         )),
         Event::ToolError(_)
     ));
@@ -3408,7 +3547,7 @@ fn posted_message_cache_eviction_and_cleanup_are_synchronized() {
             PostedMessageKey::new("C123", ts),
             PostedMessageOwner {
                 agent_id,
-                message_id: MessageFactId::new(format!("slack:C123:{ts}")),
+                message_id: MessageFactId::new(format!("slack-message:test-c123-{ts}")),
                 thread_ts: None,
                 conversation: slack_conversation("C123", None),
                 installation_team_id: "T123".to_owned(),

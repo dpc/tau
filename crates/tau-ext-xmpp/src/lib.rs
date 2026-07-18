@@ -29,9 +29,9 @@ use rand::RngCore;
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSent, SessionId,
-    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus,
+    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSenderAuth,
+    MessageSent, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
@@ -928,6 +928,7 @@ impl Extension {
                         Some(MessageConversation {
                             stable_id: conversation,
                             display_name: None,
+                            alias: None,
                         }),
                         &message,
                     )));
@@ -1978,10 +1979,15 @@ impl WorkerState {
             agent_id,
             message_id,
             MessageParty {
-                stable_id: sender_id,
+                stable_id: xmpp_sender_ref(&sender_id),
                 display_name: from
                     .resource()
                     .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+                sender_auth: Some(if real.is_some() {
+                    MessageSenderAuth::VerifiedAllowlisted
+                } else {
+                    MessageSenderAuth::TrustedMembership
+                }),
             },
             conversation_id,
             body,
@@ -2025,10 +2031,11 @@ impl WorkerState {
             agents[0].clone(),
             message_id,
             MessageParty {
-                stable_id: sender_id,
+                stable_id: xmpp_sender_ref(&sender_id),
                 display_name: from
                     .resource()
                     .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+                sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
             },
             conversation_id,
             body,
@@ -2067,6 +2074,7 @@ impl WorkerState {
                 Some(MessageConversation {
                     stable_id: conversation_id,
                     display_name: None,
+                    alias: None,
                 }),
                 text,
             )));
@@ -2107,6 +2115,15 @@ fn generated_xmpp_send_message_id(call_id: &str, conversation: &str) -> MessageF
     hasher.update(b"\0");
     hasher.update(conversation.as_bytes());
     MessageFactId::new(format!("xmpp-send:{}", hasher.finalize().to_hex()))
+}
+
+/// Derive an opaque canonical sender reference as required by
+/// `DECISION-common-external-message-envelope`.
+fn xmpp_sender_ref(sender_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-xmpp/sender-ref/v1\0");
+    hasher.update(sender_id.as_bytes());
+    format!("xmpp-sender:{}", hasher.finalize().to_hex())
 }
 
 /// Bound an XMPP nickname/resource to the universal message-fact display limit.

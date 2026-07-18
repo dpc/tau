@@ -82,9 +82,10 @@ truncation.
 Logical durable outgoing text is `presentation_text`, not the generated
 ID-bearing wire decoration. Tool invocation persistence records the safe boolean.
 Tool results, progress, errors, canonical outgoing text, and operational logs do
-not copy the native mention. Existing canonical endpoints may still contain the
-already model-visible native stable sender ID; this feature creates no new
-id-bearing protocol field.
+not copy the native mention. Model-facing message facts use the opaque sender
+references required by
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md);
+this feature creates no new id-bearing protocol field.
 
 ## Delivery and failure behavior
 

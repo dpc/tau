@@ -131,6 +131,21 @@ pub struct MessageParty {
     /// Optional presentation-only display label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional publisher-established authentication and admission outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_auth: Option<MessageSenderAuth>,
+}
+
+/// Publisher-established sender authentication and admission outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageSenderAuth {
+    /// The transport verified the sender and an operator allowlist admitted it.
+    VerifiedAllowlisted,
+    /// The transport verified the sender and conversation policy admitted it.
+    VerifiedConversationAuthorized,
+    /// Configured room membership admitted the sender without individual proof.
+    TrustedMembership,
 }
 
 /// Descriptive conversation provenance supplied by a message publisher.
@@ -141,6 +156,9 @@ pub struct MessageConversation {
     /// Optional presentation-only conversation label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional configured human-readable model-facing conversation alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 /// Raw claimed Tau transcript target retained even when it cannot parse.
@@ -442,7 +460,7 @@ pub fn project_message_fact(
     {
         return Some(Err(MessageProjectionFailure::InvalidReference));
     }
-    if view.party().is_some_and(|(_, party)| !valid_party(party)) {
+    if view.party().is_some_and(|party| !valid_party(party)) {
         return Some(Err(MessageProjectionFailure::InvalidParty));
     }
     if view
@@ -510,10 +528,10 @@ impl<'a> MessageFactView<'a> {
         }
     }
 
-    /// Return the stable presentation discriminator.
+    /// Return the stable model-facing occurrence discriminator.
     fn event_name(&self) -> &'static str {
         match self {
-            Self::Delivered(_) => "delivered",
+            Self::Delivered(_) => "created",
             Self::Edited(_) => "edited",
             Self::Deleted(_) => "deleted",
             Self::ReactionAdded(_) => "reaction_added",
@@ -569,15 +587,15 @@ impl<'a> MessageFactView<'a> {
         }
     }
 
-    /// Borrow the event-specific party and presentation attribute label.
-    fn party(&self) -> Option<(&'static str, &MessageParty)> {
+    /// Borrow the event-specific external party.
+    fn party(&self) -> Option<&MessageParty> {
         match self {
-            Self::Delivered(fact) => Some(("sender", &fact.sender)),
-            Self::Edited(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
-            Self::Deleted(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
-            Self::ReactionAdded(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
-            Self::ReactionRemoved(fact) => fact.actor.as_ref().map(|party| ("actor", party)),
-            Self::Sent(fact) => fact.recipient.as_ref().map(|party| ("recipient", party)),
+            Self::Delivered(fact) => Some(&fact.sender),
+            Self::Edited(fact) => fact.actor.as_ref(),
+            Self::Deleted(fact) => fact.actor.as_ref(),
+            Self::ReactionAdded(fact) => fact.actor.as_ref(),
+            Self::ReactionRemoved(fact) => fact.actor.as_ref(),
+            Self::Sent(fact) => fact.recipient.as_ref(),
         }
     }
 
@@ -650,6 +668,7 @@ fn valid_conversation(conversation: &MessageConversation) -> bool {
             .display_name
             .as_deref()
             .is_none_or(valid_display)
+        && conversation.alias.as_deref().is_none_or(valid_display)
 }
 
 /// Validate one optional presentation label.
@@ -659,43 +678,49 @@ fn valid_display(value: &str) -> bool {
 
 /// Render one validated fact with centralized visible Unicode and XML escaping.
 fn render_message_fact(view: &MessageFactView<'_>) -> String {
+    // Keep this common transport-neutral projection aligned with
+    // DECISION-common-external-message-envelope.
     let mut output = format!(
         "<tau_message event=\"{}\" publisher=\"{}\"",
         view.event_name(),
         xml_escape(view.publisher().as_str())
     );
     if let Some(message_id) = view.message_id() {
-        push_attribute(&mut output, "message_id", message_id.as_str());
+        push_attribute(&mut output, "message_ref", message_id.as_str());
     }
     if let Some(reference) = view.reference() {
-        push_attribute(
-            &mut output,
-            "target_publisher",
-            reference.publisher_extension_id.as_str(),
-        );
-        push_attribute(
-            &mut output,
-            "target_message_id",
-            reference.message_id.as_str(),
-        );
+        push_attribute(&mut output, "message_ref", reference.message_id.as_str());
     }
-    if let Some((label, party)) = view.party() {
-        push_attribute(&mut output, &format!("{label}_id"), &party.stable_id);
+    if let Some(party) = view.party() {
+        let party_label = if matches!(view, MessageFactView::Sent(_)) {
+            "recipient"
+        } else {
+            "sender"
+        };
+        push_attribute(&mut output, &format!("{party_label}_ref"), &party.stable_id);
         if let Some(display) = &party.display_name {
-            push_attribute(&mut output, &format!("{label}_display"), display);
+            push_attribute(&mut output, &format!("{party_label}_display"), display);
+        }
+        if !matches!(view, MessageFactView::Sent(_))
+            && let Some(sender_auth) = party.sender_auth
+        {
+            push_attribute(&mut output, "sender_auth", sender_auth.as_str());
         }
     }
-    if let Some(conversation) = view.conversation() {
-        push_attribute(&mut output, "conversation_id", &conversation.stable_id);
-        if let Some(display) = &conversation.display_name {
-            push_attribute(&mut output, "conversation_display", display);
-        }
+    if let Some(alias) = view
+        .conversation()
+        .and_then(|conversation| conversation.alias.as_deref())
+    {
+        push_attribute(&mut output, "conversation", alias);
     }
     if let Some(reaction) = view.reaction() {
         push_attribute(&mut output, "reaction", reaction);
     }
     match view.text() {
         Some(text) => {
+            if !matches!(view, MessageFactView::Sent(_)) {
+                push_attribute(&mut output, "content_trust", "external");
+            }
             output.push('>');
             output.push_str(&xml_escape(text));
             output.push_str("</tau_message>");
@@ -703,6 +728,17 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
         None => output.push_str("/>"),
     }
     output
+}
+
+impl MessageSenderAuth {
+    /// Return the stable model-facing authentication label.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedAllowlisted => "verified_allowlisted",
+            Self::VerifiedConversationAuthorized => "verified_conversation_authorized",
+            Self::TrustedMembership => "trusted_membership",
+        }
+    }
 }
 
 /// Append one escaped XML-like attribute.

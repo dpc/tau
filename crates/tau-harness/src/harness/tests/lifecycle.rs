@@ -759,6 +759,7 @@ fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
         sender: tau_proto::MessageParty {
             stable_id: "u1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         conversation: None,
         text: "hello".to_owned(),
@@ -816,6 +817,7 @@ fn socket_client_cannot_emit_message_fact() {
         sender: tau_proto::MessageParty {
             stable_id: "u1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         conversation: None,
         text: "hello".to_owned(),

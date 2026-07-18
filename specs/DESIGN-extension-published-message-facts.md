@@ -2,19 +2,8 @@
 
 Status: confirmed, 2026-07-17, dpc
 
-## Status
-
-The model presentation below still describes the current implementation, but
-its envelope choice transitions to
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
-The rest of this design remains authoritative.
-
-This design is the implementation authority for `tau-agent-1eun` and for the
-dependent bridge-migration scope of `tau-agent-a10r`. It is governed by
+This design is governed by
 [DESIGN-persistence-and-extension-interface-change-approval](DESIGN-persistence-and-extension-interface-change-approval.md).
-The decisions recorded in `tau-agent-oekz` and `tau-agent-e201`, including the
-user's final blanket authorization, are the human authority for the confirmed
-status.
 
 ## Summary
 
@@ -35,9 +24,7 @@ The wire protocol has six distinct event types:
 - `message.sent`
 
 Each has small universal typed fields, a harness-stamped stable publisher
-extension ID, and bounded opaque `extension_data`. The protocol cutover is
-lockstep and intentionally has no compatibility with the superseded transport
-message protocol or affected old journals.
+extension ID, and bounded opaque `extension_data`.
 
 ## Goals
 
@@ -79,14 +66,22 @@ pub struct MessageFactRef {
     pub message_id: MessageFactId,
 }
 
+pub enum MessageSenderAuth {
+    VerifiedAllowlisted,
+    VerifiedConversationAuthorized,
+    TrustedMembership,
+}
+
 pub struct MessageParty {
     pub stable_id: String,
     pub display_name: Option<String>,
+    pub sender_auth: Option<MessageSenderAuth>,
 }
 
 pub struct MessageConversation {
     pub stable_id: String,
     pub display_name: Option<String>,
+    pub alias: Option<String>,
 }
 
 pub struct MessageExtensionData(pub CborValue);
@@ -155,7 +150,7 @@ pub struct MessageSent {
 ```
 
 `extension_data` serializes as a CBOR value and defaults to CBOR null in client
-constructors. It is not flattened. The field is required in the v11 wire
+constructors. It is not flattened. The field is required in the wire
 representation so accidental omission is visible in conformance fixtures.
 The publishing extension may interpret its own value on live delivery/replay;
 generic harness, model, and UI consumers do not, and other subscribers may
@@ -187,24 +182,27 @@ message command.
 publisher's identifier domain. “Stable” distinguishes an identifier from a
 changeable display label; it does not establish global identity or authority.
 Conversation data is descriptive provenance only and is never a reply or send
-route. Optional displays are presentation hints. `agent_id` is the Tau
-transcript target/owner.
+route. Optional displays are presentation hints. `MessageParty.sender_auth` and
+`MessageConversation.alias` are the typed optional prompt metadata defined by
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+They do not grant authority. `agent_id` is the Tau transcript target/owner.
 
 `message.sent` means the publisher reports that a message met its own transport
 send-success criterion. It is not a generic delivery or read receipt. Inert,
 non-secret native identifiers, correlation labels, aliases, verification
-descriptions, mention state, and retry descriptions may use `extension_data`.
+descriptions, mention state, and retry descriptions may use `extension_data`
+when they are not model-facing prompt metadata.
 Credentials, bearer values, and actionable reply/send capabilities or tokens
 stay in extension-local state. None become additional generic fields.
 
 ### Stable publisher provenance
 
-For extensions, protocol v11 makes `Configure.instance_name` required and uses
-that configured `ExtensionName` as `publisher_extension_id`. The operator must
+The protocol requires `Configure.instance_name` and uses that configured
+`ExtensionName` as `publisher_extension_id`. The operator must
 keep it stable across harness restarts. Do not use transient `ConnectionId` or
 the run-local numeric `ExtensionInstanceId`.
 
-V11 configured publisher IDs are 1–128 ASCII bytes and contain only letters,
+Configured publisher IDs are 1–128 ASCII bytes and contain only letters,
 digits, `_`, and `-`. Apply the same rule post-commit to
 `MessageFactRef.publisher_extension_id`. `MessagePublisherId` remains a raw
 wire string so a malformed reference can still be committed and diagnosed;
@@ -233,7 +231,7 @@ resource limit. In addition, event intake applies these structural limits to
 - at most 16 container levels;
 - at most 4,096 aggregate array/map/tag/value nodes.
 
-Measure bytes by encoding the `CborValue` alone with the v11 protocol's normal
+Measure bytes by encoding the `CborValue` alone with the protocol's normal
 CBOR encoder. Enforce depth and node limits while decoding
 `MessageExtensionData`, with a custom bounded visitor/seed or a decoder with
 proven equivalent limits, before the full nested value is materialized. For
@@ -256,8 +254,8 @@ consumer, not deserialization or append, applies:
 - party and conversation stable IDs: non-empty and at most 4,096 UTF-8 bytes;
 - agent target: must parse under the existing `AgentId` grammar and limit;
 - reference publisher ID: the 1–128-byte ASCII grammar above;
-- display names and conversation displays: at most 256 UTF-8 bytes and 80
-  Unicode scalar values;
+- display names, conversation displays, and conversation aliases: at most 256
+  UTF-8 bytes and 80 Unicode scalar values;
 - reaction: non-empty and at most 128 UTF-8 bytes and 64 scalar values;
 - delivered, edited, and sent text: non-empty and at most 131,072 UTF-8 bytes.
 
@@ -377,29 +375,11 @@ projection-failure/UI reasons. Logs and notices carry no raw message or
 
 ## Uniform safe model presentation
 
-Project facts to one generic, XML-like boundary. The element name remains
-`tau_message`; `event` distinguishes the six concrete event types:
-
-```text
-<tau_message event="delivered" publisher="bridge-main" message_id="m1"
-  sender_id="u1" sender_display="Alice" conversation_id="c1"
-  conversation_display="General">hello</tau_message>
-<tau_message event="edited" publisher="bridge-main"
-  target_publisher="bridge-main" target_message_id="m1"
-  actor_id="u1">corrected text</tau_message>
-<tau_message event="deleted" publisher="bridge-main"
-  target_publisher="bridge-main" target_message_id="m1"/>
-<tau_message event="reaction_added" publisher="bridge-main"
-  target_publisher="bridge-main" target_message_id="m1"
-  actor_id="u2" reaction="👍"/>
-<tau_message event="sent" publisher="bridge-main" message_id="m2"
-  recipient_id="u1">reply</tau_message>
-```
-
-Optional attributes are omitted. `agent_id` is omitted because it is the owner
-of the rendered prompt. Use `actor_id`/`actor_display` for edit, delete, and
-reaction events and `recipient_id`/`recipient_display` for sent events.
-`extension_data` is never included automatically.
+Project facts to the shared `tau_message` boundary specified by
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+Optional prompt metadata is carried by typed party and conversation fields;
+`extension_data` remains opaque and is never included automatically. `agent_id`
+is omitted because it is the owner of the rendered prompt.
 
 Attribute and body values use the existing centralized escaping and visible
 Unicode metadata escaping. Escape XML delimiters and quotes; expose C0/C1,
@@ -469,50 +449,19 @@ completion, or retry the send. Extension-local retry ledgers remain local.
 
 ## Cross-bridge schema validation
 
-The schema is intentionally sufficient for these publishers without importing
-transport structs or native authority into `tau-proto`:
+The schema remains transport-neutral. Slack, Telegram, and XMPP derive
+publisher-scoped opaque sender and message references from their native
+identities without projecting those identities. Optional bounded displays remain
+presentation-only, and only Slack static routes currently supply configured
+conversation aliases. Each bridge reports its existing sender admission outcome
+through `MessageSenderAuth`; XMPP's operator-trusted room membership is not
+upgraded to verified identity.
 
-- **Slack:** user ID maps to `sender.stable_id`, display profile to its optional
-  display, channel/conversation ID to the opaque conversation stable ID, text
-  to `text`, and conversation plus native timestamp/event identity to a
-  publisher-unique opaque `message_id`.
-  Actionable thread/reply material and team/channel routing remain local;
-  mention evidence and other inert non-secret descriptions may be opaque.
-  Slack's normalized body remains ordinary `text`; no generic mention flag is
-  restored.
-- **Telegram:** numeric user ID maps to `sender.stable_id`; the bounded user
-  name maps to display; chat ID maps to conversation stable ID; chat title is
-  optional display; and the bridge composes chat plus native message/update
-  identity into a publisher-unique opaque `message_id`. Session selection,
-  `ctx_id`, gateway request IDs, chat policy, update offset, reply markup, and
-  actionable send route remain local; inert non-secret diagnostic IDs may be
-  opaque. The published `text` is the original body, not a transport prefix.
-- **XMPP:** an accepted direct bare JID or accepted MUC occupant identity maps
-  to `sender.stable_id`; a nickname is display only; direct conversation or
-  room identity maps to the conversation stable ID; and the bridge uses a
-  bounded composite/hash of sender/conversation plus stanza ID, or generates a
-  unique local ID when no stanza ID exists, for `message_id`. Real-JID proof,
-  membership trust,
-  full-resource reply route, room configuration, and allowlist evidence remain
-  local; inert non-secret descriptions may be opaque. The published `text` is
-  the stanza body, not an `[xmpp ...]` prefix.
-
-An XMPP room occupant without a disclosed real JID may use the accepted full
-occupant JID as the publisher-scoped stable ID; the generic layer does not
-upgrade it to verified identity. These examples validate optional conversation
-and actor fields but create no transport-specific wire fields.
-
-`tau-agent-1eun` implements the core protocol/harness/UI and migrates Slack.
-The separately approved, dependent `tau-agent-a10r` migrates all remaining
-bundled instant-messaging bridges, at least Telegram and XMPP, after the core
-lands. Until that follow-up, their existing `ExtPromptSubmitRequest` use is a
-temporary legacy exception, not a supported alternative for new bridges.
-After the last bundled bridge migrates, `tau-agent-a10r` deletes
-`ExtPromptSubmitRequest` and replaces its remaining timer/control use with a
-narrow `ExtInternalPromptSubmitRequest { agent_id, text, ctx_id }` that has no
-user message class. The follow-up preserves bridge-visible behavior except
-where this fact model intentionally removes textual transport prefixes or
-harness-owned semantics.
+Native routes, allowlist evidence, reply authority, and transport policy remain
+extension-local. The published text is the original normalized body rather than
+a transport prefix. These mappings create no transport-specific wire fields and
+are presented according to
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
 
 ## Security and visibility
 
@@ -527,151 +476,3 @@ matching trusted local subscribers, even though generic UI/model projection
 hides it. Publishers must minimize it and exclude secrets and reusable route
 or action capabilities; only inert non-secret identifiers/descriptions that are
 safe to disclose to every matching subscriber belong there.
-
-## Removal and preservation inventory
-
-Remove in the v11 core cutover:
-
-- `MessageEnvelope`, `MessageOperation`, transport endpoint/reference,
-  ordering, trust/policy, reply-path, draft/authorization/destination, ingress
-  acceptance, old canonical `MessageId`, and outgoing completion DTOs;
-- `AgentMessageIncoming`, `AgentMessageOutgoing`, transport capability
-  registration, transport ingress, transport send completion, and their result
-  variants;
-- harness transport capability/route/destination copies, admission and
-  cross-extension send authorization, native ordering/revision/ownership,
-  deduplication, completion/retry choreography, ingress ACKs, protected
-  replacement publications, and Slack latency correlation;
-- Slack-specific generic prompt/UI fields and branches, including generic
-  `transport_identity_mentioned`;
-- old codecs, aliases, projections, fixtures, and migration readers for the
-  affected protocol.
-
-Preserve:
-
-- ordinary `Emit`, durable append, event bus, subscription, replay, tool
-  invocation/result ownership, extension lifecycle/configuration, and peer
-  messaging;
-- cross-harness `ExternalAgentMessage`, `AgentMessageSent`/`Received`, and
-  `AgentMessageId`, which are unrelated agent peer messaging;
-- `ExtensionDataRequest`, which is unrelated file-data RPC;
-- generic prompt submission sources and visible escaping after extracting them
-  from deleted message-envelope modules;
-- Slack/Telegram/XMPP local policy, routing, duplicate suppression, ownership,
-  send reliability, and diagnostics where they do not require harness message
-  management;
-- non-message internal prompt behavior through v11, then migrate it to the
-  narrow v12 request in `tau-agent-a10r`.
-
-Update or supersede stale architecture and bridge specs, including
-`ARCH-external-message-boundary`, harness/proto architecture, Slack transport
-message designs, security documentation, feature lists, and wire fixtures.
-
-## Protocol and journal cutover
-
-Increment `PROTOCOL_VERSION` from 10 to 11. Hello remains strict: v10 peers are
-rejected, and no dual-stack mode, legacy event aliases, default decoder,
-projection shim, or feature negotiation is added. `Configure.instance_name` is
-required for extension clients in v11.
-
-Old journals containing removed transport/message-envelope events are
-unsupported. They may fail ordinary v11 decoding as an unknown event; do not
-retain a legacy decoder merely to classify them. A journal is fully decoded
-and validated under v11 before any of its records are folded or delivered, so
-a failure returns a bounded decode/invalid-journal error without partial
-replay. The harness does not rewrite or delete it. There is no requirement to
-keep old affected journals readable. Unaffected journals that naturally decode
-under v11 need no artificial rejection.
-
-Bundled extensions, fixtures, docs, and harness change in lockstep. The
-Telegram/XMPP temporary legacy use is source-level sequencing within the v11
-workspace, not v10 wire compatibility; the final bridge-path cleanup belongs
-to `tau-agent-a10r`.
-
-That final cleanup is a second lockstep wire cutover: `tau-agent-a10r` increments
-`PROTOCOL_VERSION` from 11 to 12 when it removes `ExtPromptSubmitRequest` and
-adds the narrow internal-control request. V12 strictly rejects v11 peers and
-retains no v11 request decoder. The request is not a durable semantic fact, so
-ordinary v11 journals containing only retained event variants continue to
-decode naturally; any journal that does contain the removed request is
-unsupported under the same full-journal/no-partial-replay rule. Bundled bridge,
-internal-control, harness, fixture, and documentation changes land atomically
-for v12.
-
-## Implementation sequence
-
-1. Add v11 fact DTOs, event category/names/selectors, bounds, constructors,
-   provenance stamping, and exhaustive codec fixtures.
-2. Refactor store append so message persistence precedes semantic fold; add the
-   session-journal fallback and post-commit delivery path.
-3. Add harness live/replay projection, pending-tool adjacency, bounded
-   diagnostics, and uniform prompt rendering.
-4. Add CLI/UI rendering and replay parity.
-5. Convert Slack publication and send-result flow; remove harness transport
-   management, legacy message schema, and harness Slack latency code.
-6. Update architecture/security/bridge docs, run focused suites and full
-   `selfci`, and land `tau-agent-1eun` as reviewed linear changes.
-7. In dependent `tau-agent-a10r`, migrate Telegram, XMPP, and any other bundled
-   IM bridge; publish sent facts for their send tools; make the atomic v12
-   internal-prompt/legacy-path cutover; and run full `selfci` again.
-
-## Required verification
-
-Protocol tests must prove distinct event names, exhaustive selectors,
-round-trip of all universal and opaque fields, during-decode depth/node limits,
-encoded opaque-data limit, publisher-ID grammar, required extension instance
-name, provenance overwrite, v10 rejection, and absence of old decoders.
-
-Persistence/event-bus tests must prove append-before-delivery, no pre-commit
-interception, exact live/replay payload equality, publisher recognition after
-restart, one commit per duplicate emit, unresolved references, invalid target
-session fallback, process-lifetime ephemeral fallback replay, membership fold
-isolation, and storage-failure behavior.
-
-Harness tests must prove all six projections, roles, escaped adversarial text
-and metadata, conditional concise rule, no opaque-data exposure, post-commit
-invalid-fact classifier precedence, template-owned rule placement,
-unloaded/terminating targets, replay without wake, exactly one live activation,
-and FIFO placement after terminal tool results.
-
-UI tests must prove distinct bounded live/replay rendering, stable/display
-separation, unknown references, and deterministic unprojectable lines.
-
-Slack tests must prove local relevance/admission/dedup before emit, stable
-publisher stamping, direct delivered/edit/delete/reaction/sent facts, local
-reply/send policy, natural fact/result ordering without a transactional
-promise, and complete absence of capability/ingress/completion and harness
-latency behavior.
-
-Schema conformance fixtures for `tau-agent-1eun` must construct representative
-Telegram and XMPP delivered facts exactly as described above and demonstrate
-that no transport-specific typed field is needed. `tau-agent-a10r` adds bridge
-integration/live-replay tests, requires every migrated bridge with a send tool
-to publish and test `message.sent`, and proves no bundled IM bridge publishes a
-user message through `ExtPromptSubmitRequest`. Edited/deleted/reaction facts are
-required only for bridges whose native integration supports those operations.
-V12 tests prove strict v11 peer rejection and absence of the legacy request
-decoder.
-
-Workspace checks must include formatting, lint, targeted protocol/core/harness/
-CLI/Slack tests, documentation checks, and full `selfci`.
-
-## Acceptance criteria
-
-- The six distinct immutable fact types are the only generic message-operation
-  protocol.
-- A committed fact is never rejected, rewritten, erased, or replaced by a
-  harness consumer.
-- Durable append precedes all semantic consumption and replay restores the same
-  transcript/UI without live side effects.
-- Publisher provenance is the configured stable extension name and cannot be
-  spoofed by an emitting connection.
-- Generic model/UI output is bounded, escaped, transport-neutral, and excludes
-  opaque data.
-- Harness transport capability, routing, admission, ownership, completion,
-  deduplication, and Slack latency systems are gone.
-- Slack owns its transport behavior and publishes facts directly.
-- Protocol v11 has no affected backward-compatibility path.
-- Telegram and XMPP fit the universal delivered/sent schema now and migrate in
-  the approved v12 follow-up before the remaining legacy user-message bridge
-  path is removed.

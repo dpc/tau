@@ -86,8 +86,9 @@ Unicode scalars. The removed `channel_ids`, `listening_scope`, and
 
 `sender_aliases` optionally binds at most 64 exact U/W accounts one-to-one to
 unique aliases using the same grammar. The alias is presentation only: the
-native U/W account remains authoritative and visible, and aliases never grant
-admission, command, routing, reply, reaction, or mention authority. Inbound
+native U/W account remains extension-local authority while model context uses an
+opaque sender reference, and aliases never grant admission, command, routing,
+reply, reaction, or mention authority. Inbound
 creates, edits, and reactions take bounded `profile.display_name` from the same
 live `users.info` verification call (80 scalars/256 bytes); it is mutable,
 untrusted UI presentation and is never the model's primary sender identity.
@@ -183,7 +184,7 @@ proactive-only static DM does not.
 `slack_react {message_ref, emoji, action}` is disabled by default and uses the
 separate `slack:react` policy tag. It accepts only exact Tau-issued refs from
 locally written incoming create/edit facts or successful `slack_send` results.
-Refs have the documented `slack:<channel>:<message-ts>` fact-ID format, but the
+Refs have the documented opaque `slack-message:<digest>` fact-ID format, but the
 tool never accepts channel IDs or timestamps as separate route selectors, aliases,
 Unicode emoji, toggle, list, or discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
 fail-closed across route/config/session changes. Add `reactions:write` and
@@ -191,7 +192,7 @@ reinstall the Slack app before enabling it. Whole-group `slack` grants include
 this new externally visible mutation surface.
 
 Successful `slack_send` calls now return
-`{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}`
+`{"status":"sent","message_ref":"slack-message:<digest>","delivery_copies":"one"|"one_or_two_possible"}`
 rather than the former
 plain `sent Slack message` text. The fact ref becomes usable only after the
 sent-fact and result frames are written and flushed locally. A writer failure
@@ -235,8 +236,8 @@ until the operator updates the route and restarts.
 verified humans on static routes, but never grants DM linking, agent selection,
 bridge commands, or destination control. Dynamic DMs remain exact-user and
 allowlist bound even in lax mode. All Slack content remains
-`UntrustedExternal`; identity, policy, and control authority are typed
-separately.
+marked `content_trust="external"` in model context; identity, policy, and control
+authority are typed separately.
 
 Outside DMs, commands are recognized only when raw trimmed text begins with the exact
 authenticated bot mention, regardless of whether Slack wrapped the occurrence

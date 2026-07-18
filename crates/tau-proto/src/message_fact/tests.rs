@@ -4,6 +4,30 @@ use crate::{
     decode_harness_input_from_slice, encode_message_to_vec,
 };
 
+/// Sender-authentication outcomes retain their concise model/wire spellings
+/// across serialization and replay decoding.
+#[test]
+fn sender_auth_outcomes_round_trip_with_stable_spellings() {
+    for (value, spelling) in [
+        (
+            MessageSenderAuth::VerifiedAllowlisted,
+            "verified_allowlisted",
+        ),
+        (
+            MessageSenderAuth::VerifiedConversationAuthorized,
+            "verified_conversation_authorized",
+        ),
+        (MessageSenderAuth::TrustedMembership, "trusted_membership"),
+    ] {
+        let encoded = serde_json::to_string(&value).expect("encode sender auth");
+        assert_eq!(encoded, format!("\"{spelling}\""));
+        assert_eq!(
+            serde_json::from_str::<MessageSenderAuth>(&encoded).expect("decode sender auth"),
+            value
+        );
+    }
+}
+
 /// All client constructors emit the required opaque field as CBOR null while
 /// retaining each fact's distinct v11 wire shape.
 #[test]
@@ -17,10 +41,12 @@ fn constructors_default_required_extension_data_to_null() {
     let party = MessageParty {
         stable_id: "u1".to_owned(),
         display_name: Some("Alice".to_owned()),
+        sender_auth: None,
     };
     let conversation = Some(MessageConversation {
         stable_id: "c1".to_owned(),
         display_name: Some("General".to_owned()),
+        alias: None,
     });
     let facts = [
         Event::MessageDelivered(MessageDelivered::new(
@@ -97,10 +123,12 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     let party = MessageParty {
         stable_id: "u\"1".to_owned(),
         display_name: Some("Ali\u{202e}ce".to_owned()),
+        sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
     };
     let conversation = Some(MessageConversation {
         stable_id: "c1".to_owned(),
         display_name: Some("Gen&eral".to_owned()),
+        alias: Some("room&alias".to_owned()),
     });
     let mut delivered = MessageDelivered::new(
         publisher.clone(),
@@ -153,6 +181,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
             Some(MessageParty {
                 stable_id: "recipient-1".to_owned(),
                 display_name: Some("Recipient".to_owned()),
+                sender_auth: None,
             }),
             None,
             "sent",
@@ -185,12 +214,12 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<tau_message event=\"delivered\" publisher=\"bridge-main\" message_id=\"m1\" sender_id=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\">&lt;hello&gt;</tau_message>",
-            "<tau_message event=\"edited\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\">edited</tau_message>",
-            "<tau_message event=\"deleted\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\"/>",
-            "<tau_message event=\"reaction_added\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\" reaction=\"👍\"/>",
-            "<tau_message event=\"reaction_removed\" publisher=\"bridge-main\" target_publisher=\"bridge-main\" target_message_id=\"m&lt;&amp;1\" actor_id=\"u&quot;1\" actor_display=\"Ali\\u{202E}ce\" conversation_id=\"c1\" conversation_display=\"Gen&amp;eral\" reaction=\"👍\"/>",
-            "<tau_message event=\"sent\" publisher=\"bridge-main\" message_id=\"m2\" recipient_id=\"recipient-1\" recipient_display=\"Recipient\">sent</tau_message>",
+            "<tau_message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">&lt;hello&gt;</tau_message>",
+            "<tau_message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</tau_message>",
+            "<tau_message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\"/>",
+            "<tau_message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<tau_message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<tau_message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</tau_message>",
         ]
     );
 }
@@ -205,6 +234,7 @@ fn message_projection_failure_precedence_is_stable() {
         MessageParty {
             stable_id: String::new(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "",
@@ -231,6 +261,7 @@ fn message_projection_failure_precedence_is_stable() {
     fact.conversation = Some(MessageConversation {
         stable_id: String::new(),
         display_name: None,
+        alias: None,
     });
     assert_eq!(
         project_message_fact(&Event::MessageDelivered(fact.clone())),
@@ -279,6 +310,7 @@ fn message_projection_classifies_operation_metadata_failures() {
         Some(MessageParty {
             stable_id: "u1".to_owned(),
             display_name: Some("x".repeat(257)),
+            sender_auth: None,
         }),
         None,
     ));
@@ -295,6 +327,7 @@ fn message_projection_classifies_operation_metadata_failures() {
         Some(MessageConversation {
             stable_id: String::new(),
             display_name: None,
+            alias: None,
         }),
         "edit",
     ));
@@ -331,10 +364,12 @@ fn operation_message_projection_failure_precedence_is_stable() {
         Some(MessageParty {
             stable_id: String::new(),
             display_name: None,
+            sender_auth: None,
         }),
         Some(MessageConversation {
             stable_id: String::new(),
             display_name: None,
+            alias: None,
         }),
         "",
     );
@@ -397,10 +432,12 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             sender: MessageParty {
                 stable_id: "123456".to_owned(),
                 display_name: Some("alice".to_owned()),
+                sender_auth: None,
             },
             conversation: Some(MessageConversation {
                 stable_id: "-100".to_owned(),
                 display_name: Some("Ops".to_owned()),
+                alias: None,
             }),
             text: "telegram body".to_owned(),
             extension_data: MessageExtensionData::default(),
@@ -412,10 +449,12 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             sender: MessageParty {
                 stable_id: "room@example.test/alice".to_owned(),
                 display_name: Some("alice".to_owned()),
+                sender_auth: None,
             },
             conversation: Some(MessageConversation {
                 stable_id: "room@example.test".to_owned(),
                 display_name: None,
+                alias: None,
             }),
             text: "xmpp body".to_owned(),
             extension_data: MessageExtensionData::default(),

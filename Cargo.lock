@@ -3769,6 +3769,7 @@ name = "tau-ext-slack"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "blake3",
  "futures-util",
  "rand 0.8.6",
  "serde",

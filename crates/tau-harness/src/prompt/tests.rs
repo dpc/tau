@@ -941,6 +941,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
                 tau_proto::MessageParty {
                     stable_id: "u1".to_owned(),
                     display_name: None,
+                    sender_auth: None,
                 },
                 None,
                 "old fact",

@@ -1770,6 +1770,8 @@ fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
     assert_eq!(first, same);
     assert_ne!(first, other_sender);
     assert_ne!(first, other_conversation);
+    assert!(!first.as_str().contains("alice"));
+    assert!(!first.as_str().contains("room"));
 
     native.id = None;
     let generated_one = worker.inbound_message_id(&native, "alice@example.org", "room@example.org");
@@ -1779,6 +1781,12 @@ fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
         assert!(id.as_str().len() <= 256);
         assert!(id.as_str().starts_with("xmpp-delivered:"));
     }
+    let sender = xmpp_sender_ref("alice@example.org");
+    assert_eq!(sender, xmpp_sender_ref("alice@example.org"));
+    assert_ne!(sender, xmpp_sender_ref("bob@example.org"));
+    assert!(sender.starts_with("xmpp-sender:"));
+    assert!(!sender.contains("alice"));
+    assert!(!sender.contains("example.org"));
 }
 
 /// Allowed MUC text with a cached real JID publishes one transport-neutral fact
@@ -1818,7 +1826,11 @@ fn allowed_muc_message_publishes_replay_stable_fact() {
     };
     assert_eq!(req.agent_id.as_str(), "agent-1");
     assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, "me@example.org");
+    assert_eq!(req.sender.stable_id, xmpp_sender_ref("me@example.org"));
+    assert_eq!(
+        req.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedAllowlisted)
+    );
     assert_eq!(
         req.conversation.as_ref().expect("conversation").stable_id,
         "tau-agent-1@conference.example.org"
@@ -1866,6 +1878,10 @@ fn muc_hidden_real_jid_with_trust_routes() {
     };
     assert_eq!(req.text, "hello");
     assert_eq!(req.sender.display_name.as_deref(), Some("alice"));
+    assert_eq!(
+        req.sender.sender_auth,
+        Some(MessageSenderAuth::TrustedMembership)
+    );
 }
 
 /// Trusted-membership MUC facts retain the accepted occupant nickname as
@@ -2041,7 +2057,11 @@ fn direct_message_requires_exact_bound_full_jid() {
         panic!("message.delivered fact")
     };
     assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, "me@example.org");
+    assert_eq!(req.sender.stable_id, xmpp_sender_ref("me@example.org"));
+    assert_eq!(
+        req.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedAllowlisted)
+    );
     assert_eq!(
         req.conversation.expect("conversation").stable_id,
         "me@example.org"

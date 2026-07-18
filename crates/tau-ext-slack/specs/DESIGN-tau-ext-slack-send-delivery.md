@@ -24,7 +24,8 @@ post, or reaction state.
 ## Fact and result writes
 
 After Slack success, the extension constructs the sent `MessageFactId` as
-`slack:<channel>:<message-ts>`. Under one serialized local gate it writes and
+`slack-message:<opaque-digest>` from the private channel/message coordinates.
+Under one serialized local gate it writes and
 flushes `message.sent`, then writes and flushes the ordinary `tool.result`.
 This preserves extension-frame order but is not a harness commit acknowledgement
 and is not a transaction with the remote effect or durable storage. Any confirmed writer failure latches output failure, retires the entire Slack

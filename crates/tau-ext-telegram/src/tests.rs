@@ -350,6 +350,28 @@ fn assert_delivered_live_replay_parity(mut fact: MessageDelivered) {
     );
 }
 
+/// Telegram prompt references remain deterministic and bounded without exposing
+/// native chat, update, or user identifiers.
+#[test]
+fn telegram_prompt_references_are_opaque_and_domain_separated() {
+    let message = telegram_message_ref("native-chat", "native-update");
+    assert_eq!(
+        message,
+        telegram_message_ref("native-chat", "native-update")
+    );
+    assert_ne!(message, telegram_message_ref("other-chat", "native-update"));
+    assert_ne!(message, telegram_message_ref("native-chat", "other-update"));
+    assert!(message.as_str().starts_with("telegram-message:"));
+    assert!(message.as_str().len() <= 256);
+    assert!(!message.as_str().contains("native"));
+
+    let sender = telegram_sender_ref("42");
+    assert_eq!(sender, telegram_sender_ref("42"));
+    assert_ne!(sender, telegram_sender_ref("43"));
+    assert!(sender.starts_with("telegram-sender:"));
+    assert_eq!(sender.len(), "telegram-sender:".len() + 64);
+}
+
 /// Telegram bridge tools are disabled by default because each role must make an
 /// explicit policy choice before exposing the external chat bridge to a model.
 #[test]
@@ -520,8 +542,15 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
 
     assert_eq!(delivered.agent_id.as_str(), "agent-1");
     assert_eq!(delivered.text, "hello");
-    assert_eq!(delivered.message_id.as_str(), "telegram:10:99");
-    assert_eq!(delivered.sender.stable_id, "42");
+    assert_eq!(
+        delivered.message_id,
+        telegram_message_ref("10", "telegram:10:99")
+    );
+    assert_eq!(delivered.sender.stable_id, telegram_sender_ref("42"));
+    assert_eq!(
+        delivered.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedAllowlisted)
+    );
     assert_eq!(sent.text, "reply");
     assert!(client.poll_timeouts.lock().expect("polls").is_empty());
     let requests = seen_requests.lock().expect("requests");
@@ -750,7 +779,7 @@ fn gateway_delivery_requires_live_local_registration() {
     );
     let delivered = expect_delivered(&rx);
     assert_eq!(delivered.text, "hello again");
-    assert_eq!(delivered.sender.stable_id, "7");
+    assert_eq!(delivered.sender.stable_id, telegram_sender_ref("7"));
     assert_eq!(delivered.conversation.expect("conversation").stable_id, "1");
 }
 
@@ -1438,7 +1467,17 @@ fn one_registered_agent_routes_plain_text() {
     };
     assert_eq!(req.agent_id.as_str(), "agent-1");
     assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, "123");
+    assert_eq!(req.sender.stable_id, telegram_sender_ref("123"));
+    assert_eq!(
+        req.sender.sender_auth,
+        Some(MessageSenderAuth::VerifiedAllowlisted)
+    );
+    assert_eq!(
+        req.conversation
+            .as_ref()
+            .and_then(|value| value.alias.as_ref()),
+        None
+    );
     assert_eq!(
         req.conversation.as_ref().expect("conversation").stable_id,
         "123"

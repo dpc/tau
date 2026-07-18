@@ -27,7 +27,11 @@ Key defaults/decisions:
 - Logical name `slack_react`, tag `slack:react`, existing logical group `slack`, `enabled_by_default: false`.
 - A role may receive/register/send without react, or react without send. `slack_register` is not the authorization for this tool; current role/tool policy is. Whole-group grants intentionally gain this new surface and must be documented.
 - Incoming locally written create/edit message-fact IDs and references returned by successful `slack_send` are eligible. Human-reaction occurrence IDs, bridge help/control posts, unpublished events, and arbitrary Slack items are not.
-- The reference is a Tau-issued fact selector in the documented `slack:<channel>:<message-ts>` format, not a secret or bearer capability. Although it contains native coordinates, callers cannot supply channel/timestamp fields separately and every use must resolve an exact retained local target. Revalidate exact extension instance, live agent, active session, current source/config authority, native target, and reaction ownership on every call.
+- The reference is a Tau-issued opaque fact selector in the documented
+  `slack-message:<opaque-digest>` format, not a secret or bearer capability.
+  Every use must resolve an exact retained local target. Revalidate exact
+  extension instance, live agent, active session, current source/config
+  authority, native target, and reaction ownership on every call.
 - Adding establishes runtime ownership only after an unambiguous Slack success. Removing is permitted only for a reaction that the same Tau agent owns in this runtime. Never adopt/remove a pre-existing bot reaction merely because Slack returns `already_reacted`.
 - No new config key. The extension, tool, and `reactions:write` installation are the operator opt-ins. No automatic retries, no local rate-limit queue, no persistence, and no crash-safe exactly-once claim.
 
@@ -91,7 +95,7 @@ Do not echo native routing data. Errors are terminal `ToolError`s with bounded s
 A successful send must make its posted message targetable. Its tool result is:
 
 ```json
-{"status":"sent","message_ref":"slack:<channel>:<message-ts>","delivery_copies":"one"|"one_or_two_possible"}
+{"status":"sent","message_ref":"slack-message:<opaque-digest>","delivery_copies":"one"|"one_or_two_possible"}
 ```
 
 Derive the bounded extension-local reference from the validated Slack
@@ -121,7 +125,8 @@ message_ref -> ReactionTarget {
 }
 ```
 
-The native coordinates are retained in private extension state and appear in the Tau-issued fact ref, but are never accepted as separate route fields by the tool.
+The native coordinates are retained only in private extension state and are
+never accepted as separate route fields by the tool.
 
 | Reference source | Eligible? | Required live authority |
 |---|---:|---|
@@ -302,7 +307,7 @@ All new/changed Rust structs, fields, public methods, helpers, and tests need in
   writer failure does not activate it.
 - An edit target ref resolves to the exact original item; a reaction occurrence
   ref is ineligible.
-- Successful send returns a stable `slack:<channel>:<message-ts>` fact ref after
+- Successful send returns a stable `slack-message:<opaque-digest>` fact ref after
   writing `message.sent` and the result locally. Writer failure activates
   nothing. Same-call replay preserves the ref and does not repost or rewrite the
   fact.

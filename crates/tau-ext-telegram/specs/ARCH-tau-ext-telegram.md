@@ -43,11 +43,13 @@ fails closed with the same behavior.
 ## Harness boundary
 
 After local allowlist, chat, command, and target selection, incoming Telegram
-text is emitted directly as `message.delivered`. Numeric user/chat IDs map to
-stable sender/conversation IDs, the native update identity becomes the
-publisher-scoped message ID, and the original body is published without a
+text is emitted directly as `message.delivered`. Numeric user/chat and update
+identities remain transport-local inputs to stateless opaque sender/message
+references; native conversation IDs remain durable fact/UI provenance but are
+not projected into model context. The original body is published without a
 transport prefix. The harness stamps publisher provenance and performs ordinary
-durable fact projection.
+durable fact projection according to
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
 Successful `telegram_send` calls emit `message.sent` before returning their
 ordinary terminal tool result. The sent fact uses the original body and a

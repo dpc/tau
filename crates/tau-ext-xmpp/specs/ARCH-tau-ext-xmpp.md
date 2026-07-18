@@ -69,10 +69,13 @@ polling, while synchronous paths keep a cheap requested-state check.
 
 After XMPP allowlist, room-membership, target, history, and own-message checks,
 incoming text is emitted directly as `message.delivered`. Accepted direct bare
-JIDs or MUC real/occupant identities become stable sender IDs; the direct peer or
-room becomes the conversation ID. Native stanza IDs are hashed with
-sender/conversation identity, while missing IDs use a process-unique local
-identity. The original stanza body is published without a transport prefix.
+JIDs or MUC real/occupant identities feed stateless opaque sender references; the
+direct peer or room remains fact provenance but is not projected as a native
+identifier into model context; it remains durable fact/UI provenance. Native
+stanza IDs are hashed with sender/conversation identity, while missing IDs use a
+process-unique local identity. The original stanza body is published without a
+transport prefix according to
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
 Successful `xmpp_send` calls emit `message.sent` before their ordinary terminal
 tool result. The fact uses the original body and a bounded identity derived from

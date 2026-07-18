@@ -1284,11 +1284,15 @@ impl SendDeliveryWorker {
                         .reply_routes
                         .get(message_id)
                         .map(|route| MessageParty {
-                            stable_id: route.user_id.clone(),
+                            stable_id: slack_sender_ref(
+                                &route.installation_team_id,
+                                &route.user_id,
+                            ),
                             display_name: route
                                 .identity_alias
                                 .clone()
                                 .or_else(|| route.display_name.clone()),
+                            sender_auth: None,
                         }),
                     SendAuthorization::ConfiguredDestination { alias: _ } => None,
                 };

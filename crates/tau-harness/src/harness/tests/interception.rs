@@ -11,6 +11,7 @@ fn extension_message_fact(message_id: &str) -> Event {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",

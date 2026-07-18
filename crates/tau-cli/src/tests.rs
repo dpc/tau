@@ -2378,6 +2378,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
             tau_proto::MessageParty {
                 stable_id: "sender-1".to_owned(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             text,
@@ -2452,6 +2453,7 @@ fn initial_replayed_global_message_fact_survives_first_agent_selection() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "initial replay body",
@@ -2490,6 +2492,7 @@ fn deselected_live_global_message_fact_survives_fresh_agent_selection() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "deselected live body",

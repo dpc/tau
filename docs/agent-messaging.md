@@ -15,6 +15,8 @@ they grant no identity, routing, tool, or instruction authority. Live incoming
 facts can activate the targeted agent after transcript placement, while replay
 reconstructs context without waking the model. `message.sent` projects as
 assistant context and never activates the model by itself.
+The common prompt shape is defined by
+[`DECISION-common-external-message-envelope`](../specs/DECISION-common-external-message-envelope.md).
 
 Transport admission, duplicate suppression, native identity interpretation,
 reply routes, proactive destinations, retries, and remote-send policy belong to

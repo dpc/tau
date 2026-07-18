@@ -261,6 +261,7 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
             tau_proto::MessageParty {
                 stable_id: "u1".to_owned(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             "message fact",

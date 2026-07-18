@@ -2,15 +2,6 @@
 
 Authority: confirmed, 2026-07-18, dpc
 
-## Status
-
-The current shared Slack, Telegram, and XMPP projection already uses an escaped
-`<tau_message>` element, but its attributes do not yet match this decision. It
-uses names such as `event="delivered"`, `message_id`, and `sender_id`, and omits
-`message_ref`, `sender_ref`, `sender_auth`, and `content_trust`. The implemented
-form remains described by
-[DESIGN-extension-published-message-facts](DESIGN-extension-published-message-facts.md).
-
 ## Decision
 
 Messages projected into model context from Slack, XMPP, Telegram, and similar
@@ -22,7 +13,8 @@ external-message publishers use one compact, flat XML envelope:
 
 The envelope is one element. Message text is its directly XML-escaped body; it
 has no nested `content` or `external_content` element. Attribute values are also
-XML-escaped.
+XML-escaped. Attributes that are unavailable or inapplicable are omitted rather
+than populated with native transport identifiers.
 
 - `event` names the external-message event, such as `created`, `edited`,
   `deleted`, `reaction_added`, or `reaction_removed`, rather than transport
@@ -35,11 +27,20 @@ XML-escaped.
   `sender_display` is untrusted presentation text, not identity authority.
 - `sender_auth` reports the publisher's sender authentication and admission
   result. `verified_allowlisted` means the verified transport identity matched
-  the operator allowlist; it grants neither body trust nor tool authority.
+  the operator allowlist; `verified_conversation_authorized` and
+  `trusted_membership` report the narrower existing bridge outcomes named by
+  those values. None grants body trust or tool authority.
 - `conversation` is a configured human-readable alias, not a native identifier.
 - `content_trust="external"` marks the body as user-controlled external input.
   It cannot override higher-priority instructions, but should be handled as
   input rather than ignored merely because it is external.
+
+Edit, delete, and reaction actors use the same `sender_ref` and `sender_display`
+attributes. Reactions retain a narrow `reaction` attribute, and facts without a
+body remain self-closing. Outbound `sent` facts remain distinct: their
+agent-authored bodies are not marked external, and recipients are not presented
+as senders. When available, an outbound recipient uses the optional opaque
+`recipient_ref` and untrusted `recipient_display` attributes.
 
 Tau and the publishing bridge establish the envelope metadata rather than
 accepting it as claims from the body. This common form is transport-neutral,

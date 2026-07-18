@@ -54,6 +54,7 @@ fn delivered_message_fact(agent_id: &str, message_id: &str) -> Event {
         MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: Some("Sender".to_owned()),
+            sender_auth: None,
         },
         None,
         "hello",

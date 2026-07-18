@@ -15,10 +15,12 @@ fn representative_facts() -> [Event; 6] {
     let party = MessageParty {
         stable_id: "user-1".to_owned(),
         display_name: Some("Ali\u{202e}ce".to_owned()),
+        sender_auth: None,
     };
     let conversation = Some(MessageConversation {
         stable_id: "conversation-1".to_owned(),
         display_name: Some("General".to_owned()),
+        alias: None,
     });
     let reference = MessageFactRef {
         publisher_extension_id: MessagePublisherId::new("other-bridge"),

@@ -35,8 +35,8 @@ use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInpu
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
     MessageConversation, MessageDelivered, MessageFactId, MessageParty, MessagePublisherId,
-    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
-    ToolStarted, ToolUseState, ToolUseStatus,
+    MessageSenderAuth, MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult,
+    ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -386,14 +386,16 @@ fn emit_gateway_deliveries(
         output.emit(Event::MessageDelivered(MessageDelivered::new(
             MessagePublisherId::default(),
             MessageAgentTarget::new(agent_id.as_ref()),
-            MessageFactId::new(delivery.message_id),
+            telegram_message_ref(&delivery.conversation_id, &delivery.message_id),
             MessageParty {
-                stable_id: delivery.sender_id,
+                stable_id: telegram_sender_ref(&delivery.sender_id),
                 display_name: bounded_display_name(&delivery.source),
+                sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
             },
             Some(MessageConversation {
                 stable_id: delivery.conversation_id,
                 display_name: None,
+                alias: None,
             }),
             delivery.text,
         )));
@@ -1481,14 +1483,16 @@ impl Extension {
             .emit(Event::MessageDelivered(MessageDelivered::new(
                 MessagePublisherId::default(),
                 MessageAgentTarget::new(agent_id.as_ref()),
-                MessageFactId::new(format!("telegram:{}:{update_id}", message.chat_id)),
+                telegram_message_ref(&message.chat_id.to_string(), &update_id.to_string()),
                 MessageParty {
-                    stable_id: message.user_id.to_string(),
+                    stable_id: telegram_sender_ref(&message.user_id.to_string()),
                     display_name: message.from_name.as_deref().and_then(bounded_display_name),
+                    sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
                 },
                 Some(MessageConversation {
                     stable_id: message.chat_id.to_string(),
                     display_name: None,
+                    alias: None,
                 }),
                 text,
             )));
@@ -1508,6 +1512,7 @@ impl Extension {
             chat_id.map(|id| MessageConversation {
                 stable_id: id.to_string(),
                 display_name: None,
+                alias: None,
             }),
             text,
         )));
@@ -1523,6 +1528,26 @@ fn generated_send_message_id(call_id: &str, destination: &str) -> MessageFactId 
     hasher.update(b"\0");
     hasher.update(destination.as_bytes());
     MessageFactId::new(format!("telegram-send:{}", hasher.finalize().to_hex()))
+}
+
+/// Derive the opaque message reference required by
+/// `DECISION-common-external-message-envelope`.
+fn telegram_message_ref(conversation_id: &str, occurrence_id: &str) -> MessageFactId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-telegram/message-ref/v1\0");
+    hasher.update(conversation_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(occurrence_id.as_bytes());
+    MessageFactId::new(format!("telegram-message:{}", hasher.finalize().to_hex()))
+}
+
+/// Derive an opaque canonical sender reference without exposing a Telegram user
+/// ID.
+fn telegram_sender_ref(user_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-telegram/sender-ref/v1\0");
+    hasher.update(user_id.as_bytes());
+    format!("telegram-sender:{}", hasher.finalize().to_hex())
 }
 
 /// Bound a Telegram profile label to the universal message-fact display limit.

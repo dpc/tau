@@ -39,7 +39,7 @@ Tau agent through extension-local routing.
 Admitted creates, edits, deletes, and reactions publish ordinary immutable
 `message.delivered`, `message.edited`, `message.deleted`,
 `message.reaction_added`, or `message.reaction_removed` facts. Slack derives
-stable fact IDs from native channel/message coordinates and uses
+opaque fact IDs from native channel/message coordinates and uses
 `MessageFactRef` for later operations on the same logical message. The harness
 stamps the configured extension publisher and persists the fact before prompt
 projection. There is no Slack-specific ingress acknowledgement or harness
@@ -57,10 +57,12 @@ The extension drops recently repeated native occurrence IDs with a bounded
 duplicate publication. Generic infrastructure does not deduplicate or resolve
 message facts.
 
-Exact U/W identity remains authoritative and model-primary. A bounded
-`profile.display_name` snapshot is untrusted presentation. Optional operator
-sender aliases are also presentation-only and do not affect admission, routing,
-reply, reaction, or mention authority.
+Exact U/W identity remains extension-local authority. Model context receives an
+installation-scoped opaque sender reference, an honest optional authentication
+outcome, and a bounded untrusted display. Optional operator sender aliases are
+also presentation-only and do not affect admission, routing, reply, reaction, or
+mention authority. See
+[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
 ## Sending
 
@@ -87,8 +89,8 @@ After Slack reports success, the extension writes `message.sent` and then the
 ordinary `tool.result` through one serialized local write-and-flush gate. This
 preserves frame order but does not acknowledge a harness commit. The result's
 `message_ref` becomes local reaction authority keyed to the sent fact ID. Its
-documented `slack:<channel>:<message-ts>` representation contains native
-coordinates but is accepted only when it resolves to an exact retained target.
+documented `slack-message:<opaque-digest>` representation exposes no native
+coordinates and is accepted only when it resolves to an exact retained target.
 Same-call replay returns the retained stable result without posting again or
 publishing another sent fact. Conflicting call-ID reuse fails, while a new call
 ID is new intent.

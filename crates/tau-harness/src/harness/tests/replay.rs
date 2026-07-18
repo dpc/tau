@@ -41,6 +41,7 @@ fn replay_message_fact() -> Event {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: Some("Sender".to_owned()),
+            sender_auth: None,
         },
         None,
         "hello",
@@ -205,6 +206,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         tau_proto::MessageParty {
             stable_id: "sender".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "ephemeral body",
@@ -322,6 +324,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         tau_proto::MessageParty {
             stable_id: "u1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -372,7 +375,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
                             && matches!(
                                 message.content.first(),
                                 Some(tau_proto::ContentPart::Text { text })
-                                    if text.contains("<tau_message event=\"delivered\"")
+                                    if text.contains("<tau_message event=\"created\"")
                             )
                 ))
         )
@@ -407,6 +410,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             tau_proto::MessageParty {
                 stable_id: String::new(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             "invalid party",
@@ -436,6 +440,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             tau_proto::MessageParty {
                 stable_id: "u1".to_owned(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             "arrived while terminating",
@@ -488,6 +493,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
             tau_proto::MessageParty {
                 stable_id: "u1".to_owned(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             "after tool",
@@ -563,7 +569,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
                     if matches!(
                         message.content.first(),
                         Some(ContentPart::Text { text })
-                            if text.contains("<tau_message event=\"delivered\"")
+                            if text.contains("<tau_message event=\"created\"")
                     )
             )
         })
@@ -588,6 +594,7 @@ fn known_offline_agent_message_fact_uses_agent_journal() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -657,9 +664,14 @@ fn agent_message_fact_replay_projects_without_wake() {
                 tau_proto::MessageFactId::new("m1"),
                 tau_proto::MessageParty {
                     stable_id: "u1".to_owned(),
-                    display_name: None,
+                    display_name: Some("Alice".to_owned()),
+                    sender_auth: Some(tau_proto::MessageSenderAuth::VerifiedAllowlisted),
                 },
-                None,
+                Some(tau_proto::MessageConversation {
+                    stable_id: "c1".to_owned(),
+                    display_name: None,
+                    alias: Some("general".to_owned()),
+                }),
                 "persisted message",
             )),
         );
@@ -693,6 +705,14 @@ fn agent_message_fact_replay_projects_without_wake() {
         .entry
         .clone();
     assert_eq!(replayed_projection, live_projection);
+    let tau_core::AgentEntry::MessageFact { item, .. } = &replayed_projection else {
+        panic!("replayed message fact");
+    };
+    let tau_proto::ContentPart::Text { text } = &item.content[0];
+    assert_eq!(
+        text,
+        "<tau_message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</tau_message>"
+    );
     assert!(
         event_log_events(&resumed).iter().all(|event| !matches!(
             event,
@@ -728,6 +748,7 @@ fn member_agent_message_fact_uses_agent_journal() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -772,6 +793,7 @@ fn live_route_only_message_fact_uses_agent_journal() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -855,6 +877,7 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -904,6 +927,7 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             tau_proto::MessageParty {
                 stable_id: "sender-1".to_owned(),
                 display_name: None,
+                sender_auth: None,
             },
             None,
             "agent history",
@@ -991,6 +1015,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
         tau_proto::MessageParty {
             stable_id: "sender-1".to_owned(),
             display_name: None,
+            sender_auth: None,
         },
         None,
         "hello",
@@ -1008,6 +1033,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
                 tau_proto::MessageParty {
                     stable_id: "sender-1".to_owned(),
                     display_name: None,
+                    sender_auth: None,
                 },
                 None,
                 "bad owner",

@@ -588,10 +588,12 @@ fn representative_events() -> Vec<Event> {
             sender: MessageParty {
                 stable_id: "u1".to_owned(),
                 display_name: Some("Alice".to_owned()),
+                sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
             },
             conversation: Some(MessageConversation {
                 stable_id: "c1".to_owned(),
                 display_name: Some("General".to_owned()),
+                alias: Some("general".to_owned()),
             }),
             text: "hello".to_owned(),
             extension_data: MessageExtensionData::default(),
@@ -603,7 +605,11 @@ fn representative_events() -> Vec<Event> {
                 publisher_extension_id: MessagePublisherId::new("bridge-main"),
                 message_id: MessageFactId::new("m1"),
             },
-            actor: None,
+            actor: Some(MessageParty {
+                stable_id: "u2".to_owned(),
+                display_name: None,
+                sender_auth: Some(MessageSenderAuth::VerifiedConversationAuthorized),
+            }),
             conversation: None,
             text: "edited".to_owned(),
             extension_data: MessageExtensionData::default(),
@@ -615,7 +621,11 @@ fn representative_events() -> Vec<Event> {
                 publisher_extension_id: MessagePublisherId::new("other-bridge"),
                 message_id: MessageFactId::new("future"),
             },
-            actor: None,
+            actor: Some(MessageParty {
+                stable_id: "u3".to_owned(),
+                display_name: None,
+                sender_auth: Some(MessageSenderAuth::TrustedMembership),
+            }),
             conversation: None,
             extension_data: MessageExtensionData::default(),
         }),
@@ -1476,6 +1486,35 @@ fn message_fact_events_have_distinct_required_v11_wire_shapes() {
         );
         let decoded: Event = serde_json::from_value(json.clone()).expect("decode fact from JSON");
         assert_eq!(decoded, fact);
+        if matches!(fact, Event::MessageDelivered(_)) {
+            let mut missing_optional = json.clone();
+            let payload = missing_optional
+                .get_mut("payload")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("delivered payload");
+            payload
+                .get_mut("sender")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("sender")
+                .remove("sender_auth");
+            payload
+                .get_mut("conversation")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("conversation")
+                .remove("alias");
+            let decoded: Event =
+                serde_json::from_value(missing_optional).expect("optional prompt metadata");
+            let Event::MessageDelivered(decoded) = decoded else {
+                panic!("delivered fact");
+            };
+            assert_eq!(decoded.sender.sender_auth, None);
+            assert_eq!(
+                decoded
+                    .conversation
+                    .and_then(|conversation| conversation.alias),
+                None
+            );
+        }
         let encoded = encode_message_to_vec(&HarnessInputMessage::emit(fact.clone()))
             .expect("encode fact frame");
         assert_eq!(
