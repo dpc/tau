@@ -36,3 +36,5 @@ small decision is preferred over hidden cross-component drift.
 The confirmed extension-published message-fact interface and persistence
 application is recorded by
 [DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).
+The confirmed default for extension-owned state derivable from committed facts is
+[DECISION-event-log-first-extension-state](DECISION-event-log-first-extension-state.md).
