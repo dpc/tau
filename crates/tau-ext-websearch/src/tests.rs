@@ -195,6 +195,76 @@ impl ParallelClient for StubParallelClient {
     }
 }
 
+/// Loopback server that redirects its first request and records whether the
+/// client follows it with a second request.
+struct RedirectServer {
+    /// URL of the initial redirecting endpoint.
+    endpoint: String,
+    /// Best-effort cancellation signal for the no-redirect path.
+    stop_tx: mpsc::Sender<()>,
+    /// Server worker that returns the number of accepted requests.
+    handle: thread::JoinHandle<usize>,
+}
+
+impl RedirectServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}/mcp", listener.local_addr().expect("addr"));
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut request_count = 0;
+            for response in [
+                "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned(),
+                {
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"redirect followed"}]}}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                },
+            ] {
+                listener
+                    .set_nonblocking(request_count > 0)
+                    .expect("set nonblocking");
+                let (stream, _) = loop {
+                    if stop_rx.try_recv().is_ok() {
+                        return request_count;
+                    }
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(err) => panic!("accept: {err}"),
+                    }
+                };
+                request_count += 1;
+                let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("read line");
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+            }
+            request_count
+        });
+        Self {
+            endpoint,
+            stop_tx,
+            handle,
+        }
+    }
+
+    fn stop_and_join(self) -> usize {
+        let _ = self.stop_tx.send(());
+        self.handle.join().expect("join redirect server")
+    }
+}
+
 fn spawn_extension(
     searcher: Arc<dyn Searcher>,
     parallel_client: Arc<dyn ParallelClient>,
@@ -1109,6 +1179,33 @@ fn http_error_body_redacts_endpoint_query_secrets() {
     server.join().expect("join");
     assert!(!err.contains("secret"), "err: {err}");
     assert!(!err.contains("exaApiKey"), "err: {err}");
+}
+
+/// Ensures neither hosted-provider client follows redirects, which could cross
+/// the validated endpoint's HTTPS, origin, and diagnostic-redaction boundary.
+///
+/// See `SPEC-tau-ext-websearch-provider-boundary`.
+#[test]
+fn hosted_provider_clients_reject_redirects() {
+    let exa_server = RedirectServer::start();
+    let exa_result = HttpExaSearcher::new(exa_server.endpoint.clone()).search("rust", 1);
+    let exa_request_count = exa_server.stop_and_join();
+    assert_eq!(exa_request_count, 1, "Exa client followed the redirect");
+    let err = exa_result.expect_err("Exa redirect must be rejected");
+    assert!(err.contains("HTTP 302"), "err: {err}");
+
+    let parallel_server = RedirectServer::start();
+    let parallel_result = HttpParallelClient::new(parallel_server.endpoint.clone()).call(
+        PARALLEL_REMOTE_SEARCH_TOOL,
+        serde_json::json!({ "query": "rust" }),
+    );
+    let parallel_request_count = parallel_server.stop_and_join();
+    assert_eq!(
+        parallel_request_count, 1,
+        "Parallel client followed the redirect"
+    );
+    let err = parallel_result.expect_err("Parallel redirect must be rejected");
+    assert!(err.contains("HTTP 302"), "err: {err}");
 }
 
 /// Ensures JSON-RPC provider errors cannot echo endpoint query credentials back

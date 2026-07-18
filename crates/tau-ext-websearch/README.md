@@ -58,7 +58,8 @@ Endpoint values are validated when configuration is applied. They must be HTTPS
 URLs, except that HTTP loopback URLs are accepted for deterministic local tests.
 Endpoint userinfo credentials are rejected, and logs intentionally avoid
 printing raw endpoint URLs because they can contain credentials in userinfo,
-query strings, or fragments.
+query strings, or fragments. Provider requests do not follow HTTP redirects:
+configure the final endpoint URL directly when a provider publishes a redirect.
 
 ## Runtime and security assumptions
 

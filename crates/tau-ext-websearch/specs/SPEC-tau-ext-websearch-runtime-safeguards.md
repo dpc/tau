@@ -16,5 +16,4 @@ Exa result count defaults to five and accepts only 1–100. Replay-marked
 no result.
 
 Provider URL and diagnostic safety is
-[DESIGN-tau-ext-websearch-provider-boundary](DESIGN-tau-ext-websearch-provider-boundary.md)
-pending resolution of redirect enforcement.
+[SPEC-tau-ext-websearch-provider-boundary](SPEC-tau-ext-websearch-provider-boundary.md).
