@@ -29,6 +29,19 @@ bounded presentation metadata and never alter semantic message content or
 routing identity. Late authoritative name updates reproject historical UI
 blocks without rewriting the stored message event.
 
+## Watched-agent activity
+
+The terminal shows one activity row per direct watched target. `running` means
+that directed edge's outer-turn lifecycle is directly running. `watching` means
+the directed edge is not running but its target recursively watches an active
+descendant; the row's `-> @agent-id` suffix identifies a nearest directly running
+witness. Direct state wins when both apply. Recursive activity is a CLI-only
+projection over the session's live watch DAG and does not change navigation,
+routing, persistence, or model-visible watch notifications. The bottom `@N` chip
+keeps its session-wide scope, counts unique recursively effective watch targets,
+excludes the selected agent, and retains active-prompt fallback for agents
+outside every watch edge.
+
 ## Slash commands
 
 Type `/` as the first non-whitespace character in the prompt to open slash/action completion. Built-in commands include session and agent management, model/role switching, `/name <display name>` to rename the currently selected agent, `/skill <name> [args]` for explicit user-invocable skill injection, `/theme <name>` to switch only the current CLI UI's theme for this run, `/set`, `/tree`, `/fast`, `/detach`, and `/quit`. Extension-provided actions can add dynamic slash commands and argument completions at runtime. `/skill:<name> [args]` is accepted as a Pi-compatible alias; arguments are appended after the skill body without placeholder substitution.

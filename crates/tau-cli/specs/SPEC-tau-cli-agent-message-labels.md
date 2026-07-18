@@ -52,13 +52,23 @@ not affect loading, addressability, or delivery.
 
 Execution state (`running` or `waiting`) describes the outer agent turn from
 activating input until the final response or termination returns control. It
-includes inner model and tool rounds. Structured watched-agent turn state is
-authoritative once received; prompt/provider lifecycle is only a compatibility
-fallback before that snapshot. Stats add details but do not establish execution.
+includes inner model and tool rounds. Each directed watch edge retains its own
+authority: structured watched-agent turn state is authoritative once received,
+while prompt/provider lifecycle is only a compatibility fallback before that
+edge's first snapshot. Stats add details but do not establish execution.
 
-Watched-agent blocks and the `@N` status count use execution state. `@N` counts
-running side agents and excludes the visible agent. Concurrent running blocks are
-ordered by stable agent id.
+The CLI derives recursive activity exactly over the current live watch DAG. A
+direct target whose edge is running renders as `running [name] @id`. An otherwise
+idle edge whose target watches an effective descendant renders as
+`watching [name] @id -> @witness`, where the witness is the nearest directly
+running descendant and equal-depth candidates use stable agent-id order. Direct
+activity wins when both apply. Rows remain ordered by stable target id, and the
+selected agent gets one row per direct target; recursive descendants are not
+flattened into additional rows.
+
+The session-wide `@N` count deduplicates all recursively effective watch targets
+and excludes the selected agent. Active prompts outside every watch edge retain
+their compatibility fallback contribution.
 
 ## Lifecycle projection
 

@@ -23,9 +23,12 @@ outer agent turn, from activating input through terminal response. Individual
 provider invocations are inner model rounds, and prompt/provider events are only
 a pre-snapshot compatibility fallback. `agent.stats_updated` provides generic
 counters and provider response stats provide live response throughput details
-for that running turn. Merely live, selectable, non-suspended, or watched agents
-must not appear as active watched-agent work or be counted in the bottom
-active-side-agent `@N` status chip.
+for that running turn. A direct target reads `running`; an idle direct target that
+watches an active descendant remains visible as `watching -> @descendant`. This
+recursive projection is exact over the live watch DAG, keeps one row per direct
+target, and contributes unique effective targets to the session-wide bottom
+`@N` chip. Merely live, selectable, non-suspended, or idle leaf agents must not
+appear as active watched-agent work.
 
 Prompt navigation has separate per-UI modes: ordinary agents default to
 `active`, delegated agents default to `active-auto`, and users can explicitly

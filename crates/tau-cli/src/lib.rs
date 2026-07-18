@@ -31,6 +31,7 @@ mod ui_commands;
 mod ui_events;
 mod ui_logging;
 mod ui_prompt;
+mod watch_activity;
 
 use std::sync::{Mutex, MutexGuard};
 use std::{fmt, io};

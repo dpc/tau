@@ -80,6 +80,15 @@ parse in the CLI but address exact harness-owned prompt work or provenance rathe
 than reconstructing it locally. Their behavior is specified by
 [SPEC-tau-cli-slash-commands](SPEC-tau-cli-slash-commands.md).
 
+The CLI also owns presentation-only recursive watch activity. It folds the
+harness-owned live watch DAG and edge-scoped outer-turn lifecycle into direct
+`running` and transitive `watching` rows plus the session-wide side-agent count.
+This projection must not create protocol facts, model-visible notifications,
+navigation state, persistence, or routing behavior. Its authority and exact
+presentation are specified by
+[DECISION-tau-cli-agent-watch-state-authority](DECISION-tau-cli-agent-watch-state-authority.md)
+and [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).
+
 Visible transcript state lives in renderer fields; hidden agent and protected
 no-agent transcripts live in `AgentUiState` snapshots. Hidden folding temporarily
 restores the owning snapshot under the terminal-output lock, then restores the

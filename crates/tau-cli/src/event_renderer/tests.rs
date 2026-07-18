@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use tau_cli_term_raw::Term;
 
 use super::{
@@ -91,6 +93,32 @@ fn watched_agent_turn_state_is_authoritative_for_running_counts() {
         renderer.active_side_agent_count(),
         1,
         "the reviewer edge still uses prompt fallback after the manager edge is idle"
+    );
+}
+
+/// The global side-agent count must include intermediate watched ancestors in a
+/// recursive chain while retaining unique target counting.
+#[test]
+fn watched_agent_count_projects_recursive_activity() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.watched_agents = HashMap::from([
+        ("manager".to_owned(), vec!["reviewer".to_owned()]),
+        ("reviewer".to_owned(), vec!["worker".to_owned()]),
+    ]);
+    renderer.agent_watchers = HashMap::from([
+        ("reviewer".to_owned(), vec!["manager".to_owned()]),
+        ("worker".to_owned(), vec!["reviewer".to_owned()]),
+    ]);
+    renderer
+        .active_agent_prompts
+        .insert("worker".to_owned(), HashSet::from(["prompt".to_owned()]));
+
+    assert_eq!(renderer.active_side_agent_count(), 2);
+    renderer.current_agent_id = Some("reviewer".to_owned());
+    assert_eq!(
+        renderer.active_side_agent_count(),
+        1,
+        "the existing selected-agent exclusion remains in force"
     );
 }
 

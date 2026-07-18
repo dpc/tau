@@ -36,6 +36,7 @@ use crate::tool_render::{
     streaming_block_with_indicator_suffix, synthesize_fallback_display, system_loaded_block,
     tool_duration_suffix, ui_dir_block,
 };
+use crate::watch_activity::WatchActivityProjection;
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
@@ -1206,15 +1207,27 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
         .collect()
 }
 
+/// Semantic state of a visible direct watched-agent row.
+pub(crate) enum WatchedAgentActivity<'a> {
+    /// The directed watch edge reports a running outer turn.
+    Running,
+    /// The edge is idle but its target watches an active descendant.
+    Watching {
+        /// Nearest directly running descendant, identified by stable id.
+        witness: &'a str,
+    },
+}
+
 /// Builds the generic tool-block-shaped display for a watched-agent indicator.
 ///
 /// This intentionally reuses [`tau_proto::ToolUseState`] counter formatting so
-/// `watching` keeps the compact generic layout while using passive styling, an
-/// explicit `@agent_id` chip, and no in-progress status suffix.
+/// rows keep the compact generic layout, an explicit `@agent_id` chip, and no
+/// in-progress status suffix.
 pub(crate) fn watched_agent_tool_display(
     label: &str,
     agent_id: &str,
     stats: Option<&tau_proto::AgentStatsUpdated>,
+    activity: WatchedAgentActivity<'_>,
 ) -> ToolCallDisplay {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
 
@@ -1256,8 +1269,14 @@ pub(crate) fn watched_agent_tool_display(
         status_text: String::new(),
         ..Default::default()
     };
-    let mut rendered = render_tool_use_state("watching", &display);
-    rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
+    let (name, witness) = match activity {
+        WatchedAgentActivity::Running => ("running", None),
+        WatchedAgentActivity::Watching { witness } => ("watching", Some(witness)),
+    };
+    let mut rendered = render_tool_use_state(name, &display);
+    if witness.is_some() {
+        rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
+    }
     rendered.suffixes.retain(|suffix| !suffix.text.is_empty());
     rendered.suffixes.insert(
         0,
@@ -1267,6 +1286,16 @@ pub(crate) fn watched_agent_tool_display(
             no_leading_space: false,
         },
     );
+    if let Some(witness) = witness {
+        rendered.suffixes.insert(
+            1,
+            ToolSuffixSegment {
+                text: format!("-> @{witness}"),
+                status: ToolStatus::Info,
+                no_leading_space: false,
+            },
+        );
+    }
     rendered
 }
 
@@ -1732,9 +1761,13 @@ impl EventRenderer {
             .get(&current)
             .cloned()
             .unwrap_or_default();
+        let projection = self.watch_activity_projection();
         let mut active: Vec<String> = watched
             .into_iter()
-            .filter(|agent_id| self.watched_agent_is_running(&current, agent_id))
+            .filter(|agent_id| {
+                projection.edge_is_directly_running(&current, agent_id)
+                    || projection.watcher_is_active(agent_id)
+            })
             .collect();
         active.sort();
         let active_set: HashSet<_> = active.iter().cloned().collect();
@@ -1750,7 +1783,7 @@ impl EventRenderer {
             }
         }
         for (index, agent_id) in active.iter().enumerate() {
-            let block = self.watched_agent_block(agent_id);
+            let block = self.watched_agent_block(&current, agent_id, &projection);
             let block_id = if let Some(block_id) = self.watched_agent_blocks.get(agent_id).copied()
             {
                 self.handle.set_block(block_id, block);
@@ -1789,6 +1822,22 @@ impl EventRenderer {
                 || self.agent_has_active_prompt(watched_agent_id),
                 |state| state.state == tau_proto::AgentRuntimeState::Running,
             )
+    }
+
+    /// Derives exact recursive watch activity from current live topology and
+    /// edge-authoritative direct lifecycle facts.
+    fn watch_activity_projection(&self) -> WatchActivityProjection {
+        let direct_edges = self
+            .watched_agents
+            .iter()
+            .flat_map(|(watcher, watched)| {
+                watched
+                    .iter()
+                    .filter(|target| self.watched_agent_is_running(watcher, target))
+                    .map(|target| (watcher.clone(), target.clone()))
+            })
+            .collect();
+        WatchActivityProjection::new(&self.watched_agents, &self.agent_watchers, direct_edges)
     }
 
     /// Records a structured outer agent-turn snapshot or edge for a watch.
@@ -1899,7 +1948,12 @@ impl EventRenderer {
         self.refresh_watched_agent_blocks();
     }
 
-    fn watched_agent_block(&self, agent_id: &str) -> tau_cli_term::StyledBlock {
+    fn watched_agent_block(
+        &self,
+        watcher_id: &str,
+        agent_id: &str,
+        projection: &WatchActivityProjection,
+    ) -> tau_cli_term::StyledBlock {
         let label = self
             .agent_display_names
             .lock()
@@ -1907,7 +1961,20 @@ impl EventRenderer {
             .and_then(|names| names.get(agent_id).cloned())
             .unwrap_or_else(|| agent_id.to_owned());
         let stats = self.agent_stats.get(agent_id);
-        let display = watched_agent_tool_display(&label, agent_id, stats);
+        let directly_running = projection.edge_is_directly_running(watcher_id, agent_id);
+        let witness = (!directly_running)
+            .then(|| projection.witness_for(agent_id, &self.watched_agents))
+            .flatten();
+        let activity = if directly_running {
+            WatchedAgentActivity::Running
+        } else {
+            WatchedAgentActivity::Watching {
+                witness: witness
+                    .as_deref()
+                    .expect("recursive activity has a directly running witness"),
+            }
+        };
+        let display = watched_agent_tool_display(&label, agent_id, stats, activity);
         render_tool_block(&self.theme, &display)
     }
 
@@ -3156,15 +3223,12 @@ impl EventRenderer {
 
     fn active_side_agent_count(&self) -> usize {
         let mut watched = HashSet::new();
-        let mut running = HashSet::new();
-        for (watcher_id, watched_agent_ids) in &self.watched_agents {
+        for watched_agent_ids in self.watched_agents.values() {
             for agent_id in watched_agent_ids {
                 watched.insert(agent_id.as_str());
-                if self.watched_agent_is_running(watcher_id, agent_id) {
-                    running.insert(agent_id.as_str());
-                }
             }
         }
+        let projection = self.watch_activity_projection();
         let prompt_only = self
             .active_agent_prompts
             .iter()
@@ -3173,9 +3237,10 @@ impl EventRenderer {
                     && !watched.contains(agent_id.as_str())
                     && self.current_agent_id.as_deref() != Some(agent_id.as_str())
             });
-        running
+        projection
+            .effective_targets()
             .iter()
-            .filter(|agent_id| self.current_agent_id.as_deref() != Some(**agent_id))
+            .filter(|agent_id| self.current_agent_id.as_deref() != Some(agent_id.as_str()))
             .count()
             + prompt_only.count()
     }

@@ -23,7 +23,7 @@ use super::chat::{
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
-use super::event_renderer::{EventRenderer, watched_agent_tool_display};
+use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 
 fn cli_test_theme() -> tau_themes::Theme {
     tau_themes::Theme::parse(
@@ -3202,11 +3202,11 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         context: tau_proto::AgentContextStats::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "watching [engineer_1]"));
+    assert!(!vt.screen_contains(90, "running [engineer_1]"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "watching [engineer_1] @engineer_1"));
+    assert!(vt.screen_contains(90, "running [engineer_1] @engineer_1"));
     assert!(vt.screen_contains(90, "%1/2"));
 }
 
@@ -6871,7 +6871,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         },
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "watching [engineer_1]"));
+    assert!(!vt.screen_contains(100, "running [engineer_1]"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         session_id: "s1".into(),
@@ -6896,18 +6896,18 @@ fn watched_agent_stats_redraw_active_indicator() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "watching [engineer_1] @engineer_1"),
+        eventually_screen_contains(&vt, 100, "running [engineer_1] @engineer_1"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "watching [engineer_1] @engineer_1 %3/3"),
+        eventually_screen_contains(&vt, 100, "running [engineer_1] @engineer_1 %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
         !vt.screen_contains(100, "running tools"),
-        "watched-agent block should keep compact passive tool-block layout, not prose: {:?}",
+        "watched-agent block should keep compact tool-block layout, not prose: {:?}",
         vt.screen_text(100)
     );
 }
@@ -6953,15 +6953,66 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     let screen = vt.screen_text(100);
     let first = screen
         .iter()
-        .position(|line| line.contains("watching [engineer_a] @engineer_a"))
-        .expect("engineer_a watching row");
+        .position(|line| line.contains("running [engineer_a] @engineer_a"))
+        .expect("engineer_a running row");
     let second = screen
         .iter()
-        .position(|line| line.contains("watching [engineer_b] @engineer_b"))
-        .expect("engineer_b watching row");
+        .position(|line| line.contains("running [engineer_b] @engineer_b"))
+        .expect("engineer_b running row");
     assert!(
         first < second,
         "watched-agent rows should be sorted by agent id: {screen:?}"
+    );
+}
+
+/// Recursive activity keeps one row for the selected agent's direct target,
+/// uses a stable descendant witness, and yields to direct-running wording in
+/// place.
+#[test]
+fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("manager".to_owned());
+    for (watcher, watched) in [("manager", "reviewer"), ("reviewer", "worker")] {
+        renderer.handle(&Event::AgentWatchesUpdated(
+            tau_proto::AgentWatchesUpdated {
+                session_id: "s1".into(),
+                watcher_id: agent_id(watcher),
+                watched_agent_ids: vec![agent_id(watched)],
+                changed_agent_id: Some(agent_id(watched)),
+                cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+            },
+        ));
+    }
+    let prompt_started = |agent: &str| {
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            session_id: "s1".into(),
+            agent_id: agent_id(agent),
+            agent_prompt_id: format!("ap-{agent}").into(),
+            model: "test/model".parse().expect("model id"),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+    };
+
+    renderer.handle(&prompt_started("worker"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "watching [reviewer] @reviewer -> @worker"));
+    assert!(
+        !vt.screen_contains(100, "[worker] @worker"),
+        "recursive descendants must not be flattened into manager rows"
+    );
+
+    renderer.handle(&prompt_started("reviewer"));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "running [reviewer] @reviewer"));
+    assert!(
+        !vt.screen_contains(100, "@reviewer -> @worker"),
+        "direct-running state must replace the transitive witness"
     );
 }
 
@@ -7016,7 +7067,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "watching [engineer_1] @engineer_1 %13/13",
+        "running [engineer_1] @engineer_1 %13/13",
     ));
 
     renderer.switch_agent("other_1".to_owned());
@@ -7036,12 +7087,12 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     let watching_rows: Vec<_> = vt
         .screen_text(100)
         .into_iter()
-        .filter(|row| row.contains("watching [engineer_1] @engineer_1"))
+        .filter(|row| row.contains("running [engineer_1] @engineer_1"))
         .map(|row| row.trim_end().to_owned())
         .collect();
     assert_eq!(
         watching_rows,
-        vec!["watching [engineer_1] @engineer_1 %42/42"],
+        vec!["running [engineer_1] @engineer_1 %42/42"],
         "watched-agent row should update in place after transcript restore: {:?}",
         vt.screen_text(100)
     );
@@ -7098,7 +7149,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "watching [engineer_1] @engineer_1 %15/15",
+        "running [engineer_1] @engineer_1 %15/15",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -7124,7 +7175,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "watching [engineer_1]"),
+        !vt.screen_contains(100, "running [engineer_1]"),
         "watched-agent block should be removed when provider response finishes: {:?}",
         vt.screen_text(100)
     );
@@ -7195,7 +7246,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "watching [engineer_1] @engineer_1"),
+        vt.screen_contains(100, "running [engineer_1] @engineer_1"),
         "the outer agent turn remains running while tools are pending"
     );
 
@@ -7217,7 +7268,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "watching [engineer_1] @engineer_1"),
+        vt.screen_contains(100, "running [engineer_1] @engineer_1"),
         "the provider's final model round is not the agent-turn boundary"
     );
 
@@ -7227,7 +7278,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     ));
     sync(&handle);
     assert!(
-        !vt.screen_contains(100, "watching [engineer_1]"),
+        !vt.screen_contains(100, "running [engineer_1]"),
         "the row ends only at the harness-authored agent-turn idle edge"
     );
 }
@@ -7272,7 +7323,7 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "watching [engineer_1] @engineer_1",
+        "running [engineer_1] @engineer_1",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -7298,7 +7349,7 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "watching [engineer_1]"),
+        !vt.screen_contains(100, "running [engineer_1]"),
         "provider-fallback watched-agent block should be removed on finish: {:?}",
         vt.screen_text(100)
     );
@@ -7346,7 +7397,7 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "watching [engineer_1] @engineer_1",
+        "running [engineer_1] @engineer_1",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -7372,7 +7423,7 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "watching [engineer_1]"),
+        !vt.screen_contains(100, "running [engineer_1]"),
         "watched-agent block should clear by terminal prompt id: {:?}",
         vt.screen_text(100)
     );
@@ -7441,7 +7492,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "watching [engineer_1]"),
+        !vt.screen_contains(100, "running [engineer_1]"),
         "delayed start/create must not resurrect terminal prompt: {:?}",
         vt.screen_text(100)
     );
@@ -9146,8 +9197,8 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
 }
 
 /// Ensures the generic watched-agent indicator keeps the compact tool-block
-/// shape while using passive styling, an explicit agent-id chip, and no
-/// in-progress ellipsis.
+/// shape, distinguishes normal direct-running from passive transitive styling,
+/// keeps an explicit agent-id chip, and omits an in-progress ellipsis.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -9167,12 +9218,45 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         },
     };
 
-    let display = watched_agent_tool_display("review", "engineer_1", Some(&stats));
-    assert_eq!(display.tool_name, "watching");
+    let display = watched_agent_tool_display(
+        "review",
+        "engineer_1",
+        Some(&stats),
+        WatchedAgentActivity::Running,
+    );
+    assert_eq!(display.tool_name, "running");
     assert_eq!(display.args, "[review]");
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
 
+    let block = render_tool_block(&theme, &display);
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .any(|span| span.text == "running"),
+        "direct activity is distinguished with accessible wording"
+    );
+
+    let percent_only_stats = tau_proto::AgentStatsUpdated {
+        context: tau_proto::AgentContextStats {
+            input_tokens: None,
+            cached_tokens: None,
+            context_window: None,
+            percent_used: Some(67),
+        },
+        ..stats
+    };
+    let display = watched_agent_tool_display(
+        "review",
+        "engineer_1",
+        Some(&percent_only_stats),
+        WatchedAgentActivity::Watching { witness: "leaf" },
+    );
+    let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(display.tool_name, "watching");
+    assert_eq!(texts, vec!["@engineer_1", "-> @leaf", "%2/3", "#67%"]);
     let block = render_tool_block(&theme, &display);
     let watching = block
         .content
@@ -9185,19 +9269,6 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
     );
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
-
-    let percent_only_stats = tau_proto::AgentStatsUpdated {
-        context: tau_proto::AgentContextStats {
-            input_tokens: None,
-            cached_tokens: None,
-            context_window: None,
-            percent_used: Some(67),
-        },
-        ..stats
-    };
-    let display = watched_agent_tool_display("review", "engineer_1", Some(&percent_only_stats));
-    let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["@engineer_1", "%2/3", "#67%"]);
 }
 
 #[test]

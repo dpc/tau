@@ -202,6 +202,14 @@ The CLI presents lifecycle records as compact status lines such as
 not agent-authored messages and remain visible independently of the
 `show-messages` content setting.
 
+The terminal also derives recursive activity over the current live watch DAG.
+While a directly watched agent is in its own outer turn its activity row begins
+with `running`. If that agent is idle but watches an active descendant, the row
+instead begins with `watching` and includes a stable witness such as
+`-> @worker_c`. Only direct targets receive rows; descendants are not flattened
+into an ancestor's transcript. This display-only projection does not make hidden
+watch notifications transitive.
+
 `agent_start` automatically enables watching for the sub-agent it creates. A
 watch response notification is delivered to the watching agent as a hidden
 internal prompt that is distinct from an explicit `message` tool delivery:
