@@ -3,7 +3,9 @@
 Provider output is constrained by
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 Curated provider wire evidence follows
-[DESIGN-tau-provider-chatgpt-curated-vcr](DESIGN-tau-provider-chatgpt-curated-vcr.md).
+[SPEC-tau-provider-chatgpt-curated-vcr](SPEC-tau-provider-chatgpt-curated-vcr.md);
+its rationale and evidence boundary are recorded in
+[DECISION-tau-provider-chatgpt-curated-vcr](DECISION-tau-provider-chatgpt-curated-vcr.md).
 
 ## Account quota telemetry
 

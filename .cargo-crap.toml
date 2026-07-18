@@ -1,5 +1,5 @@
 # Shared cargo-crap defaults for local runs and CI gates.
-# Policy: DESIGN-cargo-crap-gates.
+# Policy: DECISION-cargo-crap-gates.
 #
 # CI still supplies derivation-specific workspace selection, LCOV, baseline,
 # output, format, and per-gate cutoffs via CLI arguments where those differ

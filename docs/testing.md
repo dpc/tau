@@ -152,6 +152,13 @@ through renderer state to assert main, global, and watched
 activity become idle. These gates use loopback peers and explicit completion
 signals only—never provider auth, Internet access, model prose, tmux, or sleeps.
 
+Provider-builtin integration tests own profile serialization and CLI behavior,
+model publication and routing, runtime event ordering, cancellation and retry
+bookkeeping, and final provider event shapes. They use injected executors and
+virtual monotonic time for scheduler retry and cooldown behavior, and temporary
+auth files with injected endpoint outcomes for OAuth and credential-generation
+behavior. Backend protocol matrices remain in the owning adapters.
+
 The focused ChatGPT WebSocket lane stays inside `tau-provider-chatgpt`.
 Loopback-only finite peers exercise production request lowering and frame
 parsing together with pool reuse, reconnect, cooperative cancellation,
@@ -191,7 +198,7 @@ runtime and local scripted-transport tests own those contracts.
 Persisted transcript replay is likewise reconstruction evidence, not live
 transport execution or a substitute for the focused localhost lane.
 Its durable ownership and scope are recorded in
-[`DESIGN-tau-provider-chatgpt-curated-vcr`](../crates/tau-provider-chatgpt/specs/DESIGN-tau-provider-chatgpt-curated-vcr.md):
+[`SPEC-tau-provider-chatgpt-curated-vcr`](../crates/tau-provider-chatgpt/specs/SPEC-tau-provider-chatgpt-curated-vcr.md):
 the provider crate owns the corpus, manifest/audit, parser facts, and refresh
 review, while `tau-vcr` owns only generic storage.
 

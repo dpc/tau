@@ -1,6 +1,4 @@
-# DESIGN-tau-e2e-deterministic-provider: Deterministic provider boundary
-
-Status: confirmed, 2026-07-16, dpc
+# SPEC-tau-e2e-deterministic-provider: Deterministic provider acceptance contract
 
 Deterministic harness acceptance uses a test-only supervised provider subprocess
 inside `tau-e2e-tests`. It is launched by exact path as a required custom
@@ -91,4 +89,4 @@ production retry scheduling, crash-exact replay, universal packaging beyond
 the exact Gate 1 CLI and Gate 2 bundled core-shell components, or
 broad terminal rendering fidelity. Live/VCR and transcript-replay fixtures remain separate.
 
-Refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).
+Implements [DECISION-tau-e2e-deterministic-provider-boundary](DECISION-tau-e2e-deterministic-provider-boundary.md) and refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).

@@ -5,7 +5,7 @@
 //! backends. Individual backend crates own provider-specific wire formats.
 //! Component responsibilities and trust boundaries are summarized in
 //! `ARCH-tau-ext-provider-builtin`.
-//! See `DESIGN-tau-ext-provider-builtin-testing-boundary` for that test
+//! See `DECISION-tau-ext-provider-builtin-testing-boundary` for that test
 //! boundary.
 //! Retry telemetry and debug-capture persistence follow
 //! `DECISION-tau-ext-provider-builtin-structured-retry-facts` and

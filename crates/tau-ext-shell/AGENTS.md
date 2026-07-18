@@ -16,6 +16,6 @@ the current behavior instead of stale assumptions.
 
 Cwd metadata, remembered-cwd path resolution, and event sequencing rules are documented in `specs/ARCH-tau-ext-shell.md`; read and update it when touching those paths.
 
-Protocol/UI/locking test strategy is documented in `specs/DESIGN-tau-ext-shell-testing-strategy.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
+Protocol/UI/locking test coverage is documented in `testing.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
 
 Security and reliability boundaries are documented in `specs/ARCH-tau-ext-shell.md`, `specs/SPEC-tau-ext-shell-directory-locking.md`, and `specs/SPEC-tau-ext-shell-process-lifecycle.md`; read and update them when changing shell execution, filesystem mutation, directory-lock behavior, process lifecycle, output draining, or cancellation.

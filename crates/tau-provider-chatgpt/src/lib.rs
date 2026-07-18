@@ -7,7 +7,7 @@
 //! `ARCH-tau-provider-chatgpt` and
 //! `SPEC-tau-provider-chatgpt-streaming-replay`.
 //! Its transport test boundary is recorded in
-//! `DESIGN-tau-provider-chatgpt-backend-testing`.
+//! `DECISION-tau-provider-chatgpt-backend-testing-boundary`.
 
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,

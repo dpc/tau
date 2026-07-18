@@ -16,7 +16,7 @@ const STDERR_POLICY_SUBPROCESS: &str = "TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS"
 const FLOOD_MESSAGE_COUNT: usize = 128;
 
 /// Builds the command used to launch the real subprocess fixture described by
-/// `DESIGN-tau-supervisor-test-fixture`.
+/// `DECISION-tau-supervisor-integration-test-fixture`.
 fn test_command(args: &[&str]) -> ExtensionCommand {
     ExtensionCommand {
         name: "test-child".into(),

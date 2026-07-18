@@ -5,6 +5,9 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 - Read the applicable Linked Specs under `specs/` before changing
   lifecycle/startup behavior, prompt assembly, system prompt templating, or
   adding harness tests.
+- Prefer focused deterministic unit or lifecycle tests for state-machine changes.
+  Assert replay and late-subscriber delivery as well as the immediate transition
+  when diagnostics or state must remain observable after startup.
 
 - Read `specs/ARCH-tau-harness.md` before changing or reviewing harness event sequencing, persistence, interception, extension boundaries, session semantics, or extension-data behavior.
 - Read the applicable trust-boundary records under `specs/` before changing daemon IPC, listener lifecycle, shutdown, runtime discovery, or security-sensitive harness behavior.

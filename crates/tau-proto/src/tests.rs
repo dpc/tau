@@ -1506,8 +1506,8 @@ fn message_fact_events_have_distinct_required_v11_wire_shapes() {
 
 /// Ensures every representative first-party event keeps its serde tag,
 /// `EventName` constant, `Event::name()` dispatch, and default durability in
-/// sync. This guards the protocol-surface rule documented in
-/// `crates/tau-proto/specs/DESIGN-tau-proto-wire-contract-testing.md`.
+/// sync. Keep serialized event tags, parsed names, and `Event::name()`
+/// synchronized.
 #[test]
 fn first_party_event_wire_tags_match_event_names_and_transience() {
     let events = representative_events();

@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use super::*;
 
 // These behavior-level subprocess regressions implement the testing boundary in
-// `DESIGN-tau-cli-term-testing-strategy`.
+// `DECISION-tau-cli-term-testing-strategy`.
 
 /// Prevents external prompt/completion commands from allocating unbounded
 /// memory when a misconfigured command writes a very large stdout stream.

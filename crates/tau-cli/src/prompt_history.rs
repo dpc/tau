@@ -335,5 +335,6 @@ fn open_lock_file(parent: &Path) -> io::Result<File> {
 }
 
 #[cfg(test)]
-// Focused storage tests follow `DESIGN-tau-cli-testing-strategy`.
+// Focused storage tests follow
+// [`DECISION-tau-cli-testing-boundaries`](../specs/DECISION-tau-cli-testing-boundaries.md).
 mod tests;

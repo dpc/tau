@@ -53,6 +53,10 @@ externally linked entries. Missing or empty testing configuration must be
 surfaced as a warning and must continue with no provider credentials in the
 scratch environment.
 
+The manual boundary and observable helper behavior are recorded in
+[`DECISION-tau-cli-manual-tmux-e2e-boundary`](DECISION-tau-cli-manual-tmux-e2e-boundary.md)
+and [`SPEC-tau-cli-dev-tmux`](SPEC-tau-cli-dev-tmux.md).
+
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
 that paused state when setup or resume fails so the UI cannot remain permanently

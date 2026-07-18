@@ -4,7 +4,7 @@
 //! scratch Tau environment. It is intentionally a manual development helper,
 //! not a general daemon launcher and not a sandbox boundary.
 //! Its trust and workflow boundary is specified by
-//! `DESIGN-tau-cli-tmux-e2e-helper`.
+//! [`SPEC-tau-cli-dev-tmux`](../specs/SPEC-tau-cli-dev-tmux.md).
 
 mod provider_access;
 
