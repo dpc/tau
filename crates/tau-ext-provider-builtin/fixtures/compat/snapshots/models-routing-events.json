@@ -1,0 +1,714 @@
+{
+  "events": {
+    "chat_completions": [
+      {
+        "event": "provider.response_updated",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "local-compat-prompt",
+          "deltas": [
+            {
+              "output_index": 0,
+              "text": "compatibility text",
+              "type": "message"
+            }
+          ],
+          "originator": {
+            "kind": "user"
+          },
+          "response_stats": {
+            "current": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            },
+            "previous": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 0
+            }
+          }
+        }
+      },
+      {
+        "event": "provider.response_updated",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "local-compat-prompt",
+          "originator": {
+            "kind": "user"
+          },
+          "response_stats": {
+            "current": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            },
+            "previous": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            }
+          }
+        }
+      },
+      {
+        "event": "provider.response_finished",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "local-compat-prompt",
+          "backend": {
+            "base_url": "<loopback-fixture>",
+            "kind": "chat_completions",
+            "transport": "http_sse"
+          },
+          "originator": {
+            "kind": "user"
+          },
+          "output_items": [
+            {
+              "payload": {
+                "content": [
+                  {
+                    "text": "compatibility text",
+                    "type": "text"
+                  }
+                ],
+                "role": "assistant"
+              },
+              "type": "message"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": {
+            "prompt_cached_tokens": 4,
+            "prompt_sent_tokens": 10,
+            "response_received_tokens": 2,
+            "stats": {
+              "by_model": {},
+              "total": {
+                "cached_tokens": 0,
+                "in_progress_received_tokens": 0,
+                "received_tokens": 0,
+                "requests": 0,
+                "sent_tokens": 0
+              }
+            }
+          }
+        }
+      }
+    ],
+    "openrouter": [
+      {
+        "event": "provider.response_updated",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "router-compat-prompt",
+          "deltas": [
+            {
+              "output_index": 0,
+              "text": "compatibility text",
+              "type": "message"
+            }
+          ],
+          "originator": {
+            "kind": "user"
+          },
+          "response_stats": {
+            "current": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            },
+            "previous": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 0
+            }
+          }
+        }
+      },
+      {
+        "event": "provider.response_updated",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "router-compat-prompt",
+          "originator": {
+            "kind": "user"
+          },
+          "response_stats": {
+            "current": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            },
+            "previous": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 196
+            }
+          }
+        }
+      },
+      {
+        "event": "provider.response_finished",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "router-compat-prompt",
+          "backend": {
+            "base_url": "<loopback-fixture>",
+            "kind": "chat_completions",
+            "transport": "http_sse"
+          },
+          "originator": {
+            "kind": "user"
+          },
+          "output_items": [
+            {
+              "payload": {
+                "content": [
+                  {
+                    "text": "compatibility text",
+                    "type": "text"
+                  }
+                ],
+                "role": "assistant"
+              },
+              "type": "message"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": {
+            "prompt_cached_tokens": 4,
+            "prompt_sent_tokens": 10,
+            "response_received_tokens": 2,
+            "stats": {
+              "by_model": {},
+              "total": {
+                "cached_tokens": 0,
+                "in_progress_received_tokens": 0,
+                "received_tokens": 0,
+                "requests": 0,
+                "sent_tokens": 0
+              }
+            }
+          }
+        }
+      }
+    ],
+    "responses": [
+      {
+        "event": "provider.response_updated",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "compat-prompt",
+          "deltas": [
+            {
+              "output_index": 0,
+              "text": "compatibility text",
+              "type": "message"
+            }
+          ],
+          "originator": {
+            "kind": "user"
+          },
+          "response_stats": {
+            "current": {
+              "elapsed_micros": 1500,
+              "response_bytes_received": 42
+            },
+            "previous": {
+              "elapsed_micros": 0,
+              "response_bytes_received": 0
+            }
+          }
+        }
+      },
+      {
+        "event": "provider.response_finished",
+        "payload": {
+          "agent_id": "compat-agent",
+          "agent_prompt_id": "compat-prompt",
+          "backend": {
+            "base_url": "https://chatgpt.com/backend-api",
+            "kind": "responses",
+            "stale_chain_fallback": true,
+            "transport": "websocket"
+          },
+          "originator": {
+            "kind": "user"
+          },
+          "output_items": [
+            {
+              "payload": {
+                "content": [
+                  {
+                    "text": "compatibility text",
+                    "type": "text"
+                  }
+                ],
+                "role": "assistant"
+              },
+              "type": "message"
+            }
+          ],
+          "provider_response_id": "resp-compat",
+          "stop_reason": "end_turn",
+          "usage": {
+            "prompt_cached_tokens": 4,
+            "prompt_sent_tokens": 10,
+            "response_received_tokens": 2,
+            "stats": {
+              "by_model": {},
+              "total": {
+                "cached_tokens": 0,
+                "in_progress_received_tokens": 0,
+                "received_tokens": 0,
+                "requests": 0,
+                "sent_tokens": 0
+              }
+            }
+          },
+          "ws_pool_delta": {
+            "silent_reconnects": 0,
+            "upgrades": 1
+          }
+        }
+      }
+    ]
+  },
+  "models": [
+    {
+      "context_window": 353400,
+      "default_affinity": 700,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "id": "chatgpt/gpt-5.6-sol",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "standalone_compaction_threshold": 334800,
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": false,
+      "supports_standalone_compaction": true,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text",
+        "image"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 353400,
+      "default_affinity": 600,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "id": "chatgpt/gpt-5.6-terra",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "standalone_compaction_threshold": 334800,
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": false,
+      "supports_standalone_compaction": true,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text",
+        "image"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 353400,
+      "default_affinity": 500,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "id": "chatgpt/gpt-5.6-luna",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "standalone_compaction_threshold": 334800,
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": false,
+      "supports_standalone_compaction": true,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text",
+        "image"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 258400,
+      "default_affinity": 400,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "id": "chatgpt/gpt-5.5",
+      "input_modalities": [
+        "text"
+      ],
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": true,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 258400,
+      "default_affinity": 300,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "id": "chatgpt/gpt-5.4",
+      "input_modalities": [
+        "text"
+      ],
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": true,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 258400,
+      "default_affinity": 100,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "id": "chatgpt/gpt-5.4-mini",
+      "input_modalities": [
+        "text"
+      ],
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": true,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 258400,
+      "default_affinity": 200,
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "id": "chatgpt/gpt-5.3-codex",
+      "input_modalities": [
+        "text"
+      ],
+      "supported_tool_types": [
+        "function",
+        "custom"
+      ],
+      "supports_compaction": true,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "shell:chatgpt",
+        "tools:custom-text"
+      ],
+      "thinking_summaries": [
+        "off",
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "tool_result_modalities": [
+        "text"
+      ],
+      "verbosities": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "context_window": 32768,
+      "display_name": "Legacy Local",
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "id": "local/local-model",
+      "supported_tool_types": [
+        "function"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "provider:local",
+        "shell:local"
+      ],
+      "thinking_summaries": [
+        "off"
+      ],
+      "verbosities": [
+        "medium"
+      ]
+    },
+    {
+      "context_window": 131072,
+      "display_name": "Legacy Router Model",
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "id": "router/vendor/model",
+      "supported_tool_types": [
+        "function"
+      ],
+      "supports_compaction": false,
+      "supports_parallel_tool_calls": true,
+      "supports_standalone_compaction": false,
+      "tags": [
+        "route:openrouter"
+      ],
+      "thinking_summaries": [
+        "off"
+      ],
+      "verbosities": [
+        "medium"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "account_id_present": true,
+      "backend": "responses",
+      "base_url": "https://chatgpt.com/backend-api",
+      "mode": "lite_compatibility",
+      "model": "gpt-5.6-sol",
+      "raw_context_window": 372000,
+      "requested": "chatgpt/gpt-5.6-sol",
+      "supports_compaction": false,
+      "supports_encrypted_reasoning": true,
+      "supports_phase": true,
+      "supports_prompt_cache_key": true,
+      "supports_reasoning_effort": true,
+      "supports_reasoning_summary": true,
+      "supports_verbosity": true,
+      "supports_websocket": true,
+      "surface": "chatgpt",
+      "credential_present": true
+    },
+    {
+      "backend": "chat_completions",
+      "model": {
+        "compat": {
+          "parallel_tool_calls": true,
+          "prompt_cache_key": true,
+          "reasoning_effort": true,
+          "stream_options": true
+        },
+        "context_window": 32768,
+        "display_name": "Legacy Local",
+        "id": "local-model",
+        "tags": [
+          "shell:local"
+        ]
+      },
+      "provider": {
+        "base_url": "http://127.0.0.1:8080/v1",
+        "compat": {
+          "prompt_cache_key": true,
+          "stream_options": true
+        },
+        "extra_body": {
+          "chat_template_kwargs": {
+            "enable_thinking": true
+          }
+        },
+        "max_output_tokens": 4096,
+        "credential_present": true
+      },
+      "requested": "local/local-model"
+    },
+    {
+      "backend": "chat_completions",
+      "model": {
+        "compat": {
+          "max_completion_tokens": true,
+          "reasoning_effort": true,
+          "stream_options": true
+        },
+        "context_window": 131072,
+        "display_name": "Legacy Router Model",
+        "id": "vendor/model",
+        "tags": [
+          "route:openrouter"
+        ]
+      },
+      "provider": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "compat": {
+          "max_completion_tokens": true,
+          "reasoning_effort": true,
+          "stream_options": true
+        },
+        "extra_body": {},
+        "max_output_tokens": 8192,
+        "credential_present": true
+      },
+      "requested": "router/vendor/model"
+    },
+    {
+      "backend": null,
+      "requested": "local/missing"
+    }
+  ]
+}

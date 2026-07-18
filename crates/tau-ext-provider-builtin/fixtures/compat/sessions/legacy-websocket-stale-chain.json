@@ -1,0 +1,34 @@
+{
+  "event": "provider.response_finished",
+  "payload": {
+    "agent_prompt_id": "legacy-ws-prompt",
+    "agent_id": "legacy-agent",
+    "output_items": [
+      {
+        "type": "message",
+        "payload": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "legacy answer"
+            }
+          ],
+          "responses_raw_json": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"legacy answer\"}]}"
+        }
+      }
+    ],
+    "stop_reason": "end_turn",
+    "backend": {
+      "kind": "responses",
+      "base_url": "https://chatgpt.com/backend-api",
+      "transport": "websocket",
+      "stale_chain_fallback": true
+    },
+    "provider_response_id": "legacy-stale-response",
+    "ws_pool_delta": {
+      "upgrades": 1,
+      "silent_reconnects": 1
+    }
+  }
+}

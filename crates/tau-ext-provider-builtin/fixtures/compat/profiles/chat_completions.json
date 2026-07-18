@@ -1,0 +1,34 @@
+{
+  "kind": "chat_completions",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "api_key": "legacy-key",
+  "models": [
+    {
+      "id": "local-model",
+      "display_name": "Legacy Local",
+      "context_window": 32768,
+      "compat": {
+        "stream_options": true,
+        "parallel_tool_calls": true,
+        "prompt_cache_key": true,
+        "reasoning_effort": true
+      },
+      "tags": [
+        "shell:local"
+      ]
+    }
+  ],
+  "tags": [
+    "provider:local"
+  ],
+  "max_output_tokens": 4096,
+  "extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": true
+    }
+  },
+  "compat": {
+    "stream_options": true,
+    "prompt_cache_key": true
+  }
+}

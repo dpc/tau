@@ -3716,6 +3716,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tau-client",
+ "tau-core",
  "tau-proto",
  "tau-provider",
  "tau-provider-chat-completions",

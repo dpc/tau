@@ -18,6 +18,8 @@ requests cover every supported mode. Prompts must not advertise unsupported
 capabilities, and the default retains an end-to-end multi-tool lifecycle test.
 Reference-client metadata is evidence rather than a Tau requirement; compatibility
 modes do not become retry fallbacks without a separately approved decision.
+The reviewed [`compat` request fixtures](../fixtures/compat/README.md) freeze full
+Standard and Lite lowering from production model configuration.
 
 Curated provider evidence follows
 [`SPEC-tau-provider-chatgpt-curated-vcr`](../specs/SPEC-tau-provider-chatgpt-curated-vcr.md).

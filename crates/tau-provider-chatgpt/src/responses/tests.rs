@@ -1,3 +1,5 @@
+mod compatibility;
+
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, ImageContent, ImageDetail, ImageMediaType, MessageItem,
     OpaqueProviderItem, ResponsesToolCallEnvelope, ToolCallItem, ToolResultContentPart,

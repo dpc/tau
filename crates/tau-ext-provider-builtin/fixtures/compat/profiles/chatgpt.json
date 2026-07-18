@@ -1,0 +1,10 @@
+{
+  "kind": "chatgpt",
+  "auth": {
+    "access_token": "legacy-access",
+    "refresh_token": "legacy-refresh",
+    "expires_at_ms": 18446744073709551615,
+    "account_id": "acct-legacy"
+  },
+  "responses_lite_compatibility": true
+}

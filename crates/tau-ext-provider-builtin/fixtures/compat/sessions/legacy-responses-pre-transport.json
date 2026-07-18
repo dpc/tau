@@ -1,0 +1,13 @@
+{
+  "event": "provider.response_finished",
+  "payload": {
+    "agent_prompt_id": "legacy-http-prompt",
+    "agent_id": "legacy-agent",
+    "stop_reason": "end_turn",
+    "backend": {
+      "kind": "responses",
+      "base_url": "https://chatgpt.com/backend-api"
+    },
+    "provider_response_id": "legacy-response"
+  }
+}

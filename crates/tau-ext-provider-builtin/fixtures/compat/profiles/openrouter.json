@@ -1,0 +1,19 @@
+{
+  "kind": "openrouter",
+  "api_key": "legacy-router-key",
+  "models": [
+    {
+      "id": "vendor/model",
+      "display_name": "Legacy Router Model",
+      "context_window": 131072,
+      "compat": {
+        "stream_options": true,
+        "reasoning_effort": true,
+        "max_completion_tokens": true
+      },
+      "tags": [
+        "route:openrouter"
+      ]
+    }
+  ]
+}

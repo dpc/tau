@@ -15,3 +15,6 @@ boundary is recorded in
 [`DECISION-tau-provider-chatgpt-backend-testing-boundary`](../../tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-backend-testing-boundary.md).
 The evolving integration catalog lives in
 [`docs/testing.md`](../../../docs/testing.md).
+Cross-cutting profile, routing, emitted-event, and durable replay contracts are
+frozen in the reviewed [`compat` fixture set](../fixtures/compat/README.md) before
+provider ownership changes.

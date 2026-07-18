@@ -1,3 +1,5 @@
+mod compatibility;
+
 use tau_provider_chat_completions::openrouter::OpenRouterProfile;
 
 use super::*;
