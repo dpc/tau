@@ -46,6 +46,33 @@ the same daemon replay those memory records, but cold resume sees only durable
 agents. Children of ephemeral parents inherit the memory-only policy so delegated
 work does not accidentally create durable child transcripts.
 
+## Semantic store durability
+
+Memory-only agent and session stores fold the same semantic facts as durable
+stores for live and same-daemon replay while creating no reserved state
+directories, sidecars, locks, or event files. Durable `events.cbor` replay
+validates framing, monotonic durable sequence numbers, path-safe store IDs, and
+the same semantic event/parent invariants as live append. Corrupt, truncated,
+spliced, or semantically invalid records fail with a typed store error rather
+than being skipped or partially folded.
+
+Durable sequence numbers count only records written to that stream. In a
+durable session, memory-only ephemeral-agent membership is retained in a
+separately sequenced process-local overlay. Late same-daemon replay validates
+and folds the durable journal before composing the validated overlay; cached
+membership never bypasses journal validation. Restart discards the overlay and
+the corresponding ephemeral transcripts.
+
+Only one real background completion is accepted for a globally unique tool-call
+ID. Once a background result or error is recorded, later completions for that ID
+are rejected during live append and replay. Duplicate detection is global, while
+the known-call check remains branch-relative to the event's explicit fold parent
+rather than the mutable tree head.
+
+Unrouteable extension-published message facts share the session stream with
+membership records as specified by
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
+
 The debug JSONL mirror is part of this boundary: content-bearing agent, prompt,
 provider, tool, shell, or delegation events for ephemeral agents must be
 classified before logging. New event kinds that carry agent transcript content or

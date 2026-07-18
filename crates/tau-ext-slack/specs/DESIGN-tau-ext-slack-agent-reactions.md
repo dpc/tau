@@ -4,7 +4,7 @@ Status: confirmed, 2026-07-14, dpc
 
 The Slack-local reaction policy remains current. Its former harness transport
 registration/completion integration is superseded by
-[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md):
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md):
 targets are keyed to locally written message-fact IDs and successful sends publish
 `message.sent` before their ordinary tool result.
 
@@ -50,7 +50,7 @@ REACT_TOOL_NAME = "slack_react"
 REACT_TOOL_TAG = "slack:react"
 ```
 
-Register it through `scoped_tool`, in `slack_tool_group()`. `tool_prefix: work` therefore exposes `work_slack_react` in group `work_slack`; the semantic tag remains `slack:react`. Prefixing must not rewrite `action`, schema fields, examples, tags, or prose literals, consistent with `DESIGN-extension-tool-prefixes`.
+Register it through `scoped_tool`, in `slack_tool_group()`. `tool_prefix: work` therefore exposes `work_slack_react` in group `work_slack`; the semantic tag remains `slack:react`. Prefixing must not rewrite `action`, schema fields, examples, tags, or prose literals, consistent with `DECISION-extension-tool-prefixes`.
 
 Recommended schema:
 

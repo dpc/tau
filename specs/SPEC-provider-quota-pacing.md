@@ -1,20 +1,25 @@
-# DESIGN-provider-quota-pacing: Correctness-first weekly quota pacing
+# SPEC-provider-quota-pacing: Provider quota pacing
 
-Status: confirmed, 2026-07-14, dpc (tau-agent-c79j, amended by tau-agent-9idt and tau-agent-hfn6)
+Provider quota is ephemeral bounded current state, not per-response token usage,
+retry policy, credits, spend control, or transcript state. Provider adapters
+normalize upstream quota; the built-in provider reconciles full and sparse
+updates; the harness validates source, bounds, epoch, and sequence before
+exposing a full snapshot; the CLI computes generic pacing and presentation.
+Protocol records contain no credential, account ID, provider display prose,
+plan, balance, or raw response.
 
-Tau presents provider account quota as ephemeral, bounded current state. ChatGPT
-acquires a full account snapshot from authenticated `/wham/usage` and reconciles
-supported sparse HTTP response headers and WebSocket `codex.rate_limits`
-events. Quota is not per-response token usage, retry policy, credits, spend
-control, or transcript state.
+The governing choice is
+[DECISION-provider-quota-pacing](DECISION-provider-quota-pacing.md).
 
-The provider adapter owns upstream parsing and normalization. The built-in
-provider extension owns credentials, profile epochs, full-fetch coalescing, and
-sparse/full merging. Protocol records contain no credential, account id,
-provider display prose, plan, balance, or raw response. The harness verifies
-that the sending connection owns the named provider, validates bounds and
-epoch/sequence order, and exposes only a full current-state snapshot. The CLI
-owns generic pacing and presentation.
+## Acquisition and ownership
+
+ChatGPT acquires a full account snapshot from authenticated `/wham/usage` and
+reconciles supported sparse HTTP response headers and WebSocket
+`codex.rate_limits` events. The provider adapter owns upstream parsing and
+normalization. The built-in provider extension owns credentials, profile epochs,
+full-fetch coalescing, and sparse/full merging. The harness verifies that the
+sending connection owns the named provider, validates bounds and strict
+epoch/sequence order, and exposes only a complete current snapshot.
 
 ## Applicability
 

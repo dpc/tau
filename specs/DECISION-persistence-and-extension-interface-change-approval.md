@@ -35,4 +35,4 @@ small decision is preferred over hidden cross-component drift.
 
 The confirmed extension-published message-fact interface and persistence
 application is recorded by
-[DESIGN-extension-published-message-facts](DESIGN-extension-published-message-facts.md).
+[DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).

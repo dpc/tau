@@ -4275,7 +4275,7 @@ where
 
     if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
         // This deliberately has no inline fallback; see
-        // `DESIGN-tau-ext-provider-builtin-standalone-compaction`.
+        // `DECISION-tau-ext-provider-builtin-standalone-compaction`.
         match execution
             .runtime
             .compact(agent_prompt_id, config, &request, retry_ctx)
@@ -4461,7 +4461,7 @@ fn emit_chatgpt_connecting_update<W: Write>(
 }
 
 /// Samples ChatGPT streaming progress according to
-/// `DESIGN-tau-provider-chatgpt-stream-update-sampling`.
+/// `SPEC-provider-response-streaming`.
 struct RateLimitedResponseUpdateEmitter {
     delta_emitter: common::StreamDeltaEmitter,
     started_at: Instant,

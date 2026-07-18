@@ -5,7 +5,7 @@ strict sequences, bounded full/sparse reconciliation, and one coalesced full
 fetch per profile. Prompt workers report normalized rolling observations
 through the existing enqueue-before-wake worker channel; quota failure never
 delays inference or consumes prompt retry budget. This implements
-[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+[DECISION-provider-quota-pacing](../../../specs/DECISION-provider-quota-pacing.md).
 
 Provider output is constrained by [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 

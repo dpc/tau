@@ -14,5 +14,5 @@ harness namespace must not be copied into another configured extension's
 namespace merely because that extension implements shell tools.
 
 The approved implementation design is recorded in
-[DESIGN-per-agent-extension-workdirs](DESIGN-per-agent-extension-workdirs.md).
+[DECISION-per-agent-extension-workdirs](DECISION-per-agent-extension-workdirs.md).
 

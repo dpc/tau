@@ -6,7 +6,7 @@
 //! client.
 //! Update-stream ownership follows
 //! `DESIGN-tau-ext-telegram-stream-locking`, while instance-specific tool names
-//! follow the workspace-wide `DESIGN-extension-tool-prefixes`.
+//! follow the workspace-wide `DECISION-extension-tool-prefixes`.
 //! Shared-token multi-session ownership follows
 //! `DESIGN-tau-ext-telegram-single-token-gateway`.
 //! The standalone daemon and sidecar split is described by

@@ -372,7 +372,7 @@ struct ManualCompactionRequestFold {
 
 /// Durable state of an accepted model-requested compaction.
 ///
-/// See `DESIGN-tau-core-manual-compaction-projection`.
+/// See `SPEC-compaction-and-context-recovery`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ManualCompactionRecovery {
     /// The accepted request has not started or failed.
@@ -462,7 +462,7 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 
 impl AgentTree {
     /// Returns the latest validated standalone transaction's recovery
-    /// projection, following `DESIGN-tau-core-standalone-compaction-replay`.
+    /// projection, following `SPEC-compaction-and-context-recovery`.
     #[must_use]
     pub fn standalone_compaction_recovery(&self) -> Option<StandaloneCompactionRecovery> {
         let id = self.compaction_transaction_order.last()?;

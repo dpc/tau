@@ -3,7 +3,7 @@
 External messages follow
 [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md)
 and the extension-published fact interface in
-[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md).
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
 Conversation policy follows
 [DESIGN-tau-ext-slack-conversation-policy](DESIGN-tau-ext-slack-conversation-policy.md).
 

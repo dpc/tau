@@ -2,7 +2,7 @@
 //! single-message helpers, and the small types passed to/from them.
 //!
 //! Listener cancellation follows
-//! `DESIGN-tau-harness-reactive-listener-shutdown`.
+//! `SPEC-tau-harness-extension-lifecycle`.
 
 use std::collections::BTreeSet;
 use std::net::Shutdown;

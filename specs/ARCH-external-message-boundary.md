@@ -5,6 +5,10 @@ extension event emission. The harness stamps the authenticated extension's
 stable configured publisher ID, persists each fact before any consumer acts, and
 then broadcasts the same record. It does not own transport registration,
 admission, routing, reply authority, or send completion.
+The exact shared behavior is specified by
+[SPEC-extension-published-message-facts](SPEC-extension-published-message-facts.md);
+the underlying boundary choice is
+[DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).
 
 Extension-provided labels or payload can never claim `HumanUi`,
 harness-internal, authenticated Tau-agent, or another extension instance

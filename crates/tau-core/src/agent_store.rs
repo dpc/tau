@@ -278,7 +278,7 @@ pub struct AgentAppendOutcome {
 /// don't contend with a running daemon.
 ///
 /// Durable replay and memory-only parity follow
-/// `DESIGN-tau-core-semantic-store-durability`.
+/// `DECISION-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,

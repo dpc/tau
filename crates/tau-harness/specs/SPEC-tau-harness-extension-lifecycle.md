@@ -103,7 +103,16 @@ names, visible aliases, and groups inside the assigned exact component envelope.
 Final internal-name ownership is unique across live connections; prompt
 snapshots separately reject simultaneously visible alias collisions. These
 rules implement
-[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+The client runtime applies structural mapping through its logical builder
+declarations, scoped factories, and dynamic registration helpers. Raw `emit`
+remains a wire-level operation and receives no rewriting.
+
+A same-connection refresh may replace its owned registration, while a
+cross-connection registration of an owned final internal name is rejected.
+Exact tool and group policy addresses final names; semantic tag policy continues
+to span instances. Dispatch, completion provenance, replay, persisted history,
+and UI retain the final names already carried by protocol facts.
 Sending `Ready` records readiness but does not publish `extension.ready` or expose
 staged capabilities until every initial extension has either sent `Ready` or
 become terminal. The harness then resolves all final-name collisions in one
@@ -119,6 +128,14 @@ Harness-internal tool handlers are installed before this preflight, so their nam
 participate as reserved owners. Per-connection retained activation traffic is
 bounded by message-count and encoded-byte quotas; overflow follows the same
 initial required/optional or post-startup connection-isolation policy.
+
+Initial collision handling is independent of Ready order:
+required/required conflicts fail startup; required/optional keeps the required
+instance and disables the optional one; optional/optional disables every
+claimant. A conflict with a harness-internal owner fails required startup or
+disables an optional claimant. After the startup barrier, respawns and runtime
+registrations are newcomers and cannot evict an incumbent. Changing an assigned
+prefix requires restarting that extension instance.
 
 One narrow bootstrap exception exists: an `ExtensionDataRequest` received before
 that peer's `Ready` is handled immediately because an initial Configure handler
@@ -174,15 +191,23 @@ extension configuration, environment values, or resolved secret values.
 ## Extension availability startup data flow
 
 `tau-config` owns strict parsing of the supported names-only
-`TAU_ENABLE_EXTENSIONS` input. The outer CLI parses and validates it early for
-fresh-harness commands, preserving argv order for subsequent CLI operations.
+`TAU_ENABLE_EXTENSIONS` input without logging its raw value. The outer CLI parses
+and validates it early for fresh-harness commands, preserving argv order for
+subsequent CLI operations.
 Normal launches pass only ordered CLI operations through the private,
 unstable `TAU_EXTENSION_CLI_OVERRIDES` child transport; the daemon command
 clears inherited transport when there are no operations. The spawned harness
-decodes that transport fail-closed. Direct in-process `component harness`
+decodes malformed private transport as a fatal startup error, fail-closed and
+without logging raw values. Direct in-process `component harness`
 dispatch passes the same typed operations explicitly and does not consult the
 private transport for them. Harness settings own the canonical final resolver:
 config, public environment named enables, then ordered CLI overrides.
+
+Deterministic embedded and daemon acceptance may explicitly bypass all ambient
+startup environment and CLI compatibility transports and require an exact
+resolved extension-name allowlist before spawn. Runtime settings reload retains
+that environment-free policy. Normal interactive and default daemon startup use
+the ordered pipeline above.
 
 ## Environment enablement boundary
 

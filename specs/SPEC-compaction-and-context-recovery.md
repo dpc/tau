@@ -21,9 +21,13 @@ of an id do not grant compaction authority; conversely, the binding
 stopped, and cross-session targets share a non-enumerating error.
 
 Accepted model requests are harness-owned durable facts correlated to the
-originating prompt and tool call. Provider and extension input cannot select a
-cut, model, or caller, and exactly one durable start or pre-start failure may
-claim an accepted request.
+originating prompt and tool call. Each carries a unique bounded request ID and
+immutable caller, target, model, tool-call, accepted-head, and prompt
+correlation. Provider and extension input cannot select a cut, model, or caller,
+and exactly one durable start or pre-start failure may claim an accepted
+request. Projection exposes waiting, started (including transaction outcome),
+and failed state so every crash window can be repaired without resending
+ambiguous provider work or duplicating a background completion.
 Every newly selected compact cut is a provider-valid closed prefix. A tool-calling assistant
 response and the one terminal results node that closes its complete function,
 custom, or mixed parallel round are indivisible at this boundary. A provisional
@@ -41,7 +45,7 @@ is overwritten, and observations cannot automatically alter safety thresholds.
 
 ## Reactive context-overflow recovery
 
-An ordinary inference that receives a canonical, no-output context-window rejection may authorize exactly one standalone compaction when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Compaction dispatch and continuation reuse the existing durable transaction machinery. Standalone-compaction overflow, a post-compaction inference overflow, partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never recurse into recovery. Replay resumes an unclaimed planned recovery once, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+An ordinary inference that receives a canonical, no-output context-window rejection may authorize exactly one standalone compaction when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Compaction dispatch and continuation reuse the existing durable transaction machinery. Standalone-compaction overflow, a post-compaction inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
 
 ## Manual compaction
 
@@ -53,6 +57,11 @@ busy or dispatch-uncertain work. The target-scoped standalone transaction is
 the provider-work authority; its terminal event produces exactly one
 background completion for the original call before any self continuation
 checkpoint.
+The model-callable path accepts work only when the exact captured
+provider-qualified model supports standalone compaction and its route exists.
+It has no inline fallback. Provider terminal errors, including context-window
+rejection during standalone compaction, produce one terminal transaction
+failure and are not retried indefinitely.
 An explicit `/compact` or authorized `agent_compact` request may recover a
 terminally blocked standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed
@@ -62,6 +71,12 @@ owed branch, and explicit recovery refuses a current head reached by navigating
 away from that branch. Ordinary activating input remains queued and does
 not clear or implicitly retry the block; `/cancel` does not abandon this idle
 durable obligation.
+When a failed transaction carries `resume_through`, that watermark must be an
+ancestor of the successor watermark; a sibling branch with superficial
+nonemptiness is invalid. Only a failed standalone transaction may be
+superseded, duplicate transaction outcomes are rejected, and the latest
+validated successor determines blocked, successful, and
+continuation-checkpoint recovery.
 Context-window rejection records may include sanitized, harness-owned
 `context_limit_telemetry`. Correlation is the enclosing prompt plus exact
 provider-qualified model and operation. Projection is accepted only from a
@@ -120,7 +135,9 @@ accepts new boundaries only when all six transaction/cut/suffix/prompt/model/
 operation fields are present, the transaction resolves its start,
 cut/prompt/model/operation match it, operation is standalone, `suffix_end`
 equals the boundary parent, and cut is its ancestor. Legacy boundaries have
-all six absent. Runtime connection ids are deliberately not persisted:
+all six absent. Partial groups, unknown transactions, mismatches, and duplicate
+outcomes are rejected identically during live validation and replay. Runtime
+connection ids are deliberately not persisted:
 they identify a daemon incarnation rather than durable provider work.
 Only the start's post-commit reaction sends one cut-local compact request with
 that exact prompt id, provider-qualified model, operation, model parameters,
@@ -135,14 +152,18 @@ automatic retry, and leaves the agent addressable for explicit `/compact` or
 authorized `agent_compact` recovery.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
-`AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
-checkpoint's nonoptional dispatch ownership value atomically owns its model,
-inference operation, and activation cut alongside its prompt id,
-transaction owner, and transcript head. Core rejects incomplete or
-transaction-mismatched ownership correlations. The post-commit continuation
-uses that exact model for route, parameters, tools, accounting, and prompt
-creation regardless of later selection changes; an unavailable route is
-durably terminalized before remote send. It acknowledges only materialized
+`AwaitingCheckpoint` runtime state blocks every ordinary dispatch path.
+New-format inference checkpoints carry provider-qualified model, inference
+operation, and activation cut as one all-present ownership group alongside
+their prompt ID, transaction owner, and transcript head. Legacy all-three-absent
+ownership groups remain replay-compatible but cannot substitute current model
+ownership; partial groups are invalid. A continuation for a successful
+standalone transaction is accepted only when its model equals the start model,
+its operation is inference, and its activation cut equals the start cut. Core
+rejects incomplete or transaction-mismatched ownership correlations. The
+post-commit continuation uses that exact model for route, parameters, tools,
+accounting, and prompt creation regardless of later selection changes; an
+unavailable route is durably terminalized before remote send. It acknowledges only materialized
 typed-message wakes on that branch
 through the watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain

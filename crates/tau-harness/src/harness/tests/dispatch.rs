@@ -8292,7 +8292,7 @@ fn restore_looking_user_text_remains_an_activation() {
 /// A completed checkpoint consumes every true activation through its head,
 /// leaves a later true node pending once, and an uncompleted replacement
 /// checkpoint restores as uncertain without redispatch. This guards
-/// `DESIGN-tau-harness-compaction-activation-binding`.
+/// `DECISION-tau-harness-compaction-activation-binding`.
 #[test]
 fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let td = TempDir::new().expect("tempdir");
@@ -9327,7 +9327,7 @@ pub(super) fn context_overflow_response(
 ///
 /// This test cluster covers durable ordering, fail-closed eligibility, replay,
 /// crash cuts, and continuation under
-/// `DESIGN-tau-harness-reactive-overflow-transaction`.
+/// `SPEC-compaction-and-context-recovery`.
 #[test]
 fn reactive_context_overflow_recovers_in_durable_order_once() {
     let td = TempDir::new().expect("tempdir");

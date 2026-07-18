@@ -28,7 +28,7 @@ role/config, extension, and secret environment transports, retain that policy
 for runtime settings reloads, then check an exact extension-name allowlist before
 any process starts. This is a deterministic-test exception to
 normal interactive startup availability in
-[DESIGN-extension-availability-startup](../../../specs/DESIGN-extension-availability-startup.md);
+[SPEC-tau-harness-extension-lifecycle](../../tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md);
 embedded launches do not scrub the ordinary child OS environment. Spawned daemon
 acceptance clears it and supplies private HOME/XDG roots plus a fixed locale.
 

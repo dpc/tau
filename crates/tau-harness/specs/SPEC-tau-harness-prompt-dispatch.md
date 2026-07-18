@@ -12,6 +12,17 @@ queries are the intentional exception: provider definitions remain unchanged
 for cache compatibility, while locally unauthorized tool capabilities and tool
 fragments are empty.
 
+The same concrete model snapshot supplies the parallel-call capability.
+Templates advertise parallel execution only when the effective provider route
+does; otherwise they state the one-call-per-response limit. Parsing,
+persistence, and dispatch remain lossless if a provider violates a false claim
+and returns multiple calls. Template data is sparse, render failures are
+explicit and prevent provider dispatch, and capability state is not persisted
+separately.
+
+The authority choice is recorded by
+[DECISION-tau-harness-effective-tool-surface-authority](DECISION-tau-harness-effective-tool-surface-authority.md).
+
 ## Provider model registry
 
 Provider model snapshots are flattened in lexicographically sorted source-id
@@ -45,6 +56,16 @@ model. Provider tool calls are validated against that prompt-owned snapshot, not
 against mutable current role/model state after the user switches roles or models
 mid-turn. Staged tool registration can never expand a prompt snapshot after it
 was sent.
+
+Policy-exclusive registrations may share a model-visible alias, but snapshot
+construction rejects an effective surface containing two enabled tools with the
+same visible name rather than selecting by registry order. Prompt-owned
+unavailable and near-name diagnostics derive from this snapshot as well.
+
+Tool examples are registration metadata, not provider definitions. After a
+failed call, the harness may append one bounded relevant example on the owning
+agent branch and records that injection so retry loops do not receive repeated
+scaffolding.
 
 Tools tagged `provider-content:image` survive effective-tool filtering only
 when the selected route publishes image in both `input_modalities` and

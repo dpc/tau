@@ -2,7 +2,7 @@
 
 Status: confirmed, 2026-07-15, dpc; harness-completion portions superseded
 2026-07-17 by
-[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md)
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md)
 
 `slack_send` uses process/session-scoped at-least-once delivery. After validating
 one exact tool intent, the extension freezes its agent, arguments, source reply

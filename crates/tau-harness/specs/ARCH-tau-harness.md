@@ -19,9 +19,24 @@ clears consume matching tombstones and retire their epoch. The harness validates
 bounds plus epoch/sequence transitions and projects full snapshots to live and
 late UI subscribers without rebasing observation clocks. It never enters
 semantic session or agent history. See
-[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+[SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 This component implements the harness-owned parts of [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md), and [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
+
+## Tool-surface and extension-instance ownership
+
+The harness assigns immutable per-instance tool-prefix envelopes through
+Configure, validates registration and final-name ownership, and owns startup
+collision resolution. Extensions retain declaration and tool-specific semantic
+ownership. For each prompt, the harness alone resolves the effective
+post-policy/provider-filtered tool snapshot used for definitions,
+authorization, capabilities, and diagnostics, as specified by
+[SPEC-tau-harness-prompt-dispatch](SPEC-tau-harness-prompt-dispatch.md).
+
+The harness persists generic per-agent extension metadata commits. A shell
+extension instance uses its configured name to own one workdir namespace and
+publishes context from committed metadata; exact behavior is
+[SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
 
 ## Extension-published message facts
 
@@ -41,6 +56,8 @@ close, while the fact itself broadcasts immediately. Replay reconstructs context
 but never wakes the agent, resends transport traffic, or rebuilds
 extension-private authority. Invalid or unavailable targets remain committed and
 visible to subscribers even when no prompt projection is possible.
+The complete schema, persistence, and projection contract is
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

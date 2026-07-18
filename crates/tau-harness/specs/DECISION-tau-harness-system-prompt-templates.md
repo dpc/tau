@@ -1,6 +1,6 @@
-# DESIGN-tau-harness-system-prompt-templates: System prompts are assembled only through templates
+# DECISION-tau-harness-system-prompt-templates: System prompts are assembled only through templates
 
-Status: confirmed, 2026-06-17, dpc
+Authority: confirmed, 2026-06-17, dpc
 
 System prompts must be assembled through the prompt templating system. Any new
 dynamic system-prompt value must be an explicit template variable/input, not text

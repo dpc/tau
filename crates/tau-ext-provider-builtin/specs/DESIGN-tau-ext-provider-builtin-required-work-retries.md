@@ -38,7 +38,7 @@ Cancellation, failure, and a success from an older generation do not release a
 current cooldown. Replacing the configured profile identity also invalidates the
 old profile's cooldown, while best-effort quota display telemetry never does.
 The telemetry non-authority follows
-[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+[DECISION-provider-quota-pacing](../../../specs/DECISION-provider-quota-pacing.md).
 
 Scheduler mutation is implemented as synchronous, single-owner command
 transitions plus an explicit monotonic-time advance, both returning ownership

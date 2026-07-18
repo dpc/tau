@@ -1,7 +1,7 @@
 # DESIGN-tau-ext-slack-lifecycle-testing: Slack lifecycle tests use local fakes
 
 Status: inferred; transport-RPC portions superseded 2026-07-17 by
-[DESIGN-extension-published-message-facts](../../../specs/DESIGN-extension-published-message-facts.md)
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md)
 
 Slack lifecycle behavior is tested without live credentials. Unit tests use fake
 `SlackClient` implementations for Web API calls and loopback websocket servers

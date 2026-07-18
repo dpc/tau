@@ -232,7 +232,7 @@ fn resolve_extensions_with_environment_and_cli_overrides(
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
     // Keep the config → environment → CLI ordering aligned with
-    // `DESIGN-extension-availability-startup`.
+    // `SPEC-tau-harness-extension-lifecycle`.
     let (order, entries) = seed_builtin_extension_entries(builtins);
     let (order, mut entries) = apply_user_extension_entries(settings, order, entries);
     for name in environment_names {

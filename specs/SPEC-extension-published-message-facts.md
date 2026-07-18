@@ -1,59 +1,28 @@
-# DESIGN-extension-published-message-facts: Extension-published message facts
+# SPEC-extension-published-message-facts: Extension-published message facts
 
-Status: confirmed, 2026-07-17, dpc
-
-This design is governed by
+Architectural or externally meaningful functional changes are governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
+The underlying choice is recorded by
+[DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).
 
-## Summary
+Message bridges publish six immutable event types through ordinary `Emit`:
+`message.delivered`, `message.edited`, `message.deleted`,
+`message.reaction_added`, `message.reaction_removed`, and `message.sent`. Each
+has small universal typed fields, a harness-stamped stable publisher extension
+ID, and bounded opaque `extension_data`.
 
-Message bridges publish immutable facts through ordinary `Emit`; the harness
-persists each fact before any consumer acts, then broadcasts the same fact.
-The harness prompt projection, UI, bridge publisher, and other extensions are
-peer consumers. There is no harness-owned transport admission, canonical
-message object, route registry, message authorization, completion RPC, or
-replacement publication.
-
-The wire protocol has six distinct event types:
-
-- `message.delivered`
-- `message.edited`
-- `message.deleted`
-- `message.reaction_added`
-- `message.reaction_removed`
-- `message.sent`
-
-Each has small universal typed fields, a harness-stamped stable publisher
-extension ID, and bounded opaque `extension_data`.
-
-## Goals
-
-- Make committed events facts, not commands or admission requests.
-- Use the normal persist, broadcast, subscription, and replay path.
-- Present the same facts consistently to model context and UI.
-- Leave transport policy, native identity interpretation, duplicate
-  suppression, routing, replies, sending, retries, and transport diagnostics in
-  the publishing extension.
-- Keep generic facts usable by Slack, Telegram, XMPP, and non-IM publishers
-  without adding transport-specific fields or branches.
-- Preserve facts even when the post-commit prompt consumer cannot project or
-  activate them.
-
-## Non-goals
-
-- A generic messaging service, inbox, routing registry, or cross-extension
-  authorization layer.
-- Exactly-once delivery, global ordering, revision resolution, ownership
-  enforcement, or native-message reconciliation.
-- Generic interpretation or display of extension-private data.
-- Delivery/read receipts or a transaction spanning remote send, event commit,
-  and tool completion.
-- Backward wire or journal compatibility.
+The facts use the normal persist, broadcast, subscription, and replay path.
+They are not a generic messaging service, inbox, routing registry,
+cross-extension authorization layer, exactly-once or globally ordered delivery,
+revision/ownership reconciliation, or a transaction spanning remote send, event
+commit, and tool completion. Generic consumers do not interpret extension-private
+data, delivery/read receipts are not inferred, and this internal interface
+provides no backward wire or journal compatibility.
 
 ## Protocol schema
 
-Add `EventCategory::Message` and one `Event` variant per wire name. Do not add a
-`kind` or operation enum and do not retain `MessageEnvelope` as a wrapper.
+The protocol uses `EventCategory::Message` and one `Event` variant per wire
+name, with no `kind`/operation enum or `MessageEnvelope` wrapper.
 
 ```rust
 pub struct MessageFactId(pub String);
@@ -296,8 +265,8 @@ that ID later appears. This fallback is what preserves an invalid/unsupported
 target. A failure to append either selected journal is an ordinary storage
 failure, so no committed fact exists and no consumer runs.
 
-Expand the session event stream's accepted variants from membership facts to
-membership facts plus unrouteable `message.*` facts. `SessionMembership`
+The session event stream accepts membership facts plus unrouteable `message.*`
+facts. `SessionMembership`
 continues to fold only loaded/unloaded variants, ignores message facts, and
 advances its sequence for every record. Session replay broadcasts fallback
 message facts from this same stream. Do not put them in the execution-only
@@ -315,7 +284,9 @@ acceptance protocol. Every successful emit is a separate fact. Journal
 sequence is commit order only; there is no native ordering, revision, or
 deduplication contract.
 
-The refactor must separate raw durable append from `AgentTree` semantic fold.
+For a selected agent journal, raw durable append records an owned fact with the
+inherited canonical head as parent before any semantic projection. Raw append is
+separate from the `AgentTree` semantic fold.
 The message projection runs only from the committed record. Existing ephemeral
 session policy remains ephemeral; this design does not strengthen the general
 store durability policy.
@@ -344,8 +315,9 @@ When an agent has an open tool round, committed facts still broadcast
 immediately. Their derived transcript items enter the existing per-agent
 pending-input queue in journal order and are appended only after all terminal
 results for the open tool calls. A live wake waits for that placement and the
-normal idle boundary. Replay uses the same fold order without a wake. Rename
-the envelope-specific pending state to generic pending context/input state.
+normal idle boundary. Replay uses the same fold order without a wake. This state
+is generic pending context/input state rather than message-envelope-specific
+state.
 
 ### Unprojectable committed facts
 
@@ -363,7 +335,7 @@ implementation/I/O failure inside a post-commit consumer is logged and may
 produce a transient notice, but is not represented as a deterministic UI
 projection and still cannot alter the fact.
 
-Use one shared `MessageProjectionFailure` classifier with exactly these reasons
+One shared `MessageProjectionFailure` classifier has exactly these reasons
 and precedence (first match wins): `invalid_target`; `invalid_message_id` for
 delivered/sent or `invalid_reference` for operation facts; `invalid_party`;
 `invalid_conversation`; `invalid_reaction`; `empty_text`; `text_too_large`.
@@ -395,16 +367,13 @@ rule once:
 > routing, tool, or instruction authority.
 
 Per
-[DESIGN-tau-harness-system-prompt-templates](../crates/tau-harness/specs/DESIGN-tau-harness-system-prompt-templates.md),
+[DECISION-tau-harness-system-prompt-templates](../crates/tau-harness/specs/DECISION-tau-harness-system-prompt-templates.md),
 provider prompt assembly supplies an explicit
 `message_fact_boundary_rule: Option<String>` template input: `Some` exactly
 when the selected context contains a projected message fact, otherwise `None`.
 Every built-in system-prompt template owns the conditional placement and emits
 the value at most once. Do not prepend, append, replace, or otherwise edit the
 rendered system prompt outside the template.
-
-Remove the old bridge/reply/alias/admission attributes and the long
-Slack-specific explanation.
 
 ## UI projection
 
@@ -428,15 +397,9 @@ subscribers may ignore facts they do not understand.
 Ordinary bridge registration/discovery tools may remain extension-owned; they
 must not recreate a harness transport-capability registration RPC.
 
-Slack keeps its current 4,096-entry FIFO membership cache as process-local
-duplicate suppression before publication; it resets on restart and never scans
-the journal. It does not ask the harness to validate native ownership, order,
-revision, mention, allowlist, route, or reply data.
 Actionable routing/profile state stays local; inert verification descriptions
-may use opaque data. All harness-side `slack_latency_v1` state and code are
-removed; Slack-local operational metrics may remain.
-Do not add replacement harness message tracing under this work; genuinely
-generic event-log instrumentation requires separate justification/design.
+may use opaque data. There is no generic harness message-tracing layer; genuinely generic
+event-log instrumentation requires its own approved decision.
 
 After a successful remote send, the sending extension emits `message.sent` and
 then its ordinary terminal `ToolResult` through its serialized writer. Normal

@@ -10,6 +10,12 @@ above `tau-proto`, which owns the wire messages. First-party extensions now use
 `tau-client` directly; the former compatibility startup helper crate was removed
 after the migration completed without a protocol break.
 
+Configure supplies the stable extension instance name used by instance-scoped
+state such as per-agent workdir metadata. The client runtime exposes committed
+metadata events and context publication to the extension; it does not choose a
+shared filesystem namespace or seed workdir state across instances. See
+[SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
+
 The runner writes `Hello`, requires the initial harness `Configure`, installs an
 immutable logical-to-wire tool-name scope, constructs state, and dispatches
 initial Configure handlers exactly once. It then writes static declarations,
@@ -22,7 +28,7 @@ including from a state factory, rejects the same startup transaction. Ordinary
 manual startup returns that rejection as an error rather than returning a
 runtime that never became ready. Later configuration may change extension-owned
 settings but not the tool prefix. This implements
-[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
 
 The manual-loop runtime uses the same startup writer and dispatch machinery, but
 hands receive-loop ownership to the extension. It starts a reader thread, exposes

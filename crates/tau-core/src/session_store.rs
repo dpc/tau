@@ -346,7 +346,7 @@ impl SessionMembership {
 /// facts remain available for same-daemon replay.
 ///
 /// Durable replay and memory-only parity follow
-/// `DESIGN-tau-core-semantic-store-durability`.
+/// `DECISION-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,

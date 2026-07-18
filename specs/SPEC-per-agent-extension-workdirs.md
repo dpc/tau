@@ -1,6 +1,7 @@
-# DESIGN-per-agent-extension-workdirs: Per-agent extension workdirs
+# SPEC-per-agent-extension-workdirs: Per-agent extension workdirs
 
-Status: confirmed, 2026-07-15, dpc
+The governing choice is
+[DECISION-per-agent-extension-workdirs](DECISION-per-agent-extension-workdirs.md).
 
 Each shell extension instance owns an independent durable workdir for each agent:
 `(configured extension instance name, agent id) -> workdir`. The configured
@@ -33,9 +34,18 @@ use that same path. Sibling calls in one provider batch have no causal ordering;
 a call depending on a successful workdir change must be made in a later turn.
 The generic shell's call-level `cwd` and the ChatGPT-facing
 `shell_command.workdir` remain invocation-local overrides and must never mutate
-workdir metadata. The latter follows current Codex spelling and is distinct
-from the top-level persistent `workdir(path)` tool, as recorded by
-[DESIGN-model-native-tool-surfaces](DESIGN-model-native-tool-surfaces.md).
+workdir metadata. The latter is distinct from the top-level persistent
+`workdir(path)` tool, as recorded by
+[DECISION-model-native-tool-surfaces](DECISION-model-native-tool-surfaces.md).
+
+The verified Codex CLI interface at revision `2f7d89b141` uses an
+invocation-local argument named `workdir` for both legacy `shell_command` and
+unified `exec_command`; `write_stdin` has no directory argument. Tau's
+ChatGPT-facing `shell_command` therefore advertises and accepts only `workdir`,
+never a runtime-only legacy `cwd` alias. Omitting `workdir` uses the shell
+instance's remembered persistent path. Sibling calls in one provider batch have
+no causal ordering, so a persistent setter must complete before a dependent
+call in a later turn.
 
 Dynamic prompt context reports only the current path/status associated with the
 visible default or configured tool prefix. It does not enumerate configured
@@ -51,12 +61,3 @@ This design implements
 [REQ-independent-manipulation-extension-instances](REQ-independent-manipulation-extension-instances.md)
 and preserves the configured-extension trust boundary documented in
 [SECURITY.md](../SECURITY.md).
-
-## Rationale
-
-Configured shell processes can inhabit unrelated filesystem namespaces. Their
-own process cwd is the only safe missing-key default, while generic metadata
-already provides durability, replay, and child inheritance. Commit-linearized
-setters and admission snapshots prevent concurrent work from drifting between
-directories. Retaining unusable paths prevents silent execution in the wrong
-tree.

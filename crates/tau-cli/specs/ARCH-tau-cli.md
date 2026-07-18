@@ -2,7 +2,7 @@
 
 The CLI consumes harness-validated provider-neutral quota snapshots and applies
 the fixed weekly pacing classifier from
-[DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+[SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 It selects only an exact current/viewed `ModelId` binding, preserves provider
 timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
 accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.

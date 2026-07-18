@@ -198,7 +198,7 @@ fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRunti
 
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
     // Provider-owned stats remain public content per
-    // `DESIGN-tau-harness-provider-response-stats`.
+    // `DECISION-provider-response-stats`.
     !updated.deltas.is_empty()
         || updated.compaction.is_some()
         || updated.status.is_some()
@@ -12347,7 +12347,7 @@ impl Harness {
     /// cross-agent requests start immediately; every rejection completes as
     /// a foreground error.
     ///
-    /// See `DESIGN-tau-harness-manual-compaction` for capability and replay
+    /// See `SPEC-compaction-and-context-recovery` for capability and replay
     /// ownership.
     pub(crate) fn request_agent_tool_compaction(
         &mut self,

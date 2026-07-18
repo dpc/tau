@@ -24,6 +24,6 @@ call-local argument must therefore be `workdir`, and using it must not
 persistently change the agent's remembered workdir.
 
 The selected implementation approach is recorded in
-[DESIGN-model-native-tool-surfaces](DESIGN-model-native-tool-surfaces.md).
+[DECISION-model-native-tool-surfaces](DECISION-model-native-tool-surfaces.md).
 Exact Codex compatibility findings are tracked in `tau-agent-80v9`; the
 workdir refinement is related to `tau-agent-k5tn`.

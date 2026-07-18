@@ -4,7 +4,7 @@
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 Structural tool naming follows
-[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
 
 ## State
 

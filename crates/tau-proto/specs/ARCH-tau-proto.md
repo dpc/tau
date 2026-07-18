@@ -10,16 +10,18 @@ replace/patch/clear events carry opaque profile epochs, strict sequences,
 complete stable-key window records with independent usage/timing clocks, and
 exact `ModelId` route bindings. Harness projections are full current snapshots;
 none of these events are semantic transcript history. The trust and pacing
-contract is [DESIGN-provider-quota-pacing](../../../specs/DESIGN-provider-quota-pacing.md).
+contract is [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
-[DESIGN-extension-tool-prefixes](../../../specs/DESIGN-extension-tool-prefixes.md).
+[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
 The configured extension instance name is required and supplies the stable
 harness-stamped publisher ID for extension-published `message.*` facts.
+Their wire and validation contract is
+[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
 with `agent_id`, `text`, and optional `ctx_id`.
