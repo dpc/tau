@@ -45,6 +45,22 @@ thread, and sender metadata; verifies humans through `users.info`; applies
 strict/lax admission and allowlist-only control; and then selects a registered
 Tau agent through extension-local routing.
 
+One process-lifetime worker thread owns sequential Socket Mode connections.
+`worker_started` records that this thread was launched and never offers an
+in-process restart path. `worker_online` means only that the current connection
+observed Slack's `hello`; a connection guard clears it on every return path.
+The first failed startup or reconnect sets a process-lifetime notice latch and
+emits one bounded categorical warning. Later failures remain visible in local
+logs without repeating the warning.
+
+The worker actively probes each WebSocket after 10 seconds and every 10 seconds
+thereafter. A resettable deadline expires independently 40 seconds after the
+latest Pong; no other frame refreshes it. Ping, Pong, and ACK writes race both
+shutdown and that same deadline so outbound backpressure cannot pin the reader.
+Deadline or shutdown drops the WebSocket rather than attempting a potentially
+blocked close write. Stale connections reconnect through the same installation
+validation path rather than waiting indefinitely for another inbound frame.
+
 Admitted creates, edits, deletes, and reactions publish ordinary immutable
 `message.delivered`, `message.edited`, `message.deleted`,
 `message.reaction_added`, or `message.reaction_removed` facts. Slack derives

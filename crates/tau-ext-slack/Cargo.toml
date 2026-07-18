@@ -31,4 +31,5 @@ url.workspace = true
 
 [dev-dependencies]
 tau-core.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

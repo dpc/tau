@@ -137,6 +137,12 @@ before ACK. Slow live-human verification and bridge-local replies run on one ser
 worker, so they do not block later websocket ACKs, Ping/Pong, reconnect, or
 shutdown. Saturation reconnects without ACK so Slack can retry. The FIFO survives
 reconnect but is memory-only; process death after ACK can still lose an occurrence.
+The worker sends its first WebSocket Ping after 10 seconds and repeats every 10
+seconds. An independent deadline reconnects 40 seconds after the latest Pong;
+other traffic does not refresh liveness, and blocked Ping/Pong/ACK writes remain
+preemptible by shutdown and the deadline. This prevents a half-open connection
+from silently disabling ingress indefinitely. The first startup or reconnect
+failure emits one bounded warning per process.
 For latency troubleshooting, enable `TRACE` and inspect `slack_latency_v1`
 monotonic stage markers. They contain bounded classes and process-local ordinals,
 not Slack identifiers, message text, tokens, URLs, agent identities, or durable

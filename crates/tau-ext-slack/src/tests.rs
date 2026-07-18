@@ -1730,6 +1730,288 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
     server.abort();
 }
 
+/// A peer that leaves its TCP connection open but never processes WebSocket
+/// heartbeats must return a reconnectable error instead of silently losing
+/// ingress forever.
+#[tokio::test(start_paused = true)]
+async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let _ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        let _ = accepted_tx.send(());
+        std::future::pending::<()>().await;
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    let worker_cfg = cfg();
+    let worker = tokio::spawn(async move {
+        socket_worker_once_with_heartbeat(
+            &ext,
+            &worker_cfg,
+            Some(WorkerStartup {
+                bot_user_id: "UBOT123".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                socket_url,
+            }),
+            &AdmissionQueue::new(),
+            1,
+            SocketHeartbeat {
+                ping_interval: Duration::from_millis(10),
+                pong_timeout: Duration::from_millis(40),
+            },
+        )
+        .await
+    });
+
+    accepted_rx.await.expect("websocket should connect");
+    let error = tokio::time::timeout(Duration::from_millis(250), worker)
+        .await
+        .expect("stale websocket should be detected promptly")
+        .expect("socket worker should not panic")
+        .expect_err("missing heartbeat pong must reconnect");
+    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    server.abort();
+}
+
+/// Regular Pong responses must keep an otherwise idle Socket Mode connection
+/// alive beyond its stale deadline, proving the heartbeat does not force
+/// periodic reconnects while the peer remains responsive.
+#[tokio::test(start_paused = true)]
+async fn socket_worker_once_keeps_responsive_idle_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (responsive_tx, responsive_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        let _ = accepted_tx.send(());
+        let mut ping_count = 0;
+        let mut responsive_tx = Some(responsive_tx);
+        while let Some(frame) = ws.next().await {
+            match frame.expect("read client heartbeat") {
+                Message::Ping(payload) => {
+                    ws.send(Message::Pong(payload))
+                        .await
+                        .expect("answer client heartbeat");
+                    ping_count += 1;
+                    if ping_count == 12 {
+                        let _ = responsive_tx.take().expect("single signal").send(());
+                        std::future::pending::<()>().await;
+                    }
+                }
+                Message::Close(_) => return,
+                other => panic!("unexpected client frame: {other:?}"),
+            }
+        }
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(FakeClient::new(), tx));
+    let worker_ext = Arc::clone(&ext);
+    let worker_cfg = cfg();
+    let worker = tokio::spawn(async move {
+        socket_worker_once_with_heartbeat(
+            &worker_ext,
+            &worker_cfg,
+            Some(WorkerStartup {
+                bot_user_id: "UBOT123".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                socket_url,
+            }),
+            &AdmissionQueue::new(),
+            1,
+            SocketHeartbeat {
+                ping_interval: Duration::from_millis(5),
+                pong_timeout: Duration::from_millis(50),
+            },
+        )
+        .await
+    });
+
+    accepted_rx.await.expect("websocket should connect");
+    tokio::time::timeout(Duration::from_secs(1), responsive_rx)
+        .await
+        .expect("connection should survive beyond its stale deadline")
+        .expect("server should observe enough heartbeats");
+    ext.shutdown.request();
+    let outcome = tokio::time::timeout(Duration::from_millis(250), worker)
+        .await
+        .expect("responsive worker should honor shutdown")
+        .expect("socket worker should not panic")
+        .expect("socket worker should exit cleanly");
+    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    server.abort();
+}
+
+/// A Pong arriving between Ping phases resets one independent deadline exactly;
+/// later non-Pong application traffic must neither refresh that deadline nor
+/// leave the connection marked online after timeout.
+#[tokio::test(start_paused = true)]
+async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (pong_tx, pong_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        let _ = accepted_tx.send(());
+        let hello = Message::Text(r#"{"type":"hello"}"#.to_owned().into());
+        ws.send(hello.clone()).await.expect("send initial hello");
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        ws.send(Message::Pong(Vec::new().into()))
+            .await
+            .expect("send off-phase pong");
+        let _ = pong_tx.send(tokio::time::Instant::now());
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            ws.send(hello.clone())
+                .await
+                .expect("send non-pong application traffic");
+        }
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Arc::new(Extension::new(FakeClient::new(), tx));
+    let worker_ext = Arc::clone(&ext);
+    let worker = tokio::spawn(async move {
+        socket_worker_once_with_heartbeat(
+            &worker_ext,
+            &cfg(),
+            Some(WorkerStartup {
+                bot_user_id: "UBOT123".to_owned(),
+                installation_team_id: "T123".to_owned(),
+                socket_url,
+            }),
+            &AdmissionQueue::new(),
+            1,
+            SocketHeartbeat {
+                ping_interval: Duration::from_secs(10),
+                pong_timeout: Duration::from_secs(40),
+            },
+        )
+        .await
+    });
+
+    accepted_rx.await.expect("websocket should connect");
+    let pong_at = pong_rx.await.expect("off-phase pong should be sent");
+    let error = tokio::time::timeout(Duration::from_secs(60), worker)
+        .await
+        .expect("independent pong deadline should win before outer timeout")
+        .expect("socket worker should not panic")
+        .expect_err("non-pong traffic must not keep the connection alive");
+    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    assert_eq!(pong_at.elapsed(), Duration::from_secs(40));
+    assert!(!ext.state.lock().expect("state").worker_online);
+    server.abort();
+}
+
+/// A WebSocket write that remains pending must still observe extension shutdown
+/// immediately rather than pinning the worker on TCP/TLS writability.
+#[tokio::test(start_paused = true)]
+async fn blocked_socket_write_remains_shutdown_interruptible() {
+    let shutdown = Arc::new(ShutdownSignal::new());
+    let request = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        request.request();
+    });
+    let pong_deadline = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(pong_deadline);
+
+    let outcome = await_socket_write(
+        &shutdown,
+        pong_deadline.as_mut(),
+        std::future::pending::<Result<(), ()>>(),
+        "write failed",
+    )
+    .await
+    .expect("shutdown is not a write failure");
+    assert_eq!(outcome, Some(WorkerOutcome::Shutdown));
+}
+
+/// A WebSocket write that remains pending must be preempted at the exact Pong
+/// deadline, preserving stale-connection recovery under outbound backpressure.
+#[tokio::test(start_paused = true)]
+async fn blocked_socket_write_remains_pong_deadline_bounded() {
+    let shutdown = ShutdownSignal::new();
+    let started_at = tokio::time::Instant::now();
+    let pong_deadline = tokio::time::sleep(Duration::from_secs(40));
+    tokio::pin!(pong_deadline);
+
+    let error = await_socket_write(
+        &shutdown,
+        pong_deadline.as_mut(),
+        std::future::pending::<Result<(), ()>>(),
+        "write failed",
+    )
+    .await
+    .expect_err("pong deadline must preempt the blocked write");
+    assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    assert_eq!(started_at.elapsed(), Duration::from_secs(40));
+}
+
+/// Startup and reconnect failures share one process-lifetime bounded notice
+/// latch, so repeated degraded attempts do not spam the operator.
+#[test]
+fn worker_connection_failure_notice_is_bounded_and_one_shot() {
+    let (ext, rx, _client) = extension();
+    ext.report_worker_connection_failure_once(SOCKET_HEARTBEAT_TIMEOUT_ERROR);
+    ext.report_worker_connection_failure_once("Slack websocket connection failed");
+
+    let notices = rx
+        .try_iter()
+        .filter_map(|message| match message {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::HarnessNotice(notice) => Some(notice),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    let notice = &notices[0];
+    assert!(!notice.always_show);
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
+    assert!(notice.message.contains(SOCKET_HEARTBEAT_TIMEOUT_ERROR));
+    assert!(!notice.message.contains("xapp-test"));
+    assert!(!notice.message.contains("xoxb-test"));
+    assert!(notice.message.len() <= MAX_DIAGNOSTIC_BYTES + 3);
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .worker_connection_failure_reported
+    );
+}
+
 /// A blocked users.info call runs only on the serial actor: the reader still
 /// ACKs a later envelope, answers Ping, and honors shutdown before release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

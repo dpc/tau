@@ -14,7 +14,9 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
+use std::future::Future;
 use std::io::{Read, Write};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -132,7 +134,29 @@ const MAX_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_SOCKET_FRAME_BYTES: usize = 256 * 1024;
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
+const SOCKET_PING_INTERVAL: Duration = Duration::from_secs(10);
+const SOCKET_PONG_TIMEOUT: Duration = Duration::from_secs(40);
+const SOCKET_HEARTBEAT_TIMEOUT_ERROR: &str = "Slack websocket heartbeat timed out";
 const LATENCY_SCHEMA: &str = "slack_latency_v1";
+
+/// Socket Mode heartbeat timing used to detect silently stale connections.
+#[derive(Clone, Copy)]
+struct SocketHeartbeat {
+    /// Nonzero interval between client-originated WebSocket Ping frames.
+    ping_interval: Duration,
+    /// Maximum time without any WebSocket Pong before reconnecting; this must
+    /// exceed `ping_interval`.
+    pong_timeout: Duration,
+}
+
+impl Default for SocketHeartbeat {
+    fn default() -> Self {
+        Self {
+            ping_interval: SOCKET_PING_INTERVAL,
+            pong_timeout: SOCKET_PONG_TIMEOUT,
+        }
+    }
+}
 
 /// Explicit private worker context used for timing and stale-authority checks.
 struct AdmissionContext {
@@ -1291,9 +1315,12 @@ struct State {
     agent_generation: u64,
     /// Whether a live harness session may accept new Socket Mode occurrences.
     session_active: bool,
+    /// Whether the process-lifetime Socket Mode worker thread was launched.
     worker_started: bool,
+    /// Whether the current WebSocket connection observed Slack's `hello`.
     worker_online: bool,
-    worker_startup_failure_reported: bool,
+    /// Process-lifetime latch for the sole startup-or-reconnect failure notice.
+    worker_connection_failure_reported: bool,
     /// One-shot categorical restart notice after installation poisoning.
     installation_restart_notice_reported: bool,
     /// Whether the current consecutive verified-human API failure episode was
@@ -2206,7 +2233,7 @@ impl Extension {
             return Err(error);
         }
         state.worker_started = true;
-        state.worker_startup_failure_reported = false;
+        state.worker_connection_failure_reported = false;
         let send_retirement = SendRetirement {
             state: Arc::clone(&self.state),
             output_publication_gate: Arc::clone(&self.output_publication_gate),
@@ -2222,19 +2249,19 @@ impl Extension {
         Ok(())
     }
 
-    fn report_worker_startup_failure_once(&self, _cfg: &RuntimeConfig, message: &str) {
+    fn report_worker_connection_failure_once(&self, message: &str) {
         let should_report = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.worker_online || state.worker_startup_failure_reported {
+            if state.worker_online || state.worker_connection_failure_reported {
                 false
             } else {
-                state.worker_startup_failure_reported = true;
+                state.worker_connection_failure_reported = true;
                 true
             }
         };
         if should_report {
             let message = format!(
-                "Slack Socket Mode startup failed; check std-slack tokens, Socket Mode settings, and network access: {}",
+                "Slack Socket Mode startup or reconnect failed; check std-slack tokens, Socket Mode settings, and network access: {}",
                 bounded_text(message, 128)
             );
             self.output.emit(Event::HarnessNotice(HarnessNotice {
@@ -4291,13 +4318,14 @@ fn socket_worker_loop(
     let mut connection_generation = 0_u64;
     while !shutdown.is_requested() {
         connection_generation = connection_generation.wrapping_add(1);
-        match runtime.block_on(socket_worker_once(
+        let outcome = runtime.block_on(socket_worker_once(
             &ext,
             &cfg,
             startup.take(),
             &admission,
             connection_generation,
-        )) {
+        ));
+        match outcome {
             Ok(WorkerOutcome::ReconnectNow) => {
                 tracing::warn!(target: LOG_TARGET, lifecycle = "reconnecting", "Slack Socket Mode connection ended; reconnecting");
                 backoff = INITIAL_RECONNECT_BACKOFF;
@@ -4319,7 +4347,7 @@ fn socket_worker_loop(
                     );
                     break;
                 }
-                ext.report_worker_startup_failure_once(&cfg, &message);
+                ext.report_worker_connection_failure_once(&message);
                 tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", failure = "socket_worker", "Slack Socket Mode worker failed; reconnecting");
                 if runtime.block_on(shutdown.wait_timeout(backoff)) {
                     break;
@@ -4424,6 +4452,21 @@ enum WorkerOutcome {
     Shutdown,
 }
 
+/// Marks one WebSocket connection offline on every return path.
+struct WorkerOnlineGuard<'a> {
+    /// Shared worker lifecycle state owned by the extension process.
+    state: &'a Mutex<State>,
+}
+
+impl Drop for WorkerOnlineGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .worker_online = false;
+    }
+}
+
 async fn socket_worker_once(
     ext: &Extension,
     cfg: &RuntimeConfig,
@@ -4431,6 +4474,34 @@ async fn socket_worker_once(
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
     connection_generation: u64,
 ) -> Result<WorkerOutcome, String> {
+    socket_worker_once_with_heartbeat(
+        ext,
+        cfg,
+        startup,
+        admission,
+        connection_generation,
+        SocketHeartbeat::default(),
+    )
+    .await
+}
+
+/// Run one Socket Mode connection with explicit heartbeat timing.
+///
+/// Production uses [`SocketHeartbeat::default`]; injectable timing keeps stale
+/// connection regressions deterministic and fast.
+async fn socket_worker_once_with_heartbeat(
+    ext: &Extension,
+    cfg: &RuntimeConfig,
+    startup: Option<WorkerStartup>,
+    admission: &Arc<AdmissionQueue<AdmissionWork>>,
+    connection_generation: u64,
+    heartbeat: SocketHeartbeat,
+) -> Result<WorkerOutcome, String> {
+    debug_assert!(!heartbeat.ping_interval.is_zero());
+    debug_assert!(heartbeat.ping_interval < heartbeat.pong_timeout);
+    let _online_guard = WorkerOnlineGuard {
+        state: ext.state.as_ref(),
+    };
     let ws_url = match startup {
         Some(startup) => {
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4466,12 +4537,35 @@ async fn socket_worker_once(
     tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;
+    let heartbeat_started_at = tokio::time::Instant::now();
+    let mut heartbeat_tick = tokio::time::interval_at(
+        heartbeat_started_at + heartbeat.ping_interval,
+        heartbeat.ping_interval,
+    );
+    heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let pong_deadline = tokio::time::sleep_until(heartbeat_started_at + heartbeat.pong_timeout);
+    tokio::pin!(pong_deadline);
     loop {
         let frame = tokio::select! {
             biased;
             () = ext.shutdown.wait() => {
-                let _ = ws.close(None).await;
                 return Ok(WorkerOutcome::Shutdown);
+            }
+            () = &mut pong_deadline => {
+                return Err(SOCKET_HEARTBEAT_TIMEOUT_ERROR.to_owned());
+            }
+            _ = heartbeat_tick.tick() => {
+                if let Some(outcome) = await_socket_write(
+                    &ext.shutdown,
+                    pong_deadline.as_mut(),
+                    ws.send(Message::Ping(Vec::new().into())),
+                    "Slack websocket ping failed",
+                )
+                .await?
+                {
+                    return Ok(outcome);
+                }
+                continue;
             }
             frame = ws.next() => frame,
         };
@@ -4479,6 +4573,11 @@ async fn socket_worker_once(
             return Ok(WorkerOutcome::ReconnectNow);
         };
         let frame = frame.map_err(|_| "Slack websocket frame failed".to_owned())?;
+        if matches!(&frame, Message::Pong(_)) {
+            pong_deadline
+                .as_mut()
+                .reset(tokio::time::Instant::now() + heartbeat.pong_timeout);
+        }
         let received_at = Instant::now();
         let trace_seq = ext.trace_seq.fetch_add(1, Ordering::Relaxed);
         let timing = SocketFrameTiming {
@@ -4496,33 +4595,77 @@ async fn socket_worker_once(
             since_hello_us = elapsed_us(hello_at.unwrap_or(connected_at)),
             "slack.ws.frame_received"
         );
-        if let Some(outcome) =
-            handle_socket_frame(ext, cfg, &mut ws, frame, admission, timing, &mut hello_at).await?
+        if let Some(outcome) = handle_socket_frame(
+            ext,
+            &mut ws,
+            frame,
+            admission,
+            timing,
+            &mut hello_at,
+            pong_deadline.as_mut(),
+        )
+        .await?
         {
             return Ok(outcome);
         }
     }
 }
 
+/// Await one WebSocket write while preserving shutdown and heartbeat bounds.
+///
+/// When shutdown or the Pong deadline wins, the caller returns and drops the
+/// WebSocket rather than attempting another potentially blocked close write.
+async fn await_socket_write<F, E>(
+    shutdown: &ShutdownSignal,
+    pong_deadline: Pin<&mut tokio::time::Sleep>,
+    write: F,
+    failure: &'static str,
+) -> Result<Option<WorkerOutcome>, String>
+where
+    F: Future<Output = Result<(), E>>,
+{
+    tokio::pin!(write);
+    tokio::select! {
+        biased;
+        () = shutdown.wait() => Ok(Some(WorkerOutcome::Shutdown)),
+        () = pong_deadline => Err(SOCKET_HEARTBEAT_TIMEOUT_ERROR.to_owned()),
+        result = &mut write => result
+            .map(|()| None)
+            .map_err(|_| failure.to_owned()),
+    }
+}
+
 async fn handle_socket_frame(
     ext: &Extension,
-    cfg: &RuntimeConfig,
     ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     frame: Message,
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
     timing: SocketFrameTiming,
     hello_at: &mut Option<Instant>,
+    pong_deadline: Pin<&mut tokio::time::Sleep>,
 ) -> Result<Option<WorkerOutcome>, String> {
     match frame {
         Message::Text(text) => {
-            handle_socket_text_frame(ext, cfg, ws, text.as_str(), admission, timing, hello_at).await
+            handle_socket_text_frame(
+                ext,
+                ws,
+                text.as_str(),
+                admission,
+                timing,
+                hello_at,
+                pong_deadline,
+            )
+            .await
         }
         Message::Close(_) => Ok(Some(WorkerOutcome::ReconnectNow)),
         Message::Ping(payload) => {
-            ws.send(Message::Pong(payload))
-                .await
-                .map_err(|_| "Slack websocket pong failed".to_owned())?;
-            Ok(None)
+            await_socket_write(
+                &ext.shutdown,
+                pong_deadline,
+                ws.send(Message::Pong(payload)),
+                "Slack websocket pong failed",
+            )
+            .await
         }
         Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => Ok(None),
     }
@@ -4541,12 +4684,12 @@ fn socket_frame_class(frame: &Message) -> &'static str {
 
 async fn handle_socket_text_frame(
     ext: &Extension,
-    cfg: &RuntimeConfig,
     ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     text: &str,
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
     timing: SocketFrameTiming,
     hello_at: &mut Option<Instant>,
+    mut pong_deadline: Pin<&mut tokio::time::Sleep>,
 ) -> Result<Option<WorkerOutcome>, String> {
     let SocketFrameTiming {
         connection_generation,
@@ -4671,8 +4814,12 @@ async fn handle_socket_text_frame(
             "slack.ws.ack_queued"
         );
         let ack_started = Instant::now();
-        let result =
-            finish_socket_ack(send_socket_ack(cfg, ws, envelope_id).await, supported_event);
+        let write = send_socket_ack(ext, ws, envelope_id, pong_deadline.as_mut()).await;
+        let result = match write {
+            Ok(None) => finish_socket_ack(Ok(()), supported_event),
+            Ok(Some(outcome)) => return Ok(Some(outcome)),
+            Err(error) => finish_socket_ack(Err(error), supported_event),
+        };
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
@@ -4711,14 +4858,19 @@ async fn handle_socket_text_frame(
 }
 
 async fn send_socket_ack(
-    _cfg: &RuntimeConfig,
+    ext: &Extension,
     ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     envelope_id: &str,
-) -> Result<(), String> {
+    pong_deadline: Pin<&mut tokio::time::Sleep>,
+) -> Result<Option<WorkerOutcome>, String> {
     let ack = serde_json::json!({ "envelope_id": envelope_id }).to_string();
-    ws.send(Message::Text(ack.into()))
-        .await
-        .map_err(|_| "Slack websocket acknowledgement failed".to_owned())
+    await_socket_write(
+        &ext.shutdown,
+        pong_deadline,
+        ws.send(Message::Text(ack.into())),
+        "Slack websocket acknowledgement failed",
+    )
+    .await
 }
 
 #[derive(Default)]

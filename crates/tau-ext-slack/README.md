@@ -298,7 +298,15 @@ restart-required error, including if Slack's post result is ambiguous. Invalid
 or denied sends and failed synchronous preflight do not freeze configuration.
 
 Production API/socket endpoints require HTTPS/WSS (plaintext is loopback-test
-only). Shutdown, reconnect, and send-retry waits are event-driven. Slow
+only). The Socket Mode worker sends its first WebSocket Ping after 10 seconds
+and repeats every 10 seconds. An independent deadline reconnects 40 seconds
+after the latest Pong, so non-Pong traffic and half-open connections cannot
+silently preserve stale ingress. Ping, Pong, and ACK writes remain preemptible
+by shutdown and that deadline. Runtime timers observe suspend/resume according
+to the platform's monotonic-clock behavior; Tau reconnects once the runtime
+observes the deadline as expired. The first startup or reconnect failure also
+emits one bounded warning for the process lifetime. Shutdown, reconnect, and
+send-retry waits are event-driven. Slow
 `chat.postMessage`, rate-limit waits, and retry backoff do not block later
 protocol tools, session/lifecycle changes, pings, reconnect, or shutdown. Logs
 expose bounded, identifier-free connect/hello/ACK/degraded/reconnect states;

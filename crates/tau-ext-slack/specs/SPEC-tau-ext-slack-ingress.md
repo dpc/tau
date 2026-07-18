@@ -32,6 +32,23 @@ Mention-only/all-message triggers remain exact, and non-DM commands require a
 leading authenticated bot mention. Only successful fact publication installs a
 source reply selector and never proactive authority.
 
+One process-lifetime Socket Mode worker owns at most one current WebSocket.
+After connection it sends Ping every 10 seconds, with the first Ping delayed by
+one full interval. One independent deadline starts at connection and resets only
+when any Pong is received; expiry 40 seconds after the latest Pong returns a
+reconnectable closed-category failure. Text, Binary, Ping, and other non-Pong
+frames do not refresh liveness. Ping, Pong, and envelope-ACK writes remain
+preemptible by shutdown and the Pong deadline. Either boundary drops the socket
+without another write. Every connection return marks the worker offline before
+the outer loop authenticates the installation, obtains a fresh one-use Socket
+Mode URL, and reconnects.
+
+The worker thread starts at most once per extension process. Successful `hello`
+marks only its current connection online. The first startup or reconnect failure
+emits one bounded, identifier-free warning; a process-lifetime latch suppresses
+later duplicates. Restart clears the registration, worker, online state, and
+notice latch.
+
 Bot mentions classify only exact case-sensitive `<@U…>`/`<@W…>` for the
 installed bot outside complete equal-length backtick spans. Escaped, labeled,
 partial, malformed, differently cased, lookalike, other, and literal orientation
