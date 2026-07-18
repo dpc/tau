@@ -47,25 +47,20 @@ over HTTP/SSE.
 HTTP/SSE remains the Responses transport for configs that do not advertise WebSocket
 support and for the HTTP/SSE-specific request/debug/replay paths.
 
-A fresh WebSocket path emits one fixed, content-free connecting status, then
-races DNS/TCP/TLS/HTTP upgrade against cooperative prompt cancellation and a
-30-second connection deadline. Failed, timed-out, and canceled upgrades release
-their same-key pool reservation. The provider-frame idle watchdog begins only
-after the upgrade and request send, so it is not the connection bound.
-Cancellation ownership and the deadline rationale are recorded in
-[DESIGN-tau-provider-chatgpt-cooperative-cancellation](DESIGN-tau-provider-chatgpt-cooperative-cancellation.md).
+A fresh WebSocket path emits one fixed, content-free connecting status and owns
+its same-key pool reservation through connection setup. Cancellation and
+deadline behavior is specified by
+[SPEC-tau-provider-chatgpt-cancellation](SPEC-tau-provider-chatgpt-cancellation.md).
 
 Best-effort WebSocket prewarm uses the same shared pool and cooperative abort
 seam from a provider-supervised worker, never the provider event loop. It skips
-an already-reserved same-key socket, has a 30-second upgrade bound plus a
-30-second absolute response bound, and rechecks cancellation before reinstalling
-the socket. Profile and session invalidation atomically remove cached sockets
-and mark reserved sockets so a late owner cannot reinstall stale state.
+an already-reserved same-key socket. Profile and session invalidation is shared
+with normal transport pool ownership.
 
 ## GPT-5.6 Responses modes
 
 The surface choice follows
-[DESIGN-tau-provider-chatgpt-responses-surface-selection](DESIGN-tau-provider-chatgpt-responses-surface-selection.md).
+[DECISION-tau-provider-chatgpt-responses-surface-selection](DECISION-tau-provider-chatgpt-responses-surface-selection.md).
 Each profile captures an explicit mode at startup. Standard mode uses top-level
 instructions/tools, requests parallel tool calls, omits forced all-turn reasoning
 context, preserves image detail, and carries no Lite marker. Lite compatibility
@@ -118,31 +113,10 @@ the harness owns all policy that maps them to tool alternatives.
 
 ## WebSocket turn cancellation
 
-The synchronous WebSocket turn loop treats cancellation as an event source rather than a
-polling cadence. Callers pass a `TurnAbort` implementation that can both answer
-`is_aborted()` and register a `TurnAbortWaker`. While a turn waits for provider events,
-the registered waker sends `InboundEvent::AbortWake` through the same inbound queue used
-by reader/writer transport events, so the blocking receive wakes promptly without
-reducing the five-minute provider-stream idle timeout. That timeout is per-turn and
-resets whenever the provider sends an SSE `data:` event or WebSocket frame; SSE
-comments, heartbeats, and partial-line byte trickles do not count as provider progress.
-Tau does not currently impose a separate absolute turn-duration timeout for
-ChatGPT/Codex streams.
-
-`AbortWake` is only a wake hint. The loop always calls `TurnAbort::is_aborted()` after
-waking, and that check remains authoritative so stale or coalesced wake hints cannot
-cancel the wrong turn. When cancellation is confirmed, the turn returns typed
-`LlmError::Canceled`; remote HTTP 499 responses and provider-authored body text remain
-retryable. Mutable URL, credential, account, or header construction failures return
-`LlmError::ReloadableConfig` and retry after profile reload. The waker guard unregisters
-on drop so completed turns do not leave callbacks that could enqueue stale wake hints
-into a pooled socket's later turn.
-
-The same `TurnAbort` waker seam is used while a prompt turn waits for a busy same-key
-WebSocket pool reservation. The pool records an abort-wake generation under its mutex
-and notifies its condition variable, so checkout waits only for either the busy key to
-clear or an abort wake to change the generation. This keeps a canceled queued same-key
-turn from later sending a stale request after the active turn releases.
+The synchronous WebSocket turn loop receives transport events and cooperative
+abort wakes through one inbound queue. Pool checkout and connection setup share
+the same typed abort source. Exact observable behavior is specified by
+[SPEC-tau-provider-chatgpt-cancellation](SPEC-tau-provider-chatgpt-cancellation.md).
 
 ## Tool definitions
 

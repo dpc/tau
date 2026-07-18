@@ -3,7 +3,7 @@
 //! state so streaming updates land in the right block.
 //!
 //! Provider delta ordering and accumulation follow
-//! `DESIGN-tau-cli-provider-delta-accumulation`.
+//! `SPEC-tau-cli-provider-stream-rendering`.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -211,7 +211,7 @@ pub(crate) struct EventRenderer {
     /// errors do not carry an agent id, so the CLI snapshots the viewed
     /// transcript when the slash command is invoked and routes completion
     /// output back to that transcript, per
-    /// `DESIGN-tau-cli-action-completion-snapshots`.
+    /// `SPEC-tau-cli-action-completions`.
     action_invocation_owners: HashMap<tau_proto::ActionInvocationId, UiSnapshotOwner>,
     /// Extensions that are already up in this daemon. `/session new` starts a
     /// fresh session, but these processes are intentionally kept.
@@ -369,7 +369,7 @@ pub(crate) struct EventRenderer {
     /// True while folding an event for a hidden agent transcript. During this
     /// window renderer fields contain the hidden agent's snapshot, but
     /// input-loop mirrors must continue exposing the actually visible
-    /// transcript, per `DESIGN-tau-cli-prompt-editor-context`.
+    /// transcript, per `DECISION-tau-cli-per-transcript-editor-context`.
     suppress_editor_context_publish: bool,
     /// Symbol shown before the active prompt input.
     prompt_symbol: String,
@@ -2744,7 +2744,7 @@ impl EventRenderer {
     }
 
     /// Applies the UI-owned threshold and override policy from
-    /// `DESIGN-tau-cli-notice-filtering`.
+    /// `SPEC-tau-cli-notice-filtering`.
     fn notice_visible(&self, level: tau_proto::NoticeLevel, always_show: bool) -> bool {
         level == tau_proto::NoticeLevel::Critical
             || always_show

@@ -347,7 +347,7 @@ pub enum CliTheme {
 
 impl Default for CliTheme {
     /// Returns the conservative built-in selected by
-    /// `DESIGN-tau-cli-theme-defaults`.
+    /// `DECISION-tau-cli-conservative-default-theme`.
     fn default() -> Self {
         Self::Named("tau-plain-dark".to_owned())
     }

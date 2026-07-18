@@ -5,7 +5,7 @@ This record refines
 and
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md).
 Replay-sidecar semantics are constrained by
-[DESIGN-tau-provider-chatgpt-replay-sidecar-semantics](DESIGN-tau-provider-chatgpt-replay-sidecar-semantics.md).
+[DECISION-tau-provider-chatgpt-replay-sidecars](DECISION-tau-provider-chatgpt-replay-sidecars.md).
 
 ## Streaming provider output
 

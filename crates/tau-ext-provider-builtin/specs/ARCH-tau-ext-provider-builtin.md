@@ -20,6 +20,27 @@ credentials, receives model-visible prompt/tool context from the harness, sends
 requests to external model services, and turns provider responses back into Tau
 protocol events.
 
+## Profile and model ownership
+
+Tau state `auth.d/<namespace>.json` files define built-in provider namespaces;
+the serialized profile kind selects the backend family. ChatGPT profiles publish
+the model matrix owned by `tau-provider-chatgpt`, Chat Completions profiles
+publish their configured models, and OpenRouter profiles publish configured or
+fetched models through Chat Completions configuration. Prompt dispatch resolves
+an exact configured model in the selected namespace. Missing or invalid mutable
+profile, model, or auth state remains visibly pending and is resolved again for
+later attempts.
+
+ChatGPT profiles capture Responses mode at process startup. Model publication,
+prompt, prewarm, retry, and quota resolution share that captured value. Mutable
+credential reload and OAuth refresh preserve it; an on-disk mode edit takes
+effect after restart. Different namespaces may select different modes.
+
+This ownership implements
+[DECISION-tau-ext-provider-builtin-profile-ownership](DECISION-tau-ext-provider-builtin-profile-ownership.md)
+and the selected surface is constrained by
+[DECISION-tau-provider-chatgpt-responses-surface-selection](../../tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-responses-surface-selection.md).
+
 ## Credentials and diagnostics
 
 Provider profile files and OAuth tokens are local secrets. Do not echo access
@@ -57,6 +78,17 @@ non-terminal samples at no more than 1Hz, and may emit a final flush. The harnes
 validates ownership and broadcasts the stats unchanged.
 
 ## Prompt worker wakeups
+
+Protocol startup publishes provider client kind, exact subscriptions, the
+startup `ProviderModelsUpdated` snapshot, and then `Ready`. Current-state session
+directory restore is the only replay catch-up used by this provider. Prewarm,
+session-directory, cancel, and shutdown inputs use exact selectors; directed
+`ui.retry_prompt` and `agent.prompt_created` arrive as routed live deliveries
+without subscribing to or replaying provider work.
+
+Prompt workers return typed provider frames and completion notices to the main
+loop. The normal `tau-client` writer remains the only serialization path; workers
+never write protocol frames directly.
 
 Prompt workers communicate with the main manual runtime loop through a worker
 message channel plus `ManualRuntimeWaker`. Every worker message must be enqueued

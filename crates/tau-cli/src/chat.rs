@@ -1665,10 +1665,13 @@ struct TerminalInputSession<'a> {
 }
 
 /// One-shot options staged while the UI is in new-agent mode, as governed by
-/// `DESIGN-tau-cli-new-agent-staging`.
+/// `SPEC-tau-cli-new-agent-staging`.
 #[derive(Default)]
 struct PendingNewAgentOptions {
     /// Optional role override for the next created agent.
+    ///
+    /// This is a latency bridge between `/new <role>` and the asynchronous
+    /// `harness.role_selected` echo, not a second durable role authority.
     role: Option<String>,
     /// Optional model override for the next created agent.
     model: Option<tau_proto::ModelId>,

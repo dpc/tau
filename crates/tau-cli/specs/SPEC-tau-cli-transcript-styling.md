@@ -1,6 +1,4 @@
-# DESIGN-tau-cli-transcript-styling: Markdown-lite transcript styling
-
-Status: confirmed, 2026-06-15, dpc
+# SPEC-tau-cli-transcript-styling: Transcript styling
 
 
 Tau applies Markdown-lite formatting in the terminal UI only. The harness,
@@ -22,13 +20,10 @@ Markdown-lite styling; escaped marker sequences get escape styling. This keeps
 live terminal wrapping, scrollback, and copy/paste behavior stable outside
 intentional table padding.
 
-Live response and thinking blocks use an append-aware cache. Text before a blank
-line is treated as sealed and parsed once; the current unsealed block is parsed
-provisionally through its last completed newline, leaving only the current
-incomplete streamed line base-styled until it receives a newline or the final
-render parses it. The cache also preserves parser context, including open fenced
-code blocks, across sealed chunks. Final/static blocks parse the complete string
-immediately.
+Live response and thinking styling updates incrementally as complete lines
+arrive and preserves parser context across chunks. An incomplete streamed line
+remains base-styled until a newline or final rendering supplies a complete parse.
+Final and static blocks parse the complete string immediately.
 
 Formatting is scoped to submitted user prompts, assistant response text, and
 reasoning/thinking text. Tool calls, tool payloads/results, shell output,

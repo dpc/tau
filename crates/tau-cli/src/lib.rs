@@ -2,7 +2,7 @@
 //! socket client for interactive chat.
 //!
 //! Component and local-execution boundaries are summarized in `ARCH-tau-cli`.
-//! Transcript presentation follows `DESIGN-tau-cli-transcript-styling`.
+//! Transcript presentation follows `SPEC-tau-cli-transcript-styling`.
 
 pub mod cli;
 

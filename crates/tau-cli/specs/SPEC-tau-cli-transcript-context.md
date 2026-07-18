@@ -1,6 +1,4 @@
-# DESIGN-tau-cli-prompt-editor-context: Per-agent prompt-editor response context
-
-Status: confirmed, 2026-06-25, dpc
+# SPEC-tau-cli-transcript-context: Transcript and editor context
 
 The terminal UI keeps visible transcript state in renderer fields and snapshots
 hidden agent transcripts in `AgentUiState`. Response text used by the external
@@ -16,19 +14,10 @@ temporarily restore the owning agent or no-agent snapshot, update/remove the liv
 block there, then restore the actually visible transcript without publishing
 hidden prompt-editor context.
 
-When routing an event for a hidden agent, the renderer may temporarily restore
-that hidden snapshot into renderer fields to reuse normal folding code. During
-that hidden fold it must not publish hidden response context through shared
-input-loop mirrors such as `EditorContext`; Ctrl+O and other prompt actions must
-continue seeing the actually visible/no-agent context until the user explicitly
-switches transcripts.
-
-The hidden restore/fold/save/restore sequence must also be atomic with respect
-to terminal output emitted through cloned `TermHandle`s, such as local
-client-side notices. Hidden folding installs a temporary output snapshot in the
-shared terminal handle; local output must wait until the actually visible
-snapshot is restored so it cannot be appended to a hidden agent transcript by a
-cross-thread race.
+While an event folds into a hidden transcript, shared input-loop mirrors and
+cloned terminal handles must continue to expose and append to the actually
+visible transcript. The hidden fold becomes visible only when that transcript is
+selected.
 
 The initial no-agent/start-new-agent screen is not a durable transcript boundary.
 Startup or post-`/session new` status, action, and extension output that is

@@ -63,4 +63,4 @@ unregistration joins an already-started callback and is the socket-publication
 boundary; callback code must never re-enter that registry.
 
 The worker and transport cancellation design is recorded by
-[DESIGN-tau-ext-provider-builtin-bounded-prompt-workers](specs/DESIGN-tau-ext-provider-builtin-bounded-prompt-workers.md).
+[DECISION-tau-ext-provider-builtin-bounded-prompt-workers](specs/DECISION-tau-ext-provider-builtin-bounded-prompt-workers.md).

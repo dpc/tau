@@ -87,7 +87,7 @@ pub enum LlmError {
     /// Prompt cancellation observed from Tau's trusted local abort source.
     Canceled,
     /// Mutable URL, credential, or account configuration could not build a
-    /// request; see `DESIGN-tau-provider-chatgpt-mutable-config-retries`.
+    /// request; see `SPEC-tau-provider-chatgpt-retry-classification`.
     ReloadableConfig(String),
     /// Provider response was syntactically readable but unsafe to accept.
     InvalidResponse(String),
@@ -191,7 +191,7 @@ fn classify_http_status(
     transport_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
     // Keep adapter classification independent from UI prose as required by
-    // DESIGN-tau-provider-chatgpt-retry-observability.
+    // DECISION-tau-provider-chatgpt-retry-observability.
     let provider_code = parse_json_error_code(body).or_else(|| {
         body.split("(type=")
             .nth(1)

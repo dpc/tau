@@ -1780,7 +1780,7 @@ fn prompt_workers_start_concurrently() {
     // provider prompts must both enter worker execution before the first
     // one finishes. A serial dispatcher would time out the first worker's
     // wait and never observe two active starts at once. See
-    // `DESIGN-tau-ext-provider-builtin-bounded-prompt-workers`.
+    // `DECISION-tau-ext-provider-builtin-bounded-prompt-workers`.
     let mut first = prompt();
     first.agent_prompt_id = "sp-par-1".into();
     let mut second = prompt();

@@ -4,7 +4,7 @@
 //! events to Rhai scripts as JSON-shaped maps matching Serde's JSON form.
 //! Component boundaries are summarized in `ARCH-tau-ext-rhai`.
 //! Runtime concurrency and shell-worker supervision follow
-//! `DESIGN-tau-ext-rhai-runtime-model`.
+//! `DECISION-tau-ext-rhai-runtime-model`.
 //! End-to-end behavior tests follow `DESIGN-tau-ext-rhai-protocol-testing`.
 
 mod shell;
@@ -883,7 +883,7 @@ fn stage_tool(state: &HostStateRef, name: &str, spec: Map, handler: FnPtr) -> Re
             parameters,
             format: None,
             // Rhai's registration API has no validated tag surface yet; see
-            // `DESIGN-tau-ext-rhai-untagged-tools`.
+            // `ARCH-tau-ext-rhai`.
             tags: Vec::new(),
             enabled_by_default,
             background_support: None,

@@ -1,6 +1,6 @@
 // Built-in "tau-plain-dark" theme.
 //
-// Palette and emphasis constraints follow `DESIGN-tau-cli-theme-defaults`.
+// Palette and emphasis constraints follow `DECISION-tau-cli-conservative-default-theme`.
 //
 // This is a conservative subset of the richer `tau-dpc` theme. It keeps semantic
 // emphasis attributes and only uses default terminal color plus yellow, cyan,

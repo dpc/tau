@@ -8,8 +8,8 @@
 //! See `DESIGN-tau-ext-provider-builtin-testing-boundary` for that test
 //! boundary.
 //! Retry telemetry and debug-capture persistence follow
-//! `DESIGN-tau-ext-provider-builtin-structured-retry-facts` and
-//! `DESIGN-tau-ext-provider-builtin-durable-session-diagnostics`.
+//! `DECISION-tau-ext-provider-builtin-structured-retry-facts` and
+//! `DECISION-tau-ext-provider-builtin-durable-session-diagnostics`.
 
 mod oauth_refresh_rejection;
 mod prewarm;
@@ -2447,7 +2447,7 @@ struct CooldownConstraint {
 ///
 /// Time is supplied to [`Self::pop_due`] by the caller so scheduling and
 /// cooldown behavior can be acceptance-tested without wall-clock sleeps.
-/// See `DESIGN-tau-ext-provider-builtin-required-work-retries`.
+/// See `DECISION-tau-ext-provider-builtin-required-work-retries`.
 #[derive(Default)]
 struct RetryScheduleQueue {
     /// Min-heap of delayed logical prompts.

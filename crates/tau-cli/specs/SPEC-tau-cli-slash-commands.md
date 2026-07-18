@@ -1,6 +1,4 @@
-# DESIGN-tau-cli-slash-command-ownership: Slash command ownership
-
-Status: unconfirmed
+# SPEC-tau-cli-slash-commands: Slash commands
 
 The terminal input loop has multiple slash-command owners. CLI-owned commands
 such as `/quit`, `/session`, `/agent`, `/name`, `/role`, `/model`, `/set`, and
@@ -14,13 +12,13 @@ submitted as prompts so the harness can resolve skills and inject their content.
 captures the current session and selected agent; it never resubmits prompt text.
 The harness resolves the exact in-flight prompt and directly addresses its
 provider owner, then directs the correlated typed result only to the invoking UI.
+Provider-side transfer behavior is specified by
+[SPEC-tau-ext-provider-builtin-retry-scheduler](../../tau-ext-provider-builtin/specs/SPEC-tau-ext-provider-builtin-retry-scheduler.md).
 
-Until action schemas can mark sensitive arguments, the CLI has one narrow
-action-specific redaction exception: `/email auth google finish ...` is redacted
+The CLI has one narrow action-specific redaction exception: `/email auth google finish ...` is redacted
 in command echo and persistent prompt history because its pasted loopback URL
 contains a one-time OAuth authorization code. The raw `ActionInvoke` still goes
-to the owning extension so the action can complete; future schema/protocol
-sensitive-argument metadata should replace this hard-coded action id.
+to the owning extension so the action can complete.
 
 `/model <provider>/<model>` has two CLI-owned paths: with a selected agent it
 emits a targeted `ui.agent_model_select`; after `/new`, with no selected agent,
@@ -51,3 +49,5 @@ The CLI maps `/tree <positive-integer>` to a one-based prompt anchor target,
 `/tree node <non-negative-integer>` to the raw-node expert target. It must not
 send bare numeric arguments as raw transcript node ids; the harness resolves
 prompt anchors against the selected agent's durable prompt provenance.
+Anchor behavior is specified by
+[SPEC-tau-harness-session-state](../../tau-harness/specs/SPEC-tau-harness-session-state.md).

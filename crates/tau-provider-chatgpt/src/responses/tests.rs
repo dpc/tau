@@ -2985,7 +2985,7 @@ fn build_request_replays_reasoning_item_from_raw_json_sidecar() {
 /// ids, status, annotations, part ids, and unknown fields keep their original
 /// provider-visible shape.
 ///
-/// See `DESIGN-tau-provider-chatgpt-replay-sidecar-semantics`.
+/// See `DECISION-tau-provider-chatgpt-replay-sidecars`.
 #[test]
 fn build_request_replays_matching_assistant_message_from_raw_sidecar() {
     let config = phase_test_config();

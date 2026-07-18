@@ -46,7 +46,7 @@ pub mod responses;
 /// is canceled or the provider is shutting down.
 ///
 /// The cooperative wake contract is recorded in
-/// `DESIGN-tau-provider-chatgpt-cooperative-cancellation`.
+/// `DECISION-tau-provider-chatgpt-cooperative-cancellation`.
 pub trait TurnAbort {
     /// Return whether the current turn has already been canceled.
     fn is_aborted(&mut self) -> bool;

@@ -32,7 +32,45 @@ while their source/recipient wording and structured lifecycle rendering remain
 unchanged. Canonical transport endpoints retain their explicit transport and
 session qualification.
 
-This specification refines
-[DESIGN-tau-cli-agent-watch-display](DESIGN-tau-cli-agent-watch-display.md) and
-preserves the lifecycle distinctions in
-[DESIGN-tau-cli-watch-lifecycle-rendering](DESIGN-tau-cli-watch-lifecycle-rendering.md).
+## Watch state and navigation
+
+The CLI derives session-scoped forward and reverse watcher caches from complete
+`agent.watches_updated` snapshots. It clears them on session reset and rebuilds
+them from live or replayed snapshots; they do not mutate display names or durable
+transcripts.
+
+For the currently viewed agent, one watcher renders `watched by: <watcher-id>`.
+Multiple watchers are sorted by stable agent id and render the first watcher as
+`watched by: <first-id>, +N more agents`; remaining ids are not expanded into the
+status row. Watcher context never changes the agent's own display label.
+
+Navigation state (`active`, `active-auto`, or `suspended`) is memory-only UI
+policy. `active` is always eligible, `active-auto` is eligible only while agent
+stats report a running runtime, and `suspended` is ineligible. Delegated agents
+default to `active-auto`; ordinary agents default to `active`. This state does
+not affect loading, addressability, or delivery.
+
+Execution state (`running` or `waiting`) describes the outer agent turn from
+activating input until the final response or termination returns control. It
+includes inner model and tool rounds. Structured watched-agent turn state is
+authoritative once received; prompt/provider lifecycle is only a compatibility
+fallback before that snapshot. Stats add details but do not establish execution.
+
+Watched-agent blocks and the `@N` status count use execution state. `@N` counts
+running side agents and excludes the visible agent. Concurrent running blocks are
+ordered by stable agent id.
+
+## Lifecycle projection
+
+Harness-authored watched-turn lifecycle records are structured state, not
+watched-agent messages. The CLI renders their structured payload as a compact
+single-line status, suppresses any compatibility body, and bypasses
+`show-messages`.
+
+Genuine watched responses and direct-user-prompt notifications retain their
+`WatchResponse` and `WatchPrompt` kinds, sender/watcher attribution, history
+classification, and summary/full/hidden visibility behavior.
+
+This specification implements
+[DECISION-tau-cli-agent-watch-state-authority](DECISION-tau-cli-agent-watch-state-authority.md)
+and is constrained by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).

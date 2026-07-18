@@ -68,6 +68,21 @@ must separately publish transcript, selected target, status, and placeholder
 changes as one redraw-suppressed transaction, preventing a visible frame from
 mixing state derived from different selections.
 
+The CLI owns local terminal commands and parsing, completion, and echo for
+harness-owned prompt commands. Dynamic extension actions are resolved against the
+current published action schema, while harness-owned prompt commands remain prompt
+input for harness resolution. Cross-boundary commands such as `/retry` and `/tree`
+parse in the CLI but address exact harness-owned prompt work or provenance rather
+than reconstructing it locally. Their behavior is specified by
+[SPEC-tau-cli-slash-commands](SPEC-tau-cli-slash-commands.md).
+
+Visible transcript state lives in renderer fields; hidden agent and protected
+no-agent transcripts live in `AgentUiState` snapshots. Hidden folding temporarily
+restores the owning snapshot under the terminal-output lock, then restores the
+visible snapshot before publishing editor context or accepting cloned-handle
+output. The resulting behavior is specified by
+[SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md).
+
 External-editor prompt trailers are prompt-surface text. They may quote
 assistant responses and prior prompt text to help compose the next prompt, but
 the terminal UI must scope response context to the currently visible/no-agent

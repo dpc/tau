@@ -661,7 +661,7 @@ fn prompt_command_is_local_slash_command() {
 }
 
 /// Protects the final slash-command ownership fallback recorded by
-/// `DESIGN-tau-cli-slash-command-ownership`: a likely mistyped leading command
+/// `SPEC-tau-cli-slash-commands`: a likely mistyped leading command
 /// must not become a normal prompt, while non-leading slashes remain prompt
 /// text.
 #[test]
@@ -4921,6 +4921,7 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
     assert!(!status_row.contains("@engineer-junior_b ("));
 }
 
+/// Covers the single-watcher label in `SPEC-tau-cli-agent-message-labels`.
 #[test]
 fn status_agent_chip_shows_current_agent_watchers() {
     let (_term, handle, vt) = setup(120, 24);
@@ -4972,7 +4973,7 @@ fn status_agent_chip_shows_current_agent_watchers() {
 }
 
 /// Covers the watcher-derived display contract in
-/// `DESIGN-tau-cli-agent-watch-display`.
+/// `SPEC-tau-cli-agent-message-labels`.
 #[test]
 fn status_agent_chip_truncates_multiple_current_agent_watchers() {
     let (_term, handle, vt) = setup(120, 24);

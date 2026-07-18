@@ -1,10 +1,8 @@
 //! Live tool registration tracking and routing of `tool.request` events
 //! to the connection that owns each tool.
 //!
-//! Tool-example validation and repair selection follow
-//! `DESIGN-tau-core-tool-examples`.
-//! Model-visible argument validation diagnostics follow
-//! `DESIGN-tau-core-bounded-validation-diagnostics`.
+//! Tool-example validation, repair selection, and model-visible diagnostics
+//! follow `SPEC-tau-core-tool-validation`.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -299,7 +297,7 @@ pub fn validate_tool_arguments(
 /// Attempts narrow schema-guided repairs for invalid model-produced arguments.
 ///
 /// The conservative repair and mandatory revalidation boundary is recorded in
-/// `DESIGN-tau-core-schema-guided-argument-repair`.
+/// `SPEC-tau-core-tool-validation`.
 ///
 /// This helper does not decide whether repair is allowed for a call. Callers
 /// must run normal validation first, invoke repair only after validation

@@ -692,7 +692,7 @@ fn resumed_session_clears_agent_display_name_authority() {
 
 /// Watch lifecycle records are harness-authored statuses, so the renderer must
 /// use their typed payload and never label their body as an agent message. See
-/// `DESIGN-tau-cli-watch-lifecycle-rendering`.
+/// `SPEC-tau-cli-agent-message-labels`.
 #[test]
 fn watch_turn_state_renders_as_compact_typed_status() {
     let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {

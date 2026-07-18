@@ -1,6 +1,4 @@
-# DESIGN-tau-ext-provider-builtin-required-work-retries: Required provider work retries outside the worker pool
-
-Status: confirmed, 2026-07-12, user
+# SPEC-tau-ext-provider-builtin-retry-scheduler: Required-work retry scheduler
 
 A logical prompt remains pending across retryable provider attempts until it
 succeeds, is canceled, the process/session shuts down, or the unchanged request
@@ -26,6 +24,28 @@ Retry state is memory-only. Cold restart intentionally does not replay an
 ambiguously accepted request because doing so can duplicate output, cost, tools,
 or side effects.
 
+## Scheduler state and ownership
+
+One process-lifetime actor exclusively owns delayed logical jobs. Its synchronous
+state accepts atomic commands to schedule work with an independent deadline and
+optional shared cooldown, cancel one prompt, cancel all prompts, transfer one
+exact prompt for manual retry, extend a provider cooldown generation, or release
+one exact generation. An explicit monotonic-time advance makes every eligible
+job due; the transport actor adds only channel delivery and timer waiting.
+
+Every transition returns ownership actions for the provider main loop: `Due`
+transfers an eligible job, `Canceled` transfers a job plus the delayed ownership
+count to retire, and `Manual` returns the exact optional transferred job and
+request correlation. Duplicate delayed ownership fails closed by canceling the
+original rather than dispatching either duplicate. Cancellation and transfer
+remove ownership atomically; a missing manual target returns a correlated empty
+result.
+
+Each parked job retains its independent eligibility deadline separately from any
+provider cooldown. Extending a cooldown can only delay matching work. Releasing
+an exact generation removes only that constraint and applies stable prompt-local
+anti-herd jitter without changing unrelated deadlines or providers.
+
 An explicit user `/retry` may atomically remove one exact `AgentPromptId` from
 the delayed scheduler before its deadline. This deliberately shortens even a
 trusted server delay for that job only. The same owned job and retry accounting
@@ -40,28 +60,5 @@ old profile's cooldown, while best-effort quota display telemetry never does.
 The telemetry non-authority follows
 [DECISION-provider-quota-pacing](../../../specs/DECISION-provider-quota-pacing.md).
 
-Scheduler mutation is implemented as synchronous, single-owner command
-transitions plus an explicit monotonic-time advance, both returning ownership
-actions for the provider actor to deliver. The production actor adds only
-channel transport and timer waiting. Tests may inject and advance the
-monotonic clock, so multi-day cooldown, exact-generation release, independent
-deadlines, and anti-herd wakeup are acceptance-tested without network access,
-wall sleeps, or quota telemetry acting as scheduler policy.
-
-The synchronous transition seam is guarded by a second, independent delayed
-ownership/deadline reference model. Bounded fixed-seed command traces run on
-every change and cover schedule, extend, release, manual transfer, cancellation,
-virtual advance, and duplicate identities. Conservation, exact
-provider/generation scope, independent deadline preservation, and bounded
-progress after a valid release are checked after every scheduler command.
-Runtime fixtures—not synthetic queue commands—own profile rotation, telemetry
-non-authority, cancellation/commit, and provider-side shutdown/EOF.
-Property failures report their seed and the minimized replayable trace;
-scheduled CI may raise the case budget without changing command semantics or
-introducing wall-clock scheduling oracles.
-
-Authority amendment (confirmed by the user for Stage 2): property generation is
-limited to commands owned by the pure scheduler actor. Profile rotation, quota
-telemetry, and EOF/shutdown instead use deterministic production-runtime
-fixtures, where their actual control-plane semantics live. This layered split
-must not be replaced with synthetic queue-level stand-ins.
+This behavior implements
+[DECISION-tau-ext-provider-builtin-required-work-retries](DECISION-tau-ext-provider-builtin-required-work-retries.md).
