@@ -133,3 +133,12 @@ traffic is control-plane state only and must never be forwarded as a harness
 client.
 
 The harness validates provider prompt ownership and derives public routing identity, but providers retain streaming and response-throughput authority under [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md). Public stats are content-free and transient; they never become transcript, editor, prompt-stdin, or final-response content.
+
+## Agent navigation authority
+
+Current-session runtime owns loaded-agent navigation modes alongside membership
+and routing. Modes affect UI eligibility only, never loading, routing, delivery,
+watches, execution, or model behavior.
+
+The authoritative rationale and lifecycle are recorded in
+[DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).

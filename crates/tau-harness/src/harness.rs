@@ -196,6 +196,16 @@ fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRunti
     }
 }
 
+fn default_navigation_mode(
+    originator: &tau_proto::PromptOriginator,
+) -> tau_proto::AgentNavigationMode {
+    if matches!(originator, tau_proto::PromptOriginator::Extension { .. }) {
+        tau_proto::AgentNavigationMode::ActiveAuto
+    } else {
+        tau_proto::AgentNavigationMode::Active
+    }
+}
+
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
     // Provider-owned stats remain public content per
     // `DECISION-provider-response-stats`.
@@ -1848,7 +1858,9 @@ pub struct Harness {
     /// Agents that have appeared in the current session's membership history,
     /// including agents that are presently unloaded.
     pub(crate) session_ever_loaded_agents: HashSet<tau_proto::AgentId>,
-    /// Harness-owned lifecycle state for current-session agents.
+    /// Harness-owned navigation classification for loaded current-session
+    /// agents.
+    pub(crate) agent_navigation_modes: HashMap<tau_proto::AgentId, tau_proto::AgentNavigationMode>,
     /// Session-local watch sets keyed by watcher public agent id.
     pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
     /// Reverse session-local watch index keyed by watched public agent id.
@@ -2583,6 +2595,7 @@ impl Harness {
             precommitted_user_interactions: HashMap::new(),
             session_loaded_agents: HashSet::new(),
             session_ever_loaded_agents: HashSet::new(),
+            agent_navigation_modes: HashMap::new(),
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_watch_subscriptions: HashMap::new(),
@@ -5120,6 +5133,7 @@ impl Harness {
             && unloaded.session_id == self.current_session_id
         {
             self.retire_agent_watch_endpoint(unloaded.agent_id.as_str());
+            self.agent_navigation_modes.remove(&unloaded.agent_id);
         }
         if let Event::SessionAgentUnloaded(unloaded) = event
             && let Some(cid) = self
@@ -8438,6 +8452,7 @@ impl Harness {
                 }
                 Ok(None)
             }
+            Event::UiSetAgentNavigationMode(_) => Ok(None),
             other => Ok(Some(other)),
         }
     }
@@ -8828,6 +8843,19 @@ impl Harness {
             }
             Event::UiRetryPrompt(req) => {
                 self.handle_retry_prompt(client_id, req);
+                Ok((true, None))
+            }
+            Event::UiSetAgentNavigationMode(req) => {
+                let is_ui = self.bus.connections().iter().any(|connection| {
+                    connection.id.as_str() == client_id
+                        && connection.kind == tau_proto::ClientKind::Ui
+                }) && !self
+                    .external_message_peers
+                    .iter()
+                    .any(|connection_id| connection_id.as_str() == client_id);
+                if is_ui {
+                    self.handle_set_agent_navigation_mode(client_id, req);
+                }
                 Ok((true, None))
             }
             Event::UiRecallQueuedPrompt(req) => {
@@ -11252,6 +11280,7 @@ impl Harness {
                 | Event::SessionShutdown(_)
                 | Event::SessionAgentLoaded(_)
                 | Event::SessionAgentUnloaded(_)
+                | Event::AgentStatsUpdated(_)
                 | Event::AgentStarted(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
@@ -12351,6 +12380,18 @@ impl Harness {
         Some(AgentStatsUpdated {
             session_id: self.current_session_id.clone(),
             agent_id: crate::parse_agent_id(agent_id),
+            navigation_mode: self
+                .agent_navigation_modes
+                .get(&crate::parse_agent_id(agent_id))
+                .copied()
+                .unwrap_or_else(|| {
+                    tracing::error!(
+                        target: "tau_harness",
+                        agent_id,
+                        "loaded agent is missing its navigation mode"
+                    );
+                    tau_proto::AgentNavigationMode::Active
+                }),
             runtime_state: agent_runtime_state_for_turn(&agent.turn_state),
             tools: AgentToolStats {
                 in_flight: agent.tools_in_flight,
@@ -12369,6 +12410,55 @@ impl Harness {
         if let Some(stats) = self.agent_stats_snapshot(cid) {
             self.publish_event(None, Event::AgentStatsUpdated(stats));
         }
+    }
+
+    fn handle_set_agent_navigation_mode(
+        &mut self,
+        client_id: &str,
+        request: tau_proto::UiSetAgentNavigationMode,
+    ) {
+        let rejection = if request.session_id != self.current_session_id {
+            Some(tau_proto::UiSetAgentNavigationModeRejection::StaleSession)
+        } else if !self.session_loaded_agents.contains(&request.agent_id)
+            || !self.agent_navigation_modes.contains_key(&request.agent_id)
+        {
+            Some(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded)
+        } else {
+            None
+        };
+        let outcome = if let Some(reason) = rejection {
+            tau_proto::UiSetAgentNavigationModeOutcome::Rejected { reason }
+        } else {
+            let mode = match request.action {
+                tau_proto::UiAgentNavigationModeAction::SetActive => {
+                    tau_proto::AgentNavigationMode::Active
+                }
+                tau_proto::UiAgentNavigationModeAction::SetActiveAuto => {
+                    tau_proto::AgentNavigationMode::ActiveAuto
+                }
+                tau_proto::UiAgentNavigationModeAction::SetSuspended => {
+                    tau_proto::AgentNavigationMode::Suspended
+                }
+            };
+            self.agent_navigation_modes
+                .insert(request.agent_id.clone(), mode);
+            if let Some(cid) = self.agent_routes.get(request.agent_id.as_str()).cloned() {
+                self.emit_agent_stats_updated(&cid);
+            }
+            tau_proto::UiSetAgentNavigationModeOutcome::Applied
+        };
+        let _ = self.bus.send_to(
+            client_id,
+            None,
+            HarnessOutputMessage::deliver(Event::UiSetAgentNavigationModeResult(
+                tau_proto::UiSetAgentNavigationModeResult {
+                    request_id: request.request_id,
+                    session_id: request.session_id,
+                    agent_id: request.agent_id,
+                    outcome,
+                },
+            )),
+        );
     }
 
     fn handle_compact_request(&mut self, session_id: SessionId, target_agent_id: Option<&str>) {
@@ -14343,6 +14433,7 @@ impl Harness {
         self.agent_routes.clear();
         self.session_loaded_agents.clear();
         self.session_ever_loaded_agents.clear();
+        self.agent_navigation_modes.clear();
         self.agent_watches.clear();
         self.agent_watchers.clear();
         self.agent_watch_subscriptions.clear();
@@ -15577,6 +15668,14 @@ impl Harness {
             }
             self.agent_routes
                 .insert(agent_id_string.clone(), cid.clone());
+            let navigation_mode = self
+                .agents
+                .get(&cid)
+                .map(|agent| default_navigation_mode(&agent.originator))
+                .unwrap_or_default();
+            self.agent_navigation_modes
+                .entry(agent_id.clone())
+                .or_insert(navigation_mode);
             match restored_compaction.clone() {
                 Some(tau_core::StandaloneCompactionRecovery::Blocked {
                     failed,
@@ -16520,6 +16619,14 @@ impl Harness {
         // New agents reached this point only after their creation record
         // committed; existing agents already have validated journal identity.
         self.agent_routes.insert(agent_id.to_owned(), cid.clone());
+        let default_navigation_mode = self
+            .agents
+            .get(cid)
+            .map(|agent| default_navigation_mode(&agent.originator))
+            .unwrap_or_default();
+        self.agent_navigation_modes
+            .entry(agent_id_proto.clone())
+            .or_insert(default_navigation_mode);
         let role = self
             .agents
             .get(cid)

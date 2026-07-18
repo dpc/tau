@@ -44,11 +44,12 @@ Multiple watchers are sorted by stable agent id and render the first watcher as
 `watched by: <first-id>, +N more agents`; remaining ids are not expanded into the
 status row. Watcher context never changes the agent's own display label.
 
-Navigation state (`active`, `active-auto`, or `suspended`) is memory-only UI
-policy. `active` is always eligible, `active-auto` is eligible only while agent
-stats report a running runtime, and `suspended` is ineligible. Delegated agents
-default to `active-auto`; ordinary agents default to `active`. This state does
-not affect loading, addressability, or delivery.
+Navigation state (`active`, `active-auto`, or `suspended`) is harness-owned
+current-session daemon memory projected into each UI by agent stats. `active` is
+always eligible, `active-auto` is eligible only while stats report a running
+runtime, and `suspended` is ineligible. Delegated agents default to
+`active-auto`; ordinary agents default to `active`. Selection and presentation
+remain UI-local. Modes do not affect loading, addressability, or delivery.
 
 Execution state (`running` or `waiting`) describes the outer agent turn from
 activating input until the final response or termination returns control. It

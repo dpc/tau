@@ -272,6 +272,17 @@ impl Harness {
                 }
             }
         }
+        let stats_events = loaded_agents
+            .iter()
+            .filter_map(|agent_id| self.agent_routes.get(agent_id.as_str()))
+            .filter_map(|cid| self.agent_stats_snapshot(cid))
+            .map(Event::AgentStatsUpdated)
+            .collect::<Vec<_>>();
+        for event in stats_events {
+            if selector_matches_event(selectors, &event) {
+                self.send_catch_up_event(client_id, None, event);
+            }
+        }
         self.replay_active_queued_prompts(client_id, selectors);
         for agent_id in loaded_agents {
             let error = outcome.agent_error(&agent_id);
@@ -418,6 +429,14 @@ impl Harness {
                 Err(message) => {
                     self.send_replay_error(&client_id, message);
                     errors.push(message.clone());
+                }
+            }
+            if let Some(cid) = self.agent_routes.get(agent_id.as_str())
+                && let Some(stats) = self.agent_stats_snapshot(cid)
+            {
+                let event = Event::AgentStatsUpdated(stats);
+                if selector_matches_event(&selectors, &event) {
+                    self.send_catch_up_event(&client_id, None, event);
                 }
             }
             self.emit_agent_replay_complete(
@@ -659,17 +678,6 @@ impl Harness {
         });
         if selector_matches_event(selectors, &context_event) {
             self.send_catch_up_event(client_id, None, context_event);
-        }
-        let stats_events: Vec<_> = self
-            .agents
-            .keys()
-            .filter_map(|cid| self.agent_stats_snapshot(cid))
-            .map(Event::AgentStatsUpdated)
-            .collect();
-        for event in stats_events {
-            if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, None, event);
-            }
         }
         let mut watch_entries = self.agent_watches.iter().collect::<Vec<_>>();
         watch_entries.sort_by_key(|(watcher, _)| *watcher);

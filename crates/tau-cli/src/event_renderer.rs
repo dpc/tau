@@ -18,8 +18,6 @@ use tau_proto::{
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
-#[cfg(test)]
-use crate::agent_navigation::AgentNavigationState;
 use crate::build_banner;
 use crate::chat::{DraftSlot, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
@@ -1740,7 +1738,11 @@ impl EventRenderer {
             return;
         }
         if let Ok(mut navigation) = self.agent_navigation.lock() {
-            navigation.update_runtime(updated.agent_id.as_str(), updated.runtime_state);
+            navigation.apply_stats(
+                updated.agent_id.as_str(),
+                updated.navigation_mode,
+                updated.runtime_state,
+            );
         }
         self.agent_stats
             .insert(updated.agent_id.to_string(), updated.clone());
@@ -2236,53 +2238,6 @@ impl EventRenderer {
         if let Ok(mut agents) = self.ephemeral_agents.lock() {
             agents.insert(agent_id.to_owned());
         }
-    }
-
-    fn mark_agent_active_auto_if_absent(&mut self, agent_id: String) {
-        self.remember_agent(agent_id.clone());
-        if let Ok(mut navigation) = self.agent_navigation.lock() {
-            navigation.mark_active_auto_if_absent(agent_id.clone());
-        }
-        self.render_model_status_if_present();
-        if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
-            self.refresh_prompt_placeholder();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resume_agent(&mut self, agent_id: String) {
-        self.remember_agent(agent_id.clone());
-        if let Ok(mut navigation) = self.agent_navigation.lock() {
-            navigation.set_mode(agent_id.clone(), AgentNavigationState::Active);
-        }
-        self.refresh_agent_navigation(&agent_id);
-    }
-
-    /// Refresh status and placeholder rendering after the input thread changes
-    /// the shared navigation snapshot.
-    pub(crate) fn refresh_agent_navigation(&mut self, agent_id: &str) {
-        let handle = self.handle.clone();
-        handle.with_redraw_suppressed(|| {
-            self.render_model_status_if_present();
-            if self.current_agent_id.as_deref() == Some(agent_id) {
-                self.refresh_prompt_placeholder();
-                handle.redraw();
-            }
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn suspend_agent(&mut self, agent_id: &str) {
-        self.mark_agent_suspended(agent_id);
-    }
-
-    #[cfg(test)]
-    fn mark_agent_suspended(&mut self, agent_id: &str) {
-        self.remember_agent(agent_id.to_owned());
-        if let Ok(mut navigation) = self.agent_navigation.lock() {
-            navigation.set_mode(agent_id, AgentNavigationState::Suspended);
-        }
-        self.refresh_agent_navigation(agent_id);
     }
 
     fn render_model_status_if_present(&mut self) {
@@ -3881,7 +3836,7 @@ impl EventRenderer {
                 let agent_id = accepted.agent_id.to_string();
                 self.query_agents
                     .insert(accepted.query_id.clone(), agent_id.clone());
-                self.mark_agent_active_auto_if_absent(agent_id);
+                self.remember_agent(agent_id);
                 true
             }
             Event::AgentStarted(started) => {
@@ -3952,7 +3907,7 @@ impl EventRenderer {
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
                     self.query_agents.insert(query_id.clone(), agent_id.clone());
-                    self.mark_agent_active_auto_if_absent(agent_id);
+                    self.mark_agent_live(agent_id);
                 } else {
                     self.mark_agent_live(agent_id);
                 }
@@ -6324,6 +6279,28 @@ impl EventRenderer {
                     "retry-result",
                     render_action_output_block(&self.theme, &result.message),
                 );
+                true
+            }
+            Event::UiSetAgentNavigationModeResult(result) => {
+                if let tau_proto::UiSetAgentNavigationModeOutcome::Rejected { reason } =
+                    result.outcome
+                {
+                    use crate::tool_render::render_action_output_block;
+                    let message = match reason {
+                        tau_proto::UiSetAgentNavigationModeRejection::StaleSession => {
+                            "Agent navigation mode was not changed because the session changed."
+                                .to_owned()
+                        }
+                        tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded => format!(
+                            "Agent {} is not currently loaded; its navigation mode was not changed.",
+                            result.agent_id
+                        ),
+                    };
+                    self.handle.print_output(
+                        "agent-navigation-result",
+                        render_action_output_block(&self.theme, &message),
+                    );
+                }
                 true
             }
             Event::ActionInvoke(_) => true,

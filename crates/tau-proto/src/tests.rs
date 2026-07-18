@@ -670,6 +670,7 @@ fn representative_events() -> Vec<Event> {
         Event::AgentStatsUpdated(AgentStatsUpdated {
             session_id: "session_123".into(),
             agent_id: agent_id("engineer_child"),
+            navigation_mode: AgentNavigationMode::Active,
             runtime_state: AgentRuntimeState::Running,
             tools: AgentToolStats {
                 in_flight: 1,
@@ -2472,6 +2473,7 @@ fn agent_stats_updated_serde_round_trip() {
     let update = AgentStatsUpdated {
         session_id: "session_123".into(),
         agent_id: agent_id("engineer_child"),
+        navigation_mode: AgentNavigationMode::Active,
         runtime_state: AgentRuntimeState::Running,
         tools: AgentToolStats {
             in_flight: 1,
@@ -4027,4 +4029,60 @@ fn streaming_reader_rejects_oversized_protocol_message() {
         .read_message()
         .expect_err("oversized frame must fail");
     assert!(error.to_string().contains("protocol message exceeds"));
+}
+
+/// Locks the navigation request wire spelling, including explicit active-auto.
+#[test]
+fn agent_navigation_mode_request_round_trips_with_snake_case_actions() {
+    for (action, spelling) in [
+        (UiAgentNavigationModeAction::SetActive, "set_active"),
+        (
+            UiAgentNavigationModeAction::SetActiveAuto,
+            "set_active_auto",
+        ),
+        (UiAgentNavigationModeAction::SetSuspended, "set_suspended"),
+    ] {
+        let event = Event::UiSetAgentNavigationMode(UiSetAgentNavigationMode {
+            request_id: "navigation-1".to_owned(),
+            session_id: "session-1".into(),
+            agent_id: AgentId::parse("agent-1").expect("valid agent id"),
+            action,
+        });
+        let value = serde_json::to_value(&event).expect("serialize navigation request");
+        assert_eq!(value["event"], "ui.set_agent_navigation_mode");
+        assert_eq!(value["payload"]["action"], spelling);
+        assert!(event.defaults_to_transient());
+        assert_eq!(
+            serde_json::from_value::<Event>(value).expect("round trip"),
+            event
+        );
+    }
+}
+
+/// Locks requester-result applied/rejection wire spellings and transience.
+#[test]
+fn agent_navigation_mode_results_round_trip() {
+    for outcome in [
+        UiSetAgentNavigationModeOutcome::Applied,
+        UiSetAgentNavigationModeOutcome::Rejected {
+            reason: UiSetAgentNavigationModeRejection::StaleSession,
+        },
+        UiSetAgentNavigationModeOutcome::Rejected {
+            reason: UiSetAgentNavigationModeRejection::AgentNotLoaded,
+        },
+    ] {
+        let event = Event::UiSetAgentNavigationModeResult(UiSetAgentNavigationModeResult {
+            request_id: "navigation-result".to_owned(),
+            session_id: "session-1".into(),
+            agent_id: AgentId::parse("agent-1").expect("valid agent id"),
+            outcome,
+        });
+        let value = serde_json::to_value(&event).expect("serialize result");
+        assert_eq!(value["event"], "ui.set_agent_navigation_mode_result");
+        assert!(event.defaults_to_transient());
+        assert_eq!(
+            serde_json::from_value::<Event>(value).expect("round trip"),
+            event
+        );
+    }
 }

@@ -30,14 +30,14 @@ target, and contributes unique effective targets to the session-wide bottom
 `@N` chip. Merely live, selectable, non-suspended, or idle leaf agents must not
 appear as active watched-agent work.
 
-Prompt navigation has separate per-UI modes: ordinary agents default to
-`active`, delegated agents default to `active-auto`, and users can explicitly
-set `suspended` or `active` with suspend/resume. `active-auto` follows the
-complete outer-turn `agent.stats_updated.runtime_state`: it is offered by
-switch/mention completion and keyboard cycling only while `running`. These
-modes are not persisted or sent over the protocol; replayed extension prompt
-provenance and stats catch-up reconstruct delegated defaults and current
-effectiveness. Selecting or prompting a hidden agent does not change its mode.
+Prompt navigation modes are harness-owned current-session daemon memory:
+ordinary agents default to `active`, delegated agents default to `active-auto`,
+and any attached UI can request `suspended`, `active`, or `active-auto` with
+`/agent suspend`, `/agent resume`, or `/agent auto`. Complete
+`agent.stats_updated` snapshots update each UI cache. Selection, transcript,
+drafts, and presentation remain UI-local. Explicit overrides are not persisted;
+cold restore recomputes defaults from existing provenance. Selecting or
+prompting a hidden agent does not change its mode.
 
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because

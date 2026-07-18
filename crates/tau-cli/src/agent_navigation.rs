@@ -1,29 +1,19 @@
-//! Per-UI agent navigation policy and effective-activity calculation.
+//! Per-UI projection of harness-owned agent navigation state.
 
 #[cfg(test)]
 mod agent_navigation_tests;
 
 use std::collections::{HashMap, HashSet};
 
-/// A UI-local agent navigation mode.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum AgentNavigationState {
-    /// Always include the loaded agent in navigation targets.
-    #[default]
-    Active,
-    /// Include the loaded agent only while its canonical outer turn is running.
-    ActiveAuto,
-    /// Never include the agent in navigation targets.
-    Suspended,
-}
+pub(crate) use tau_proto::AgentNavigationMode as AgentNavigationState;
 
 /// One atomic snapshot of the facts used to route terminal input.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentNavigation {
     /// Agent ids currently loaded by the harness.
     live_agents: HashSet<String>,
-    /// Explicit or reconstructed per-UI navigation modes.
-    modes: HashMap<String, AgentNavigationState>,
+    /// Modes received in complete harness-authored operational snapshots.
+    modes: HashMap<String, tau_proto::AgentNavigationMode>,
     /// Latest authoritative outer-turn runtime state for each loaded agent.
     runtime_states: HashMap<String, tau_proto::AgentRuntimeState>,
 }
@@ -34,31 +24,15 @@ impl AgentNavigation {
         self.live_agents.insert(agent_id.into());
     }
 
-    /// Record a delegated agent's default mode without overwriting a local
-    /// override.
-    pub(crate) fn mark_active_auto_if_absent(&mut self, agent_id: impl Into<String>) {
-        let agent_id = agent_id.into();
-        self.live_agents.insert(agent_id.clone());
-        self.modes
-            .entry(agent_id)
-            .or_insert(AgentNavigationState::ActiveAuto);
-    }
-
-    /// Apply an explicit local navigation mode to a currently loaded endpoint.
-    pub(crate) fn set_mode(&mut self, agent_id: impl Into<String>, mode: AgentNavigationState) {
-        let agent_id = agent_id.into();
-        if self.live_agents.contains(&agent_id) {
-            self.modes.insert(agent_id, mode);
-        }
-    }
-
-    /// Update authoritative runtime state only for a currently loaded agent.
-    pub(crate) fn update_runtime(
+    /// Atomically apply one complete authoritative operational snapshot.
+    pub(crate) fn apply_stats(
         &mut self,
         agent_id: &str,
+        navigation_mode: tau_proto::AgentNavigationMode,
         runtime_state: tau_proto::AgentRuntimeState,
     ) {
         if self.live_agents.contains(agent_id) {
+            self.modes.insert(agent_id.to_owned(), navigation_mode);
             self.runtime_states
                 .insert(agent_id.to_owned(), runtime_state);
         }
@@ -79,21 +53,21 @@ impl AgentNavigation {
     }
 
     /// Return the stored mode, using the ordinary-agent `active` default.
-    pub(crate) fn mode(&self, agent_id: &str) -> AgentNavigationState {
+    pub(crate) fn mode(&self, agent_id: &str) -> tau_proto::AgentNavigationMode {
         self.modes.get(agent_id).copied().unwrap_or_default()
     }
 
     /// Return whether a loaded agent is an effective navigation target.
     pub(crate) fn is_active(&self, agent_id: &str) -> bool {
         self.live_agents.contains(agent_id)
-            && match self.mode(agent_id) {
-                AgentNavigationState::Active => true,
-                AgentNavigationState::ActiveAuto => {
+            && self.modes.get(agent_id).is_some_and(|mode| match mode {
+                tau_proto::AgentNavigationMode::Active => true,
+                tau_proto::AgentNavigationMode::ActiveAuto => {
                     self.runtime_states.get(agent_id)
                         == Some(&tau_proto::AgentRuntimeState::Running)
                 }
-                AgentNavigationState::Suspended => false,
-            }
+                tau_proto::AgentNavigationMode::Suspended => false,
+            })
     }
 
     /// Return all effective navigation targets.
@@ -116,5 +90,10 @@ impl AgentNavigation {
     /// Return whether the harness currently has an agent loaded.
     pub(crate) fn is_live(&self, agent_id: &str) -> bool {
         self.live_agents.contains(agent_id)
+    }
+
+    /// Return all currently loaded agent ids.
+    pub(crate) fn live_agents(&self) -> HashSet<String> {
+        self.live_agents.clone()
     }
 }

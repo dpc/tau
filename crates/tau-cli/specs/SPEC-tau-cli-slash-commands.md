@@ -28,10 +28,11 @@ agent instead of sending an untargeted agent update.
 Agent switch commands distinguish known transcript selection from effective
 prompt routing. `/agent switch` completions list effectively active agents and
 `none`; mentions, cycling, and suspend completion use the same effective set.
-Resume completion lists the remaining known agents, including idle
+Resume completion lists loaded ineffective agents, including idle
 `active-auto` agents. Explicitly typing a known hidden id still selects it.
-Accepted input preserves the mode; only `/agent resume` or `/resume` changes a
-mode to unconditional `active`, and suspend changes it to `suspended`.
+Accepted input preserves the mode. `/agent resume` or `/resume` requests
+unconditional `active`, `/agent suspend` requests `suspended`, and `/agent auto`
+requests `active-auto`.
 
 `/name <display name>` is the selected-agent shortcut for `/agent name
 <agent_id> <display name>`. It emits the same display-name update as `/agent
@@ -51,3 +52,10 @@ send bare numeric arguments as raw transcript node ids; the harness resolves
 prompt anchors against the selected agent's durable prompt provenance.
 Anchor behavior is specified by
 [SPEC-tau-harness-session-state](../../tau-harness/specs/SPEC-tau-harness-session-state.md).
+
+## Shared navigation mutations
+
+`/agent suspend`, `/agent resume`, and `/agent auto` request the absolute
+harness-owned modes `suspended`, `active`, and `active-auto`. The UI never
+optimistically mutates its cache; complete stats snapshots update it. Selection,
+transcript view, drafts, and presentation remain local.

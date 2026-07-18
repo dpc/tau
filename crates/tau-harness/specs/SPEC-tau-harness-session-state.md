@@ -137,3 +137,10 @@ into another session publishes membership but never appends a second creation
 fact. A sidecar-only artifact reserves its id but is not a semantic routing
 identity. See
 [DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+
+## Navigation classification
+
+The harness owns a daemon-lifetime mode for every loaded current-session agent.
+UI disconnect preserves it; committed unload, session switch, and process exit
+forget it. Cold restore recomputes ordinary/delegated defaults and does not
+restore explicit overrides.

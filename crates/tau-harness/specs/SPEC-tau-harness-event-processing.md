@@ -115,3 +115,10 @@ events they subscribe to before those events commit. Must-pass and immutable
 checks protect selected harness-owned facts from integrity loss, but they are not
 confidentiality boundaries: do not expose sensitive event streams to interceptors
 you do not trust.
+
+## Navigation-mode writes
+
+The event loop consumes `ui.set_agent_navigation_mode` only from UI intake and
+serializes accepted absolute writes, so the last accepted write wins. Extensions
+cannot mutate this state. Harness-authored `agent.stats_updated` snapshots are
+must-pass and immutable because they carry the complete shared classification.

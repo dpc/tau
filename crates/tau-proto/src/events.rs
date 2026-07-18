@@ -2443,6 +2443,20 @@ pub struct AgentContextStats {
     pub percent_used: Option<u8>,
 }
 
+/// Harness-owned classification controlling whether a loaded agent appears in
+/// UI navigation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNavigationMode {
+    /// Always include the loaded agent in navigation targets.
+    #[default]
+    Active,
+    /// Include the loaded agent only while its outer turn is running.
+    ActiveAuto,
+    /// Exclude the loaded agent from navigation targets.
+    Suspended,
+}
+
 /// Complete operational snapshot for one loaded agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentStatsUpdated {
@@ -2450,6 +2464,8 @@ pub struct AgentStatsUpdated {
     pub session_id: SessionId,
     /// Agent described by this snapshot.
     pub agent_id: AgentId,
+    /// Current harness-owned navigation classification.
+    pub navigation_mode: AgentNavigationMode,
     /// Current harness runtime state for the agent.
     pub runtime_state: AgentRuntimeState,
     /// Current and cumulative tool counters.
@@ -3191,6 +3207,67 @@ pub struct UiRetryPromptResult {
     pub status: Option<RetryPromptStatus>,
     /// User-facing result text.
     pub message: String,
+}
+
+/// Absolute navigation-mode mutation requested by a UI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiAgentNavigationModeAction {
+    /// Set the mode to [`AgentNavigationMode::Active`].
+    SetActive,
+    /// Set the mode to [`AgentNavigationMode::ActiveAuto`].
+    SetActiveAuto,
+    /// Set the mode to [`AgentNavigationMode::Suspended`].
+    SetSuspended,
+}
+
+/// Request to change one loaded agent's shared navigation mode.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetAgentNavigationMode {
+    /// Correlates the requester-directed result with this request.
+    pub request_id: String,
+    /// Session captured when the UI submitted the request.
+    pub session_id: SessionId,
+    /// Loaded agent whose mode should change.
+    pub agent_id: AgentId,
+    /// Absolute mode to apply.
+    pub action: UiAgentNavigationModeAction,
+}
+
+/// Stable reason why a navigation-mode mutation was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiSetAgentNavigationModeRejection {
+    /// The request names a session other than the harness binding.
+    StaleSession,
+    /// The target is not currently loaded.
+    AgentNotLoaded,
+}
+
+/// Outcome of a navigation-mode mutation request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum UiSetAgentNavigationModeOutcome {
+    /// The absolute write was accepted at one event-loop position.
+    Applied,
+    /// The request did not mutate shared state.
+    Rejected {
+        /// Stable rejection reason.
+        reason: UiSetAgentNavigationModeRejection,
+    },
+}
+
+/// Requester-directed acknowledgement of a navigation-mode mutation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetAgentNavigationModeResult {
+    /// Correlation identifier copied from the request.
+    pub request_id: String,
+    /// Session copied from the request.
+    pub session_id: SessionId,
+    /// Agent copied from the request.
+    pub agent_id: AgentId,
+    /// Authoritative acceptance or rejection at processing time.
+    pub outcome: UiSetAgentNavigationModeOutcome,
 }
 
 /// Request that the harness remove and return the most recently queued user
@@ -4571,6 +4648,10 @@ pub enum Event {
     UiRetryPrompt(UiRetryPrompt),
     #[serde(rename = "ui.retry_prompt_result")]
     UiRetryPromptResult(UiRetryPromptResult),
+    #[serde(rename = "ui.set_agent_navigation_mode")]
+    UiSetAgentNavigationMode(UiSetAgentNavigationMode),
+    #[serde(rename = "ui.set_agent_navigation_mode_result")]
+    UiSetAgentNavigationModeResult(UiSetAgentNavigationModeResult),
     #[serde(rename = "ui.recall_queued_prompt")]
     UiRecallQueuedPrompt(UiRecallQueuedPrompt),
     #[serde(rename = "ui.set_agent_display_name")]
@@ -4869,6 +4950,10 @@ impl Event {
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
             Self::UiRetryPrompt(_) => EventName::UI_RETRY_PROMPT,
             Self::UiRetryPromptResult(_) => EventName::UI_RETRY_PROMPT_RESULT,
+            Self::UiSetAgentNavigationMode(_) => EventName::UI_SET_AGENT_NAVIGATION_MODE,
+            Self::UiSetAgentNavigationModeResult(_) => {
+                EventName::UI_SET_AGENT_NAVIGATION_MODE_RESULT
+            }
             Self::UiRecallQueuedPrompt(_) => EventName::UI_RECALL_QUEUED_PROMPT,
             Self::UiSetAgentDisplayName(_) => EventName::UI_SET_AGENT_DISPLAY_NAME,
             _ => return None,
@@ -4986,6 +5071,8 @@ impl Event {
                 | Self::UiDebugEventStatsRequest(_)
                 | Self::UiPromptDraft(_)
                 | Self::UiFocusChanged(_)
+                | Self::UiSetAgentNavigationMode(_)
+                | Self::UiSetAgentNavigationModeResult(_)
                 | Self::UiSetAgentDisplayName(_)
         )
     }

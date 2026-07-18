@@ -1066,6 +1066,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             historical_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+                EventSelector::Exact(tau_proto::EventName::AGENT_STATS_UPDATED),
             ],
             live_selectors: Vec::new(),
         })),
@@ -1942,6 +1943,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             historical_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+                EventSelector::Exact(tau_proto::EventName::AGENT_STATS_UPDATED),
             ],
             live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::SESSION_AGENT_LOADED,
@@ -1950,6 +1952,21 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     )
     .expect("subscribe");
     sink.lock().expect("sink").clear();
+
+    let cid = crate::parse_agent_id(agent_id.as_str());
+    let mut agent = crate::agent::Agent::new(
+        cid.clone(),
+        h.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    agent.agent_id = Some(agent_id.to_string());
+    h.agents.insert(cid.clone(), agent);
+    h.agent_routes.insert(agent_id.to_string(), cid.clone());
+    h.session_loaded_agents.insert(agent_id.clone());
+    h.agent_navigation_modes
+        .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Active);
 
     h.publish_event(
         None,
@@ -2012,7 +2029,21 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             })
         })
         .expect("agent boundary");
-    assert!(metadata_index < replay_index && replay_index < boundary_index);
+    let stats_index = events
+        .iter()
+        .position(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::AgentStatsUpdated(stats) if stats.agent_id == agent_id
+                    )
+            })
+        })
+        .expect("loaded-agent stats snapshot");
+    assert!(
+        metadata_index < replay_index && replay_index < stats_index && stats_index < boundary_index
+    );
     assert!(
         load_index < boundary_index,
         "live load and its per-agent restore boundary must both be delivered"

@@ -146,3 +146,9 @@ events. Per-extension stats therefore require the local socket control path, are
 returned only as a directed non-persisted notice, and must remain bounded by
 key-cardinality caps with overflow buckets so a noisy peer cannot grow daemon
 memory by emitting many unique custom event names.
+
+## Navigation projection
+
+The CLI caches harness-owned navigation classification only from complete
+`agent.stats_updated` snapshots. Selected transcript, drafts, editor state, and
+presentation remain local to each UI.

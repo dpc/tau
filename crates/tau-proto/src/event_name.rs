@@ -353,6 +353,12 @@ impl EventName {
     /// Requester-directed result of a manual delayed-retry request.
     pub const UI_RETRY_PROMPT_RESULT: Self =
         Self::from_static(EventCategory::Ui, "retry_prompt_result");
+    /// Request an absolute shared navigation mode.
+    pub const UI_SET_AGENT_NAVIGATION_MODE: Self =
+        Self::from_static(EventCategory::Ui, "set_agent_navigation_mode");
+    /// Requester-directed result of a shared navigation-mode request.
+    pub const UI_SET_AGENT_NAVIGATION_MODE_RESULT: Self =
+        Self::from_static(EventCategory::Ui, "set_agent_navigation_mode_result");
     pub const UI_RECALL_QUEUED_PROMPT: Self =
         Self::from_static(EventCategory::Ui, "recall_queued_prompt");
     pub const UI_SET_AGENT_DISPLAY_NAME: Self =

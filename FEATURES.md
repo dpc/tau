@@ -87,6 +87,12 @@ receiving another agent's hidden prompts or raw provider data. The session-local
 watch graph is acyclic; an enable that would close a cycle is rejected without
 changing watch state.
 
+Attached UIs share the harness-owned `active`, `active-auto`, or `suspended`
+navigation classification for each loaded agent while keeping their selected
+transcript, drafts, and presentation local. Explicit classifications survive UI
+reconnect while the agent remains loaded in the same daemon session. Unload,
+session switch, and daemon exit forget them.
+
 See [agent messaging](docs/agent-messaging.md),
 [agent roles](docs/agent-roles.md), and the
 [agent-watch specification](specs/SPEC-agent-watch.md).

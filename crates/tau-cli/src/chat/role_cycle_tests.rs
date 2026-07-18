@@ -7,9 +7,18 @@ fn routing_state(
     let mut navigation = AgentNavigation::default();
     for agent_id in live.lock().expect("live agents lock").iter() {
         navigation.mark_live(agent_id.clone());
+        navigation.apply_stats(
+            agent_id,
+            tau_proto::AgentNavigationMode::Active,
+            tau_proto::AgentRuntimeState::Idle,
+        );
     }
     for agent_id in suspended.lock().expect("suspended agents lock").iter() {
-        navigation.set_mode(agent_id.clone(), AgentNavigationState::Suspended);
+        navigation.apply_stats(
+            agent_id,
+            tau_proto::AgentNavigationMode::Suspended,
+            tau_proto::AgentRuntimeState::Idle,
+        );
     }
     InputRoutingState::new(
         Arc::new(Mutex::new(None)),
@@ -43,8 +52,9 @@ fn agent_completer_offers_subcommands_first() {
         vec![
             ("new", "Clear the selected agent"),
             ("switch", "Show a known agent transcript"),
-            ("suspend", "Hide an active agent transcript"),
-            ("resume", "Keep a hidden agent in navigation"),
+            ("suspend", "Exclude an active agent from navigation"),
+            ("resume", "Make a loaded agent always navigation-eligible"),
+            ("auto", "Make a loaded agent eligible only while running"),
             ("name", "Set an agent display name"),
         ]
     );
@@ -85,30 +95,10 @@ fn agent_new_takes_no_agent_id_completion() {
     assert!(completer(&["new", ""]).is_empty());
 }
 
-#[test]
-fn agent_suspend_resume_updates_prompt_routing_state_synchronously() {
-    // Regression: `/agent suspend` and `/agent resume` are initiated by the
-    // input thread, while the renderer applies the UI command later. Mirror
-    // the state immediately so a prompt entered on the next line observes
-    // the updated active/suspended sets without racing the renderer thread.
-    let routing = routing_state(
-        Arc::new(Mutex::new(vec!["worker".to_owned()])),
-        Arc::new(Mutex::new(std::collections::HashSet::from([
-            "worker".to_owned()
-        ]))),
-        Arc::new(Mutex::new(std::collections::HashSet::new())),
-    );
-    routing.mark_suspended("worker");
-    assert!(!routing.agent_is_active("worker"));
-    routing.mark_resumed("worker");
-    assert!(routing.agent_is_active("worker"));
-}
-
+/// Ensures `/suspend` resolves the selected target without optimistically
+/// mutating the authoritative cache.
 #[test]
 fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
-    // `/suspend` is a no-argument alias for suspending the selected agent. This
-    // verifies the command path updates prompt-routing state immediately and
-    // emits the renderer command used by `/agent suspend`.
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
     let live = Arc::new(Mutex::new(std::collections::HashSet::from([
         "worker".to_owned()
@@ -116,10 +106,9 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
     let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let routing = routing_state(known, live.clone(), suspended.clone());
     routing.set_selected_agent(Some("worker".to_owned()));
-    let (renderer_tx, renderer_rx) = mpsc::channel();
     let messages = Arc::new(Mutex::new(Vec::new()));
 
-    handle_agent_suspend_command(&routing, &renderer_tx, None, &|message| {
+    let target = handle_agent_suspend_command(&routing, None, &|message| {
         messages
             .lock()
             .expect("messages lock poisoned")
@@ -127,18 +116,14 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
     });
 
     assert!(messages.lock().expect("messages lock poisoned").is_empty());
-    assert!(!routing.agent_is_active("worker"));
-    match renderer_rx.try_recv().expect("renderer command") {
-        RendererCmd::SuspendAgent { agent_id } => assert_eq!(agent_id, "worker"),
-        _ => panic!("expected suspend renderer command"),
-    }
+    assert_eq!(target.as_deref(), Some("worker"));
+    assert!(routing.agent_is_active("worker"));
 }
 
+/// Ensures `/resume` resolves the selected suspended agent without changing the
+/// cache before the harness snapshot arrives.
 #[test]
 fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
-    // `/resume` is a no-argument alias for resuming the selected suspended
-    // agent. This catches regressions where the alias updates state but forgets
-    // to notify the renderer, or vice versa.
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
     let live = Arc::new(Mutex::new(std::collections::HashSet::from([
         "worker".to_owned()
@@ -148,10 +133,9 @@ fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
     ])));
     let routing = routing_state(known, live.clone(), suspended.clone());
     routing.set_selected_agent(Some("worker".to_owned()));
-    let (renderer_tx, renderer_rx) = mpsc::channel();
     let messages = Arc::new(Mutex::new(Vec::new()));
 
-    handle_agent_resume_command(&routing, &renderer_tx, None, &|message| {
+    let target = handle_agent_resume_command(&routing, None, &|message| {
         messages
             .lock()
             .expect("messages lock poisoned")
@@ -159,11 +143,8 @@ fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
     });
 
     assert!(messages.lock().expect("messages lock poisoned").is_empty());
-    assert!(routing.agent_is_active("worker"));
-    match renderer_rx.try_recv().expect("renderer command") {
-        RendererCmd::ResumeAgent { agent_id } => assert_eq!(agent_id, "worker"),
-        _ => panic!("expected resume renderer command"),
-    }
+    assert_eq!(target.as_deref(), Some("worker"));
+    assert!(!routing.agent_is_active("worker"));
 }
 
 #[test]
@@ -193,7 +174,12 @@ fn agent_mention_completer_offers_only_active_agents() {
 #[test]
 fn active_auto_completion_follows_runtime_state() {
     let mut navigation = AgentNavigation::default();
-    navigation.mark_active_auto_if_absent("helper");
+    navigation.mark_live("helper");
+    navigation.apply_stats(
+        "helper",
+        tau_proto::AgentNavigationMode::ActiveAuto,
+        tau_proto::AgentRuntimeState::Idle,
+    );
     let navigation = Arc::new(Mutex::new(navigation));
     let routing = InputRoutingState::new(
         Arc::new(Mutex::new(None)),
@@ -207,19 +193,21 @@ fn active_auto_completion_follows_runtime_state() {
     assert!(mentions(&[""]).is_empty());
     assert_eq!(agents(&["resume", ""])[0].value, "helper");
 
-    navigation
-        .lock()
-        .expect("agent navigation")
-        .update_runtime("helper", tau_proto::AgentRuntimeState::Running);
+    navigation.lock().expect("agent navigation").apply_stats(
+        "helper",
+        tau_proto::AgentNavigationMode::ActiveAuto,
+        tau_proto::AgentRuntimeState::Running,
+    );
     assert_eq!(mentions(&[""])[0].value, "helper");
     assert_eq!(agents(&["switch", ""])[1].value, "helper");
     assert_eq!(agents(&["suspend", ""])[0].value, "helper");
     assert!(agents(&["resume", ""]).is_empty());
 
-    navigation
-        .lock()
-        .expect("agent navigation")
-        .update_runtime("helper", tau_proto::AgentRuntimeState::Idle);
+    navigation.lock().expect("agent navigation").apply_stats(
+        "helper",
+        tau_proto::AgentNavigationMode::ActiveAuto,
+        tau_proto::AgentRuntimeState::Idle,
+    );
     assert!(mentions(&[""]).is_empty());
     assert_eq!(agents(&["resume", ""])[0].value, "helper");
 }

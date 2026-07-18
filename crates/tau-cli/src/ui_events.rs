@@ -97,6 +97,28 @@ pub(crate) fn set_agent_display_name(
     })
 }
 
+/// Build one uniquely correlated absolute shared-navigation mutation.
+pub(crate) fn set_agent_navigation_mode(
+    session_id: &str,
+    agent_id: tau_proto::AgentId,
+    action: tau_proto::UiAgentNavigationModeAction,
+) -> Event {
+    static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let nonce = time
+        ^ u64::from(process::id()).rotate_left(32)
+        ^ NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
+        request_id: format!("{nonce:016x}"),
+        session_id: session_id.into(),
+        agent_id,
+        action,
+    })
+}
+
 pub(crate) fn role_update(role: impl Into<String>, action: UiRoleUpdateAction) -> Event {
     Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
         role: role.into(),
@@ -125,3 +147,6 @@ pub(crate) fn shell_command(
         target_agent_id,
     })
 }
+
+#[cfg(test)]
+mod tests;

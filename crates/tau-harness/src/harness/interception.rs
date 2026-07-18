@@ -152,6 +152,8 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // live session state inconsistent with persisted membership.
     EventName::SESSION_AGENT_LOADED,
     EventName::SESSION_AGENT_UNLOADED,
+    // Complete current operational snapshots carry shared navigation authority.
+    EventName::AGENT_STATS_UPDATED,
     // Agent creation and message projection facts are harness-validated durable
     // transcript facts. Dropping or rewriting them after validation breaks
     // sender/recipient correlation and resume state.
@@ -251,6 +253,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
             | Event::SessionAgentUnloaded(_)
+            | Event::AgentStatsUpdated(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentCompacted(_)
             | Event::AgentStandaloneCompactionStarted(_)

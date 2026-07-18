@@ -94,3 +94,10 @@ or otherwise maintain state from prompt drafts must key that state by both
 `session_id` and `target_agent_id`. A missing `target_agent_id` means an
 unscoped/session-level draft, normally the start-new-agent prompt; consumers
 must not infer the current agent from absence.
+
+## Shared agent navigation mode
+
+Every `agent.stats_updated` complete operational snapshot carries a required
+navigation mode independently of runtime state. Transient
+`ui.set_agent_navigation_mode` requests absolute changes; requester-directed
+results acknowledge processing but do not replace the authoritative snapshot.

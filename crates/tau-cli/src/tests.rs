@@ -2712,6 +2712,14 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -2745,6 +2753,7 @@ fn agent_stats_does_not_overwrite_display_name() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer-Ab12"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
@@ -2776,9 +2785,18 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: Default::default(),
         context: Default::default(),
@@ -2810,6 +2828,7 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
         tools: Default::default(),
         context: Default::default(),
@@ -2821,6 +2840,78 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
         AgentNavigationState::ActiveAuto
     );
     assert!(!navigation.is_active("worker-1"));
+}
+
+/// Applies one complete authoritative navigation snapshot in renderer tests.
+fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::AgentNavigationMode) {
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        navigation_mode: mode,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+    }));
+}
+
+/// Ensures requester acknowledgements and diagnostics never become cache
+/// authority; only a subsequent complete stats snapshot changes navigation.
+#[test]
+fn navigation_mode_results_do_not_mutate_cache() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Suspended);
+    for outcome in [
+        tau_proto::UiSetAgentNavigationModeOutcome::Applied,
+        tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
+            reason: tau_proto::UiSetAgentNavigationModeRejection::StaleSession,
+        },
+        tau_proto::UiSetAgentNavigationModeOutcome::Rejected {
+            reason: tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded,
+        },
+    ] {
+        renderer.handle(&Event::UiSetAgentNavigationModeResult(
+            tau_proto::UiSetAgentNavigationModeResult {
+                request_id: "result".to_owned(),
+                session_id: "s1".into(),
+                agent_id: agent_id("worker-1"),
+                outcome,
+            },
+        ));
+        assert_eq!(
+            renderer
+                .agent_navigation()
+                .lock()
+                .expect("navigation")
+                .mode("worker-1"),
+            tau_proto::AgentNavigationMode::Suspended
+        );
+    }
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
+    assert_eq!(
+        renderer
+            .agent_navigation()
+            .lock()
+            .expect("navigation")
+            .mode("worker-1"),
+        tau_proto::AgentNavigationMode::Active
+    );
 }
 
 /// Ensures placeholder copy distinguishes idle automatic hiding from an
@@ -2839,6 +2930,22 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+    }));
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(100, "active-auto agent is idle"));
@@ -2846,7 +2953,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
     // its own redraw even when no model-status block is present to do so.
     renderer.clear_model_status_for_test();
     let generation = vt.frame_generation();
-    renderer.suspend_agent("worker-1");
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Suspended);
     let frame = vt.wait_for_frame_after(generation);
     assert!(
         frame
@@ -2854,7 +2961,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
             .any(|row| row.contains("This agent is suspended"))
     );
     let generation = vt.frame_generation();
-    renderer.resume_agent("worker-1".to_owned());
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
     let frame = vt.wait_for_frame_after(generation);
     assert!(
         frame
@@ -2881,18 +2988,18 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    {
-        let navigation = renderer.agent_navigation();
-        let navigation = navigation.lock().expect("agent navigation");
-        assert_eq!(
-            navigation.mode("worker-1"),
-            AgentNavigationState::ActiveAuto
-        );
-        assert!(!navigation.is_active("worker-1"));
-    }
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: Default::default(),
         context: Default::default(),
@@ -2911,8 +3018,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
     );
 }
 
-/// Ensures durable extension prompt provenance reconstructs the delegated
-/// default without overwriting a local explicit resume.
+/// Ensures prompt provenance cannot overwrite a harness-authored mode snapshot.
 #[test]
 fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
     let (_term, handle, _vt) = setup(80, 24);
@@ -2934,6 +3040,22 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         display_name: None,
         ctx_id: None,
     };
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker-1"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+    }));
     renderer.handle(&Event::AgentPromptSubmitted(prompt.clone()));
     assert_eq!(
         renderer
@@ -2943,7 +3065,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
             .mode("worker-1"),
         AgentNavigationState::ActiveAuto,
     );
-    renderer.resume_agent("worker-1".to_owned());
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
     renderer.handle(&Event::AgentPromptSubmitted(prompt));
     assert_eq!(
         renderer
@@ -2969,7 +3091,15 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         query_id: "q-worker-1".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    renderer.resume_agent("worker-1".to_owned());
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: Default::default(),
+        context: Default::default(),
+    }));
+    apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
     renderer.handle(&Event::SessionAgentUnloaded(
         tau_proto::SessionAgentUnloaded {
             session_id: "s1".into(),
@@ -2977,7 +3107,6 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         },
     ));
 
-    renderer.refresh_agent_navigation("worker-1");
     assert!(
         !renderer
             .agent_navigation()
@@ -2992,10 +3121,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
     }));
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
-    assert_eq!(
-        navigation.mode("worker-1"),
-        AgentNavigationState::ActiveAuto
-    );
+    assert_eq!(navigation.mode("worker-1"), AgentNavigationState::Active);
     assert!(!navigation.is_active("worker-1"));
 }
 
@@ -3194,6 +3320,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 1,
@@ -5820,6 +5947,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 2,
@@ -6887,6 +7015,7 @@ fn watched_agent_stats_redraw_active_indicator() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
@@ -7056,6 +7185,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
@@ -7075,6 +7205,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
@@ -7138,6 +7269,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
@@ -9205,6 +9337,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let stats = tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
         tools: tau_proto::AgentToolStats {
             in_flight: 1,

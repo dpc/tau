@@ -185,3 +185,10 @@ When reporting a vulnerability, include:
 
 Avoid sharing API keys, OAuth tokens, email contents, or other private data in
 reports.
+
+## Agent navigation modes
+
+Navigation modes are same-user UI control state with presentation-only effects.
+The harness accepts absolute mutations only through UI intake; extensions cannot
+mutate them. Modes do not authorize loading, routing, prompt delivery, watches,
+execution, or model access and are intentionally not durable.

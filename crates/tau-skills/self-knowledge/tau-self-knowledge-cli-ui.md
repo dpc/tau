@@ -102,3 +102,12 @@ to opt into fuzzy git path completion for `./<partial>`.
 `/retry` runs the selected agent's exact currently delayed provider retry now.
 It does not resubmit prompt text; if the provider no longer has that prompt
 parked, Tau reports that it may already be running.
+
+## Shared agent navigation modes
+
+Navigation classification is shared by UIs attached to the same daemon. Use
+`/agent suspend`, `/agent resume`, or `/agent auto` for absolute `suspended`,
+`active`, or `active-auto` modes. Selection, drafts, transcript view, and
+presentation remain local to each UI. Overrides survive UI reconnect while the
+agent remains loaded in the same daemon session; unload, session switch, and
+harness restart forget them.

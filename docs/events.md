@@ -643,3 +643,17 @@ the UI is the only consumer. Components without a terminal silently no-op.
   `accepted` or `not_parked` result for that exact prompt.
 - **`ui.retry_prompt_result`** — Requester-directed retry outcome, including
   harness-side validation failures and the captured target-agent label.
+
+## Shared agent navigation mode
+
+`agent.stats_updated` is a transient, must-pass, immutable complete operational
+snapshot for one loaded agent. Its required `navigation_mode` is independent of
+`runtime_state`, and current snapshots are delivered during catch-up before
+replay completion.
+
+UI clients request absolute `set_active`, `set_active_auto`, or `set_suspended`
+writes with transient `ui.set_agent_navigation_mode`. The harness validates the
+current session and loaded membership, broadcasts a fresh stats snapshot after
+accepted writes, and directs `ui.set_agent_navigation_mode_result` only to the
+requester. Event-loop order is last-accepted-write-wins. Results are diagnostics,
+not cache updates, and have no ordering guarantee relative to snapshots.
