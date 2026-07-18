@@ -5,6 +5,7 @@
 //! small [`ConnectionSink`] interface.
 
 mod action_registry;
+mod agent_checkpoint;
 mod agent_store;
 mod bus;
 mod connection;
@@ -20,6 +21,10 @@ mod tests;
 
 pub use action_registry::{
     ActionProviderSchema, ActionRegistry, ActionRegistryError, ActionRouteError,
+};
+pub use agent_checkpoint::{
+    AgentCheckpoint, AgentJournalCheckpoint, AgentListEntry, AgentListIdentity, AgentListStatus,
+    AgentSummary, list_agent_entries,
 };
 pub use agent_store::{
     AgentAppendOutcome, AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked,

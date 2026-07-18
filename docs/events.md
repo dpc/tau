@@ -223,6 +223,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   their event log; ephemeral agents replay it from memory only. It carries
   optional `parent_agent`; inheritable metadata from that parent is copied into
   the new agent after this fact commits and before the agent is announced loaded.
+- **`agent.user_interaction_recorded`** — Content-free durable fact committed
+  when a visible user submission is accepted, including a queued submission that
+  may later be recalled. The persisted record supplies the acceptance timestamp;
+  prompt text is intentionally not duplicated. Interceptors cannot drop,
+  replace, or retarget this fact.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested root or
   node target.

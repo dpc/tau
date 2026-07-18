@@ -130,3 +130,10 @@ Restored background-tool interruption notices are queued by session and owning
 agent. They must be folded only into the next real user prompt for the agent
 whose background call was repaired, so one loaded agent in a resumed session
 cannot consume or see another agent's restored background-tool notice.
+
+New durable agents commit `AgentStarted` as journal sequence zero before the
+harness publishes their route or session membership. Loading an existing agent
+into another session publishes membership but never appends a second creation
+fact. A sidecar-only artifact reserves its id but is not a semantic routing
+identity. See
+[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).

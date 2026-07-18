@@ -27,7 +27,7 @@ pub struct AgentEventValidationError {
 }
 
 impl AgentEventValidationError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -1203,6 +1203,7 @@ impl AgentTree {
     fn apply_side_state_event(&mut self, event: &Event) -> bool {
         match event {
             Event::AgentStarted(started) => self.apply_agent_started(started),
+            Event::AgentUserInteractionRecorded(_) => {}
             Event::AgentDisplayNameSet(name) => self.update_display_name(&name.display_name),
             Event::AgentMetadataSet(set) => {
                 self.metadata.insert(
@@ -1578,6 +1579,11 @@ impl AgentTree {
         match event {
             Event::AgentStarted(started) if started.agent_id == self.agent_id => {
                 Some(validate_optional_display_name(&started.display_name))
+            }
+            Event::AgentUserInteractionRecorded(interaction)
+                if interaction.agent_id == self.agent_id =>
+            {
+                Some(Ok(()))
             }
             Event::AgentDisplayNameSet(name) if name.agent_id == self.agent_id => {
                 Some(validate_display_name(&name.display_name))
@@ -2102,6 +2108,7 @@ impl AgentTree {
         matches!(
             event,
             Event::AgentStarted(_)
+                | Event::AgentUserInteractionRecorded(_)
                 | Event::AgentDisplayNameSet(_)
                 | Event::AgentPromptSubmitted(_)
                 | Event::AgentUserMessageInjected(_)

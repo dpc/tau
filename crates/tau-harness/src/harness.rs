@@ -1830,6 +1830,17 @@ pub struct Harness {
     /// session. Suspended agents remain here so `/agent resume` and follow-up
     /// prompts can continue their conversation.
     pub(crate) agent_routes: HashMap<String, AgentId>,
+    /// Harness-local acceptance order for visible user interactions.
+    ///
+    /// This is routing authority for untargeted live shell output; wall-clock
+    /// sidecars are deliberately not consulted.
+    user_interaction_order: HashMap<String, u64>,
+    /// Next process-local visible interaction ordinal.
+    next_user_interaction_order: u64,
+    /// Creation facts already committed before their normal publish pipeline.
+    precommitted_agent_starts: HashSet<String>,
+    /// Counts interaction facts durably committed before central delivery.
+    precommitted_user_interactions: HashMap<String, u64>,
     /// Agent ids already loaded, or with a must-pass membership publish queued,
     /// for the current session. This closes the race where interception parks
     /// `session.agent_loaded` before the durable session store can fold it.
@@ -2566,6 +2577,10 @@ impl Harness {
             prompt_agents: HashMap::new(),
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
+            user_interaction_order: HashMap::new(),
+            next_user_interaction_order: 1,
+            precommitted_agent_starts: HashSet::new(),
+            precommitted_user_interactions: HashMap::new(),
             session_loaded_agents: HashSet::new(),
             session_ever_loaded_agents: HashSet::new(),
             agent_watches: HashMap::new(),
@@ -4158,16 +4173,16 @@ impl Harness {
         let source = source.map(tau_proto::ConnectionId::from);
         let known_agent = event.message_agent_target().and_then(|target| {
             let agent_id = tau_proto::AgentId::parse(target.as_str()).ok()?;
-            let in_membership = self
-                .store
-                .session(self.current_session_id.as_str())
-                .is_some_and(|membership| membership.contains_agent(&agent_id));
             let has_live_route = self
-                .agents
-                .values()
-                .any(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()));
-            (in_membership || has_live_route || self.agent_store.agent_exists(agent_id.as_str()))
-                .then_some(agent_id)
+                .agent_routes
+                .get(agent_id.as_str())
+                .and_then(|cid| self.agents.get(cid))
+                .is_some_and(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()));
+            (has_live_route
+                || self
+                    .agent_store
+                    .agent_is_known_for_routing(agent_id.as_str()))
+            .then_some(agent_id)
         });
         if let Some(agent_id) = known_agent {
             let outcome = self.agent_store.append_agent_message_fact_at(
@@ -5417,6 +5432,26 @@ impl Harness {
         sync_head_for: Option<&ConversationHeadSync>,
         recorded_at: tau_proto::UnixMicros,
     ) -> Result<Option<tau_proto::NodeId>, HarnessError> {
+        if let Event::AgentStarted(started) = event
+            && self
+                .precommitted_agent_starts
+                .remove(started.agent_id.as_str())
+        {
+            return Ok(None);
+        }
+        if let Event::AgentUserInteractionRecorded(interaction) = event
+            && let Some(count) = self
+                .precommitted_user_interactions
+                .get_mut(interaction.agent_id.as_str())
+            && *count != 0
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.precommitted_user_interactions
+                    .remove(interaction.agent_id.as_str());
+            }
+            return Ok(None);
+        }
         if !semantic_event_router::should_persist_event(event, transient) {
             return Ok(None);
         }
@@ -9319,11 +9354,69 @@ impl Harness {
             PendingPrompt::human_ui(text.clone())
         }
         .with_ctx_id(prompt.ctx_id.clone());
-        let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
-        if !matches!(submission, PromptSubmission::Rejected { .. }) && is_user_interaction {
-            let _ = self.agent_store.record_agent_user_interaction(&agent_id);
+        let will_accept = prompt.session_id == self.current_session_id
+            && self
+                .agent_routes
+                .get(&agent_id)
+                .and_then(|cid| self.agents.get(cid))
+                .is_some_and(|agent| !agent.terminating);
+        if will_accept && is_user_interaction {
+            self.record_accepted_visible_user_interaction(&agent_id)?;
         }
+        let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
+        debug_assert_eq!(
+            matches!(submission, PromptSubmission::Rejected { .. }),
+            !will_accept
+        );
         Ok(true)
+    }
+
+    /// Record one accepted visible UI interaction without retaining its
+    /// content.
+    fn record_accepted_visible_user_interaction(
+        &mut self,
+        agent_id: &str,
+    ) -> Result<(), HarnessError> {
+        let event = Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+            agent_id: crate::parse_agent_id(agent_id),
+        });
+        let parent = self
+            .agent_routes
+            .get(agent_id)
+            .and_then(|cid| self.agents.get(cid))
+            .and_then(|agent| agent.head)
+            .map_or(
+                tau_core::AgentEventParent::Root,
+                tau_core::AgentEventParent::Under,
+            );
+        self.agent_store.append_agent_event_at(
+            agent_id,
+            None,
+            parent,
+            event.clone(),
+            tau_proto::UnixMicros::now(),
+        )?;
+        *self
+            .precommitted_user_interactions
+            .entry(agent_id.to_owned())
+            .or_default() += 1;
+        self.user_interaction_order
+            .insert(agent_id.to_owned(), self.next_user_interaction_order);
+        self.next_user_interaction_order = self.next_user_interaction_order.saturating_add(1);
+        self.enqueue_publish(
+            None,
+            event,
+            false,
+            true,
+            self.agent_routes
+                .get(agent_id)
+                .cloned()
+                .map(|cid| ConversationHeadSync {
+                    cid,
+                    agent_id: Some(crate::parse_agent_id(agent_id)),
+                }),
+        );
+        Ok(())
     }
 
     fn expand_user_skill_command(&mut self, text: &str) -> Option<String> {
@@ -9450,9 +9543,10 @@ impl Harness {
             },
             None => None,
         };
+        let is_user_initial_prompt = req.initial_prompt.is_some()
+            && req.originator.is_user()
+            && !req.message_class.is_internal();
         let initial_prompt = if let Some(initial_prompt) = req.initial_prompt {
-            let is_user_initial_prompt =
-                req.originator.is_user() && !req.message_class.is_internal();
             let initial_prompt = if is_user_initial_prompt {
                 let Some(text) = self.expand_user_skill_command(&initial_prompt) else {
                     return Ok(true);
@@ -9474,13 +9568,16 @@ impl Harness {
         } else {
             tau_core::AgentPersistenceMode::Durable
         };
-        let cid = self.create_user_agent_with_parent(
+        let cid = self.try_create_user_agent_with_parent(
             req.session_id.clone(),
             &req.role,
             parent_cid,
             req.metadata,
             persistence,
-        );
+        )?;
+        if is_user_initial_prompt && let Some(agent_id) = self.target_agent_id_for_agent(&cid) {
+            self.record_accepted_visible_user_interaction(&agent_id)?;
+        }
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.next_ctx_id = req.ctx_id.clone();
             conv.model_override = req.model_override;
@@ -9635,14 +9732,12 @@ impl Harness {
                     return None;
                 }
                 let agent_id = conv.agent_id.clone()?;
-                let last_user_interaction_time = self
-                    .agent_store
-                    .agent_meta(&agent_id)
-                    .ok()
-                    .flatten()
-                    .map(|meta| meta.last_user_interaction_time)
+                let interaction_order = self
+                    .user_interaction_order
+                    .get(&agent_id)
+                    .copied()
                     .unwrap_or_default();
-                Some((last_user_interaction_time, cid.clone(), agent_id))
+                Some((interaction_order, cid.clone(), agent_id))
             })
             .collect();
 
@@ -9657,7 +9752,17 @@ impl Harness {
                     return None;
                 }
                 let role = self.selected_role.clone();
-                let cid = self.create_durable_user_agent(self.current_session_id.clone(), &role);
+                let cid = match self
+                    .try_create_durable_user_agent(self.current_session_id.clone(), &role)
+                {
+                    Ok(cid) => cid,
+                    Err(error) => {
+                        self.emit_harness_failure(&format!(
+                            "failed to create shell-output target agent: {error}"
+                        ));
+                        return None;
+                    }
+                };
                 let agent_id = self
                     .agents
                     .get(&cid)
@@ -12022,7 +12127,19 @@ impl Harness {
                 .pending_start_agent_requests
                 .remove(idx)
                 .expect("index just located");
-            self.start_agent_request(pending)?;
+            let source_id = pending.source_id.clone();
+            let query_id = pending.query.query_id.clone();
+            let agent_id = pending.agent_id.clone();
+            if let Err(error) = self.start_agent_request(pending) {
+                self.emit_harness_failure(&format!(
+                    "failed to start accepted agent `{agent_id}`: {error}"
+                ));
+                self.fail_start_agent_request(
+                    &source_id,
+                    query_id,
+                    format!("failed to start agent `{agent_id}`"),
+                );
+            }
         }
     }
 
@@ -12117,6 +12234,36 @@ impl Harness {
             name: extension_name.clone().into(),
             query_id: query.query_id.clone(),
         };
+        let initial_metadata: Vec<_> = peer_entrypoint_endpoint
+            .then(|| tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new(
+                    crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
+                ),
+                value: CborValue::Bool(true),
+                inheritable: false,
+            })
+            .into_iter()
+            .collect();
+        let started = Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: crate::parse_agent_id(&agent_id),
+            parent_agent: parent_agent_id
+                .as_ref()
+                .and_then(|parent| self.target_agent_id_for_agent(parent))
+                .map(crate::parse_agent_id),
+            role: conversation_role
+                .clone()
+                .unwrap_or_else(|| self.selected_role.clone()),
+            display_name: display_name.clone(),
+            metadata: initial_metadata.clone(),
+            ephemeral: persistence.is_ephemeral(),
+        });
+        self.agent_store.append_agent_event_at(
+            &agent_id,
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            started.clone(),
+            tau_proto::UnixMicros::now(),
+        )?;
         let mut conv = Agent::new(
             cid.clone(),
             session_id.clone(),
@@ -12139,16 +12286,17 @@ impl Harness {
         conv.pending_prompts = pending_agent_messages;
         self.agent_routes.insert(agent_id.clone(), cid.clone());
         self.agents.insert(cid.clone(), conv);
-        let initial_metadata = peer_entrypoint_endpoint
-            .then(|| tau_proto::AgentInitialMetadata {
-                key: tau_proto::AgentMetadataKey::new(
-                    crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
-                ),
-                value: CborValue::Bool(true),
-                inheritable: false,
-            })
-            .into_iter()
-            .collect();
+        self.precommitted_agent_starts.insert(agent_id.clone());
+        self.enqueue_publish(
+            None,
+            started,
+            false,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(crate::parse_agent_id(&agent_id)),
+            }),
+        );
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, initial_metadata);
         if let Some(display_name) = self
             .agents
@@ -13704,10 +13852,11 @@ impl Harness {
                     && conv.agent_id.is_some())
                 .then_some(cid.clone())
             })
+            .map(Ok)
             .unwrap_or_else(|| {
                 let role = self.selected_role.clone();
-                self.create_durable_user_agent(session_id.clone(), &role)
-            });
+                self.try_create_durable_user_agent(session_id.clone(), &role)
+            })?;
         self.preempt_blocking_ext_side_agents(&session_id);
         if !self.session_initialized(&session_id)
             || (self.selected_model.is_none() && self.provider_model_info.is_empty())
@@ -15304,9 +15453,24 @@ impl Harness {
             };
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
-            if let Err(error) = self.agent_store.load_agent(agent_id.as_str()) {
+            match self.agent_store.load_agent(agent_id.as_str()) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.emit_harness_failure(&format!(
+                        "failed to load restored agent `{agent_id}`: journal is missing"
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    self.emit_harness_failure(&format!(
+                        "failed to load restored agent `{agent_id}`: {error}"
+                    ));
+                    continue;
+                }
+            }
+            if !self.agent_store.agent_has_committed_identity(&agent_id) {
                 self.emit_harness_failure(&format!(
-                    "failed to load restored agent `{agent_id}`: {error}"
+                    "failed to load restored agent `{agent_id}`: journal has no committed creation"
                 ));
                 continue;
             }
@@ -16104,22 +16268,32 @@ impl Harness {
         self.emit_info_important(&message);
     }
 
+    #[cfg(test)]
     pub(crate) fn create_durable_user_agent(
         &mut self,
         session_id: SessionId,
         role: &str,
     ) -> AgentId {
-        self.create_durable_user_agent_with_parent(session_id, role, None, Vec::new())
+        self.try_create_durable_user_agent(session_id, role)
+            .expect("test agent creation")
     }
 
-    pub(crate) fn create_durable_user_agent_with_parent(
+    fn try_create_durable_user_agent(
+        &mut self,
+        session_id: SessionId,
+        role: &str,
+    ) -> Result<AgentId, HarnessError> {
+        self.try_create_durable_user_agent_with_parent(session_id, role, None, Vec::new())
+    }
+
+    fn try_create_durable_user_agent_with_parent(
         &mut self,
         session_id: SessionId,
         role: &str,
         parent_cid: Option<AgentId>,
         metadata: Vec<tau_proto::AgentInitialMetadata>,
-    ) -> AgentId {
-        self.create_user_agent_with_parent(
+    ) -> Result<AgentId, HarnessError> {
+        self.try_create_user_agent_with_parent(
             session_id,
             role,
             parent_cid,
@@ -16128,22 +16302,42 @@ impl Harness {
         )
     }
 
-    pub(crate) fn create_user_agent_with_parent(
+    fn try_create_user_agent_with_parent(
         &mut self,
         session_id: SessionId,
         role: &str,
         parent_cid: Option<AgentId>,
         metadata: Vec<tau_proto::AgentInitialMetadata>,
         persistence: tau_core::AgentPersistenceMode,
-    ) -> AgentId {
+    ) -> Result<AgentId, HarnessError> {
         let agent_id = self.mint_available_agent_id_for_role(role);
         if persistence.is_ephemeral() {
-            self.agent_store
-                .mark_agent_ephemeral(&agent_id)
-                .expect("freshly minted agent id can be marked ephemeral");
+            self.agent_store.mark_agent_ephemeral(&agent_id)?;
         }
         let display_name = self.display_name_for_new_agent(&agent_id, role, None);
         let cid: AgentId = crate::parse_agent_id(&agent_id);
+        let started = Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: crate::parse_agent_id(&agent_id),
+            parent_agent: parent_cid
+                .as_ref()
+                .and_then(|parent| self.agents.get(parent))
+                .and_then(|agent| agent.agent_id.as_deref())
+                .map(crate::parse_agent_id),
+            role: role.to_owned(),
+            display_name: normalize_display_name(display_name.as_deref()),
+            metadata: metadata.clone(),
+            ephemeral: persistence.is_ephemeral(),
+        });
+        self.agent_store.append_agent_event_at(
+            &agent_id,
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            started.clone(),
+            tau_proto::UnixMicros::now(),
+        )?;
+        self.session_ever_loaded_agents
+            .insert(crate::parse_agent_id(&agent_id));
+        self.precommitted_agent_starts.insert(agent_id.clone());
         let mut conv = Agent::new(
             cid.clone(),
             session_id,
@@ -16157,11 +16351,20 @@ impl Harness {
         conv.display_name = display_name;
         conv.persistence = persistence;
         self.agents.insert(cid.clone(), conv);
+        self.enqueue_publish(
+            None,
+            started,
+            false,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(crate::parse_agent_id(&agent_id)),
+            }),
+        );
         self.publish_delegate_roles_context();
-        let _ = self.agent_store.record_agent_meta(&agent_id);
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, metadata);
         self.insert_agents_context_for_agent(&cid, &agent_id);
-        cid
+        Ok(cid)
     }
 
     pub(crate) fn ensure_agent_id_for_agent(&mut self, cid: &AgentId) -> Option<String> {
@@ -16181,17 +16384,57 @@ impl Harness {
             .get(cid)
             .map(|conv| conv.persistence)
             .unwrap_or_default();
-        if persistence.is_ephemeral() {
-            self.agent_store
-                .mark_agent_ephemeral(&agent_id)
-                .expect("freshly minted agent id can be marked ephemeral");
+        if persistence.is_ephemeral()
+            && let Err(error) = self.agent_store.mark_agent_ephemeral(&agent_id)
+        {
+            self.emit_harness_failure(&format!(
+                "failed to reserve ephemeral agent `{agent_id}`: {error}"
+            ));
+            return None;
         }
+        let started = Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: crate::parse_agent_id(&agent_id),
+            parent_agent: self.parent_agent_id_for_cid(cid),
+            role: role.clone(),
+            display_name: normalize_display_name(display_name.as_deref()).or_else(|| {
+                self.agents
+                    .get(cid)
+                    .and_then(|agent| normalize_display_name(agent.display_name.as_deref()))
+            }),
+            metadata: Vec::new(),
+            ephemeral: persistence.is_ephemeral(),
+        });
+        if let Err(error) = self.agent_store.append_agent_event_at(
+            &agent_id,
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            started.clone(),
+            tau_proto::UnixMicros::now(),
+        ) {
+            self.emit_harness_failure(&format!(
+                "failed to commit creation for agent `{agent_id}`: {error}"
+            ));
+            return None;
+        }
+        self.session_ever_loaded_agents
+            .insert(crate::parse_agent_id(&agent_id));
+        self.precommitted_agent_starts.insert(agent_id.clone());
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.agent_id = Some(agent_id.clone());
             if normalize_display_name(conv.display_name.as_deref()).is_none() {
                 conv.display_name = display_name;
             }
         }
+        self.enqueue_publish(
+            None,
+            started,
+            false,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(crate::parse_agent_id(&agent_id)),
+            }),
+        );
         self.ensure_loaded_agent_for_agent(cid, &agent_id);
         self.emit_agent_stats_updated(cid);
         Some(agent_id)
@@ -16225,6 +16468,57 @@ impl Harness {
         initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
     ) {
         self.stopped_agent_ids.remove(agent_id);
+        let agent_id_proto = crate::parse_agent_id(agent_id);
+        let has_creation = self
+            .agent_store
+            .agent_has_committed_identity(&agent_id_proto);
+        if !has_creation {
+            let persistence = self
+                .agents
+                .get(cid)
+                .map(|agent| agent.persistence)
+                .unwrap_or_default();
+            let started = Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: crate::parse_agent_id(agent_id),
+                parent_agent: self.parent_agent_id_for_cid(cid),
+                role: self
+                    .agents
+                    .get(cid)
+                    .map(|agent| self.role_name_for_agent(agent))
+                    .unwrap_or_else(|| self.selected_role.clone()),
+                display_name: self
+                    .agents
+                    .get(cid)
+                    .and_then(|agent| normalize_display_name(agent.display_name.as_deref())),
+                metadata: initial_metadata.clone(),
+                ephemeral: persistence.is_ephemeral(),
+            });
+            if let Err(error) = self.agent_store.append_agent_event_at(
+                agent_id,
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                started.clone(),
+                tau_proto::UnixMicros::now(),
+            ) {
+                self.emit_harness_failure(&format!(
+                    "failed to commit creation for agent `{agent_id}`: {error}"
+                ));
+                return;
+            }
+            self.precommitted_agent_starts.insert(agent_id.to_owned());
+            self.enqueue_publish(
+                None,
+                started,
+                false,
+                true,
+                Some(ConversationHeadSync {
+                    cid: cid.clone(),
+                    agent_id: Some(crate::parse_agent_id(agent_id)),
+                }),
+            );
+        }
+        // New agents reached this point only after their creation record
+        // committed; existing agents already have validated journal identity.
         self.agent_routes.insert(agent_id.to_owned(), cid.clone());
         let role = self
             .agents
@@ -16235,8 +16529,6 @@ impl Harness {
             .get(cid)
             .map(|conv| conv.persistence)
             .unwrap_or_default();
-        let _ = self.agent_store.record_agent_meta(agent_id);
-        let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
         let prompt_index_initialized = self
             .agents
             .get(cid)
@@ -16284,29 +16576,7 @@ impl Harness {
                 self.pending_agent_context_ready
                     .insert(agent_id_proto.clone(), waiting_on);
             }
-            if let Some(role) = role.as_deref() {
-                let started = Event::AgentStarted(tau_proto::AgentStarted {
-                    agent_id: agent_id_proto.clone(),
-                    parent_agent: self.parent_agent_id_for_cid(cid),
-                    role: role.to_owned(),
-                    display_name: self
-                        .agents
-                        .get(cid)
-                        .and_then(|conv| normalize_display_name(conv.display_name.as_deref())),
-                    metadata: initial_metadata,
-                    ephemeral: persistence.is_ephemeral(),
-                });
-                self.enqueue_publish(
-                    None,
-                    started,
-                    false,
-                    false,
-                    Some(ConversationHeadSync {
-                        cid: cid.clone(),
-                        agent_id: Some(agent_id_proto.clone()),
-                    }),
-                );
-            }
+            let _ = (role, initial_metadata);
             for (key, entry) in self.inherited_metadata_for_cid(cid) {
                 self.enqueue_publish(
                     None,
@@ -20176,7 +20446,7 @@ impl Harness {
         harness.selected_model = Some("test/model".parse().expect("model id"));
 
         let role = harness.selected_role.clone();
-        let cid = harness.create_durable_user_agent("s1".into(), &role);
+        let cid = harness.try_create_durable_user_agent("s1".into(), &role)?;
         let agent_id = harness
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");

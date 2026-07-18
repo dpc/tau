@@ -17,3 +17,6 @@ NUL, and the reserved `.` and `..` names.
 
 Durability mode is governed by
 [DECISION-tau-core-semantic-store-durability](DECISION-tau-core-semantic-store-durability.md).
+Per-agent listing checkpoints and their journal-authority boundary are governed
+by
+[DECISION-tau-core-agent-summary-checkpoints](DECISION-tau-core-agent-summary-checkpoints.md).

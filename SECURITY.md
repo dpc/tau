@@ -18,6 +18,23 @@ remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
 work, and spend.
 
+## Agent journals and summary checkpoints
+
+Per-agent `events.cbor` journals are authoritative durable identity and
+transcript state. Their `meta.json` files are content-minimized, atomically
+replaced derived checkpoints, not routing authority. Checkpoints bind an exact
+frame boundary and sequence to journal file identity and a boundary witness;
+stale or invalid checkpoints are repaired only under nonblocking byte, record,
+and time budgets. Metadata-only, empty, corrupt, or otherwise unvalidated
+artifacts reserve ids but cannot receive routed facts.
+
+Summary files intentionally omit prompt previews. Legacy preview-bearing
+sidecars are unverified hints and are scrubbed when strict journal migration can
+acquire the agent lock. Repair never rewrites or salvages a journal, and failure
+to publish derived metadata does not invalidate an already committed record.
+This is cooperative same-UID crash consistency, not tamper detection: arbitrary
+same-inode/same-size journal mutation is outside the append-only store contract.
+
 ## Agent display names
 
 Agent display/task names are presentation-only metadata, never routing or trust

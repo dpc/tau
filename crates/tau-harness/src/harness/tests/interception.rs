@@ -2170,6 +2170,73 @@ fn interception_replacement_of_agent_started_publishes_original() {
     assert_eq!(persisted_agent_started_events(&h), vec![started]);
 }
 
+/// Accepted-visible interaction facts bind the monotonic live-routing update to
+/// the same agent whose durable summary advances; interceptors must not
+/// retarget that content-free fact.
+#[test]
+fn interception_cannot_retarget_user_interaction_fact() {
+    let original = Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+        agent_id: crate::parse_agent_id("agent-1"),
+    });
+    let replacement =
+        Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+            agent_id: crate::parse_agent_id("agent-2"),
+        });
+
+    assert!(
+        crate::harness::interception::immutable_protected_fact_was_modified(
+            &original,
+            &replacement,
+        )
+    );
+}
+
+/// Visible UI acceptance durably records its content-free timestamp before the
+/// corresponding prompt can remain parked in interception.
+#[test]
+fn parked_ui_prompt_has_precommitted_interaction_fact() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h
+        .agents
+        .get(&cid)
+        .and_then(|agent| agent.agent_id.clone())
+        .expect("agent id");
+    let _interceptor = connect_test_tool(&mut h, "interaction-interceptor");
+    h.handle_extension_event(
+        "interaction-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_ui_prompt_submitted(tau_proto::UiPromptSubmitted {
+        session_id: h.current_session_id.clone(),
+        text: "park me".to_owned(),
+        agent_id: crate::parse_agent_id(&agent_id),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("accept visible prompt");
+
+    assert!(h.pending_intercept.is_some(), "prompt remains parked");
+    let interactions: Vec<_> = h
+        .agent_store
+        .agent_events(&agent_id)
+        .expect("agent journal")
+        .into_iter()
+        .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
+        .collect();
+    assert_eq!(interactions.len(), 1);
+    assert_ne!(interactions[0].recorded_at.get(), 0);
+}
+
 fn session_agent_loaded_event(agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         session_id: "session-intercept".into(),

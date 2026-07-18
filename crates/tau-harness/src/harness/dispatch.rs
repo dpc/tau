@@ -38,10 +38,11 @@ impl Harness {
                     && conv.agent_id.is_some())
                 .then_some(cid.clone())
             })
+            .map(Ok)
             .unwrap_or_else(|| {
                 let role = self.selected_role.clone();
-                self.create_durable_user_agent(session_id, &role)
-            });
+                self.try_create_durable_user_agent(session_id, &role)
+            })?;
         self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::human_ui(text))
     }
 

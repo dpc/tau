@@ -388,6 +388,8 @@ impl EventName {
     pub const AGENT_INFERENCE_DISPATCH_STARTED: Self =
         Self::from_static(EventCategory::Agent, "inference_dispatch_started");
     pub const AGENT_STARTED: Self = Self::from_static(EventCategory::Agent, "started");
+    pub const AGENT_USER_INTERACTION_RECORDED: Self =
+        Self::from_static(EventCategory::Agent, "user_interaction_recorded");
     pub const AGENT_DISPLAY_NAME_SET: Self =
         Self::from_static(EventCategory::Agent, "display_name_set");
     pub const AGENT_METADATA_SET: Self = Self::from_static(EventCategory::Agent, "metadata_set");

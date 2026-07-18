@@ -15,6 +15,8 @@ Strict durable validation avoids silently accepting corrupted or spliced state;
 the tradeoff is that invalid journals block replay and require explicit recovery.
 
 Store ownership and overlays are described by [ARCH-tau-core](ARCH-tau-core.md).
+Derived agent listing state is described by
+[DECISION-tau-core-agent-summary-checkpoints](DECISION-tau-core-agent-summary-checkpoints.md).
 Persistence and replay behavior is specified by
 [SPEC-tau-harness-session-state](../../tau-harness/specs/SPEC-tau-harness-session-state.md),
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md),

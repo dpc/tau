@@ -1,5 +1,12 @@
 # SPEC-tau-harness-prompt-dispatch: Prompt Dispatch
 
+Every accepted visible UI submission commits a content-free
+`agent.user_interaction_recorded` fact, including an accepted queued prompt that
+may later be recalled. Live untargeted shell output chooses among user agents by
+the harness-local monotonic acceptance order; it never treats a derived
+`meta.json` wall-clock value as routing authority. These rules refine
+[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+
 ## Prompt capability snapshot
 
 Prompt capability conditionals use one turn-local snapshot. Tau resolves the

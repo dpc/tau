@@ -23,6 +23,10 @@ use tau_proto::{
     UnixMicros,
 };
 
+use crate::agent_checkpoint::{
+    AgentCheckpoint, AgentSummary, CommittedJournalPosition, journal_position, read_checkpoint,
+    write_checkpoint_atomic,
+};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
     PersistedAgentEventSeq,
@@ -283,12 +287,19 @@ pub struct AgentAppendOutcome {
 pub struct AgentStore {
     agents_dir: PathBuf,
     agents: HashMap<AgentId, AgentTree>,
+    /// Agents whose validated stream begins with their immutable creation fact.
+    created_agents: HashSet<AgentId>,
     /// Memory-only agent ids owned by this process.
     ephemeral_agents: HashSet<AgentId>,
     /// Replay records for memory-only agents.
     ephemeral_events: HashMap<AgentId, Vec<PersistedAgentEvent>>,
     /// Sidecar metadata for memory-only agents.
     ephemeral_meta: HashMap<AgentId, AgentMeta>,
+    /// Journal-derived summaries retained alongside loaded durable trees.
+    summaries: HashMap<AgentId, AgentSummary>,
+    /// Agents whose latest derived checkpoint could not be atomically
+    /// published.
+    dirty_checkpoints: HashSet<AgentId>,
     /// Held flocks per agent, acquired lazily on first write. Released
     /// when this store is dropped (the OS releases the flock when the
     /// file handle closes).
@@ -348,9 +359,12 @@ impl AgentStore {
         Ok(Self {
             agents_dir,
             agents: HashMap::new(),
+            created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_meta: HashMap::new(),
+            summaries: HashMap::new(),
+            dirty_checkpoints: HashSet::new(),
             locks: HashMap::new(),
         })
     }
@@ -367,9 +381,60 @@ impl AgentStore {
         if !events_path.exists() {
             return Ok(());
         }
+        // A temporary nonblocking lock lets an ordinary strict load migrate a
+        // stable legacy/missing checkpoint without contending with a daemon.
+        // Writers already retain the same lock in `self.locks`.
+        let temporary_lock = if self.locks.contains_key(&aid) {
+            None
+        } else {
+            let lock_path = self.agent_dir(agent_id).join("lock");
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).write(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options
+                .open(lock_path)
+                .ok()
+                .filter(|file| FileExt::try_lock_exclusive(file).is_ok())
+        };
         let events = load_agent_events(&events_path)?;
         let tree = AgentTree::try_from_events(aid.clone(), &events)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        if records_begin_with_creation(&aid, &events) {
+            self.created_agents.insert(aid.clone());
+        }
+        let mut summary = AgentSummary::default();
+        for record in &events {
+            summary.apply(record);
+        }
+        if records_begin_with_creation(&aid, &events)
+            && (self.locks.contains_key(&aid) || temporary_lock.is_some())
+        {
+            let migration = (|| -> io::Result<()> {
+                let mut journal = File::open(&events_path)?;
+                let position = journal_position(&mut journal)?;
+                let checkpoint = AgentCheckpoint::new(
+                    aid.clone(),
+                    summary.clone(),
+                    PersistedAgentEventSeq::new(events.len() as u64),
+                    &position,
+                );
+                write_checkpoint_atomic(&self.agent_dir(agent_id).join("meta.json"), &checkpoint)
+            })();
+            if let Err(error) = migration {
+                self.dirty_checkpoints.insert(aid.clone());
+                eprintln!(
+                    "tau: agent checkpoint migration failed for {}: {error}",
+                    aid.as_str()
+                );
+            } else {
+                self.dirty_checkpoints.remove(&aid);
+            }
+        }
+        self.summaries.insert(aid.clone(), summary);
         self.agents.insert(aid, tree);
         Ok(())
     }
@@ -385,7 +450,7 @@ impl AgentStore {
     /// A durable `events.cbor` log or `meta.json` sidecar reserves the
     /// id even when this lazy store has not loaded that agent yet.
     #[must_use]
-    pub fn agent_exists(&self, agent_id: &str) -> bool {
+    pub fn agent_id_is_reserved(&self, agent_id: &str) -> bool {
         let Ok(aid) = AgentId::parse(agent_id) else {
             return false;
         };
@@ -395,8 +460,46 @@ impl AgentStore {
         if self.ephemeral_agents.contains(&aid) {
             return true;
         }
-        let agent_dir = self.agent_dir(agent_id);
-        agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists()
+        self.agent_dir(agent_id).exists()
+    }
+
+    /// Returns whether an agent has a loaded or journal-backed semantic
+    /// identity.
+    ///
+    /// A `meta.json`-only artifact deliberately does not satisfy this routing
+    /// predicate.
+    #[must_use]
+    pub fn agent_is_known_for_routing(&self, agent_id: &str) -> bool {
+        let Ok(aid) = AgentId::parse(agent_id) else {
+            return false;
+        };
+        self.agent_has_committed_identity(&aid)
+    }
+
+    /// Returns whether strict history starts with the agent's creation fact.
+    ///
+    /// Empty cached trees and zero-length journal artifacts are deliberately
+    /// excluded: they reserve an id but cannot establish routing identity.
+    #[must_use]
+    pub fn agent_has_committed_identity(&self, agent_id: &AgentId) -> bool {
+        if self.created_agents.contains(agent_id) {
+            return true;
+        }
+        if let Some(events) = self.ephemeral_events.get(agent_id) {
+            return records_begin_with_creation(agent_id, events);
+        }
+        let path = self.agent_dir(agent_id.as_str()).join("events.cbor");
+        let Ok(events) = load_agent_events(&path) else {
+            return false;
+        };
+        records_begin_with_creation(agent_id, &events)
+            && AgentTree::try_from_events(agent_id.clone(), &events).is_ok()
+    }
+
+    /// Compatibility alias for conservative id reservation.
+    #[must_use]
+    pub fn agent_exists(&self, agent_id: &str) -> bool {
+        self.agent_id_is_reserved(agent_id)
     }
 
     /// Marks an agent id as memory-only before its first transcript write.
@@ -408,7 +511,7 @@ impl AgentStore {
     pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
-        if agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists() {
+        if agent_dir.exists() {
             return Err(AgentStoreError::PersistenceConflict {
                 agent_id: aid,
                 path: agent_dir,
@@ -445,6 +548,16 @@ impl AgentStore {
                 source,
             }
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&agent_dir, fs::Permissions::from_mode(0o700)).map_err(
+                |source| AgentStoreError::Write {
+                    path: agent_dir.clone(),
+                    source,
+                },
+            )?;
+        }
         let lock_path = agent_dir.join("lock");
         let mut file = OpenOptions::new()
             .create(true)
@@ -551,6 +664,13 @@ impl AgentStore {
             .agents
             .entry(sid.clone())
             .or_insert_with(|| AgentTree::from_events(sid.clone(), &[]));
+        if matches!(event, Event::AgentStarted(_)) && tree.next_event_seq().get() != 0 {
+            return Err(AgentStoreError::InvalidEvent {
+                source: AgentEventValidationError::new(
+                    "AgentStarted is only valid as the first journal record",
+                ),
+            });
+        }
         tree.validate_event_at(parent, &event)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         // Cached: `from_events` populated this from the highest
@@ -565,22 +685,31 @@ impl AgentStore {
             parent,
             recorded_at,
         };
-        if persistence.is_durable() {
-            append_cbor_record(&agent_dir.join("events.cbor"), &record)?;
+        let committed_position = if persistence.is_durable() {
+            Some(append_cbor_record(&agent_dir.join("events.cbor"), &record)?)
         } else {
             self.ephemeral_events
                 .entry(sid.clone())
                 .or_default()
-                .push(record);
-        }
+                .push(record.clone());
+            None
+        };
 
         let folded_node_id = tree.apply_event_at(parent, &event);
         tree.advance_next_event_seq();
+        if matches!(event, Event::AgentStarted(_)) {
+            self.created_agents.insert(sid.clone());
+        }
         // Sidecar metadata is derived from the event stream. Do not let a
         // sidecar write failure make the caller retry this already-persisted
         // durable sequence and create a duplicate record.
-        if persistence.is_durable() {
-            let _ = touch_meta_for_event(&agent_dir.join("meta.json"), &event);
+        if let Some(position) = committed_position {
+            let summary = {
+                let summary = self.summaries.entry(sid.clone()).or_default();
+                summary.apply(&record);
+                summary.clone()
+            };
+            self.publish_checkpoint(&sid, summary, &position);
         } else {
             touch_ephemeral_meta_for_event(
                 self.ephemeral_meta.entry(sid).or_default(),
@@ -655,17 +784,35 @@ impl AgentStore {
             parent: AgentEventParent::InheritHead,
             recorded_at,
         };
-        if persistence.is_durable() {
-            append_cbor_record(&agent_dir.join("events.cbor"), &record)?;
+        let committed_position = if persistence.is_durable() {
+            Some(append_cbor_record(&agent_dir.join("events.cbor"), &record)?)
         } else {
-            self.ephemeral_events.entry(aid).or_default().push(record);
-        }
+            self.ephemeral_events
+                .entry(aid.clone())
+                .or_default()
+                .push(record.clone());
+            None
+        };
         let folded_node_id = tau_proto::project_message_fact(&event)
             .and_then(Result::ok)
             .and_then(|projection| {
                 tree.record_committed_message_fact(Box::new(projection.item), seq)
             });
         tree.advance_next_event_seq();
+        if let Some(position) = committed_position {
+            let summary = {
+                let summary = self.summaries.entry(aid.clone()).or_default();
+                summary.apply(&record);
+                summary.clone()
+            };
+            self.publish_checkpoint(&aid, summary, &position);
+        } else {
+            touch_ephemeral_meta_for_event(
+                self.ephemeral_meta.entry(aid).or_default(),
+                &event,
+                recorded_at.get() / 1_000_000,
+            );
+        }
         Ok(AgentAppendOutcome {
             seq,
             folded_node_id,
@@ -782,16 +929,30 @@ impl AgentStore {
             return Ok(self.ephemeral_meta.get(&parsed_agent_id).cloned());
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("meta.json");
-        match read_meta(&path) {
-            Ok(meta) => Ok(Some(meta)),
+        match read_checkpoint(&path) {
+            Ok(checkpoint) if checkpoint.agent_id == parsed_agent_id => {
+                Ok(Some(checkpoint.summary.legacy_view()))
+            }
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "agent checkpoint id mismatch",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => match read_meta(&path) {
+                Ok(mut meta) => {
+                    meta.latest_user_prompt_preview = None;
+                    Ok(Some(meta))
+                }
+                Err(error) => Err(error),
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
 
-    /// Records sidecar metadata timestamps for an agent.
+    /// Initializes process-local metadata for an ephemeral agent.
     ///
-    /// Idempotent: subsequent calls only update `last_touched`.
+    /// Durable agents intentionally ignore this legacy compatibility call:
+    /// their checkpoint can only be created from journal facts.
     pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         if self.ephemeral_agents.contains(&aid) {
@@ -802,21 +963,12 @@ impl AgentStore {
             );
             return Ok(());
         }
-        self.ensure_locked(agent_id)?;
-        let path = self.agent_dir(agent_id).join("meta.json");
-        let now = unix_now();
-        let mut meta = read_meta(&path).unwrap_or_default();
-        if meta.created_at == 0 {
-            meta.created_at = now;
-        }
-        meta.last_touched = now;
-        if meta.last_user_interaction_time == 0 {
-            meta.last_user_interaction_time = now;
-        }
-        write_meta(&path, &meta)
+        // Durable metadata is now exclusively a projection of journal facts.
+        // Creation commits `AgentStarted`; a metadata-only identity is forbidden.
+        Ok(())
     }
 
-    /// Records that a human user interacted with an existing agent.
+    /// Appends the content-free fact that a human interacted with an agent.
     pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         if self.ephemeral_agents.contains(&aid) {
@@ -826,18 +978,43 @@ impl AgentStore {
             meta.last_user_interaction_time = now;
             return Ok(());
         }
-        self.ensure_locked(agent_id)?;
-        let path = self.agent_dir(agent_id).join("meta.json");
-        let now = unix_now();
-        let mut meta = read_meta(&path).unwrap_or_default();
-        if meta.created_at == 0 {
-            meta.created_at = now;
+        self.append_agent_event(
+            agent_id,
+            None,
+            Event::AgentUserInteractionRecorded(tau_proto::AgentUserInteractionRecorded {
+                agent_id: aid,
+            }),
+        )
+        .map(|_| ())
+    }
+
+    fn publish_checkpoint(
+        &mut self,
+        agent_id: &AgentId,
+        summary: AgentSummary,
+        position: &CommittedJournalPosition,
+    ) {
+        // A sidecar is a proof of semantic identity. Creationless artifacts
+        // remain reserved and visible, but must go through strict rebuild
+        // validation rather than acquiring a trusted Fresh checkpoint.
+        if !self.created_agents.contains(agent_id) {
+            return;
         }
-        if meta.last_touched == 0 {
-            meta.last_touched = now;
+        let next_seq = self
+            .agents
+            .get(agent_id)
+            .map_or(PersistedAgentEventSeq::new(0), AgentTree::next_event_seq);
+        let checkpoint = AgentCheckpoint::new(agent_id.clone(), summary, next_seq, position);
+        let path = self.agent_dir(agent_id.as_str()).join("meta.json");
+        if let Err(error) = write_checkpoint_atomic(&path, &checkpoint) {
+            self.dirty_checkpoints.insert(agent_id.clone());
+            eprintln!(
+                "tau: agent checkpoint update failed for {}: {error}",
+                agent_id.as_str()
+            );
+        } else {
+            self.dirty_checkpoints.remove(agent_id);
         }
-        meta.last_user_interaction_time = now;
-        write_meta(&path, &meta)
     }
 }
 
@@ -850,41 +1027,16 @@ impl AgentStore {
 /// invisible to operators. The goal is best-effort discovery for
 /// `-r` resumption, not strict listing.
 pub fn list_agent_metas(agents_dir: &Path) -> io::Result<Vec<(AgentId, AgentMeta)>> {
-    let mut out = Vec::new();
-    if !agents_dir.exists() {
-        return Ok(out);
-    }
-    for entry in fs::read_dir(agents_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let meta_path = path.join("meta.json");
-        let meta = match read_meta(&meta_path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                eprintln!(
-                    "tau: skipping agent {name}: failed to read {}: {error}",
-                    meta_path.display()
-                );
-                continue;
-            }
-        };
-        let agent_id = match AgentId::parse(name) {
-            Ok(agent_id) => agent_id,
-            Err(error) => {
-                eprintln!("tau: skipping agent {name}: invalid agent id: {error}");
-                continue;
-            }
-        };
-        out.push((agent_id, meta));
-    }
-    Ok(out)
+    crate::list_agent_entries(agents_dir).map(|entries| {
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .summary
+                    .map(|summary| (entry.id, summary.legacy_view()))
+            })
+            .collect()
+    })
 }
 
 /// Best-effort check whether an agent's lock is currently held.
@@ -914,35 +1066,18 @@ fn unix_now() -> u64 {
 }
 
 fn read_meta(path: &Path) -> io::Result<AgentMeta> {
-    let bytes = fs::read(path)?;
+    const MAX_LEGACY_META_BYTES: u64 = 64 * 1024;
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_LEGACY_META_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_LEGACY_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy agent metadata exceeds maximum size",
+        ));
+    }
     serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn write_meta(path: &Path, meta: &AgentMeta) -> Result<(), AgentStoreError> {
-    let bytes = serde_json::to_vec_pretty(meta).map_err(|e| AgentStoreError::Write {
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidData, e),
-    })?;
-    fs::write(path, bytes).map_err(|source| AgentStoreError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), AgentStoreError> {
-    let now = unix_now();
-    let mut meta = read_meta(path).unwrap_or_default();
-    if meta.created_at == 0 {
-        meta.created_at = now;
-    }
-    meta.last_touched = now;
-    if let Some(display_name) = display_name_for_event(event).and_then(normalize_display_name) {
-        meta.display_name = Some(display_name);
-    }
-    if let Some(text) = user_prompt_text(event) {
-        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
-    }
-    write_meta(path, &meta)
 }
 
 fn initialize_ephemeral_meta(meta: &mut AgentMeta, now: u64, initialize_user_interaction: bool) {
@@ -1009,7 +1144,11 @@ fn preview_text(text: &str, max: usize) -> String {
     }
 }
 
-fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), AgentStoreError> {
+fn append_cbor_record<T: Serialize>(
+    path: &Path,
+    record: &T,
+) -> Result<CommittedJournalPosition, AgentStoreError> {
+    let newly_created = !path.exists();
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| AgentStoreError::Encode {
         path: path.to_path_buf(),
@@ -1020,12 +1159,32 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Agent
 
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .map_err(|source| AgentStoreError::Open {
             path: path.to_path_buf(),
             source,
         })?;
+    if newly_created {
+        // Make the new journal and directory entries durable before any record
+        // commit. Failures here are safe to return and retry because no frame
+        // bytes have been written.
+        sync_parent_directory(path)?;
+        if let Some(agent_dir) = path.parent() {
+            sync_parent_directory(agent_dir)?;
+        }
+    }
+    let start = journal_position(&mut file).map_err(|source| AgentStoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut committed_boundary = start.boundary.clone();
+    committed_boundary.extend_from_slice(&record_length.to_le_bytes());
+    committed_boundary.extend_from_slice(&encoded);
+    if committed_boundary.len() > 64 {
+        committed_boundary.drain(..committed_boundary.len() - 64);
+    }
     file.write_all(&record_length.to_le_bytes())
         .map_err(|source| AgentStoreError::Write {
             path: path.to_path_buf(),
@@ -1044,7 +1203,28 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Agent
     file.sync_data().map_err(|source| AgentStoreError::Write {
         path: path.to_path_buf(),
         source,
+    })?;
+    Ok(CommittedJournalPosition {
+        device: start.device,
+        inode: start.inode,
+        end_offset: start
+            .end_offset
+            .saturating_add(8)
+            .saturating_add(record_length),
+        boundary: committed_boundary,
     })
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), AgentStoreError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| AgentStoreError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })
 }
 
 fn validate_record_length(path: &Path, record_length: u64) -> Result<(), AgentStoreError> {
@@ -1078,6 +1258,13 @@ fn load_agent_events(path: &Path) -> Result<Vec<PersistedAgentEvent>, AgentStore
         }
     }
     Ok(events)
+}
+
+fn records_begin_with_creation(agent_id: &AgentId, events: &[PersistedAgentEvent]) -> bool {
+    matches!(
+        events.first().map(|record| &record.event),
+        Some(Event::AgentStarted(started)) if &started.agent_id == agent_id
+    )
 }
 
 /// Largest individual CBOR record we'll allocate from the

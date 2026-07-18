@@ -410,6 +410,16 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
             .all(|event| !matches!(event, Event::AgentPromptQueued(_))),
         "queued prompts are transient and must not be persisted"
     );
+    assert_eq!(
+        h.agent_store
+            .agent_events(&agent_id)
+            .expect("queued agent journal")
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
+            .count(),
+        1,
+        "accepted queued initial prompt records exactly one interaction fact"
+    );
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
     client_end
@@ -467,7 +477,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
             value: CborValue::Text(cwd.display().to_string()),
             inheritable: true,
         }],
-        initial_prompt: None,
+        initial_prompt: Some("hello from create".to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -485,6 +495,21 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
                 && item.inheritable
         })
     }));
+    let created_id = h
+        .agents
+        .values()
+        .find_map(|agent| agent.agent_id.as_deref())
+        .expect("created agent id");
+    assert_eq!(
+        h.agent_store
+            .agent_events(created_id)
+            .expect("created journal")
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
+            .count(),
+        1,
+        "accepted immediate initial prompt records exactly one interaction fact"
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -1100,6 +1125,22 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
         drop(sessions);
 
         let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        for agent_id in ["engineer_default", "worker_steered"] {
+            agents
+                .append_agent_event(
+                    agent_id,
+                    None,
+                    Event::AgentStarted(tau_proto::AgentStarted {
+                        parent_agent: None,
+                        agent_id: crate::parse_agent_id(agent_id),
+                        role: "engineer".to_owned(),
+                        display_name: None,
+                        metadata: Vec::new(),
+                        ephemeral: false,
+                    }),
+                )
+                .expect("seed creation");
+        }
         agents
             .append_agent_event(
                 "engineer_default",
@@ -1427,6 +1468,26 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
             }),
         )
         .expect("seed session membership");
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    if !agent_store.agent_is_known_for_routing(agent_id) {
+        agent_store
+            .append_agent_event_at(
+                agent_id,
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                Event::AgentStarted(tau_proto::AgentStarted {
+                    parent_agent: None,
+                    agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+                    role: "engineer".to_owned(),
+                    display_name: None,
+                    metadata: Vec::new(),
+                    ephemeral: false,
+                }),
+                tau_proto::UnixMicros::new(1),
+            )
+            .expect("seed agent creation");
+    }
 }
 
 fn context_text_count(prompt: &AgentPromptCreated, text: &str) -> usize {
@@ -3565,6 +3626,107 @@ fn ext_query(query_id: &str) -> StartAgentRequest {
         tool_call_id: None,
         task_name: None,
     }
+}
+
+/// A post-accept creation failure must terminalize exactly once without
+/// exposing the failed identity or blocking the next accepted FIFO request.
+#[test]
+fn accepted_start_failure_terminalizes_and_continues_fifo() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("harness");
+    let first = h
+        .prepare_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-fail"))
+        .expect("prepare first")
+        .expect("first pending");
+    let second = h
+        .prepare_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-next"))
+        .expect("prepare second")
+        .expect("second pending");
+    let first_agent_id = first.agent_id.clone();
+    let second_agent_id = second.agent_id.clone();
+    h.accept_duplicate_start_agent_request(
+        HARNESS_CONNECTION_ID,
+        &first.query.query_id,
+        &first_agent_id,
+    );
+    h.accept_duplicate_start_agent_request(
+        HARNESS_CONNECTION_ID,
+        &second.query.query_id,
+        &second_agent_id,
+    );
+    h.pending_start_agent_requests.push_back(first);
+    h.pending_start_agent_requests.push_back(second);
+    let blocked_journal = state
+        .join("agents")
+        .join(&first_agent_id)
+        .join("events.cbor");
+    std::fs::create_dir_all(&blocked_journal).expect("block first journal");
+
+    h.drain_pending_start_agent_requests().expect("drain");
+
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::StartAgentAccepted(accepted) if accepted.query_id == "q-fail"
+            ))
+            .count(),
+        1
+    );
+    let failed_results: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::StartAgentResult(result) if result.query_id == "q-fail" => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed_results.len(), 1);
+    assert!(failed_results[0].error.is_some());
+    assert!(!h.agent_routes.contains_key(&first_agent_id));
+    assert!(
+        !h.agents
+            .contains_key(&crate::parse_agent_id(&first_agent_id))
+    );
+    assert!(
+        !h.session_loaded_agents
+            .contains(&crate::parse_agent_id(&first_agent_id))
+    );
+    assert!(h.store.session("s1").is_none_or(|membership| {
+        !membership.contains_agent(&crate::parse_agent_id(&first_agent_id))
+    }));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt) if prompt.agent_id.as_str() == first_agent_id
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentStarted(started) if started.agent_id.as_str() == first_agent_id
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
+    )));
+    assert!(h.agent_routes.contains_key(&second_agent_id));
+    let second_records = h
+        .agent_store
+        .agent_events(&second_agent_id)
+        .expect("second agent records");
+    assert!(matches!(
+        second_records.first().map(|record| &record.event),
+        Some(Event::AgentStarted(started)) if started.agent_id.as_str() == second_agent_id
+    ));
+    assert!(h.store.session("s1").is_some_and(|membership| {
+        membership.contains_agent(&crate::parse_agent_id(&second_agent_id))
+    }));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::StartAgentResult(result)
+            if result.query_id == "q-next" && result.error.is_some()
+    )));
+    assert!(h.pending_start_agent_requests.is_empty());
 }
 
 fn provider_model_info(
@@ -9674,6 +9836,17 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         }),
     );
     let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            parent_agent: None,
+            agent_id: agent_id.clone(),
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    );
     append_seed_agent_event(
         &mut store,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

@@ -14,6 +14,12 @@ contract is [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-paci
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 
+Agent lifecycle includes the content-free
+`agent.user_interaction_recorded` durable fact. Its persisted-record timestamp
+represents acceptance of a visible UI interaction without duplicating prompt
+text. The summary projection contract is
+[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by

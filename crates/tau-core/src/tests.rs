@@ -378,32 +378,31 @@ fn agent_store_rejects_empty_display_name() {
 
 #[test]
 fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
-    // User-interaction time is metadata state, not derived from replayable
-    // transcript events. Background agent events must not refresh it when old
-    // agents are loaded or replayed; accepted UI prompts call the explicit bump.
+    // Accepted visible interactions must be durable content-free facts so the
+    // checkpoint can reconstruct them after sidecar loss.
     let agents_dir = temp_dir("last-user-interaction");
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
 
     store
-        .record_agent_meta("agent-1")
-        .expect("record initial metadata");
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                parent_agent: None,
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("commit creation");
     let meta = store
         .agent_meta("agent-1")
         .expect("read initial agent meta")
         .expect("agent meta exists");
     assert_ne!(meta.created_at, 0);
-    assert_eq!(meta.last_user_interaction_time, meta.created_at);
-
-    let meta_path = agents_dir.join("agent-1").join("meta.json");
-    std::fs::write(
-        &meta_path,
-        r#"{
-  "created_at": 1,
-  "last_touched": 1,
-  "last_user_interaction_time": 1
-}"#,
-    )
-    .expect("seed deterministic metadata");
+    assert_eq!(meta.last_user_interaction_time, 0);
 
     store
         .append_agent_event(
@@ -419,7 +418,7 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
         .agent_meta("agent-1")
         .expect("read meta after background event")
         .expect("agent meta exists");
-    assert_eq!(meta.last_user_interaction_time, 1);
+    assert_eq!(meta.last_user_interaction_time, 0);
 
     store
         .record_agent_user_interaction("agent-1")
@@ -428,8 +427,247 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
         .agent_meta("agent-1")
         .expect("read meta after user interaction")
         .expect("agent meta exists");
-    assert!(meta.last_user_interaction_time > 1);
+    assert!(meta.last_user_interaction_time > 0);
 
+    let meta_path = agents_dir.join("agent-1").join("meta.json");
+    drop(store);
+    std::fs::write(
+        &meta_path,
+        br#"{
+  "created_at": 1,
+  "last_touched": 2,
+  "last_user_interaction_time": 3,
+  "latest_user_prompt_preview": "private legacy prompt"
+}"#,
+    )
+    .expect("replace checkpoint with preview-bearing v1");
+    let _reopened = AgentStore::open(&agents_dir).expect("strict replay succeeds");
+    let migrated_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&meta_path).expect("strict load republishes checkpoint"),
+    )
+    .expect("decode migrated checkpoint");
+    assert_eq!(migrated_json["schema_version"], 2);
+    assert!(migrated_json.get("latest_user_prompt_preview").is_none());
+    let entries = crate::list_agent_entries(&agents_dir).expect("list repaired agent");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, crate::AgentListStatus::Fresh);
+    assert!(
+        entries[0]
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.last_user_interaction_at_micros)
+            .is_some()
+    );
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A valid checkpoint must make fresh listing independent of journal payload
+/// size and a post-checkpoint append must repair only its validated suffix.
+#[test]
+fn agent_checkpoint_lists_fresh_and_repairs_a_suffix() {
+    let agents_dir = temp_dir("agent-checkpoint-suffix");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: AgentId::parse("agent-1").expect("agent id"),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("append creation");
+    store
+        .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
+        .expect("append first event");
+    let before = crate::list_agent_entries(&agents_dir).expect("fresh list");
+    assert_eq!(before[0].status, crate::AgentListStatus::Fresh);
+
+    let checkpoint_path = agents_dir.join("agent-1/meta.json");
+    let old_checkpoint = std::fs::read(&checkpoint_path).expect("checkpoint bytes");
+    store
+        .append_agent_event("agent-1", None, agent_prompt("agent-1", "second"))
+        .expect("append second event");
+    std::fs::write(&checkpoint_path, old_checkpoint).expect("restore stale checkpoint");
+    drop(store);
+
+    let repaired = crate::list_agent_entries(&agents_dir).expect("repair suffix");
+    assert_eq!(repaired[0].status, crate::AgentListStatus::Fresh);
+    let checkpoint: crate::AgentCheckpoint =
+        serde_json::from_slice(&std::fs::read(&checkpoint_path).expect("repaired checkpoint"))
+            .expect("decode checkpoint");
+    assert_eq!(checkpoint.journal.next_seq, 3);
+    assert_eq!(
+        checkpoint.journal.covered_bytes,
+        std::fs::metadata(agents_dir.join("agent-1/events.cbor"))
+            .expect("journal metadata")
+            .len()
+    );
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Corrupt or missing summary JSON must never hide a journal-backed agent, and
+/// a journal larger than the foreground budget must not be scanned implicitly.
+#[test]
+fn agent_checkpoint_listing_exposes_unrepairable_summary_state() {
+    let agents_dir = temp_dir("agent-checkpoint-visible-corruption");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("meta.json"), b"{").expect("corrupt checkpoint");
+    std::fs::write(agent_dir.join("events.cbor"), vec![0_u8; 300 * 1024])
+        .expect("large invalid journal");
+
+    let entries = crate::list_agent_entries(&agents_dir).expect("list artifacts");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].identity, crate::AgentListIdentity::JournalBacked);
+    assert_eq!(entries[0].status, crate::AgentListStatus::CorruptSummary);
+    assert!(entries[0].summary.is_none());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Foreground repair must reject a huge declared frame before allocating its
+/// payload, even when the corrupt journal itself contains only the header.
+#[test]
+fn agent_checkpoint_repair_rejects_declared_frame_over_budget() {
+    let agents_dir = temp_dir("agent-checkpoint-frame-budget");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("meta.json"), b"{").expect("corrupt checkpoint");
+    std::fs::write(
+        agent_dir.join("events.cbor"),
+        (64_u64 * 1024 * 1024).to_le_bytes(),
+    )
+    .expect("oversized frame header");
+
+    let entries = crate::list_agent_entries(&agents_dir).expect("bounded list");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, crate::AgentListStatus::RepairFailed);
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Empty journal artifacts and validation-created empty tree caches reserve an
+/// id but must not become semantic message-routing identities.
+#[test]
+fn agent_store_requires_committed_creation_for_routing_identity() {
+    let agents_dir = temp_dir("agent-routing-identity");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("events.cbor"), []).expect("empty journal");
+    let mut store = AgentStore::open_lazy(&agents_dir).expect("open store");
+    assert!(store.agent_id_is_reserved("agent-1"));
+    assert!(!store.agent_is_known_for_routing("agent-1"));
+
+    store
+        .validate_agent_event_at(
+            "agent-1",
+            None,
+            AgentEventParent::Root,
+            &agent_prompt("agent-1", "prospective"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("prospective validation");
+    assert!(store.agent("agent-1").is_some(), "empty tree was cached");
+    assert!(!store.agent_is_known_for_routing("agent-1"));
+
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                parent_agent: None,
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("commit creation");
+    assert!(store.agent_is_known_for_routing("agent-1"));
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Empty and creationless journals remain visible artifacts but can never be
+/// promoted to a fresh journal-backed identity.
+#[test]
+fn agent_checkpoint_rejects_creationless_identity() {
+    for (name, records) in [
+        ("empty", Vec::new()),
+        (
+            "creationless",
+            vec![PersistedAgentEvent {
+                seq: PersistedAgentEventSeq::new(0),
+                source: None,
+                event: agent_prompt("agent-1", "orphan"),
+                parent: AgentEventParent::InheritHead,
+                recorded_at: tau_proto::UnixMicros::now(),
+            }],
+        ),
+    ] {
+        let agents_dir = temp_dir(&format!("checkpoint-{name}"));
+        let events_path = agents_dir.join("agent-1/events.cbor");
+        std::fs::create_dir_all(events_path.parent().expect("agent dir")).expect("agent dir");
+        std::fs::write(&events_path, []).expect("empty journal");
+        for record in records {
+            append_raw_cbor(&events_path, &record);
+        }
+
+        let entries = crate::list_agent_entries(&agents_dir).expect("list invalid identity");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].identity,
+            crate::AgentListIdentity::UnverifiedArtifact
+        );
+        assert_ne!(entries[0].status, crate::AgentListStatus::Fresh);
+        assert!(!agents_dir.join("agent-1/meta.json").exists());
+        let _ = std::fs::remove_dir_all(agents_dir);
+    }
+}
+
+/// A corrupt checkpoint over a 65-record journal must stop at the foreground
+/// record cap and leave the untrusted sidecar untouched.
+#[test]
+fn agent_checkpoint_full_rebuild_stops_before_record_65() {
+    let agents_dir = temp_dir("agent-checkpoint-record-budget");
+    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                parent_agent: None,
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("creation");
+    for index in 1..65 {
+        store
+            .append_agent_event(
+                "agent-1",
+                None,
+                Event::AgentDisplayNameSet(AgentDisplayNameSet {
+                    agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                    display_name: format!("name-{index}"),
+                }),
+            )
+            .expect("append small record");
+    }
+    drop(store);
+    let meta_path = agents_dir.join("agent-1/meta.json");
+    std::fs::write(&meta_path, b"{").expect("corrupt summary");
+
+    let entries = crate::list_agent_entries(&agents_dir).expect("bounded list");
+    assert_eq!(entries[0].status, crate::AgentListStatus::CorruptSummary);
+    assert_eq!(std::fs::read(&meta_path).expect("sidecar retained"), b"{");
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 

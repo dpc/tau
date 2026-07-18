@@ -15,6 +15,23 @@ fn append_persisted_record<T: serde::Serialize>(path: &Path, record: &T) {
     file.write_all(&encoded).expect("write record");
 }
 
+fn append_agent_creation(store: &mut tau_core::AgentStore, agent_id: &str) {
+    store
+        .append_agent_event(
+            agent_id,
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: crate::parse_agent_id(agent_id),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed agent creation");
+}
+
 /// Collect message-category deliveries with the requested replay marker.
 fn message_deliveries(sink: &Arc<Mutex<Vec<RoutedFrame>>>, replay: bool) -> Vec<Event> {
     sink.lock()
@@ -578,15 +595,19 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.shutdown().expect("shutdown");
 }
 
-/// A known non-runnable agent selected only by existing store metadata receives
-/// its message fact in the agent journal rather than session fallback.
+/// A legacy sidecar-only ghost reserves its id but cannot redirect a message
+/// fact away from the session journal without validated agent identity.
 #[test]
-fn known_offline_agent_message_fact_uses_agent_journal() {
+fn metadata_only_offline_agent_message_fact_uses_session_journal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.agent_store
-        .record_agent_meta("offline-agent")
-        .expect("reserve offline agent");
+    let ghost_dir = h.agent_store.agents_dir().join("offline-agent");
+    std::fs::create_dir_all(&ghost_dir).expect("create legacy ghost dir");
+    std::fs::write(
+        ghost_dir.join("meta.json"),
+        br#"{"created_at":1,"last_touched":1,"last_user_interaction_time":1}"#,
+    )
+    .expect("seed legacy metadata-only ghost");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::new("configured-bridge"),
         tau_proto::MessageAgentTarget::new("offline-agent"),
@@ -602,28 +623,14 @@ fn known_offline_agent_message_fact_uses_agent_journal() {
 
     h.commit_message_fact(Some("bridge-connection"), fact.clone());
 
-    let agent_records = h
-        .agent_store
-        .agent_events("offline-agent")
-        .expect("offline agent records");
-    assert_eq!(agent_records.len(), 1);
-    assert_eq!(agent_records[0].event, fact);
+    assert!(!ghost_dir.join("events.cbor").exists());
     assert!(
         h.store
             .session_events("s1")
             .expect("session records")
             .iter()
-            .all(|record| record.event.name().category() != &tau_proto::EventCategory::Message)
+            .any(|record| record.event == fact)
     );
-    assert!(matches!(
-        h.agent_store
-            .agent("offline-agent")
-            .expect("offline transcript")
-            .nodes()
-            .last()
-            .map(|node| &node.entry),
-        Some(tau_core::AgentEntry::MessageFact { .. })
-    ));
     assert!(
         event_log_events(&h).iter().all(|event| !matches!(
             event,
@@ -642,9 +649,7 @@ fn agent_message_fact_replay_projects_without_wake() {
     let agent_id = tau_proto::AgentId::parse("offline-agent").expect("agent id");
     let live_projection = {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
-        h.agent_store
-            .record_agent_meta(agent_id.as_str())
-            .expect("reserve offline agent");
+        append_agent_creation(&mut h.agent_store, agent_id.as_str());
         h.store
             .append_session_event(
                 "s1",
@@ -723,8 +728,8 @@ fn agent_message_fact_replay_projects_without_wake() {
     resumed.shutdown().expect("shutdown");
 }
 
-/// Current-session membership is sufficient to select an agent journal even
-/// before that agent has a live route or existing store metadata.
+/// A committed offline agent identity selects its agent journal without a live
+/// route; session membership alone is not identity authority.
 #[test]
 fn member_agent_message_fact_uses_agent_journal() {
     let td = TempDir::new().expect("tempdir");
@@ -741,6 +746,7 @@ fn member_agent_message_fact_uses_agent_journal() {
             }),
         )
         .expect("seed membership");
+    append_agent_creation(&mut h.agent_store, agent_id.as_str());
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::new("configured-bridge"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
@@ -759,7 +765,7 @@ fn member_agent_message_fact_uses_agent_journal() {
     assert_eq!(
         h.agent_store
             .agent_events(agent_id.as_str())
-            .expect("member agent records")[0]
+            .expect("member agent records")[1]
             .event,
         fact
     );
@@ -852,8 +858,19 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
     h.agent_store
-        .record_agent_meta("offline-agent")
-        .expect("reserve agent");
+        .append_agent_event(
+            "offline-agent",
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: tau_proto::AgentId::parse("offline-agent").expect("agent id"),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("create agent identity");
     let live_sink = connect_test_client(&mut h, "live-ui", tau_proto::ClientKind::Ui);
     h.handle_client_event(
         "live-ui",
@@ -869,6 +886,7 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
         .join("agents")
         .join("offline-agent")
         .join("events.cbor");
+    std::fs::remove_file(&event_path).expect("remove agent stream");
     std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::new("configured-bridge"),
@@ -981,9 +999,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
-    h.agent_store
-        .record_agent_meta("agent-1")
-        .expect("reserve agent");
+    append_agent_creation(&mut h.agent_store, "agent-1");
     h.store
         .append_session_event(
             "s1",
@@ -1024,7 +1040,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
     append_persisted_record(
         &state_dir.join("agents").join("agent-1").join("events.cbor"),
         &tau_core::PersistedAgentEvent {
-            seq: tau_core::PersistedAgentEventSeq::new(2),
+            seq: tau_core::PersistedAgentEventSeq::new(3),
             source: None,
             event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
                 tau_proto::MessagePublisherId::new("configured-bridge"),
@@ -1245,6 +1261,91 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 Event::ProviderToolResult(successful_tool_result(call_id)),
             )
             .expect("seed completed tool call");
+    }
+}
+
+/// Session membership cannot manufacture a routable agent when the referenced
+/// journal is missing, empty, or lacks the immutable creation fact.
+#[test]
+fn restore_rejects_membership_without_committed_agent_creation() {
+    for journal_kind in ["missing", "empty", "creationless"] {
+        let td = TempDir::new().expect("tempdir");
+        let state_dir = td.path().join(journal_kind);
+        let mut store =
+            tau_core::SessionStore::open(state_dir.join("sessions")).expect("session store");
+        store
+            .append_session_event(
+                "s1",
+                None,
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    session_id: "s1".into(),
+                    agent_id: crate::parse_agent_id("orphan"),
+                    ephemeral: false,
+                }),
+            )
+            .expect("seed membership");
+        drop(store);
+        let events_path = state_dir.join("agents/orphan/events.cbor");
+        if journal_kind != "missing" {
+            std::fs::create_dir_all(events_path.parent().expect("agent dir"))
+                .expect("create agent dir");
+            std::fs::write(&events_path, []).expect("create empty journal");
+        }
+        if journal_kind == "creationless" {
+            append_persisted_record(
+                &events_path,
+                &tau_core::PersistedAgentEvent {
+                    seq: tau_core::PersistedAgentEventSeq::new(0),
+                    source: None,
+                    event: Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                        inference_activation: false,
+                        agent_id: crate::parse_agent_id("orphan"),
+                        text: "orphan prompt".to_owned(),
+                        message_class: tau_proto::PromptMessageClass::User,
+                        originator: tau_proto::PromptOriginator::User,
+                        submission_source: Default::default(),
+                        display_name: None,
+                        ctx_id: None,
+                    }),
+                    parent: tau_core::AgentEventParent::InheritHead,
+                    recorded_at: tau_proto::UnixMicros::now(),
+                },
+            );
+        }
+
+        let before_len = std::fs::metadata(&events_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut h =
+            echo_harness_with_start_reason("s1", &state_dir, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        assert!(
+            !h.agent_routes.contains_key("orphan"),
+            "{journal_kind} journal became routable"
+        );
+        assert!(!h.agents.contains_key(&crate::parse_agent_id("orphan")));
+        h.commit_message_fact(
+            Some("bridge"),
+            Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::new("bridge"),
+                tau_proto::MessageAgentTarget::new("orphan"),
+                tau_proto::MessageFactId::new("must-fallback"),
+                tau_proto::MessageParty {
+                    stable_id: "sender".to_owned(),
+                    display_name: None,
+                    sender_auth: None,
+                },
+                None,
+                "do not recreate an invalid agent journal",
+            )),
+        );
+        let after_len = std::fs::metadata(&events_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        assert_eq!(
+            after_len, before_len,
+            "{journal_kind} journal was extended through stale membership"
+        );
     }
 }
 

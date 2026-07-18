@@ -2226,6 +2226,17 @@ pub struct AgentStarted {
     pub ephemeral: bool,
 }
 
+/// Content-free durable fact recording one accepted visible user interaction.
+///
+/// The enclosing persisted record supplies the acceptance timestamp. Keeping
+/// prompt content out of this fact lets derived summaries recover interaction
+/// ordering even when a queued prompt is later recalled.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentUserInteractionRecorded {
+    /// Agent that accepted the visible user interaction.
+    pub agent_id: AgentId,
+}
+
 /// Durable per-agent metadata value update.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetadataSet {
@@ -4614,6 +4625,8 @@ pub enum Event {
     AgentHeadMoved(AgentHeadMoved),
     #[serde(rename = "agent.started")]
     AgentStarted(AgentStarted),
+    #[serde(rename = "agent.user_interaction_recorded")]
+    AgentUserInteractionRecorded(AgentUserInteractionRecorded),
     #[serde(rename = "agent.display_name_set")]
     AgentDisplayNameSet(AgentDisplayNameSet),
     #[serde(rename = "agent.metadata_set")]
@@ -4900,6 +4913,7 @@ impl Event {
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
             Self::AgentStarted(_) => EventName::AGENT_STARTED,
+            Self::AgentUserInteractionRecorded(_) => EventName::AGENT_USER_INTERACTION_RECORDED,
             Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
             Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
             Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,

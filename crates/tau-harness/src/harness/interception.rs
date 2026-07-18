@@ -244,6 +244,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
     matches!(
         original,
         Event::AgentStarted(_)
+            | Event::AgentUserInteractionRecorded(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
             | Event::SessionStarted(_)
