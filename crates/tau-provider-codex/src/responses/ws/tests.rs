@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
@@ -81,6 +82,291 @@ fn test_responses_config() -> ResponsesConfig {
     }
 }
 
+/// Ensures plain WebSocket traffic uses an HTTP proxy's required absolute-form
+/// upgrade without resolving or dialing the target directly.
+#[test]
+fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let address = listener.local_addr().expect("proxy address");
+    let (request_tx, request_rx) = std_mpsc::channel();
+    let proxy = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("proxy connection");
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).expect("upgrade request");
+            request.push(byte[0]);
+            assert!(request.len() < 32 * 1024, "upgrade head is bounded");
+        }
+        let request_text = String::from_utf8(request).expect("ASCII upgrade");
+        let key = request_text
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("websocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .expect("upgrade response");
+        stream.flush().expect("flush upgrade");
+        request_tx.send(request_text).expect("request capture");
+    });
+    let environment =
+        std::collections::BTreeMap::from([("http_proxy".to_owned(), format!("http://{address}"))]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
+    let mut config = test_responses_config();
+    config.base_url = "http://unresolvable.invalid/backend-api".to_owned();
+    let mut abort = NeverAbort;
+    let connection = WsConn::connect(&config, "thread-proxy", &network, &mut abort)
+        .expect("proxied WebSocket upgrade");
+    drop(connection);
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("captured request");
+    assert!(
+        request.starts_with(
+            "GET http://unresolvable.invalid/backend-api/codex/responses HTTP/1.1\r\n"
+        ),
+        "request was {request:?}",
+    );
+    proxy.join().expect("proxy thread");
+}
+
+/// Ensures a proxy cannot negotiate an extension the client did not request.
+#[test]
+fn websocket_upgrade_rejects_unsolicited_proxy_extension() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let address = listener.local_addr().expect("proxy address");
+    let proxy = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("proxy connection");
+        let request = read_http_head(&mut stream);
+        let key = request
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("websocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n"
+        )
+        .expect("upgrade response");
+    });
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(
+        std::collections::BTreeMap::from([("http_proxy".to_owned(), format!("http://{address}"))]),
+        None,
+    );
+    let mut config = test_responses_config();
+    config.base_url = "http://unresolvable.invalid/backend-api".to_owned();
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-extension", &network, &mut abort)
+    else {
+        panic!("expected typed proxy protocol error");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
+    proxy.join().expect("proxy thread");
+}
+
+/// Ensures a direct target cannot negotiate an extension the client did not
+/// request.
+#[test]
+fn websocket_upgrade_rejects_unsolicited_target_extension() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("target listener");
+    let address = listener.local_addr().expect("target address");
+    let target = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("target connection");
+        let request = read_http_head(&mut stream);
+        let key = request
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("websocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n"
+        )
+        .expect("upgrade response");
+    });
+    let network = crate::test_network_policy();
+    let mut config = test_responses_config();
+    config.base_url = format!("http://{address}/backend-api");
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-extension", &network, &mut abort)
+    else {
+        panic!("expected typed target protocol error");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Direct);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
+    target.join().expect("target thread");
+}
+
+/// Ensures a direct target cannot select a WebSocket subprotocol the client did
+/// not offer.
+#[test]
+fn websocket_upgrade_rejects_unsolicited_target_subprotocol() {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("target listener");
+    let address = listener.local_addr().expect("target address");
+    let target = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("target connection");
+        let request = read_http_head(&mut stream);
+        let key = request
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("websocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: unoffered\r\n\r\n"
+        )
+        .expect("upgrade response");
+    });
+    let network = crate::test_network_policy();
+    let mut config = test_responses_config();
+    config.base_url = format!("http://{address}/backend-api");
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-subprotocol", &network, &mut abort)
+    else {
+        panic!("expected typed target protocol error");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Direct);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
+    target.join().expect("target thread");
+}
+
+/// Ensures secure WebSocket traffic uses CONNECT, performs target TLS with the
+/// additive custom CA, and sends provider credentials only inside the tunnel.
+#[test]
+fn secure_websocket_proxy_connects_before_target_tls_and_upgrade() {
+    use std::io::Write;
+
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_key = rcgen::KeyPair::generate().expect("CA key");
+    let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
+    let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
+    let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .expect("leaf params")
+        .signed_by(&leaf_key, &ca, &ca_key)
+        .expect("leaf certificate");
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                leaf_key.serialize_der(),
+            )),
+        )
+        .expect("target TLS");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let address = listener.local_addr().expect("proxy address");
+    let (capture_tx, capture_rx) = std_mpsc::channel();
+    let proxy = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("proxy connection");
+        let connect = read_http_head(&mut socket);
+        assert!(
+            connect.starts_with("CONNECT localhost:4443 HTTP/1.1\r\n"),
+            "CONNECT was {connect:?}",
+        );
+        assert!(
+            !connect
+                .to_ascii_lowercase()
+                .contains("authorization: bearer"),
+            "target credential escaped into CONNECT"
+        );
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .expect("CONNECT response");
+        let connection =
+            rustls::ServerConnection::new(Arc::new(tls)).expect("target TLS connection");
+        let mut tunnel = rustls::StreamOwned::new(connection, socket);
+        let upgrade = read_http_head(&mut tunnel);
+        let key = upgrade
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("websocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            tunnel,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .expect("upgrade response");
+        tunnel.flush().expect("flush upgrade");
+        capture_tx.send((connect, upgrade)).expect("capture");
+    });
+    let directory = tempfile::tempdir().expect("CA directory");
+    let ca_path = directory.path().join("ca.pem");
+    std::fs::write(&ca_path, ca.pem()).expect("write CA");
+    let environment =
+        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
+    let mut config = test_responses_config();
+    config.base_url = "https://localhost:4443/backend-api".to_owned();
+    let mut abort = NeverAbort;
+    let connection = WsConn::connect(&config, "thread-connect", &network, &mut abort)
+        .expect("tunneled secure WebSocket");
+    drop(connection);
+    let (_, upgrade) = capture_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("captured tunnel");
+    assert!(
+        upgrade.starts_with("GET /backend-api/codex/responses HTTP/1.1\r\n"),
+        "upgrade was {upgrade:?}",
+    );
+    assert!(upgrade.contains("authorization: Bearer test-token"));
+    proxy.join().expect("proxy thread");
+}
+
+fn read_http_head(stream: &mut impl Read) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("HTTP head");
+        head.push(byte[0]);
+        assert!(head.len() < 32 * 1024, "HTTP head is bounded");
+    }
+    String::from_utf8(head).expect("ASCII HTTP head")
+}
+
 /// Mutable credential/account header failures retry as auth/config and a
 /// corrected profile builds successfully on the next attempt.
 #[test]
@@ -133,12 +419,18 @@ fn ws_connect_wait_is_bounded() {
         std::future::pending::<Result<(), ()>>(),
     );
     assert!(matches!(result, Err(ConnectWaitError::Timeout)));
-    let error = map_connect_wait_error(ConnectWaitError::Timeout);
-    assert!(matches!(
-        error,
-        LlmError::HttpStatus(0, ref body)
-            if body == "stream error: websocket connect timeout"
-    ));
+    let network = crate::test_network_policy();
+    let error = map_connect_wait_error(
+        ConnectWaitError::Timeout,
+        &network,
+        "wss://target.example/codex/responses",
+    );
+    let LlmError::Outbound(outbound) = &error else {
+        panic!("expected typed deadline");
+    };
+    assert_eq!(outbound.route(), tau_provider::OutboundRouteKind::Direct);
+    assert_eq!(outbound.phase(), tau_provider::OutboundPhase::Connect);
+    assert_eq!(outbound.kind(), tau_provider::OutboundErrorKind::Deadline);
     assert_eq!(
         error.retry_decision().map(|decision| decision.class),
         Some(tau_provider::retry_policy::RetryClass::Transport)
@@ -218,7 +510,11 @@ fn ws_connect_rechecks_cancellation_after_waker_registration() {
     );
     assert!(matches!(result, Err(ConnectWaitError::Canceled)));
     assert!(matches!(
-        map_connect_wait_error(ConnectWaitError::Canceled),
+        map_connect_wait_error(
+            ConnectWaitError::Canceled,
+            &crate::test_network_policy(),
+            "wss://target.example/codex/responses",
+        ),
         LlmError::Canceled
     ));
 }
@@ -304,8 +600,13 @@ fn localhost_ws_round_trip_lowers_and_parses_production_frames() {
     let fixture = PromptFixture::new();
     let request = fixture.payload();
     let mut abort = NeverAbort;
-    let mut conn =
-        WsConn::connect(&config, "thread-local", &mut abort).expect("connect localhost WebSocket");
+    let mut conn = WsConn::connect(
+        &config,
+        "thread-local",
+        &crate::test_network_policy(),
+        &mut abort,
+    )
+    .expect("connect localhost WebSocket");
 
     let result = conn
         .run_turn(
@@ -373,8 +674,13 @@ fn localhost_ws_silent_turn_returns_typed_cancellation() {
     let fixture = PromptFixture::new();
     let request = fixture.payload();
     let mut connect_abort = NeverAbort;
-    let mut conn = WsConn::connect(&config, "thread-cancel", &mut connect_abort)
-        .expect("connect localhost WS");
+    let mut conn = WsConn::connect(
+        &config,
+        "thread-cancel",
+        &crate::test_network_policy(),
+        &mut connect_abort,
+    )
+    .expect("connect localhost WS");
     let aborted = Arc::new(AtomicBool::new(false));
     let (registered_tx, registered_rx) = std_mpsc::channel();
     let waker = Arc::new(Mutex::new(None));
@@ -432,8 +738,13 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
     let request = fixture.payload();
     let envelope = build_ws_envelope(&config, &request, None, None);
     let mut abort = NeverAbort;
-    let mut conn =
-        WsConn::connect(&config, "thread-timeout", &mut abort).expect("connect localhost WS");
+    let mut conn = WsConn::connect(
+        &config,
+        "thread-timeout",
+        &crate::test_network_policy(),
+        &mut abort,
+    )
+    .expect("connect localhost WS");
 
     let result = conn.run_envelope_with_timeouts(
         "ap-local-timeout",

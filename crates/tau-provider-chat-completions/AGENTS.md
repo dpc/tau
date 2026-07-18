@@ -2,6 +2,9 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 
 # tau-provider-chat-completions
 
+- Read `SECURITY.md` before changing HTTP transport, proxy/TLS behavior,
+  cancellation, response bounds, or provider diagnostics.
+
 - Read the repository root `AGENTS.md` before making changes.
 - Read `specs/ARCH-tau-provider-chat-completions.md` before changing request construction, streaming
   parsing, replay behavior, tool-call handling, or provider cache/prompt identity

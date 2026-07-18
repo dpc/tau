@@ -45,6 +45,12 @@ fallback. Capability, connection-limit, and retryable WebSocket failures surface
 to the outer logical-prompt scheduler rather than replaying the prompt over HTTP.
 HTTPS remains supported for OAuth, quota acquisition, and unary compaction.
 
+All HTTP control-plane operations and the HTTP/1.1 WebSocket upgrade use the
+startup-injected shared reqwest/rustls policy. WSS uses CONNECT through the
+selected proxy before target TLS; plain WS uses proxy absolute-form. Both paths
+disable library environment discovery and direct fallback. The same platform
+verifier plus optional additive custom CA covers target and HTTPS-proxy TLS.
+
 A fresh WebSocket path emits one fixed, content-free connecting status and owns
 its same-key pool reservation through connection setup. Cancellation and
 deadline behavior is specified by

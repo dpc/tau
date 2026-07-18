@@ -1,11 +1,9 @@
 //! Shared Tokio runtime for provider-builtin network IO.
 //!
 //! One process-wide multi-thread runtime, lazily started on first
-//! use. The runtime is intentionally narrow in scope today (WS pool
-//! tasks for the Codex Responses backend) but built broad: any
-//! future async client (a tokio-based replacement for the `ureq`
-//! another synchronous control-plane path, for instance) can
-//! `handle().spawn(...)` here without bringing its own runtime.
+//! use. The runtime owns WebSocket pool tasks for the Codex Responses backend;
+//! bounded control-plane calls create short-lived current-thread runtimes at
+//! their synchronous API boundaries.
 //!
 //! Why a dedicated runtime and not async-everything at the provider
 //! boundary: the provider's main loop is sync (blocking mpsc, blocking

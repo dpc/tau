@@ -2269,6 +2269,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2708,6 +2718,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2925,6 +2948,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2943,6 +2975,27 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "jni 0.21.1",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier-android",
+ "rustls-webpki",
+ "security-framework",
+ "security-framework-sys",
+ "webpki-root-certs",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls-platform-verifier"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "jni 0.22.4",
  "log",
  "once_cell",
  "rustls",
@@ -3925,13 +3978,20 @@ dependencies = [
  "blake3",
  "dirs",
  "httpdate",
+ "ipnet",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-platform-verifier 0.7.0",
  "serde",
  "serde_json",
  "tau-config",
  "tau-proto",
  "tempfile",
+ "tokio",
  "tracing",
- "ureq",
+ "url",
 ]
 
 [[package]]
@@ -3947,7 +4007,6 @@ dependencies = [
  "tau-provider",
  "tokio",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -3959,6 +4018,9 @@ dependencies = [
  "futures-util",
  "lru",
  "rand 0.8.6",
+ "rcgen",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -3967,11 +4029,11 @@ dependencies = [
  "tau-proto",
  "tau-provider",
  "tau-vcr",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",
  "tungstenite",
- "ureq",
  "url",
  "uuid",
 ]
@@ -4508,7 +4570,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier",
+ "rustls-platform-verifier 0.6.2",
  "ureq-proto",
  "utf8-zero",
  "webpki-roots",
@@ -5103,6 +5165,15 @@ dependencies = [
  "arraydeque",
  "encoding_rs",
  "hashlink",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

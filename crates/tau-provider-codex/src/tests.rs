@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 #[derive(Default)]
@@ -195,7 +197,7 @@ fn read_bounded_http_request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
 fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
     let server = spawn_ws_context_error_server();
     let config = test_config(server.base_url());
-    let runtime = CodexRuntime::new();
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("session-ws-context");
     let agent_id = tau_proto::AgentId::parse("agent-ws-context").expect("agent id");
     let context = tau_proto::PromptContext::default();
@@ -479,7 +481,7 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
 fn websocket_capability_error_does_not_fallback_to_http_sse() {
     let server = spawn_ws_426_server();
     let config = test_config(server.base_url());
-    let runtime = CodexRuntime::new();
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("session-ws-426");
     let agent_id = tau_proto::AgentId::parse("agent-ws-426").expect("agent id");
     let context = tau_proto::PromptContext::default();
@@ -516,7 +518,7 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
 fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
     let server = spawn_ws_disconnect_server();
     let config = test_config(server.base_url());
-    let runtime = CodexRuntime::new();
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("session-ws-retry");
     let agent_id = tau_proto::AgentId::parse("agent-ws-retry").expect("agent id");
     let context = tau_proto::PromptContext::default();
@@ -535,7 +537,7 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
     );
     assert_eq!(
         error.retry_decision().map(|decision| decision.class),
-        Some(tau_provider::retry_policy::RetryClass::Unknown)
+        Some(tau_provider::retry_policy::RetryClass::Transport)
     );
     assert_eq!(
         server

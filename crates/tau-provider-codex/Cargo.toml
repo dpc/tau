@@ -20,6 +20,7 @@ blake3.workspace = true
 futures-util.workspace = true
 lru.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,10 +31,12 @@ tau-vcr.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
-ureq.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
 serde_yaml_ng.workspace = true
+tempfile.workspace = true
 tungstenite.workspace = true

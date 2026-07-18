@@ -73,10 +73,13 @@ Cancellation is prompt-scoped. Active request and stream waits must observe the
 caller's cancellation source; delayed cancellation belongs to the scheduler.
 
 Chat Completions prompt traffic uses async `reqwest` on an attempt-local Tokio
-runtime. Header and body futures are polled with the prompt cancellation source;
+runtime and the provider process's immutable outbound policy. Reqwest does not
+rediscover environment proxies or follow redirects; proxy and target TLS share
+the platform verifier plus optional additive custom CA. Header and body futures
+are polled with the prompt cancellation source;
 dropping a canceled future aborts its connection without detaching work outside
-the provider concurrency permit. The existing synchronous transport remains
-only for profile/model discovery, which is not a logical prompt attempt.
+the provider concurrency permit. Profile/model discovery uses the same
+asynchronous transport and immutable policy, but is not a logical prompt attempt.
 
 ## Tool definitions
 

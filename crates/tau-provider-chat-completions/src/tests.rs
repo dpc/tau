@@ -1,5 +1,22 @@
 use super::*;
 
+/// Ensures shared outbound categories retain their intended scheduler cadence
+/// at the Chat Completions adapter boundary.
+#[test]
+fn outbound_categories_map_to_retry_classes() {
+    use tau_provider::OutboundErrorKind as Kind;
+
+    for (kind, expected) in [
+        (Kind::InvalidConfiguration, RetryClass::Auth),
+        (Kind::ProxyAuthentication, RetryClass::Auth),
+        (Kind::Transport, RetryClass::Transport),
+        (Kind::Deadline, RetryClass::Transport),
+        (Kind::Protocol, RetryClass::Transport),
+    ] {
+        assert_eq!(outbound_retry_class(kind), expected, "{kind:?}");
+    }
+}
+
 fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -168,6 +185,10 @@ fn reqwest_transport_streams_local_success_response() {
         false,
         &mut writer,
         &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(
+            std::collections::BTreeMap::new(),
+            None,
+        ),
     );
     let PromptAttemptOutcome::Finished(finished) = outcome else {
         panic!("local success must finish");
@@ -220,6 +241,10 @@ fn local_http_throttle_contract_covers_generic_and_openrouter_routes() {
             false,
             &mut writer,
             &mut || false,
+            &tau_provider::OutboundNetworkPolicy::from_environment(
+                std::collections::BTreeMap::new(),
+                None,
+            ),
         );
         let PromptAttemptOutcome::Retry(decision) = outcome else {
             panic!("canonical local 429 must remain scheduler-owned");
@@ -436,6 +461,10 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
             false,
             &mut writer,
             &mut || attempt_canceled.load(std::sync::atomic::Ordering::SeqCst),
+            &tau_provider::OutboundNetworkPolicy::from_environment(
+                std::collections::BTreeMap::new(),
+                None,
+            ),
         );
         result_tx.send(outcome).expect("report attempt outcome");
     });

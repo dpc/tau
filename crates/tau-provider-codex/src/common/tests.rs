@@ -1,5 +1,22 @@
 use super::*;
 
+/// Ensures shared outbound categories retain their intended scheduler cadence
+/// at the Codex adapter boundary.
+#[test]
+fn outbound_categories_map_to_retry_classes() {
+    use tau_provider::OutboundErrorKind as Kind;
+
+    for (kind, expected) in [
+        (Kind::InvalidConfiguration, RetryClass::Auth),
+        (Kind::ProxyAuthentication, RetryClass::Auth),
+        (Kind::Transport, RetryClass::Transport),
+        (Kind::Deadline, RetryClass::Transport),
+        (Kind::Protocol, RetryClass::Transport),
+    ] {
+        assert_eq!(outbound_retry_class(kind), expected, "{kind:?}");
+    }
+}
+
 #[test]
 fn into_output_items_drops_nameless_accumulator_artifacts() {
     // The streaming paths eagerly extend `tool_calls` from

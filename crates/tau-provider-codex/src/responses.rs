@@ -42,6 +42,8 @@ const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 6
 const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_HTTP_THREADS: usize = 4;
+const MAX_COMPACT_SUCCESS_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COMPACT_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 struct CompactTransportState {
@@ -368,17 +370,24 @@ fn debug_write_provider_request(
 
 /// Calls the unary Responses compact endpoint and returns its ordered
 /// replacement window.
+///
+/// # Errors
+///
+/// Returns a typed cancellation, configuration, outbound, HTTP-status, size,
+/// decoding, or response-validation error. Cancellation joins the request
+/// worker before returning, so no late compact result can be published.
 pub fn responses_compact(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     abort: &mut impl TurnAbort,
+    network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 ) -> Result<Vec<ContextItem>, LlmError> {
     if abort.is_aborted() {
         return Err(LlmError::Canceled);
     }
     let body = build_compact_request(config, request)?;
-    send_compact_request(agent_prompt_id, config, request, abort, body)
+    send_compact_request(agent_prompt_id, config, request, abort, body, network)
 }
 
 fn build_compact_request(
@@ -410,6 +419,7 @@ fn send_compact_request(
     request: &PromptPayload<'_>,
     abort: &mut impl TurnAbort,
     body: serde_json::Value,
+    network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 ) -> Result<Vec<ContextItem>, LlmError> {
     maybe_debug_write_provider_request(
         agent_prompt_id,
@@ -426,18 +436,22 @@ fn send_compact_request(
         std::sync::Mutex::new(CompactCompletion::default()),
         std::sync::Condvar::new(),
     ));
+    let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let _abort_waker = register_compact_abort_waker(abort, &completion, &cancel_notify)?;
     let network_completion = std::sync::Arc::clone(&completion);
-    std::thread::Builder::new()
+    let network_cancel = std::sync::Arc::clone(&cancel_notify);
+    let worker = std::thread::Builder::new()
         .name("responses-compact-http".to_owned())
         .spawn(move || {
             let _permit = permit;
-            let result =
-                std::panic::catch_unwind(|| compact_http_request(&config, &thread_id, &body_str))
-                    .unwrap_or_else(|_| {
-                        Err(LlmError::InvalidResponse(
-                            "compact HTTP worker panicked".to_owned(),
-                        ))
-                    });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compact_http_request(&config, &thread_id, &body_str, &network, &network_cancel)
+            }))
+            .unwrap_or_else(|_| {
+                Err(LlmError::InvalidResponse(
+                    "compact HTTP worker panicked".to_owned(),
+                ))
+            });
             let (result_slot, changed) = &*network_completion;
             if let Ok(mut slot) = result_slot.lock() {
                 slot.result = Some(result);
@@ -445,7 +459,6 @@ fn send_compact_request(
             }
         })
         .map_err(LlmError::Io)?;
-    let _abort_waker = register_compact_abort_waker(abort, &completion)?;
     let (result_slot, changed) = &*completion;
     let mut slot = result_slot
         .lock()
@@ -455,9 +468,17 @@ fn send_compact_request(
             LlmError::InvalidResponse("compact completion lock poisoned".to_owned())
         })?;
     }
-    if slot.canceled || abort.is_aborted() {
+    let canceled = slot.canceled || abort.is_aborted();
+    drop(slot);
+    worker.join().map_err(|_| {
+        LlmError::InvalidResponse("compact HTTP worker did not stop cleanly".to_owned())
+    })?;
+    if canceled {
         return Err(LlmError::Canceled);
     }
+    let mut slot = result_slot
+        .lock()
+        .map_err(|_| LlmError::InvalidResponse("compact completion lock poisoned".to_owned()))?;
     let response_body = slot
         .result
         .take()
@@ -468,13 +489,16 @@ fn send_compact_request(
 fn register_compact_abort_waker(
     abort: &mut impl TurnAbort,
     completion: &std::sync::Arc<(std::sync::Mutex<CompactCompletion>, std::sync::Condvar)>,
+    cancel_notify: &std::sync::Arc<tokio::sync::Notify>,
 ) -> Result<Box<dyn crate::TurnAbortWaker>, LlmError> {
     let wake_completion = std::sync::Arc::clone(completion);
+    let wake_network = std::sync::Arc::clone(cancel_notify);
     let guard = abort.register_waker(std::sync::Arc::new(move || {
         if let Ok(mut state) = wake_completion.0.lock() {
             state.canceled = true;
             wake_completion.1.notify_all();
         }
+        wake_network.notify_one();
     }));
     if abort.is_aborted() {
         return Err(LlmError::Canceled);
@@ -486,36 +510,86 @@ fn compact_http_request(
     config: &ResponsesConfig,
     thread_id: &str,
     body_str: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+    cancel_notify: &tokio::sync::Notify,
 ) -> Result<String, LlmError> {
-    let mut req = tau_provider::oauth::proxy_agent()
-        .post(compact_url(&config.base_url))
-        .config()
-        .timeout_global(Some(DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT * 4))
+    let url = compact_url(&config.base_url);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
-        .content_type("application/json")
-        .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("OpenAI-Beta", "responses=experimental")
-        .header("session-id", thread_id)
-        .header("thread-id", thread_id);
-    if let Some(account_id) = &config.account_id {
-        req = req.header("chatgpt-account-id", account_id);
+        .map_err(LlmError::Io)?;
+    runtime.block_on(async {
+        let client = network.client_for(&url).map_err(LlmError::Outbound)?;
+        let mut req = client
+            .post(compact_url(&config.base_url))
+            .timeout(DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT * 4)
+            .header("content-type", "application/json")
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", config.api_key))
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("session-id", thread_id)
+            .header("thread-id", thread_id);
+        if let Some(account_id) = &config.account_id {
+            req = req.header("chatgpt-account-id", account_id);
+        }
+        if config.mode.is_lite_compatibility() {
+            req = req.header(RESPONSES_LITE_HEADER, "true");
+        }
+        tokio::select! {
+            biased;
+            () = cancel_notify.notified() => Err(LlmError::Canceled),
+            result = async {
+                let response = req
+                    .body(body_str.to_owned())
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        LlmError::Outbound(network.reqwest_error(
+                            &url,
+                            tau_provider::OutboundPhase::Request,
+                            &error,
+                        ))
+                    })?;
+                if !response.status().is_success() {
+                    let code = response.status().as_u16();
+                    if let Some(error) = network.proxy_response_error(&url, code) {
+                        return Err(LlmError::Outbound(error));
+                    }
+                    let body = read_compact_body(
+                        response,
+                        MAX_COMPACT_ERROR_BODY_BYTES,
+                        network,
+                        &url,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    return Err(LlmError::HttpStatus(code, body));
+                }
+                read_compact_body(response, MAX_COMPACT_SUCCESS_BODY_BYTES, network, &url).await
+            } => result,
+        }
+    })
+}
+
+async fn read_compact_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    network: &tau_provider::OutboundNetworkPolicy,
+    url: &str,
+) -> Result<String, LlmError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        LlmError::Outbound(network.reqwest_error(url, tau_provider::OutboundPhase::Body, &error))
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(LlmError::InvalidResponse(
+                "compact response exceeded size limit".to_owned(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    if config.mode.is_lite_compatibility() {
-        req = req.header(RESPONSES_LITE_HEADER, "true");
-    }
-    let mut response = req
-        .send(body_str)
-        .map_err(|error| LlmError::Http(Box::new(error)))?;
-    if !response.status().is_success() {
-        let code = response.status().as_u16();
-        let body = response.body_mut().read_to_string().unwrap_or_default();
-        return Err(LlmError::HttpStatus(code, body));
-    }
-    response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| LlmError::Http(Box::new(error)))
+    String::from_utf8(bytes)
+        .map_err(|_| LlmError::InvalidResponse("compact response was not UTF-8".to_owned()))
 }
 
 fn parse_compact_response(response_body: &str) -> Result<Vec<ContextItem>, LlmError> {

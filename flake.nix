@@ -190,6 +190,7 @@
               src = buildSrc;
               nativeBuildInputs = [ ];
               env.RUSTDOCFLAGS = "-D warnings";
+              env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
               CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "";
               CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "";
             };

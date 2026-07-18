@@ -1293,7 +1293,14 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
             ..chain_test_config()
         };
 
-        let body = compact_http_request(&config, "thread-test", "{}").expect("compact response");
+        let body = compact_http_request(
+            &config,
+            "thread-test",
+            "{}",
+            &crate::test_network_policy(),
+            &tokio::sync::Notify::new(),
+        )
+        .expect("compact response");
         assert_eq!(body, r#"{"output":[]}"#);
         server.join().expect("capture server");
         let request = captured.lock().expect("capture lock").to_ascii_lowercase();
@@ -1308,6 +1315,80 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
         assert!(request.contains("accept: application/json\r\n"));
         assert!(!request.contains("text/event-stream"));
     }
+}
+
+/// Ensures canceling a stalled compact request drops the async reqwest future
+/// and closes its socket instead of leaving detached prompt-owned network work.
+#[test]
+fn compact_http_request_cancellation_closes_active_socket() {
+    use std::io::Read;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
+    let address = listener.local_addr().expect("compact address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept compact request");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("read timeout");
+        accepted_tx.send(()).expect("accepted receiver");
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("canceled compact request retained its socket");
+                }
+                Err(_) => break,
+            }
+        }
+        closed_tx.send(()).expect("closed receiver");
+    });
+    let config = ResponsesConfig {
+        base_url: format!("http://{address}"),
+        ..chain_test_config()
+    };
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(
+        std::collections::BTreeMap::new(),
+        None,
+    );
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_cancel = std::sync::Arc::clone(&cancel);
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            result_tx
+                .send(compact_http_request(
+                    &config,
+                    "thread-cancel",
+                    "{}",
+                    &network,
+                    &worker_cancel,
+                ))
+                .expect("result receiver");
+        });
+        accepted_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("request reached server");
+        cancel.notify_one();
+        assert!(matches!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("cancellation result"),
+            Err(LlmError::Canceled)
+        ));
+    });
+    closed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("canceled socket closed");
+    server.join().expect("compact server");
 }
 
 /// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
@@ -1865,7 +1946,11 @@ fn compact_abort_rechecks_cancellation_after_waker_registration() {
     ));
     let mut abort = AbortDuringRegistration(false);
     assert!(matches!(
-        register_compact_abort_waker(&mut abort, &completion),
+        register_compact_abort_waker(
+            &mut abort,
+            &completion,
+            &std::sync::Arc::new(tokio::sync::Notify::new()),
+        ),
         Err(LlmError::Canceled)
     ));
 }

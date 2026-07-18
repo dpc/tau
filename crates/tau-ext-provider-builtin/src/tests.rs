@@ -225,7 +225,7 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
     let mut prompt = minimal_prompt();
     prompt.model = "chatgpt/gpt-5.3-codex".parse().expect("model id");
     let mut retry = RecordingRetrySleeper;
-    let runtime = CodexRuntime::new();
+    let runtime = CodexRuntime::new(Arc::new(test_network_policy()));
     let mut bytes = Vec::new();
     let mut writer = PeerOutputWriter::new(&mut bytes);
 
@@ -495,7 +495,12 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     }
     let mut successful_rejections = OAuthRefreshRejectionCache::default();
     let successful = profiles.resolve_initial_quota_backends(|model, profiles| {
-        resolve_responses_backend(model, profiles, &mut successful_rejections)
+        resolve_responses_backend(
+            model,
+            profiles,
+            &mut successful_rejections,
+            &test_network_policy(),
+        )
     });
     assert_eq!(successful.len(), 2);
 }
@@ -1240,6 +1245,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             &ModelId::new(provider_name.clone(), configured.id.clone()),
             &mut profiles,
             &mut refresh_rejections,
+            &test_network_policy(),
         ),
         Some(PromptBackend::ChatCompletions { model, .. }) if model.id == configured.id
     ));
@@ -1248,6 +1254,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             &ModelId::new(provider_name, ModelName::new("missing")),
             &mut profiles,
             &mut refresh_rejections,
+            &test_network_policy(),
         )
         .is_none()
     );
@@ -1280,6 +1287,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             &ModelId::new(provider_name.clone(), configured.id.clone()),
             &mut profiles,
             &mut refresh_rejections,
+            &test_network_policy(),
         ),
         Some(PromptBackend::ChatCompletions { provider, model })
             if provider.base_url == "https://openrouter.ai/api/v1"
@@ -1290,6 +1298,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             &ModelId::new(provider_name, ModelName::new("missing")),
             &mut profiles,
             &mut refresh_rejections,
+            &test_network_policy(),
         )
         .is_none()
     );

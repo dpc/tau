@@ -37,6 +37,11 @@ pub mod oauth;
 pub mod quota;
 pub mod responses;
 
+#[cfg(test)]
+pub(crate) fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
+    tau_provider::OutboundNetworkPolicy::from_environment(std::collections::BTreeMap::new(), None)
+}
+
 /// Prompt-turn cancellation source used by the WebSocket transport.
 ///
 /// The synchronous provider loop needs a cancellation event that can wake a
@@ -89,7 +94,11 @@ impl TurnAbortWaker for NeverAbortWaker {}
 
 /// Runtime state for the ChatGPT/Codex WebSocket inference pool.
 pub struct CodexRuntime {
+    /// Shared pool whose connection setup uses `network`.
     ws_pool: responses::pool::SharedWsPool,
+    /// Required immutable startup policy for all Codex control-plane and prompt
+    /// traffic.
+    network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 }
 
 /// Result of one ChatGPT/Codex streaming dispatch.
@@ -113,12 +122,26 @@ pub enum StreamUpdate<'a> {
 }
 
 impl CodexRuntime {
-    /// Create an empty Codex runtime with no pooled WebSocket connections.
+    /// Create an empty Codex runtime using one immutable startup network
+    /// policy.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>) -> Self {
         Self {
-            ws_pool: responses::pool::SharedWsPool::new(),
+            ws_pool: responses::pool::SharedWsPool::new(std::sync::Arc::clone(&network)),
+            network,
         }
+    }
+
+    /// Return the immutable outbound policy shared by this runtime.
+    #[must_use]
+    pub fn network(&self) -> &tau_provider::OutboundNetworkPolicy {
+        &self.network
+    }
+
+    /// Clone the immutable outbound policy for supervised background work.
+    #[must_use]
+    pub fn network_arc(&self) -> std::sync::Arc<tau_provider::OutboundNetworkPolicy> {
+        std::sync::Arc::clone(&self.network)
     }
 
     /// Stream one prompt through the Codex WebSocket transport.
@@ -230,17 +253,17 @@ impl CodexRuntime {
         request: &common::PromptPayload<'_>,
         abort: &mut impl TurnAbort,
     ) -> Result<Vec<tau_proto::ContextItem>, common::LlmError> {
-        let output = responses::responses_compact(agent_prompt_id, config, request, abort)?;
+        let output = responses::responses_compact(
+            agent_prompt_id,
+            config,
+            request,
+            abort,
+            std::sync::Arc::clone(&self.network),
+        )?;
         self.ws_pool
             .invalidate(config, request)
             .map_err(|error| error.into_llm_error())?;
         Ok(output)
-    }
-}
-
-impl Default for CodexRuntime {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

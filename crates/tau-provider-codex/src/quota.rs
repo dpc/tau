@@ -54,7 +54,9 @@ pub struct FullQuotaSnapshot {
 #[derive(Debug)]
 pub enum UsageFetchError {
     /// Request construction or transport failed.
-    Transport,
+    Transport(tau_provider::OutboundError),
+    /// The local async runtime could not start.
+    Runtime,
     /// Upstream returned a non-success status.
     Status(u16),
     /// Response exceeded the quota-specific body cap.
@@ -66,7 +68,8 @@ pub enum UsageFetchError {
 impl std::fmt::Display for UsageFetchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transport => formatter.write_str("ChatGPT quota request failed"),
+            Self::Transport(error) => error.fmt(formatter),
+            Self::Runtime => formatter.write_str("ChatGPT quota runtime failed"),
             Self::Status(status) => {
                 write!(formatter, "ChatGPT quota request returned HTTP {status}")
             }
@@ -76,44 +79,76 @@ impl std::fmt::Display for UsageFetchError {
     }
 }
 
-impl std::error::Error for UsageFetchError {}
+impl std::error::Error for UsageFetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Fetches and normalizes the authenticated ChatGPT account-usage snapshot.
 ///
 /// Redirects are disabled so bearer and account headers cannot cross origins.
+///
+/// # Errors
+///
+/// Returns a bounded redacted error when runtime setup, routing, request I/O,
+/// response bounds, status validation, or payload normalization fails.
 pub fn fetch_usage(
     base_url: &str,
     access_token: &str,
     account_id: Option<&str>,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<FullQuotaSnapshot, UsageFetchError> {
     let url = format!("{}/wham/usage", base_url.trim_end_matches('/'));
-    let mut request = tau_provider::oauth::proxy_agent()
-        .get(&url)
-        .config()
-        .timeout_global(Some(USAGE_REQUEST_TIMEOUT))
-        .max_redirects(0)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
-        .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {access_token}"));
-    if let Some(account_id) = account_id.filter(|value| !value.trim().is_empty()) {
-        request = request.header("chatgpt-account-id", account_id);
-    }
-    let mut response = request.call().map_err(|_| UsageFetchError::Transport)?;
+        .map_err(|_| UsageFetchError::Runtime)?;
+    let mut response = runtime.block_on(async {
+        let client = network
+            .client_for(&url)
+            .map_err(UsageFetchError::Transport)?;
+        let mut request = client
+            .get(&url)
+            .timeout(USAGE_REQUEST_TIMEOUT)
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        if let Some(account_id) = account_id.filter(|value| !value.trim().is_empty()) {
+            request = request.header("chatgpt-account-id", account_id);
+        }
+        request.send().await.map_err(|error| {
+            UsageFetchError::Transport(network.reqwest_error(
+                &url,
+                tau_provider::OutboundPhase::Request,
+                &error,
+            ))
+        })
+    })?;
     if !response.status().is_success() {
+        if let Some(error) = network.proxy_response_error(&url, response.status().as_u16()) {
+            return Err(UsageFetchError::Transport(error));
+        }
         return Err(UsageFetchError::Status(response.status().as_u16()));
     }
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_USAGE_BODY_BYTES)
-        .read_to_string()
-        .map_err(|error| {
-            if error.to_string().contains("limit") {
-                UsageFetchError::BodyTooLarge
-            } else {
-                UsageFetchError::Transport
+    let body = runtime.block_on(async {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            UsageFetchError::Transport(network.reqwest_error(
+                &url,
+                tau_provider::OutboundPhase::Body,
+                &error,
+            ))
+        })? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_USAGE_BODY_BYTES as usize {
+                return Err(UsageFetchError::BodyTooLarge);
             }
-        })?;
+            bytes.extend_from_slice(&chunk);
+        }
+        String::from_utf8(bytes).map_err(|_| UsageFetchError::InvalidJson)
+    })?;
     parse_full_usage_json(&body)
 }
 
@@ -208,7 +243,7 @@ pub fn parse_full_usage_json(body: &str) -> Result<FullQuotaSnapshot, UsageFetch
 }
 
 /// Parses every supported quota header family from one HTTP response.
-pub fn parse_http_headers(headers: &ureq::http::HeaderMap) -> RollingQuotaObservation {
+pub fn parse_http_headers(headers: &reqwest::header::HeaderMap) -> RollingQuotaObservation {
     let mut raw_ids = BTreeSet::from(["codex".to_owned()]);
     for name in headers.keys() {
         let name = name.as_str().to_ascii_lowercase();
@@ -396,7 +431,7 @@ fn normalize_limit_id(raw: &str) -> Option<ProviderQuotaLimitId> {
     ProviderQuotaLimitId::parse(value).ok()
 }
 
-fn header_f64(headers: &ureq::http::HeaderMap, name: &str) -> Option<f64> {
+fn header_f64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
     headers
         .get(name)?
         .to_str()
@@ -406,7 +441,7 @@ fn header_f64(headers: &ureq::http::HeaderMap, name: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn header_i64(headers: &ureq::http::HeaderMap, name: &str) -> Option<i64> {
+fn header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
     headers.get(name)?.to_str().ok()?.parse().ok()
 }
 

@@ -63,6 +63,28 @@ same neutral unknown state.
 
 ## Runtime behavior
 
+Built-in provider HTTP and WebSocket networking snapshots `http_proxy`,
+`https_proxy`, `all_proxy`, and `no_proxy` at provider startup, with each
+lowercase variable taking precedence over its uppercase equivalent. HTTP/WS use
+the HTTP proxy class and HTTPS/WSS use the HTTPS class, then fall back to
+ALL_PROXY. `NO_PROXY` is the only direct bypass; a selected proxy never falls
+back directly after failure. Supported proxy URLs use HTTP or HTTPS with
+optional percent-encoded Basic credentials. SOCKS, PAC/WPAD, desktop discovery,
+integrated authentication, and redirects are unsupported. Restart after changing
+network environment.
+
+Release acceptance covers HTTP through HTTP or HTTPS proxies, WS through an HTTP
+proxy, and WSS through an HTTP proxy followed by target TLS. Nested HTTPS/WSS
+through an HTTPS proxy is not yet acceptance-certified and should be validated
+locally before relying on that combination.
+
+TLS always verifies with platform trust. `TAU_PROVIDER_CA_BUNDLE` can add one
+bounded certificate-only PEM bundle captured at startup; it cannot disable or
+replace platform verification. Reqwest does not expose the status of a rejected
+HTTPS/WSS CONNECT tunnel, so Tau safely reports a hidden proxy 407 as a redacted
+proxy-route transport failure rather than guessing authentication from error
+text. Plain HTTP/WS proxy 407 responses remain specifically classified.
+
 The harness assembles prompts and routes provider-owned turns to this extension. The extension publishes `ProviderModelsUpdated`, streams response updates, and emits final response events with stop reasons and usage/cache diagnostics.
 
 ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay within that finite provider attempt; an ambiguous failed attempt then returns to the logical-prompt scheduler.

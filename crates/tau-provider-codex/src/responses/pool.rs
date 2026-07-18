@@ -206,6 +206,8 @@ type CheckoutWaitHook = Arc<dyn Fn() + Send + Sync + 'static>;
 pub struct SharedWsPool {
     inner: Arc<Mutex<SharedWsPoolInner>>,
     changed: Arc<Condvar>,
+    /// Immutable outbound policy used by every fresh connection.
+    network: Arc<tau_provider::OutboundNetworkPolicy>,
     /// Test-only observation hook fired at the exact same-key wait boundary.
     #[cfg(test)]
     checkout_wait_hook: Arc<Mutex<Option<CheckoutWaitHook>>>,
@@ -223,7 +225,8 @@ struct SharedWsPoolInner {
 }
 
 impl SharedWsPool {
-    pub fn new() -> Self {
+    /// Create a pool whose fresh sockets share one startup network policy.
+    pub(crate) fn new(network: Arc<tau_provider::OutboundNetworkPolicy>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SharedWsPoolInner {
                 pool: WsPool::new(),
@@ -234,6 +237,7 @@ impl SharedWsPool {
                 abort_wake_generation: 0,
             })),
             changed: Arc::new(Condvar::new()),
+            network,
             #[cfg(test)]
             checkout_wait_hook: Arc::new(Mutex::new(None)),
         }
@@ -482,12 +486,6 @@ impl SharedWsPool {
 
     fn lock_inner(&self) -> Result<std::sync::MutexGuard<'_, SharedWsPoolInner>, WsTurnError> {
         self.inner.lock().map_err(pool_poisoned)
-    }
-}
-
-impl Default for SharedWsPool {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -749,8 +747,13 @@ pub fn run_turn_through_pool(
     // one cold full replay on WS. That is cheaper over the next turns than
     // switching to HTTP and staying cold.
     let mut abort = NeverAbort;
-    let mut conn =
-        WsConn::connect(config, &key.thread_id, &mut abort).map_err(WsTurnError::Other)?;
+    let mut conn = WsConn::connect(
+        config,
+        &key.thread_id,
+        &crate::test_network_policy(),
+        &mut abort,
+    )
+    .map_err(WsTurnError::Other)?;
     pool.stats.upgrades += 1;
     let mut recording_stream = vcr_record_config
         .as_ref()
@@ -897,9 +900,14 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             return Err(WsTurnError::Canceled);
         }
         on_update(crate::StreamUpdate::Connecting);
-        let mut conn =
-            self.pool
-                .connect_reserved_fresh(&self.key, self.config, abort, WsConn::connect)?;
+        let mut conn = self.pool.connect_reserved_fresh(
+            &self.key,
+            self.config,
+            abort,
+            |config, thread_id, abort| {
+                WsConn::connect(config, thread_id, &self.pool.network, abort)
+            },
+        )?;
         self.pool.record_fresh_open()?;
         let mut stream = recording_stream(self.record_config);
         match conn.run_turn(
@@ -978,7 +986,12 @@ pub fn run_prewarm_through_pool(
     }
 
     let mut abort = NeverAbort;
-    let mut conn = WsConn::connect(config, &key.thread_id, &mut abort)?;
+    let mut conn = WsConn::connect(
+        config,
+        &key.thread_id,
+        &crate::test_network_policy(),
+        &mut abort,
+    )?;
     pool.stats.upgrades += 1;
     match conn.run_prewarm(config, request, &mut abort) {
         Ok(state) => {
@@ -1070,10 +1083,13 @@ pub fn run_prewarm_through_shared_pool(
         }
     }
 
-    let mut conn = match pool.connect_reserved_fresh(&key, config, abort, WsConn::connect) {
-        Ok(conn) => conn,
-        Err(error) => return Err(error.into_llm_error()),
-    };
+    let mut conn =
+        match pool.connect_reserved_fresh(&key, config, abort, |config, thread_id, abort| {
+            WsConn::connect(config, thread_id, &pool.network, abort)
+        }) {
+            Ok(conn) => conn,
+            Err(error) => return Err(error.into_llm_error()),
+        };
     pool.record_fresh_open()
         .map_err(WsTurnError::into_llm_error)?;
     match conn.run_prewarm(config, request, abort) {

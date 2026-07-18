@@ -35,14 +35,13 @@ use std::time::{Duration, Instant};
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
+use tokio_tungstenite::{WebSocketStream, tungstenite};
 
 use super::{
     DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream, ResponsesConfig,
@@ -111,7 +110,7 @@ fn apply_ws_raw_json_event(
     apply_raw_json_event(state, data, on_update)
 }
 
-type SharedStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type SharedStream = WebSocketStream<reqwest::Upgraded>;
 type Sink = SplitSink<SharedStream, Message>;
 type Stream = SplitStream<SharedStream>;
 
@@ -203,30 +202,29 @@ impl WsConn {
     /// `thread_id` is the prompt-cache UUID for the request bucket; it is sent
     /// as both `session-id` and `thread-id` on the upgrade.
     ///
-    /// Errors:
-    /// - `LlmError::Canceled` — prompt cancellation or shutdown won the upgrade
-    ///   race.
-    /// - `LlmError::HttpStatus(0, "stream error: websocket connect timeout")` —
-    ///   the 30-second upgrade deadline elapsed; classified as retryable
-    ///   transport.
-    /// - `LlmError::HttpStatus(426, _)` — server rejected the upgrade.
-    /// - `LlmError::HttpStatus(0, "stream error: ...")` — transient transport
-    ///   hiccup, retryable.
-    /// - Other 4xx — surface as-is.
+    /// # Errors
+    ///
+    /// Returns typed cancellation, reloadable configuration, outbound
+    /// route/phase/category, or provider HTTP rejection errors. The 30-second
+    /// upgrade deadline is `Outbound(Deadline)`, while malformed negotiation is
+    /// `Outbound(Protocol)`.
     pub fn connect(
         config: &ResponsesConfig,
         thread_id: &str,
+        network: &tau_provider::OutboundNetworkPolicy,
         abort: &mut impl TurnAbort,
     ) -> Result<Self, LlmError> {
-        Self::connect_with_timeout(config, thread_id, abort, CONNECT_TIMEOUT)
+        Self::connect_with_timeout(config, thread_id, network, abort, CONNECT_TIMEOUT)
     }
 
     fn connect_with_timeout(
         config: &ResponsesConfig,
         thread_id: &str,
+        network: &tau_provider::OutboundNetworkPolicy,
         abort: &mut impl TurnAbort,
         timeout: Duration,
     ) -> Result<Self, LlmError> {
+        let websocket_url = build_ws_url(&config.base_url)?;
         let request = build_request(config, thread_id)?;
         let bearer = config.api_key.clone();
         let runtime = ws_runtime::handle();
@@ -234,9 +232,9 @@ impl WsConn {
             &runtime,
             abort,
             timeout,
-            tokio_tungstenite::connect_async(request),
+            connect_with_policy(request, network),
         )
-        .map_err(map_connect_wait_error)?;
+        .map_err(|error| map_connect_wait_error(error, network, &websocket_url))?;
 
         let (sink, stream) = ws.split();
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
@@ -464,17 +462,108 @@ impl WsConn {
     }
 }
 
+async fn connect_with_policy(
+    request: Request,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<(SharedStream, tungstenite::handshake::client::Response), tungstenite::Error> {
+    let websocket_url = request.uri().to_string();
+    let http_url = if let Some(rest) = websocket_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = websocket_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        return Err(tungstenite::Error::Url(
+            tungstenite::error::UrlError::UnsupportedUrlScheme,
+        ));
+    };
+    let key = request
+        .headers()
+        .get("sec-websocket-key")
+        .cloned()
+        .ok_or_else(|| {
+            tungstenite::Error::Protocol(tungstenite::error::ProtocolError::MissingSecWebSocketKey)
+        })?;
+    let client = network
+        .client_for(&websocket_url)
+        .map_err(|error| tungstenite::Error::Io(std::io::Error::other(error)))?;
+    let mut outbound = client.get(&http_url).version(reqwest::Version::HTTP_11);
+    for (name, value) in request.headers() {
+        outbound = outbound.header(name, value);
+    }
+    let response = outbound.send().await.map_err(|error| {
+        tungstenite::Error::Io(std::io::Error::other(network.reqwest_error(
+            &websocket_url,
+            tau_provider::OutboundPhase::Request,
+            &error,
+        )))
+    })?;
+    let status = response.status();
+    if status != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+        if let Some(error) = network.proxy_response_error(&websocket_url, status.as_u16()) {
+            return Err(tungstenite::Error::Io(std::io::Error::other(error)));
+        }
+        return Err(tungstenite::Error::Http(Box::new(
+            tungstenite::http::Response::builder()
+                .status(status)
+                .body(None)
+                .expect("valid provider status"),
+        )));
+    }
+    let headers = response.headers();
+    let upgrade_ok = headers
+        .get("upgrade")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    let connection_ok = headers
+        .get("connection")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        });
+    let expected_accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+    let accept_ok = headers
+        .get("sec-websocket-accept")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected_accept);
+    let negotiation_absent = !headers.contains_key("sec-websocket-extensions")
+        && !headers.contains_key("sec-websocket-protocol");
+    if !(upgrade_ok && connection_ok && accept_ok && negotiation_absent) {
+        return Err(tungstenite::Error::Io(std::io::Error::other(
+            network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
+        )));
+    }
+    let response_headers = response.headers().clone();
+    let upgraded = response.upgrade().await.map_err(|_| {
+        tungstenite::Error::Io(std::io::Error::other(
+            network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
+        ))
+    })?;
+    let stream =
+        WebSocketStream::from_raw_socket(upgraded, tungstenite::protocol::Role::Client, None).await;
+    let mut handshake = tungstenite::http::Response::builder().status(status);
+    *handshake
+        .headers_mut()
+        .expect("response builder exposes headers") = response_headers;
+    Ok((stream, handshake.body(None).expect("valid response")))
+}
+
 enum ConnectWaitError<E> {
     Canceled,
     Timeout,
     Connect(E),
 }
 
-fn map_connect_wait_error(error: ConnectWaitError<tungstenite::Error>) -> LlmError {
+fn map_connect_wait_error(
+    error: ConnectWaitError<tungstenite::Error>,
+    network: &tau_provider::OutboundNetworkPolicy,
+    target: &str,
+) -> LlmError {
     match error {
         ConnectWaitError::Canceled => LlmError::Canceled,
         ConnectWaitError::Timeout => {
-            LlmError::HttpStatus(0, "stream error: websocket connect timeout".to_owned())
+            LlmError::Outbound(network.deadline_error(target, tau_provider::OutboundPhase::Connect))
         }
         ConnectWaitError::Connect(error) => map_ws_connect_error(error),
     }
@@ -797,8 +886,16 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             .unwrap_or_default();
         return LlmError::HttpStatus(code, body);
     }
+    if let tungstenite::Error::Io(error) = &e
+        && let Some(outbound) = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<tau_provider::OutboundError>())
+    {
+        return LlmError::Outbound(outbound.clone());
+    }
     // Network / TLS / protocol — treat as retryable transport.
-    LlmError::HttpStatus(0, format!("stream error: ws connect: {e}"))
+    let _ = e;
+    LlmError::HttpStatus(0, "stream error: websocket connection failed".to_owned())
 }
 
 #[cfg(test)]

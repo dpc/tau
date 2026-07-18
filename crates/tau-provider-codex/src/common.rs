@@ -80,7 +80,8 @@ impl PromptPayload<'_> {
 /// Transport / protocol error returned from any LLM backend stream.
 #[derive(Debug)]
 pub enum LlmError {
-    Http(Box<ureq::Error>),
+    /// Shared outbound policy or route failure with a redacted projection.
+    Outbound(tau_provider::OutboundError),
     HttpStatus(u16, String),
     /// HTTP status preserving a trusted transport-level retry hint.
     HttpStatusHinted(u16, String, Duration),
@@ -103,7 +104,7 @@ pub enum LlmError {
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Http(e) => write!(f, "HTTP error: {e}"),
+            Self::Outbound(error) => error.fmt(f),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::Canceled => write!(f, "cancelled by harness"),
@@ -121,7 +122,7 @@ impl std::fmt::Display for LlmError {
 impl std::error::Error for LlmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Http(e) => Some(e),
+            Self::Outbound(error) => Some(error),
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
             Self::Vcr(e) => Some(e),
@@ -144,7 +145,8 @@ impl LlmError {
     #[must_use]
     pub fn retry_decision(&self) -> Option<RetryDecision> {
         match self {
-            Self::Http(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
+            Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
+            Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::Vcr(_)
             | Self::RepetitionDetected(_)
@@ -185,6 +187,16 @@ impl LlmError {
     }
 }
 
+fn outbound_retry_class(kind: tau_provider::OutboundErrorKind) -> RetryClass {
+    match kind {
+        tau_provider::OutboundErrorKind::InvalidConfiguration
+        | tau_provider::OutboundErrorKind::ProxyAuthentication => RetryClass::Auth,
+        tau_provider::OutboundErrorKind::Transport
+        | tau_provider::OutboundErrorKind::Deadline
+        | tau_provider::OutboundErrorKind::Protocol => RetryClass::Transport,
+    }
+}
+
 fn classify_http_status(
     code: u16,
     body: &str,
@@ -210,11 +222,7 @@ fn classify_http_status(
             429 => RetryClass::Throttle,
             500..=599 => RetryClass::Overload,
             401 | 403 => RetryClass::Auth,
-            0 if is_provider_stream_idle_timeout_body(body)
-                || is_websocket_connect_timeout_body(body) =>
-            {
-                RetryClass::Transport
-            }
+            0 if is_provider_stream_idle_timeout_body(body) => RetryClass::Transport,
             _ => RetryClass::Unknown,
         });
     let body_hint = parse_json_reset_hint(body, SystemTime::now());
@@ -289,10 +297,6 @@ pub fn is_account_limit_body(body: &str) -> bool {
 /// error.
 pub fn is_provider_stream_idle_timeout_body(body: &str) -> bool {
     body.contains("provider stream idle timeout")
-}
-
-fn is_websocket_connect_timeout_body(body: &str) -> bool {
-    body == "stream error: websocket connect timeout"
 }
 
 /// One provider output item as it is incrementally assembled from a

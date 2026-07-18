@@ -65,6 +65,11 @@ pub const LOG_TARGET: &str = "provider-builtin";
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
 const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
+
+#[cfg(test)]
+fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
+    tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None)
+}
 /// One built-in provider profile loaded from `auth.d/<provider>.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -676,8 +681,9 @@ const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";
 
 /// Runs setup commands for registered built-in provider profiles.
 pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     match args.first().map(String::as_str).unwrap_or("help") {
-        "add" => cmd_add(&args[1..])?,
+        "add" => cmd_add(&args[1..], &network)?,
         "remove" | "delete" => cmd_remove(args.get(1).map(String::as_str))?,
         "list" | "status" => cmd_list()?,
         "help" | "--help" | "-h" => println!("{PROVIDER_CLI_HELP}"),
@@ -694,7 +700,10 @@ Subcommands:
   remove <name>                  Remove a provider profile
   list                           List provider profiles";
 
-fn cmd_add(args: &[String]) -> Result<(), Box<dyn Error>> {
+fn cmd_add(
+    args: &[String],
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<(), Box<dyn Error>> {
     if !args.is_empty() {
         return Err(
             "tau provider add does not accept arguments; it prompts for all provider details"
@@ -706,17 +715,17 @@ fn cmd_add(args: &[String]) -> Result<(), Box<dyn Error>> {
         .default("chatgpt".to_owned())
         .interact_text()?;
     match kind.trim() {
-        "chatgpt" => cmd_add_chatgpt()?,
+        "chatgpt" => cmd_add_chatgpt(network)?,
         "chat-completions" => cmd_add_chat_completions()?,
-        "openrouter" => cmd_add_openrouter()?,
+        "openrouter" => cmd_add_openrouter(network)?,
         other => return Err(format!("unknown provider kind: {other}").into()),
     }
     Ok(())
 }
 
-fn cmd_add_chatgpt() -> Result<(), Box<dyn Error>> {
+fn cmd_add_chatgpt(network: &tau_provider::OutboundNetworkPolicy) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("chatgpt")?;
-    let auth = run_openai_codex_login()?;
+    let auth = run_openai_codex_login(network)?;
     let responses_lite_compatibility = Confirm::new()
         .with_prompt("Use legacy Responses Lite compatibility for GPT-5.6?")
         .default(DEFAULT_RESPONSES_LITE_COMPATIBILITY)
@@ -766,7 +775,7 @@ fn chat_completions_add_compat() -> tau_provider_chat_completions::ChatCompletio
     }
 }
 
-fn cmd_add_openrouter() -> Result<(), Box<dyn Error>> {
+fn cmd_add_openrouter(network: &tau_provider::OutboundNetworkPolicy) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("openrouter")?;
     let api_key: String = Input::new()
         .with_prompt("API key")
@@ -778,7 +787,7 @@ fn cmd_add_openrouter() -> Result<(), Box<dyn Error>> {
         .interact_text()?;
     let models = if models_input.trim().is_empty() {
         eprintln!("Fetching models from OpenRouter...");
-        fetch_openrouter_models(&api_key)?
+        fetch_openrouter_models(&api_key, network)?
     } else {
         parse_chat_model_list(&models_input)?
     };
@@ -905,7 +914,9 @@ fn save_profile(
     Ok(())
 }
 
-fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
+fn run_openai_codex_login(
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<OpenAiAuth, Box<dyn Error>> {
     let (auth_url, expected_state, verifier) = tau_provider_codex::oauth::openai_codex_auth_url();
 
     eprintln!("\nOpen this URL in your browser:\n");
@@ -926,7 +937,7 @@ fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
     }
 
     eprintln!("Exchanging code for tokens...");
-    let tokens = tau_provider_codex::oauth::openai_codex_exchange(&code, &verifier)?;
+    let tokens = tau_provider_codex::oauth::openai_codex_exchange(&code, &verifier, network)?;
 
     eprintln!("Login successful!");
     Ok(OpenAiAuth {
@@ -1134,6 +1145,7 @@ where
 {
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let startup_responses_modes = startup_profiles.startup_responses_modes();
+    let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     let runtime = ProviderRuntime {
         load_prompt_profiles,
         startup_responses_modes,
@@ -1147,7 +1159,7 @@ where
         retry_clock: executors.retry_clock,
         shared_cooldowns: BTreeMap::new(),
         shared_cooldown_generation: 0,
-        codex_runtime: Arc::new(CodexRuntime::new()),
+        codex_runtime: Arc::new(CodexRuntime::new(network)),
         prewarm_supervisor: PrewarmSupervisor::default(),
         provider_profile_identities: BTreeMap::new(),
         prewarm_profile_identities: BTreeMap::new(),
@@ -1386,7 +1398,12 @@ where
     fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
         let backends = profiles.resolve_initial_quota_backends(|model, profiles| {
-            resolve_responses_backend(model, profiles, &mut self.oauth_refresh_rejections)
+            resolve_responses_backend(
+                model,
+                profiles,
+                &mut self.oauth_refresh_rejections,
+                self.codex_runtime.network(),
+            )
         });
         for (provider, config) in backends {
             self.ensure_quota_profile(&provider, &config, handle)?;
@@ -1434,11 +1451,13 @@ where
         let base_url = config.base_url.clone();
         let access_token = config.api_key.clone();
         let account_id = config.account_id.clone();
+        let network = self.codex_runtime.network_arc();
         thread::spawn(move || {
             let result = tau_provider_codex::quota::fetch_usage(
                 &base_url,
                 &access_token,
                 account_id.as_deref(),
+                &network,
             );
             let _ = send_worker_message(
                 &tx,
@@ -1461,8 +1480,13 @@ where
         profiles: &mut BuiltinProviderProfiles,
         handle: &ClientHandle,
     ) -> ClientResult<PromptBackend> {
-        let backend = resolve_prompt_backend(model, profiles, &mut self.oauth_refresh_rejections)
-            .unwrap_or(PromptBackend::Unavailable);
+        let backend = resolve_prompt_backend(
+            model,
+            profiles,
+            &mut self.oauth_refresh_rejections,
+            self.codex_runtime.network(),
+        )
+        .unwrap_or(PromptBackend::Unavailable);
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
@@ -1564,9 +1588,12 @@ where
     ) -> ClientResult<()> {
         let mut profiles = self.load_profiles();
         let requested_provider = prewarm.model.as_ref().map(|model| model.provider.clone());
-        let Some((model, config)) =
-            resolve_prewarm_backend(&prewarm, &mut profiles, &mut self.oauth_refresh_rejections)
-        else {
+        let Some((model, config)) = resolve_prewarm_backend(
+            &prewarm,
+            &mut profiles,
+            &mut self.oauth_refresh_rejections,
+            self.codex_runtime.network(),
+        ) else {
             if let Some(provider) = requested_provider {
                 self.clear_prewarm_profile(&provider);
             }
@@ -2084,6 +2111,7 @@ where
                                     &model.id,
                                     &mut profiles,
                                     &mut self.oauth_refresh_rejections,
+                                    self.codex_runtime.network(),
                                 )
                             });
                         if let Some(config) = config {
@@ -3749,6 +3777,7 @@ fn resolve_prompt_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Option<PromptBackend> {
     let Some(profile) = profiles.providers.get_mut(&model.provider) else {
         refresh_rejections.clear(&model.provider);
@@ -3763,6 +3792,7 @@ fn resolve_prompt_backend(
                 &mut profile.auth,
                 mode,
                 refresh_rejections,
+                network,
             )
             .map(PromptBackend::Responses)
         }
@@ -3798,6 +3828,7 @@ fn resolve_responses_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Option<responses::ResponsesConfig> {
     let Some(profile) = profiles.providers.get_mut(&model.provider) else {
         refresh_rejections.clear(&model.provider);
@@ -3812,6 +3843,7 @@ fn resolve_responses_backend(
                 &mut profile.auth,
                 mode,
                 refresh_rejections,
+                network,
             )
         }
         BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => {
@@ -3827,6 +3859,7 @@ fn resolve_chatgpt_backend(
     auth_store: &mut OpenAiAuth,
     mode: responses::ResponsesMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Option<responses::ResponsesConfig> {
     resolve_chatgpt_backend_with_refresh(
         model,
@@ -3834,7 +3867,9 @@ fn resolve_chatgpt_backend(
         auth_store,
         mode,
         refresh_rejections,
-        refresh_chatgpt_credentials_locked,
+        |provider, mode, rejections| {
+            refresh_chatgpt_credentials_locked(provider, mode, rejections, network)
+        },
     )
 }
 
@@ -3920,6 +3955,7 @@ fn refresh_chatgpt_credentials_locked(
     provider_name: &ProviderName,
     mode: responses::ResponsesMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
     let auth_file = AuthFile::<BuiltinProviderProfile>::open_default(provider_name.as_str())
         .map_err(RefreshCredentialsError::Storage)?;
@@ -3928,7 +3964,7 @@ fn refresh_chatgpt_credentials_locked(
         provider_name,
         mode,
         refresh_rejections,
-        tau_provider_codex::oauth::openai_codex_refresh,
+        |token| tau_provider_codex::oauth::openai_codex_refresh(token, network),
     )
 }
 
@@ -4128,6 +4164,7 @@ fn resolve_prewarm_backend(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Option<(ModelId, responses::ResponsesConfig)> {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -4137,7 +4174,8 @@ fn resolve_prewarm_backend(
         );
         return None;
     };
-    let Some(config) = resolve_responses_backend(model, profiles, refresh_rejections) else {
+    let Some(config) = resolve_responses_backend(model, profiles, refresh_rejections, network)
+    else {
         tracing::debug!(
             target: LOG_TARGET,
             agent_id = %prewarm.agent_id,
@@ -4215,6 +4253,7 @@ where
                 context.debug_provider_requests,
                 writer,
                 &mut || TurnAbort::is_aborted(retry_ctx),
+                context.runtime.network(),
             );
             match outcome {
                 PromptAttemptOutcome::Finished(finished) => {

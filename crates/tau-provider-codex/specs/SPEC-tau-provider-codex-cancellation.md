@@ -37,5 +37,9 @@ sockets and marks active reservations so a late owner cannot reinstall stale
 state. Completed turns unregister wake callbacks. Prewarm completion likewise
 cannot publish a socket after cancellation.
 
+Standalone compact owns and joins its HTTP worker before returning cancellation.
+Cancellation therefore cannot leave detached compact I/O or publish a late
+compacted result after the caller has resumed.
+
 This behavior implements
 [DECISION-tau-provider-codex-cooperative-cancellation](DECISION-tau-provider-codex-cooperative-cancellation.md).

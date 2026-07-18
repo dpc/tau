@@ -26,6 +26,7 @@ fn full_fetch_uses_expected_endpoint_and_auth_headers() {
         &format!("http://{address}/backend-api/"),
         "test-token",
         Some("account-123"),
+        &crate::test_network_policy(),
     )
     .expect("fetch usage");
     let request = request_rx.recv().expect("captured usage request");
@@ -102,7 +103,7 @@ fn malformed_and_colliding_additional_pools_fail_closed() {
 /// the server supplies the explicit active-limit header.
 #[test]
 fn http_headers_parse_default_additional_and_active_limit() {
-    let mut headers = ureq::http::HeaderMap::new();
+    let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "x-codex-secondary-used-percent",
         "42.5".parse().expect("valid quota test value"),
@@ -134,7 +135,7 @@ fn http_headers_parse_default_additional_and_active_limit() {
 /// that could erase a good account snapshot.
 #[test]
 fn empty_http_headers_do_not_create_a_window_or_binding() {
-    let observation = parse_http_headers(&ureq::http::HeaderMap::new());
+    let observation = parse_http_headers(&reqwest::header::HeaderMap::new());
     assert!(observation.windows.is_empty());
     assert!(observation.active_limit_id.is_none());
 }
@@ -298,7 +299,7 @@ fn oversized_full_snapshot_is_rejected_atomically() {
 /// enumeration alone still supplies no applicability binding.
 #[test]
 fn http_discovers_secondary_only_additional_pool() {
-    let mut headers = ureq::http::HeaderMap::new();
+    let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "x-codex-fast-secondary-used-percent",
         "7".parse().expect("header value"),

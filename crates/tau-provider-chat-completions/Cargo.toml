@@ -24,4 +24,3 @@ tau-proto.workspace = true
 tau-provider.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-ureq.workspace = true

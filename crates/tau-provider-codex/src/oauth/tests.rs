@@ -92,8 +92,12 @@ fn oversized_oauth_error_body_is_not_retained() {
         std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write OAuth response");
     });
 
-    let error = super::post_form(&format!("http://{address}/oauth/token"), "grant_type=test")
-        .expect_err("oversized response must fail");
+    let error = super::post_form(
+        &format!("http://{address}/oauth/token"),
+        "grant_type=test",
+        &crate::test_network_policy(),
+    )
+    .expect_err("oversized response must fail");
     server.join().expect("OAuth test server");
 
     assert_eq!(error.http_status(), Some(400));
@@ -232,7 +236,11 @@ fn post_form_bytes_from_test_server(
         let _ = std::io::Write::write_all(&mut stream, headers.as_bytes());
         let _ = std::io::Write::write_all(&mut stream, &body);
     });
-    let result = super::post_form(&format!("http://{address}/oauth/token"), "grant_type=test");
+    let result = super::post_form(
+        &format!("http://{address}/oauth/token"),
+        "grant_type=test",
+        &crate::test_network_policy(),
+    );
     server.join().expect("OAuth test server");
     result
 }

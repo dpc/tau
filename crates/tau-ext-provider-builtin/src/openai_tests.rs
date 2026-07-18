@@ -1317,8 +1317,13 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
     };
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let mut refresh_rejections = OAuthRefreshRejectionCache::default();
-    let responses = resolve_prompt_backend(&prompt().model, &mut profiles, &mut refresh_rejections)
-        .expect("configured Responses backend");
+    let responses = resolve_prompt_backend(
+        &prompt().model,
+        &mut profiles,
+        &mut refresh_rejections,
+        &test_network_policy(),
+    )
+    .expect("configured Responses backend");
 
     assert_ne!(
         backend_profile_identity(&old),
@@ -1668,6 +1673,7 @@ fn resolves_chatgpt_to_codex_responses_backend() {
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"),
         &mut profiles,
         &mut refresh_rejections,
+        &test_network_policy(),
     )
     .expect("chatgpt backend");
 
@@ -1692,12 +1698,14 @@ fn chatgpt_phase_metadata_is_model_specific() {
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.2-codex"),
         &mut profiles,
         &mut refresh_rejections,
+        &test_network_policy(),
     )
     .expect("old codex backend");
     let new = resolve_responses_backend(
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.3-codex"),
         &mut profiles,
         &mut refresh_rejections,
+        &test_network_policy(),
     )
     .expect("new codex backend");
 

@@ -62,7 +62,7 @@ fn compatibility_route_snapshot(
     refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> serde_json::Value {
     let requested = model.to_string();
-    match resolve_prompt_backend(&model, profiles, refresh_rejections) {
+    match resolve_prompt_backend(&model, profiles, refresh_rejections, &test_network_policy()) {
         Some(PromptBackend::Responses(config)) => serde_json::json!({
             "requested": requested,
             "backend": "responses",
@@ -214,7 +214,7 @@ fn chat_completions_event_snapshot(
     prompt.model = ModelId::new(ProviderName::new(provider_name), model.id.clone());
     let backend = PromptBackend::ChatCompletions { provider, model };
     let mut bytes = Vec::new();
-    let runtime = CodexRuntime::new();
+    let runtime = CodexRuntime::new(Arc::new(test_network_policy()));
     let mut abort = RecordingRetrySleeper;
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);

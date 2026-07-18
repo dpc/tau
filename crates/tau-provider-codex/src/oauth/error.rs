@@ -39,6 +39,8 @@ pub struct OAuthError {
     provider_code: Option<String>,
     /// Bounded single-line untrusted provider message or local diagnostic.
     message: Option<String>,
+    /// Shared route/phase failure, retained only through its safe projection.
+    outbound: Option<tau_provider::OutboundError>,
 }
 
 impl OAuthError {
@@ -72,6 +74,12 @@ impl OAuthError {
     #[must_use]
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    /// Return the shared route failure when transport setup or I/O failed.
+    #[must_use]
+    pub fn outbound(&self) -> Option<&tau_provider::OutboundError> {
+        self.outbound.as_ref()
     }
 
     /// Builds a typed error from an OAuth HTTP rejection envelope.
@@ -109,6 +117,17 @@ impl OAuthError {
             http_status: None,
             provider_code: None,
             message: bounded_oauth_text(&error.to_string(), MAX_OAUTH_ERROR_MESSAGE_CHARS),
+            outbound: None,
+        }
+    }
+
+    pub(super) fn from_outbound(error: tau_provider::OutboundError) -> Self {
+        Self {
+            kind: OAuthErrorKind::Transport,
+            http_status: None,
+            provider_code: None,
+            message: None,
+            outbound: Some(error),
         }
     }
 
@@ -118,6 +137,7 @@ impl OAuthError {
             http_status: None,
             provider_code: None,
             message: bounded_oauth_text(&message.to_string(), MAX_OAUTH_ERROR_MESSAGE_CHARS),
+            outbound: None,
         }
     }
 
@@ -128,6 +148,7 @@ impl OAuthError {
             http_status: Some(status),
             provider_code: fields.provider_code,
             message: fields.message,
+            outbound: None,
         }
     }
 
@@ -147,7 +168,12 @@ impl OAuthError {
 impl fmt::Display for OAuthError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
-            OAuthErrorKind::Transport => formatter.write_str("OAuth transport failed")?,
+            OAuthErrorKind::Transport => {
+                if let Some(error) = &self.outbound {
+                    return error.fmt(formatter);
+                }
+                formatter.write_str("OAuth transport failed")?;
+            }
             OAuthErrorKind::Http => formatter.write_str("OAuth request was rejected")?,
             OAuthErrorKind::InvalidResponse => {
                 formatter.write_str("OAuth response was invalid")?;
@@ -170,11 +196,18 @@ impl fmt::Debug for OAuthError {
             .field("kind", &self.kind)
             .field("http_status", &self.http_status)
             .field("provider_code", &self.safe_provider_code())
+            .field("outbound", &self.outbound)
             .finish_non_exhaustive()
     }
 }
 
-impl std::error::Error for OAuthError {}
+impl std::error::Error for OAuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.outbound
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Bounded fields recognized in one OAuth error response envelope.
 #[derive(Default)]

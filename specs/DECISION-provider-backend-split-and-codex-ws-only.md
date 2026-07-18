@@ -4,10 +4,11 @@ Authority: confirmed, 2026-07-17, dpc
 
 ## Status
 
-The implementation now uses `tau-provider-codex`, owns OpenAI OAuth there, and
-uses WebSocket-only Codex inference. User profiles and protocol records remain
-unchanged. The shared network policy, Chat Completions ownership cutover, narrow
-typed attempt facade, and revised recovery boundaries do not yet apply. This
+The implementation now uses `tau-provider-codex`, owns OpenAI OAuth there,
+uses WebSocket-only Codex inference, and applies one startup-snapshotted
+reqwest/rustls outbound policy to provider HTTP and WebSocket operations. User
+profiles and protocol records remain unchanged. The Chat Completions ownership
+cutover, narrow typed attempt facade, and revised recovery boundaries do not yet apply. This
 record remains the approved target for `tau-agent-6fjo`; current component
 architecture records describe the still-transitional boundaries.
 
@@ -144,9 +145,16 @@ Every provider HTTP, HTTPS, and WSS operation uses one immutable outbound policy
 snapshot created at provider startup. It consistently covers Chat Completions,
 OpenRouter discovery, Codex OAuth/quota/compact, and Codex WS setup.
 
-The default policy reads standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
-lowercase equivalents, plus `NO_PROXY`/`no_proxy`. `NO_PROXY` is an intentional
-direct-route decision. Once a proxy is selected for a target, connection,
+The user approved one asynchronous reqwest/rustls stack for this boundary after
+ureq's stable API proved unable to combine exact platform verification with
+additive custom roots or cooperatively cancel prompt-bound blocking work.
+
+The user explicitly approved `TAU_PROVIDER_CA_BUNDLE` as the custom-root
+environment name, lowercase-first precedence for each proxy variable pair, and
+fail-closed handling of a malformed selected value. The default policy therefore
+reads `http_proxy`, `https_proxy`, and `all_proxy` before their uppercase
+equivalents, and reads `no_proxy` before `NO_PROXY`. `NO_PROXY` matching is an
+intentional direct-route decision. Once a proxy is selected for a target, connection,
 authentication, CONNECT, TLS, or timeout failure never falls back to a direct
 connection.
 

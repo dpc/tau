@@ -123,7 +123,11 @@ pub fn parse_redirect_url(input: &str) -> Result<(String, String), String> {
 /// Returns a bounded [`OAuthError`] for transport failure, HTTP rejection, or
 /// an oversized, malformed, incorrectly encoded, or incomplete successful
 /// response.
-pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, OAuthError> {
+pub fn openai_codex_exchange(
+    code: &str,
+    verifier: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<OAuthTokens, OAuthError> {
     // `code` and `verifier` must be form-encoded: the code is an opaque
     // server-issued token that can legally contain `+`, `=`, `&`, etc.,
     // and a raw `+` in a form body would be decoded as a space on the
@@ -137,7 +141,7 @@ pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, 
         client_id = OPENAI_CLIENT_ID,
     );
 
-    let json = post_form(OPENAI_TOKEN_URL, &body)?;
+    let json = post_form(OPENAI_TOKEN_URL, &body, network)?;
     parse_openai_token_response(&json)
 }
 
@@ -148,14 +152,17 @@ pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, 
 /// Returns a bounded [`OAuthError`] for transport failure, HTTP rejection, or
 /// an oversized, malformed, incorrectly encoded, or incomplete successful
 /// response.
-pub fn openai_codex_refresh(refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
+pub fn openai_codex_refresh(
+    refresh_token: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<OAuthTokens, OAuthError> {
     let body = format!(
         "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}",
         refresh_token = urlencoding(refresh_token),
         client_id = OPENAI_CLIENT_ID,
     );
 
-    let json = post_form(OPENAI_TOKEN_URL, &body)?;
+    let json = post_form(OPENAI_TOKEN_URL, &body, network)?;
     parse_openai_token_response(&json)
 }
 
@@ -216,24 +223,49 @@ fn extract_openai_account_id(jwt: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// POST a form-encoded body and parse JSON response.
-fn post_form(url: &str, body: &str) -> Result<serde_json::Value, OAuthError> {
-    let resp = tau_provider::oauth::proxy_agent()
-        .post(url)
-        .content_type("application/x-www-form-urlencoded")
-        .send(body)
+fn post_form(
+    url: &str,
+    body: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<serde_json::Value, OAuthError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .map_err(OAuthError::transport)?;
-    read_success_json(resp)
+    runtime.block_on(async {
+        let client = network.client_for(url).map_err(OAuthError::from_outbound)?;
+        let response = client
+            .post(url)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .timeout(Duration::from_secs(30))
+            .body(body.to_owned())
+            .send()
+            .await
+            .map_err(|error| {
+                OAuthError::from_outbound(network.reqwest_error(
+                    url,
+                    tau_provider::OutboundPhase::Request,
+                    &error,
+                ))
+            })?;
+        read_success_json(response, network, url).await
+    })
 }
 
-fn map_status_error(
-    mut resp: ureq::http::Response<ureq::Body>,
-) -> Result<ureq::http::Response<ureq::Body>, OAuthError> {
+async fn map_status_error(
+    mut resp: reqwest::Response,
+    network: &tau_provider::OutboundNetworkPolicy,
+    url: &str,
+) -> Result<reqwest::Response, OAuthError> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
 
-    let body = read_bounded_oauth_body(resp.body_mut()).ok();
+    if let Some(error) = network.proxy_response_error(url, status.as_u16()) {
+        return Err(OAuthError::from_outbound(error));
+    }
+    let body = read_bounded_oauth_body(&mut resp).await.ok();
     Err(OAuthError::http(status.as_u16(), body.as_deref()))
 }
 
@@ -244,38 +276,49 @@ enum OAuthBodyReadError {
     /// The complete bounded response was not valid UTF-8.
     InvalidEncoding,
     /// The transport failed before a complete body was available.
-    Transport(ureq::Error),
+    Transport(reqwest::Error),
 }
 
-fn read_bounded_oauth_body(body: &mut ureq::Body) -> Result<String, OAuthBodyReadError> {
-    let bytes = body
-        .with_config()
-        .limit(MAX_OAUTH_RESPONSE_BODY_BYTES.saturating_add(1))
-        .read_to_vec()
-        .map_err(|error| match error {
-            ureq::Error::BodyExceedsLimit(_) => OAuthBodyReadError::TooLarge,
-            other => OAuthBodyReadError::Transport(other),
-        })?;
+async fn read_bounded_oauth_body(
+    response: &mut reqwest::Response,
+) -> Result<String, OAuthBodyReadError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(OAuthBodyReadError::Transport)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_OAUTH_RESPONSE_BODY_BYTES as usize {
+            return Err(OAuthBodyReadError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     if bytes.len() > MAX_OAUTH_RESPONSE_BODY_BYTES as usize {
         return Err(OAuthBodyReadError::TooLarge);
     }
     String::from_utf8(bytes).map_err(|_| OAuthBodyReadError::InvalidEncoding)
 }
 
-/// Read a ureq response body as JSON.
-fn read_success_json(
-    resp: ureq::http::Response<ureq::Body>,
+/// Read a bounded asynchronous response body as JSON.
+async fn read_success_json(
+    resp: reqwest::Response,
+    network: &tau_provider::OutboundNetworkPolicy,
+    url: &str,
 ) -> Result<serde_json::Value, OAuthError> {
-    let mut resp = map_status_error(resp)?;
-    let text = read_bounded_oauth_body(resp.body_mut()).map_err(|error| match error {
-        OAuthBodyReadError::TooLarge => {
-            OAuthError::invalid_response("OAuth response exceeded size limit")
-        }
-        OAuthBodyReadError::InvalidEncoding => {
-            OAuthError::invalid_response("OAuth response was not valid UTF-8")
-        }
-        OAuthBodyReadError::Transport(error) => OAuthError::transport(error),
-    })?;
+    let mut resp = map_status_error(resp, network, url).await?;
+    let text = read_bounded_oauth_body(&mut resp)
+        .await
+        .map_err(|error| match error {
+            OAuthBodyReadError::TooLarge => {
+                OAuthError::invalid_response("OAuth response exceeded size limit")
+            }
+            OAuthBodyReadError::InvalidEncoding => {
+                OAuthError::invalid_response("OAuth response was not valid UTF-8")
+            }
+            OAuthBodyReadError::Transport(error) => OAuthError::from_outbound(
+                network.reqwest_error(url, tau_provider::OutboundPhase::Body, &error),
+            ),
+        })?;
     serde_json::from_str(&text).map_err(OAuthError::invalid_response)
 }
 

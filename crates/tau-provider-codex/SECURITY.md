@@ -27,10 +27,18 @@ ignored or reinterpreted as that default. JSON null is treated as absence.
 
 ## WebSocket liveness and cancellation
 
+OAuth, quota, compact, and WebSocket upgrade traffic uses the shared immutable
+outbound policy in `tau-provider`. Reqwest does not rediscover environment
+proxies or follow redirects. A selected proxy route cannot fall back direct;
+platform verification plus the optional startup custom CA applies to target
+and HTTPS-proxy TLS. Upgrade and transport errors retain only bounded status
+and route/phase facts, never endpoints, credentials, CA material, or raw
+failure bodies.
+
 Fresh DNS/TCP/TLS/WebSocket upgrades race the prompt abort registry and a
 30-second deadline. Cancellation is rechecked after waker registration and after
 upgrade success. Canceled work returns the typed cancellation outcome; timeout is
-a fixed, provider-content-free status-zero error classified as retryable
+a redacted outbound `Deadline` during `Connect`, classified as retryable
 `Transport`. Failure, timeout, and cancellation all abandon the same-key pool
 reservation.
 

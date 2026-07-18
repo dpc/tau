@@ -175,6 +175,7 @@ fn run_prompt<W: Write>(
     model: ChatCompletionsModel,
     debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> ProviderResponseFinished {
     if let Some(model_compat) = model.compat {
         provider.compat = model_compat;
@@ -193,6 +194,7 @@ fn run_prompt<W: Write>(
                 debug_provider_requests,
                 &mut on_update,
                 &mut || false,
+                network,
             )
         };
         match result {
@@ -430,6 +432,7 @@ pub fn run_prompt_for_provider<W: Write>(
     model: &ChatCompletionsModel,
     debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> ProviderResponseFinished {
     run_prompt(
         agent_prompt_id,
@@ -444,6 +447,7 @@ pub fn run_prompt_for_provider<W: Write>(
         model.clone(),
         debug_provider_requests,
         writer,
+        network,
     )
 }
 
@@ -513,7 +517,8 @@ fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {
 #[derive(Debug)]
 enum LlmError {
     EmptyResponse,
-    Reqwest(reqwest::Error),
+    /// Redacted route- and phase-scoped shared network failure.
+    Outbound(tau_provider::OutboundError),
     HttpStatus(u16, String),
     HttpStatusHinted(u16, String, Duration),
     Io(std::io::Error),
@@ -527,7 +532,7 @@ impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyResponse => write!(f, "provider returned an empty response"),
-            Self::Reqwest(error) => write!(f, "HTTP error: {error}"),
+            Self::Outbound(error) => error.fmt(f),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::Io(error) => write!(f, "I/O error: {error}"),
@@ -545,7 +550,8 @@ impl LlmError {
     fn retry_decision(&self) -> Option<RetryDecision> {
         match self {
             Self::RepetitionDetected(_) | Self::Canceled | Self::UnsupportedToolType(_) => None,
-            Self::Reqwest(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
+            Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
+            Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::EmptyResponse | Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::HttpStatus(code, body) => retry_decision_for_http_error(*code, body, None),
             Self::HttpStatusHinted(code, body, hint) => {
@@ -560,6 +566,16 @@ impl LlmError {
             return None;
         };
         http_failure_kind(*status, body)
+    }
+}
+
+fn outbound_retry_class(kind: tau_provider::OutboundErrorKind) -> RetryClass {
+    match kind {
+        tau_provider::OutboundErrorKind::InvalidConfiguration
+        | tau_provider::OutboundErrorKind::ProxyAuthentication => RetryClass::Auth,
+        tau_provider::OutboundErrorKind::Transport
+        | tau_provider::OutboundErrorKind::Deadline
+        | tau_provider::OutboundErrorKind::Protocol => RetryClass::Transport,
     }
 }
 
@@ -640,6 +656,7 @@ pub enum PromptAttemptOutcome {
 
 /// Run exactly one provider attempt without sleeping or closing a retryable
 /// prompt.
+#[allow(clippy::too_many_arguments)] // Transitional phase-4 ownership API; transport injection is intentionally explicit.
 pub fn run_prompt_attempt_for_provider<W: Write>(
     agent_prompt_id: &AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
@@ -648,6 +665,7 @@ pub fn run_prompt_attempt_for_provider<W: Write>(
     debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
     is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> PromptAttemptOutcome {
     let mut resolved = ResolvedProvider {
         base_url: provider.base_url.clone(),
@@ -671,6 +689,7 @@ pub fn run_prompt_attempt_for_provider<W: Write>(
             debug_provider_requests,
             &mut on_update,
             is_canceled,
+            network,
         )
     };
     match result {
@@ -1130,6 +1149,7 @@ fn chat_completions_stream(
     debug_provider_requests: bool,
     on_update: &mut impl FnMut(&StreamState),
     is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<StreamState, LlmError> {
     if is_canceled() {
         return Err(LlmError::Canceled);
@@ -1156,6 +1176,7 @@ fn chat_completions_stream(
         },
         on_update,
         is_canceled,
+        network,
     ))?;
     flush_pending_content(&mut state, on_update)?;
     maybe_debug_write_provider_response(
@@ -1187,10 +1208,11 @@ async fn chat_completions_stream_async(
     context: AsyncAttemptContext<'_>,
     on_update: &mut impl FnMut(&StreamState),
     is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<(StreamState, Vec<serde_json::Value>), LlmError> {
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(LlmError::Reqwest)?;
+    let client = network
+        .client_for(context.url)
+        .map_err(LlmError::Outbound)?;
     let mut request = client
         .post(context.url)
         .header("content-type", "application/json")
@@ -1206,17 +1228,25 @@ async fn chat_completions_stream_async(
             return Err(LlmError::Canceled);
         }
         if let Ok(result) = tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, &mut send).await {
-            break result.map_err(LlmError::Reqwest)?;
+            break result.map_err(|error| {
+                LlmError::Outbound(network.reqwest_error(
+                    context.url,
+                    tau_provider::OutboundPhase::Request,
+                    &error,
+                ))
+            })?;
         }
         if header_started_at.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
-            return Err(LlmError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "provider response header timeout",
-            )));
+            return Err(LlmError::Outbound(
+                network.deadline_error(context.url, tau_provider::OutboundPhase::Request),
+            ));
         }
     };
     if !response.status().is_success() {
         let code = response.status().as_u16();
+        if let Some(error) = network.proxy_response_error(context.url, code) {
+            return Err(LlmError::Outbound(error));
+        }
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -1235,14 +1265,19 @@ async fn chat_completions_stream_async(
                     bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                 }
                 Ok(Ok(None)) => break,
-                Ok(Err(error)) => return Err(LlmError::Reqwest(error)),
+                Ok(Err(error)) => {
+                    return Err(LlmError::Outbound(network.reqwest_error(
+                        context.url,
+                        tau_provider::OutboundPhase::Body,
+                        &error,
+                    )));
+                }
                 Err(_) => {}
             }
             if last_body_progress.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
-                return Err(LlmError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "provider error body idle timeout",
-                )));
+                return Err(LlmError::Outbound(
+                    network.deadline_error(context.url, tau_provider::OutboundPhase::Body),
+                ));
             }
         }
         let body = String::from_utf8_lossy(&bytes).into_owned();
@@ -1283,14 +1318,19 @@ async fn chat_completions_stream_async(
                 }
             }
             Ok(Ok(None)) => return Ok((state, raw_events)),
-            Ok(Err(error)) => return Err(LlmError::Reqwest(error)),
+            Ok(Err(error)) => {
+                return Err(LlmError::Outbound(network.reqwest_error(
+                    context.url,
+                    tau_provider::OutboundPhase::Body,
+                    &error,
+                )));
+            }
             Err(_) => {}
         }
         if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
-            return Err(LlmError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "provider stream idle timeout",
-            )));
+            return Err(LlmError::Outbound(
+                network.deadline_error(context.url, tau_provider::OutboundPhase::Body),
+            ));
         }
     }
 }

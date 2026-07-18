@@ -249,7 +249,7 @@ fn shared_pool_serializes_same_key_turns() {
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     let first = {
         let config = config.clone();
         let pool = pool.clone();
@@ -304,7 +304,7 @@ fn shared_pool_checkout_wait_aborts_when_canceled() {
         tau_proto::PromptOriginator::User,
         false,
     );
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     pool.inner
         .lock()
         .expect("pool lock")
@@ -362,7 +362,7 @@ fn shared_pool_checkout_wait_aborts_when_canceled() {
 /// retry cannot remain parked behind work that no longer exists.
 #[test]
 fn failed_fresh_connect_releases_pool_reservation() {
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
     let key = pool_key_for(
         &config,
@@ -377,11 +377,12 @@ fn failed_fresh_connect_releases_pool_reservation() {
             .is_none()
     );
 
+    let network = crate::test_network_policy();
     let result = pool.connect_reserved_fresh(&key, &config, &mut abort, |_, _, _| {
-        Err(LlmError::HttpStatus(
-            0,
-            "stream error: websocket connect timeout".to_owned(),
-        ))
+        Err(LlmError::Outbound(network.deadline_error(
+            "wss://target.example/codex/responses",
+            tau_provider::OutboundPhase::Connect,
+        )))
     });
     assert!(matches!(result, Err(WsTurnError::Other(_))));
     assert!(matches!(
@@ -428,7 +429,7 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
         pool.abandon(key).expect("clean reusable reservation");
     }
 
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
     let key = pool_key_for(
         &config,
@@ -468,7 +469,7 @@ fn canceled_fresh_connect_releases_pool_reservation_at_every_boundary() {
         &mut abort,
         |config, thread, abort| {
             let mut never = NeverAbort;
-            let conn = WsConn::connect(config, thread, &mut never)?;
+            let conn = WsConn::connect(config, thread, &crate::test_network_policy(), &mut never)?;
             abort.0 = true;
             Ok(conn)
         },
@@ -487,7 +488,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     let key = pool_key_for(
         &config,
         "test-agent",
@@ -565,7 +566,7 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     let key = pool_key_for(
         &config,
         "test-agent",
@@ -639,7 +640,7 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
 fn invalidate_all_discards_late_reserved_socket_release() {
     let (addr, _server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "invalidate-session", "sp-warm");
     let key = pool_key_for(
         &config,
@@ -673,7 +674,7 @@ fn invalidate_all_discards_late_reserved_socket_release() {
 fn cancel_between_staged_release_and_finish_discards_socket() {
     let (addr, _server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "cancel-release", "sp-warm");
     let key = pool_key_for(
         &config,
@@ -712,7 +713,7 @@ fn staged_socket_is_not_checkoutable_before_guard_unregisters() {
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     run_shared_turn(&pool, &config, "publish-order", "sp-warm");
     let key = pool_key_for(
         &config,
@@ -774,7 +775,7 @@ fn staged_socket_is_not_checkoutable_before_guard_unregisters() {
 #[test]
 fn prewarm_reservation_drop_cleans_up_early_exit() {
     let config = make_config("https://example.invalid/backend-api", Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let key = pool_key_for(
         &config,
         "test-agent",
@@ -808,7 +809,7 @@ fn prewarm_reservation_drop_cleans_up_early_exit() {
 fn shared_prewarm_socket_is_reused_by_real_turn() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("shared-prewarm-reuse");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
@@ -840,7 +841,7 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
 #[test]
 fn shared_prewarm_connect_failure_releases_reservation() {
     let config = make_config("file:///unsupported", Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("prewarm-failure");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
@@ -877,7 +878,7 @@ fn shared_prewarm_connect_failure_releases_reservation() {
 fn already_canceled_cached_prewarm_sends_no_request() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "already-canceled", "sp-warm");
     let session_id = tau_proto::SessionId::new("already-canceled");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
@@ -925,7 +926,7 @@ fn already_canceled_cached_prewarm_sends_no_request() {
 fn staged_prewarm_reservation_drop_removes_socket() {
     let (addr, _server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "staged-drop", "sp-warm");
     let key = pool_key_for(
         &config,
@@ -969,7 +970,7 @@ fn shared_pool_allows_different_keys_to_run_concurrently() {
         &format!("http://{addr}/backend-api"),
         Some("acc"),
     ));
-    let pool = Arc::new(SharedWsPool::new());
+    let pool = Arc::new(SharedWsPool::new(Arc::new(crate::test_network_policy())));
     let barrier = Arc::new(Barrier::new(2));
 
     let mut handles = Vec::new();
@@ -1445,7 +1446,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         after_turn: 1,
     });
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let pool = SharedWsPool::new();
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let mut connecting_count = 0;
     let mut on_update = |update: crate::StreamUpdate<'_>| {
         if matches!(update, crate::StreamUpdate::Connecting) {

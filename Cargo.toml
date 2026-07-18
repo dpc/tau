@@ -149,6 +149,7 @@ image = { version = "0.25", default-features = false, features = [
   "webp",
 ] }
 indexmap = { version = "2", default-features = false, features = ["serde"] }
+ipnet = { version = "2", default-features = false, features = ["std"] }
 json5 = { version = "0.4", default-features = false }
 lettre = { version = "0.11", default-features = false, features = [
   "builder",
@@ -172,6 +173,11 @@ rand = { version = "0.8", default-features = false, features = [
   "std",
   "std_rng",
 ] }
+rcgen = { version = "0.13", default-features = false, features = [
+  "crypto",
+  "pem",
+  "ring",
+] }
 regex = { version = "1", default-features = false, features = [
   "std",
   "unicode-perl",
@@ -186,6 +192,8 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
   "tls12",
 ] }
+rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
+rustls-platform-verifier = { version = "0.7", default-features = false }
 serde = { version = "1", default-features = false, features = [
   "derive",
   "std",

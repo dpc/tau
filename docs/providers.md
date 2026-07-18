@@ -8,6 +8,39 @@ recovery-disposition fields are ignored.
 A provider is a normal Tau extension that exposes models and executes prompts.
 The harness does not own provider-specific LLM execution; provider extensions are the model executors.
 
+## Proxy and certificate policy
+
+Built-in provider networking snapshots `http_proxy`/`HTTP_PROXY`,
+`https_proxy`/`HTTPS_PROXY`, `all_proxy`/`ALL_PROXY`, and
+`no_proxy`/`NO_PROXY` when the provider process starts. Lowercase variables
+take precedence. HTTP and WebSocket targets use the HTTP proxy class; HTTPS
+and secure WebSocket targets use the HTTPS class, with `ALL_PROXY` as fallback.
+Restart Tau after changing these values.
+
+`NO_PROXY` is the only direct-route bypass. Once a proxy is selected, proxy
+DNS, connection, TLS, authentication, tunneling, timeout, or upgrade failure
+does not fall back to a direct connection. HTTP and HTTPS proxy URLs with
+percent-encoded Basic credentials are supported. SOCKS, PAC/WPAD, desktop proxy
+discovery, integrated authentication, and redirects are unsupported.
+
+The release acceptance suite proves HTTP through HTTP or HTTPS proxies, WS
+through an HTTP proxy, and WSS through an HTTP proxy followed by verified target
+TLS. Nested HTTPS/WSS through an HTTPS proxy is not yet an acceptance-certified
+topology; deployments requiring that combination should validate it locally.
+
+For HTTPS/WSS, reqwest owns the proxy `CONNECT` exchange. Its public API does not
+expose a tunnel rejection's status. Tau therefore reports a hidden CONNECT 407
+as a redacted proxy-route transport failure, not as proven proxy authentication;
+this can use the shorter transport retry cadence. Plain HTTP/WS proxy 407
+responses remain specifically classified. Tau never guesses from dependency
+error text, and the no-direct-fallback guarantee is unchanged.
+
+TLS always uses the operating system verifier. `TAU_PROVIDER_CA_BUNDLE` may
+name a bounded certificate-only PEM bundle that adds corporate trust without
+replacing platform trust. The bundle is captured at startup. Plain HTTP or WS
+is visible to the selected proxy; use HTTPS/WSS when the proxy must not observe
+provider credentials or content.
+
 ## Core meaning
 
 - **provider**: a configured runtime instance that can expose and execute one or more models
