@@ -49,9 +49,9 @@ Supported profile kinds:
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
-ChatGPT account quota is acquired best-effort from `/wham/usage` and reconciled
-with supported response-header/WebSocket observations without delaying model
-work. Tau shows neutral `Q?` for a selected model when provider quota
+ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
+and reconciled with sparse in-band WebSocket `codex.rate_limits` observations
+without delaying model work. Tau shows neutral `Q?` for a selected model when provider quota
 current-state exists but weekly data is absent, unbound, stale, expired, or
 timing-untrusted. `Q-`, `Q=`, `Q+`, and `Q!` require a fresh explicit in-band
 pool binding for the exact model. Tau does not infer colored applicability from
@@ -79,7 +79,7 @@ replacement-window transcript boundary. The startup mode also separates prompt
 cache/thread/socket identity, causing one cold transition after upgrade, while
 quota and retry identity remain account/provider based.
 
-The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account, startup-selected Responses mode, and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys use the same mode-aware identity and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface instead of silently falling back to HTTP/SSE.
+The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account, startup-selected Responses mode, and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys use the same mode-aware identity and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. ChatGPT/Codex inference is WebSocket-only: retryable WS failures return to the in-memory logical-prompt scheduler, while proven terminal WS errors surface without an HTTP fallback.
 
 Fresh WebSocket setup first emits a fixed secret-free connecting status, then races
 DNS/TCP/TLS/upgrade against the prompt cancellation registry and a 30-second
@@ -92,7 +92,10 @@ rotation wakes it. Its connection and non-generating response phases are each
 bounded to 30 seconds, and stale canceled/invalidated sockets cannot return to
 the pool.
 
-After setup, ChatGPT/Codex live streams have a separate default five-minute idle watchdog on both HTTP/SSE and WebSocket. The timer resets on each SSE `data:` event or WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte trickles, and is not an absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt, clears tentative output, and parks the logical prompt for another attempt.
+After setup, ChatGPT/Codex inference is WebSocket-only with a separate default
+five-minute idle watchdog. The timer resets on each provider frame and is not an
+absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt,
+clears tentative output, and parks the logical prompt for another attempt.
 
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures; trusted later `Retry-After` and reset hints remain lower bounds. Retry state exists only for the running process/session and is not replayed after cold restart.
 

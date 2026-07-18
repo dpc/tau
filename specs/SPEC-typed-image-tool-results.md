@@ -74,5 +74,5 @@ This behavior refines
 and is implemented at the component boundaries described by
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
 [SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md),
-[ARCH-tau-provider-chatgpt](../crates/tau-provider-chatgpt/specs/ARCH-tau-provider-chatgpt.md),
+[ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md),
 and [ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).

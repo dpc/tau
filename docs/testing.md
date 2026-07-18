@@ -121,8 +121,8 @@ jitter rather than real multi-minute sleeps. Cover retry-to-park handoff,
 released worker capacity, due/fresh fairness, shared-cooldown extension,
 prompt-scoped and global cancellation in queued/delayed/active states,
 profile reload before a later success, and exactly one submitted/terminal
-lifecycle. Backend fixtures should cover Responses HTTP/SSE/WebSocket, generic
-Chat Completions, and OpenRouter retry-then-success paths, including tentative
+lifecycle. Backend fixtures should cover Codex WebSocket, generic Chat
+Completions HTTP/SSE, and OpenRouter retry-then-success paths, including tentative
 output clearing and trusted hint lower bounds.
 Manual `/retry` coverage must drive the scheduler/runtime boundary
 deterministically: assert delayed-count transfer, timer/manual and
@@ -143,8 +143,8 @@ trace. Scheduled CI can increase the deterministic budget with
 `TAU_SCHEDULER_MODEL_CASES`; the ordinary default must remain fast, sleep-free,
 and reliable.
 Boundary acceptance should keep representative wire contracts in their owning
-adapters: local Responses HTTP/SSE and WebSocket failures plus generic Chat
-Completions/OpenRouter failures must traverse production parsing and typed retry
+adapters: local Codex WebSocket failures plus generic Chat
+Completions/OpenRouter HTTP/SSE failures must traverse production parsing and typed retry
 classification. The joined incident gate may then consume that typed decision;
 the feature-gated causal fixture carries its manually retried probe into an
 embedded deterministic tool round, then feeds those exact committed events
@@ -159,7 +159,7 @@ virtual monotonic time for scheduler retry and cooldown behavior, and temporary
 auth files with injected endpoint outcomes for OAuth and credential-generation
 behavior. Backend protocol matrices remain in the owning adapters.
 
-The focused ChatGPT WebSocket lane stays inside `tau-provider-chatgpt`.
+The focused ChatGPT WebSocket lane stays inside `tau-provider-codex`.
 Loopback-only finite peers exercise production request lowering and frame
 parsing together with pool reuse, reconnect, cooperative cancellation,
 provider-frame deadlines, typed errors, and the no-HTTP-fallback commitment.
@@ -173,7 +173,7 @@ transport contracts.
 
 ## OAuth response safety
 
-Shared OAuth protocol regressions live in `tau-provider`: bounded response
+Codex OAuth protocol regressions live in `tau-provider-codex`: bounded response
 reads, flat and nested error envelopes, malformed responses, typed field bounds,
 and credential-safe `Display`/`Debug` formatting. Parser and formatting cases use
 synthetic in-process values; HTTP read/classification cases use loopback servers.
@@ -190,15 +190,15 @@ live provider auth, Internet access, real credentials, and wall-clock sleeps.
 ## Curated provider VCR compatibility evidence
 
 The small corpus under
-`crates/tau-provider-chatgpt/fixtures/provider-vcr/` is synthetic,
-structurally sanitized evidence that representative Responses SSE and
-WebSocket wire frames still traverse the production parsers. It is not a
+`crates/tau-provider-codex/fixtures/provider-vcr/` is synthetic,
+structurally sanitized evidence that representative Responses WebSocket frames
+still traverse the production parser. It is not a
 scheduler, retry-timing, concurrency, or model-output oracle; deterministic
 runtime and local scripted-transport tests own those contracts.
 Persisted transcript replay is likewise reconstruction evidence, not live
 transport execution or a substitute for the focused localhost lane.
 Its durable ownership and scope are recorded in
-[`SPEC-tau-provider-chatgpt-curated-vcr`](../crates/tau-provider-chatgpt/specs/SPEC-tau-provider-chatgpt-curated-vcr.md):
+[`SPEC-tau-provider-codex-curated-vcr`](../crates/tau-provider-codex/specs/SPEC-tau-provider-codex-curated-vcr.md):
 the provider crate owns the corpus, manifest/audit, parser facts, and refresh
 review, while `tau-vcr` owns only generic storage.
 

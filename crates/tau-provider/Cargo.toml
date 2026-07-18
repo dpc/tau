@@ -15,19 +15,15 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-base64.workspace = true
 blake3.workspace = true
 dirs.workspace = true
 httpdate.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tau-config.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 ureq = { workspace = true }
-url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

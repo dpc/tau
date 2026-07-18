@@ -12,7 +12,7 @@ wall-clock sleeps.
 This separation avoids duplicating protocol matrices while still testing the
 integration that only the built-in provider extension owns. The ChatGPT backend
 boundary is recorded in
-[`DECISION-tau-provider-chatgpt-backend-testing-boundary`](../../tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-backend-testing-boundary.md).
+[`DECISION-tau-provider-codex-backend-testing-boundary`](../../tau-provider-codex/specs/DECISION-tau-provider-codex-backend-testing-boundary.md).
 The evolving integration catalog lives in
 [`docs/testing.md`](../../../docs/testing.md).
 Cross-cutting profile, routing, emitted-event, and durable replay contracts are

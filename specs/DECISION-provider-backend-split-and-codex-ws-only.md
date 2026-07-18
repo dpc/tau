@@ -4,13 +4,12 @@ Authority: confirmed, 2026-07-17, dpc
 
 ## Status
 
-The implementation still uses `tau-provider-chatgpt`, permits HTTP/SSE Codex
-inference for non-WebSocket configurations, and distributes provider ownership
-across the existing crates. The stable user/protocol surfaces and non-goals below
-already constrain the code; the crate split, WS-only inference, shared network
-policy, and revised recovery boundaries do not yet apply. This record is the
-approved target for `tau-agent-6fjo`; until that cutover completes, current
-component architecture records continue to describe the implemented boundaries.
+The implementation now uses `tau-provider-codex`, owns OpenAI OAuth there, and
+uses WebSocket-only Codex inference. User profiles and protocol records remain
+unchanged. The shared network policy, Chat Completions ownership cutover, narrow
+typed attempt facade, and revised recovery boundaries do not yet apply. This
+record remains the approved target for `tau-agent-6fjo`; current component
+architecture records describe the still-transitional boundaries.
 
 ## Executive summary
 
@@ -248,10 +247,10 @@ snapshot source.
 
 Implementation updates the ownership/name statements in
 [ARCH-tau-provider-chat-completions](../crates/tau-provider-chat-completions/specs/ARCH-tau-provider-chat-completions.md),
-[ARCH-tau-provider-chatgpt](../crates/tau-provider-chatgpt/specs/ARCH-tau-provider-chatgpt.md),
+[ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md),
 [DECISION-tau-ext-provider-builtin-profile-ownership](../crates/tau-ext-provider-builtin/specs/DECISION-tau-ext-provider-builtin-profile-ownership.md),
 and
-[DECISION-tau-provider-chatgpt-responses-surface-selection](../crates/tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-responses-surface-selection.md)
+[DECISION-tau-provider-codex-responses-surface-selection](../crates/tau-provider-codex/specs/DECISION-tau-provider-codex-responses-surface-selection.md)
 without changing their unrelated authority.
 
 The unconfirmed

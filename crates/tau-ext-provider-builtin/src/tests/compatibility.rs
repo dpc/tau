@@ -72,9 +72,7 @@ fn compatibility_route_snapshot(
                 responses::ResponsesMode::LiteCompatibility => "lite_compatibility",
             },
             "base_url": config.base_url,
-            "surface": match config.surface {
-                responses::ResponsesSurface::ChatGpt => "chatgpt",
-            },
+            "surface": "chatgpt",
             "credential_present": !config.api_key.trim().is_empty(),
             "raw_context_window": config.raw_context_window,
             "account_id_present": config.account_id.is_some(),
@@ -83,7 +81,7 @@ fn compatibility_route_snapshot(
             "supports_verbosity": config.supports_verbosity,
             "supports_phase": config.supports_phase,
             "supports_encrypted_reasoning": config.supports_encrypted_reasoning,
-            "supports_websocket": config.supports_websocket,
+            "supports_websocket": true,
             "supports_compaction": config.supports_compaction,
             "supports_prompt_cache_key": config.supports_prompt_cache_key,
         }),
@@ -136,7 +134,7 @@ fn responses_event_snapshot() -> Vec<Event> {
     state.response_id = Some("resp-compat".to_owned());
     let backend = ProviderBackend {
         kind: ProviderBackendKind::Responses,
-        base_url: tau_provider_chatgpt::DEFAULT_BASE_URL.to_owned(),
+        base_url: tau_provider_codex::DEFAULT_BASE_URL.to_owned(),
         transport: ProviderBackendTransport::Websocket,
         stale_chain_fallback: true,
     };
@@ -216,7 +214,7 @@ fn chat_completions_event_snapshot(
     prompt.model = ModelId::new(ProviderName::new(provider_name), model.id.clone());
     let backend = PromptBackend::ChatCompletions { provider, model };
     let mut bytes = Vec::new();
-    let runtime = ChatGptRuntime::new();
+    let runtime = CodexRuntime::new();
     let mut abort = RecordingRetrySleeper;
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);

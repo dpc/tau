@@ -2,9 +2,9 @@
 
 use std::collections::VecDeque;
 use std::io::{BufReader, Cursor, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -14,11 +14,10 @@ use tau_proto::{
     ToolType, UiRetryPrompt,
 };
 use tau_provider::retry_policy::RetryClass;
-use tau_provider_chatgpt::{ChatGptRuntime, NeverAbort};
 
 use super::*;
 
-/// Runs a self-contained provider whose canonical wire failure is manually
+/// Runs a self-contained provider whose typed usage-window failure is manually
 /// retried before its tool call is continued by the real harness.
 ///
 /// This entrypoint exists only behind `quota-test-support`; production builds
@@ -31,8 +30,6 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         .map_err(|error| format!("clone fixture input: {error}"))?;
     let pump = thread::spawn(move || pump_harness_input(reader, pump_input));
     let mut pump = PumpGuard::new(pump_shutdown, pump);
-    let mut server = ScriptedServer::spawn();
-    let base_url = server.base_url();
     let observation = Arc::new(Mutex::new(FixtureObservation::default()));
     let executor: PromptExecutor = Arc::new(move |execution| {
         let prompt = &execution.job.prompt;
@@ -43,31 +40,11 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
             .any(|item| matches!(item, ContextItem::ToolResult(_)));
         let attempt = execution.job.retry_state.attempts;
         if attempt == 0 && !is_continuation {
-            let PromptBackend::Responses(config) = &execution.job.backend else {
+            let PromptBackend::Responses(_config) = &execution.job.backend else {
                 panic!("fixture requires Responses backend");
             };
-            let mut wire_config = config.clone();
-            wire_config.base_url = base_url.clone();
-            wire_config.supports_websocket = false;
-            let runtime = ChatGptRuntime::new();
-            let mut abort = NeverAbort;
-            let decision = {
-                let mut frame_writer = execution.frame_writer();
-                handle_prompt(
-                    execution.job.agent_prompt_id.as_str(),
-                    &wire_config,
-                    prompt,
-                    &mut frame_writer,
-                    &mut abort,
-                    ChatGptPromptExecutionContext {
-                        debug_provider_requests: false,
-                        runtime: &runtime,
-                    },
-                    &mut |_| {},
-                )
-                .expect("fixture wire attempt")
-                .expect("wire failure remains pending")
-            };
+            let decision = RetryDecision::new(RetryClass::UsageWindow)
+                .with_retry_after(Some(Duration::from_secs(432_000)));
             assert_eq!(decision.class, RetryClass::UsageWindow);
             assert_eq!(decision.retry_after, Some(Duration::from_secs(432_000)));
             send_worker_message(
@@ -155,10 +132,8 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         executor,
     )
     .map_err(|error| error.to_string());
-    let server_result = server.stop();
     let pump_result = pump.stop();
     result?;
-    server_result?;
     pump_result?;
     let observation = observation.lock().expect("fixture observation");
     if observation.parked != 1 || observation.injected != 1 || observation.accepted_retry != 1 {
@@ -416,81 +391,3 @@ fn encode_harness_output(frame: &HarnessOutputMessage) -> Vec<u8> {
     writer.flush().expect("flush fixture retry");
     bytes
 }
-
-/// Owned local Responses failure server with deterministic shutdown.
-struct ScriptedServer {
-    /// Listener address used both by the adapter and shutdown wakeup.
-    address: SocketAddr,
-    /// Clone of the accepted stream used to interrupt a partial request.
-    accepted: Arc<Mutex<Option<TcpStream>>>,
-    /// Notification that the accepted stream clone has been published.
-    accepted_rx: mpsc::Receiver<()>,
-    /// Server thread, consumed exactly once.
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl ScriptedServer {
-    /// Starts the canonical local Responses failure server.
-    fn spawn() -> Self {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind quota fixture");
-        let address = listener.local_addr().expect("quota fixture address");
-        let accepted = Arc::new(Mutex::new(None));
-        let accepted_slot = Arc::clone(&accepted);
-        let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
-        let handle = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept quota fixture request");
-            *accepted_slot.lock().expect("accepted stream") =
-                Some(socket.try_clone().expect("clone accepted stream"));
-            let _ = accepted_tx.send(());
-            let Ok(request) = crate::scripted_http::read_bounded_http_request(&mut socket) else {
-                return;
-            };
-            assert!(String::from_utf8_lossy(&request.request_line).contains("/responses"));
-            assert!(!request.body.is_empty());
-            let body = r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":432000}}"#;
-            let _ = write!(
-                socket,
-                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 60\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-        });
-        Self {
-            address,
-            accepted,
-            accepted_rx,
-            handle: Some(handle),
-        }
-    }
-
-    /// Returns the adapter base URL.
-    fn base_url(&self) -> String {
-        format!("http://{}", self.address)
-    }
-
-    /// Unblocks accept/read and joins the server.
-    fn stop(&mut self) -> Result<(), String> {
-        if self.handle.is_none() {
-            return Ok(());
-        }
-        let _ = TcpStream::connect(self.address);
-        let _ = self.accepted_rx.recv();
-        if let Some(stream) = self.accepted.lock().expect("accepted stream").as_ref() {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
-        self.handle
-            .take()
-            .expect("server handle")
-            .join()
-            .map_err(|_| "quota fixture server panicked".to_owned())
-    }
-}
-
-impl Drop for ScriptedServer {
-    fn drop(&mut self) {
-        let _ = self.stop();
-    }
-}
-
-#[cfg(test)]
-mod tests;

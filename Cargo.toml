@@ -27,7 +27,7 @@ members = [
   "crates/tau-proto",
   "crates/tau-provider",
   "crates/tau-provider-chat-completions",
-  "crates/tau-provider-chatgpt",
+  "crates/tau-provider-codex",
   "crates/tau-session-inspect",
   "crates/tau-skills",
   "crates/tau-socket",
@@ -89,7 +89,7 @@ tau-harness-tools = { path = "crates/tau-harness-tools" }
 tau-proto = { path = "crates/tau-proto" }
 tau-provider = { path = "crates/tau-provider" }
 tau-provider-chat-completions = { path = "crates/tau-provider-chat-completions" }
-tau-provider-chatgpt = { path = "crates/tau-provider-chatgpt" }
+tau-provider-codex = { path = "crates/tau-provider-codex" }
 tau-session-inspect = { path = "crates/tau-session-inspect" }
 tau-skills = { path = "crates/tau-skills" }
 tau-socket = { path = "crates/tau-socket" }

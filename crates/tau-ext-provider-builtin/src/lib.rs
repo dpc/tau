@@ -15,8 +15,6 @@ mod oauth_refresh_rejection;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
-#[cfg(any(test, feature = "quota-test-support"))]
-mod scripted_http;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -57,8 +55,8 @@ use tau_provider_chat_completions::{
     ChatCompletionsModel, ChatCompletionsProvider, PromptAttemptOutcome,
     models_for_provider as chat_models_for_provider, run_prompt_attempt_for_provider,
 };
-use tau_provider_chatgpt::{
-    ChatGptRuntime, ChatGptTurnState, StreamUpdate, TurnAbort, TurnAbortWaker, common, responses,
+use tau_provider_codex::{
+    CodexRuntime, StreamUpdate, TurnAbort, TurnAbortWaker, common, responses,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -155,7 +153,7 @@ impl BuiltinProviderProfiles {
                 let BuiltinProviderProfile::Chatgpt(profile) = profile else {
                     return None;
                 };
-                tau_provider_chatgpt::models_for_provider_mode(provider, profile.responses_mode())
+                tau_provider_codex::models_for_provider_mode(provider, profile.responses_mode())
                     .into_iter()
                     .next()
                     .map(|model| model.id)
@@ -396,7 +394,7 @@ impl QuotaCoordinator {
         provider: ProviderName,
         epoch: tau_proto::ProviderQuotaEpoch,
         fetch_start_sequence: u64,
-        snapshot: tau_provider_chatgpt::quota::FullQuotaSnapshot,
+        snapshot: tau_provider_codex::quota::FullQuotaSnapshot,
         observed_at_unix_ms: u64,
     ) -> Option<Event> {
         let current = self.profiles.get_mut(&provider)?;
@@ -456,7 +454,7 @@ impl QuotaCoordinator {
         &mut self,
         model: ModelId,
         profile_identity: u64,
-        observation: tau_provider_chatgpt::quota::RollingQuotaObservation,
+        observation: tau_provider_codex::quota::RollingQuotaObservation,
         observed_at_unix_ms: u64,
     ) -> Option<Event> {
         let provider = model.provider.clone();
@@ -569,7 +567,7 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
 }
 
 fn full_quota_window(
-    observation: tau_provider_chatgpt::quota::QuotaWindowObservation,
+    observation: tau_provider_codex::quota::QuotaWindowObservation,
     observed_at_unix_ms: u64,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let window_seconds = observation.window_seconds?;
@@ -605,7 +603,7 @@ fn full_quota_window(
 
 fn merge_sparse_quota_window(
     previous: Option<&tau_proto::ProviderQuotaWindow>,
-    sparse: tau_provider_chatgpt::quota::QuotaWindowObservation,
+    sparse: tau_provider_codex::quota::QuotaWindowObservation,
     observed_at_unix_ms: u64,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let duration_changed = previous.is_some_and(|previous| {
@@ -908,7 +906,7 @@ fn save_profile(
 }
 
 fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
-    let (auth_url, expected_state, verifier) = tau_provider::oauth::openai_codex_auth_url();
+    let (auth_url, expected_state, verifier) = tau_provider_codex::oauth::openai_codex_auth_url();
 
     eprintln!("\nOpen this URL in your browser:\n");
     eprintln!("{auth_url}");
@@ -920,7 +918,7 @@ fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
     std::io::stdout().flush()?;
     let redirect_input: String = Input::new().with_prompt("Redirect URL").interact_text()?;
 
-    let (code, state) = tau_provider::oauth::parse_redirect_url(&redirect_input)
+    let (code, state) = tau_provider_codex::oauth::parse_redirect_url(&redirect_input)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     if state != expected_state {
@@ -928,7 +926,7 @@ fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
     }
 
     eprintln!("Exchanging code for tokens...");
-    let tokens = tau_provider::oauth::openai_codex_exchange(&code, &verifier)?;
+    let tokens = tau_provider_codex::oauth::openai_codex_exchange(&code, &verifier)?;
 
     eprintln!("Login successful!");
     Ok(OpenAiAuth {
@@ -1149,7 +1147,7 @@ where
         retry_clock: executors.retry_clock,
         shared_cooldowns: BTreeMap::new(),
         shared_cooldown_generation: 0,
-        chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
+        codex_runtime: Arc::new(CodexRuntime::new()),
         prewarm_supervisor: PrewarmSupervisor::default(),
         provider_profile_identities: BTreeMap::new(),
         prewarm_profile_identities: BTreeMap::new(),
@@ -1338,7 +1336,7 @@ struct ProviderRuntime<F> {
     /// changes.
     shared_cooldown_generation: u64,
     /// Shared ChatGPT backend runtime for prewarm and prompt execution.
-    chatgpt_runtime: Arc<ChatGptRuntime>,
+    codex_runtime: Arc<CodexRuntime>,
     /// Main-loop ownership and cancellation for prewarm workers.
     prewarm_supervisor: PrewarmSupervisor,
     /// Last resolved inference identity for every configured provider
@@ -1437,7 +1435,7 @@ where
         let access_token = config.api_key.clone();
         let account_id = config.account_id.clone();
         thread::spawn(move || {
-            let result = tau_provider_chatgpt::quota::fetch_usage(
+            let result = tau_provider_codex::quota::fetch_usage(
                 &base_url,
                 &access_token,
                 account_id.as_deref(),
@@ -1591,7 +1589,7 @@ where
         let debug_provider_requests =
             debug_provider_requests_for(&prewarm.session_id, &self.session_debug_allowed);
         let executor = self.prewarm_executor.clone();
-        let runtime = self.chatgpt_runtime.clone();
+        let runtime = self.codex_runtime.clone();
         let tx = self.worker_tx.clone();
         let waker = self
             .worker_waker
@@ -1630,7 +1628,7 @@ where
                 );
             }
             self.cancel_all_prewarms();
-            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile change: {error}",
@@ -1651,7 +1649,7 @@ where
             .is_some_and(|previous| previous != identity);
         if changed {
             self.cancel_all_prewarms();
-            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile change: {error}",
@@ -1663,7 +1661,7 @@ where
     fn clear_prewarm_profile(&mut self, provider: &ProviderName) {
         if self.prewarm_profile_identities.remove(provider).is_some() {
             self.cancel_all_prewarms();
-            if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile removal: {error}",
@@ -1828,7 +1826,7 @@ where
             },
             handle,
         )?;
-        if let Err(error) = self.chatgpt_runtime.invalidate_all_websockets() {
+        if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
             tracing::debug!(
                 target: LOG_TARGET,
                 "failed to invalidate websocket pool after session shutdown: {error}",
@@ -2158,7 +2156,7 @@ where
                 .clone(),
             prompt_executor: self.prompt_executor.clone(),
             cancellation: self.cancellation.clone(),
-            chatgpt_runtime: self.chatgpt_runtime.clone(),
+            codex_runtime: self.codex_runtime.clone(),
         }
     }
 }
@@ -2310,7 +2308,7 @@ type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 /// Owned inputs for one finite prewarm worker attempt.
 struct PrewarmExecution {
     /// Shared ChatGPT runtime and connection pool.
-    runtime: Arc<ChatGptRuntime>,
+    runtime: Arc<CodexRuntime>,
     /// Resolved immutable backend configuration.
     config: responses::ResponsesConfig,
     /// Owned prefix request received from the harness.
@@ -3002,7 +3000,7 @@ struct PromptExecution {
     output_tx: Sender<WorkerMessage>,
     output_waker: ManualRuntimeWaker,
     cancellation: Arc<CancellationState>,
-    chatgpt_runtime: Arc<ChatGptRuntime>,
+    codex_runtime: Arc<CodexRuntime>,
 }
 
 struct PromptWorkerContext {
@@ -3010,7 +3008,7 @@ struct PromptWorkerContext {
     worker_waker: ManualRuntimeWaker,
     prompt_executor: PromptExecutor,
     cancellation: Arc<CancellationState>,
-    chatgpt_runtime: Arc<ChatGptRuntime>,
+    codex_runtime: Arc<CodexRuntime>,
 }
 
 impl PromptExecution {
@@ -3078,7 +3076,7 @@ enum WorkerMessage {
         /// Secret-free hash of the profile used by this prompt.
         profile_identity: u64,
         /// Provider-normalized sparse rolling observation.
-        observation: tau_provider_chatgpt::quota::RollingQuotaObservation,
+        observation: tau_provider_codex::quota::RollingQuotaObservation,
         /// Original wall-clock observation time.
         observed_at_unix_ms: u64,
     },
@@ -3094,8 +3092,8 @@ enum WorkerMessage {
         observed_at_unix_ms: u64,
         /// Sanitized full-fetch result.
         result: Result<
-            tau_provider_chatgpt::quota::FullQuotaSnapshot,
-            tau_provider_chatgpt::quota::UsageFetchError,
+            tau_provider_codex::quota::FullQuotaSnapshot,
+            tau_provider_codex::quota::UsageFetchError,
         >,
     },
     /// Coarse full-refresh wake for a still-current profile epoch.
@@ -3411,7 +3409,7 @@ fn production_prompt_executor() -> PromptExecutor {
         let quota_tx = execution.output_tx.clone();
         let quota_waker = execution.output_waker.clone();
         let mut last_quota = None;
-        let mut on_quota = |observation: &tau_provider_chatgpt::quota::RollingQuotaObservation| {
+        let mut on_quota = |observation: &tau_provider_codex::quota::RollingQuotaObservation| {
             if last_quota.as_ref() == Some(observation) {
                 return;
             }
@@ -3439,7 +3437,7 @@ fn production_prompt_executor() -> PromptExecutor {
             };
             let prompt_context = ChatGptPromptExecutionContext {
                 debug_provider_requests: execution.job.debug_provider_requests,
-                runtime: &execution.chatgpt_runtime,
+                runtime: &execution.codex_runtime,
             };
             handle_prompt_backend(
                 &agent_prompt_id,
@@ -3495,7 +3493,7 @@ fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &Pr
         output_tx: context.worker_tx.clone(),
         output_waker: context.worker_waker.clone(),
         cancellation: context.cancellation.clone(),
-        chatgpt_runtime: context.chatgpt_runtime.clone(),
+        codex_runtime: context.codex_runtime.clone(),
     };
     let executor = context.prompt_executor.clone();
     let done_tx = context.worker_tx.clone();
@@ -3910,7 +3908,7 @@ fn resolve_chatgpt_backend_with_refresh(
         return None;
     }
 
-    Some(tau_provider_chatgpt::config_for_model_mode(
+    Some(tau_provider_codex::config_for_model_mode(
         &model.model,
         auth_store.access_token.clone(),
         auth_store.account_id.clone(),
@@ -3930,7 +3928,7 @@ fn refresh_chatgpt_credentials_locked(
         provider_name,
         mode,
         refresh_rejections,
-        tau_provider::oauth::openai_codex_refresh,
+        tau_provider_codex::oauth::openai_codex_refresh,
     )
 }
 
@@ -3941,8 +3939,10 @@ fn refresh_chatgpt_credentials_in(
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     refresh: impl FnOnce(
         &str,
-    )
-        -> Result<tau_provider::oauth::OAuthTokens, tau_provider::oauth::OAuthError>,
+    ) -> Result<
+        tau_provider_codex::oauth::OAuthTokens,
+        tau_provider_codex::oauth::OAuthError,
+    >,
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
     let lock_result = auth_file.with_lock_result(|locked| {
         let BuiltinProviderProfile::Chatgpt(mut profile) = locked.load()?.ok_or_else(|| {
@@ -4081,7 +4081,7 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 
 fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
     let payload = jwt.split('.').nth(1)?;
-    let payload = tau_provider::oauth::base64_url_safe_no_pad_decode(payload)?;
+    let payload = tau_provider_codex::oauth::base64_url_safe_no_pad_decode(payload)?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     claims.get("iat")?.as_u64().map(|secs| secs * 1000)
 }
@@ -4152,7 +4152,7 @@ fn resolve_prewarm_backend(
 fn handle_resolved_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     config: &responses::ResponsesConfig,
-    chatgpt_runtime: &ChatGptRuntime,
+    codex_runtime: &CodexRuntime,
     debug_provider_requests: bool,
     abort: &mut impl TurnAbort,
 ) {
@@ -4171,7 +4171,7 @@ fn handle_resolved_prewarm(
         debug_provider_requests,
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
-    match chatgpt_runtime.prewarm(config, session_id_str, &request, abort) {
+    match codex_runtime.prewarm(config, session_id_str, &request, abort) {
         Ok(()) => {
             tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
         }
@@ -4190,7 +4190,7 @@ fn handle_prompt_backend<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
-    on_quota: &mut impl FnMut(&tau_provider_chatgpt::quota::RollingQuotaObservation),
+    on_quota: &mut impl FnMut(&tau_provider_codex::quota::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -4244,7 +4244,7 @@ struct ChatGptPromptExecutionContext<'a> {
     /// Whether durable-session policy permits provider debug captures.
     debug_provider_requests: bool,
     /// Shared ChatGPT transport runtime and WebSocket pool.
-    runtime: &'a ChatGptRuntime,
+    runtime: &'a CodexRuntime,
 }
 
 fn handle_prompt<R, W: Write>(
@@ -4254,7 +4254,7 @@ fn handle_prompt<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
-    on_quota: &mut impl FnMut(&tau_provider_chatgpt::quota::RollingQuotaObservation),
+    on_quota: &mut impl FnMut(&tau_provider_codex::quota::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -4327,12 +4327,7 @@ where
     }
 
     let originator = prompt.originator.clone();
-    let mut chatgpt_turn_state = ChatGptTurnState::new(usize::MAX);
-    let mut transport_taken = if config.supports_websocket {
-        ProviderBackendTransport::Websocket
-    } else {
-        ProviderBackendTransport::HttpSse
-    };
+    let transport_taken = ProviderBackendTransport::Websocket;
     let mut ws_pool_delta = None;
     let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
     let mut on_update = |update: StreamUpdate<'_>| match update {
@@ -4352,14 +4347,10 @@ where
             );
         }
     };
-    let result = execution.runtime.stream(
-        agent_prompt_id,
-        config,
-        &request,
-        &mut chatgpt_turn_state,
-        retry_ctx,
-        &mut on_update,
-    );
+    let result =
+        execution
+            .runtime
+            .stream(agent_prompt_id, config, &request, retry_ctx, &mut on_update);
     if TurnAbort::is_aborted(retry_ctx) {
         finish_canceled(agent_prompt_id, prompt, writer)?;
         return Ok(None);
@@ -4375,7 +4366,6 @@ where
     }
     match result {
         Ok(dispatch) => {
-            transport_taken = dispatch.transport;
             ws_pool_delta = dispatch.ws_pool_delta;
             let backend =
                 backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
@@ -4888,7 +4878,7 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
     for (provider_name, profile) in &profiles.providers {
         match profile {
             BuiltinProviderProfile::Chatgpt(profile) => {
-                models.extend(tau_provider_chatgpt::models_for_provider_mode(
+                models.extend(tau_provider_codex::models_for_provider_mode(
                     provider_name,
                     profile.responses_mode(),
                 ));

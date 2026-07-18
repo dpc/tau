@@ -8,7 +8,7 @@ ownership and alone owns watcher snapshots and fanout. This separates safe
 operational facts from provider-authored prose and avoids duplicate watch authority.
 
 Backend classification follows
-[DECISION-tau-provider-chatgpt-retry-observability](../../tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-retry-observability.md).
+[DECISION-tau-provider-codex-retry-observability](../../tau-provider-codex/specs/DECISION-tau-provider-codex-retry-observability.md).
 Exact fields and harness projection are specified by
 [SPEC-tau-proto-provider-updates](../../tau-proto/specs/SPEC-tau-proto-provider-updates.md)
 and [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).

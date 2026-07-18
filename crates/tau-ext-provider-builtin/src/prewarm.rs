@@ -39,7 +39,7 @@ impl PrewarmSupervisor {
     /// Reserves one cache owner, returning work identity unless already active.
     pub(crate) fn begin(&mut self, key: PrewarmKey) -> Option<(u64, PrewarmAbort)> {
         if self.active.contains_key(&key)
-            || tau_provider_chatgpt::responses::pool::DEFAULT_POOL_MAX <= self.active.len()
+            || tau_provider_codex::responses::pool::DEFAULT_POOL_MAX <= self.active.len()
         {
             return None;
         }

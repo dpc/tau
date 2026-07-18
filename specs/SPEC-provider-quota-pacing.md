@@ -14,8 +14,7 @@ The governing choice is
 ## Acquisition and ownership
 
 ChatGPT acquires a full account snapshot from authenticated `/wham/usage` and
-reconciles supported sparse HTTP response headers and WebSocket
-`codex.rate_limits` events. The provider adapter owns upstream parsing and
+reconciles sparse in-band WebSocket `codex.rate_limits` events. The provider adapter owns upstream parsing and
 normalization. The built-in provider extension owns credentials, profile epochs,
 full-fetch coalescing, and sparse/full merging. The harness verifies that the
 sending connection owns the named provider, validates bounds and strict

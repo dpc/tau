@@ -24,7 +24,7 @@ protocol events.
 
 Tau state `auth.d/<namespace>.json` files define built-in provider namespaces;
 the serialized profile kind selects the backend family. ChatGPT profiles publish
-the model matrix owned by `tau-provider-chatgpt`, Chat Completions profiles
+the model matrix owned by `tau-provider-codex`, Chat Completions profiles
 publish their configured models, and OpenRouter profiles publish configured or
 fetched models through Chat Completions configuration. Prompt dispatch resolves
 an exact configured model in the selected namespace. Missing or invalid mutable
@@ -39,7 +39,7 @@ effect after restart. Different namespaces may select different modes.
 This ownership implements
 [DECISION-tau-ext-provider-builtin-profile-ownership](DECISION-tau-ext-provider-builtin-profile-ownership.md)
 and the selected surface is constrained by
-[DECISION-tau-provider-chatgpt-responses-surface-selection](../../tau-provider-chatgpt/specs/DECISION-tau-provider-chatgpt-responses-surface-selection.md).
+[DECISION-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/DECISION-tau-provider-codex-responses-surface-selection.md).
 
 ## Credentials and diagnostics
 

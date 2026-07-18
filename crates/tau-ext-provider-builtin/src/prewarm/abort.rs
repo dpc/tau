@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tau_provider_chatgpt::{TurnAbort, TurnAbortWaker};
+use tau_provider_codex::{TurnAbort, TurnAbortWaker};
 
 /// Cancellation source owned by one supervised prewarm.
 #[derive(Clone, Default)]

@@ -224,8 +224,8 @@ It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `pr
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 
-ChatGPT profiles also fetch bounded account quota from `/wham/usage` and merge
-supported HTTP/WebSocket rolling observations. Quota telemetry is best-effort
+ChatGPT profiles fetch the bounded full account quota snapshot from `/wham/usage`
+and merge sparse in-band WebSocket `codex.rate_limits` observations. Quota telemetry is best-effort
 and never delays inference or consumes prompt retry budget. The compact status
 chip is shown for a selected model when its provider publishes quota current
 state. Tau uses neutral `Q?` when weekly state is absent, unbound, stale, expired,
@@ -281,10 +281,9 @@ context management. Manual and threshold-driven compaction use the separate
 unary `/codex/responses/compact` operation with the selected mode's request
 shape and a provider default threshold of 334,800 tokens; accepted output
 becomes one standalone transcript boundary.
-After setup, ChatGPT/Codex live streams use a separate five-minute idle watchdog on both HTTP/SSE and
-WebSocket transports. The watchdog resets on each SSE `data:` event or
-WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte
-trickles, and is not an absolute turn-duration cap. If upstream goes quiet, Tau
+After setup, ChatGPT/Codex inference uses WebSocket exclusively with a separate
+five-minute idle watchdog. The watchdog resets on each provider frame and is not
+an absolute turn-duration cap. If upstream goes quiet, Tau
 aborts the attempt and schedules the still-required logical prompt with transport, prompt id,
 elapsed/idle timing, configured idle timeout, whether partial output had already
 arrived, and read-source details where available.

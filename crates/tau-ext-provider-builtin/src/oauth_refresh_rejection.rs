@@ -5,8 +5,8 @@ use std::error::Error;
 use std::fmt;
 
 use tau_proto::ProviderName;
-use tau_provider::oauth::OAuthError;
-use tau_provider_chatgpt::responses::ResponsesMode;
+use tau_provider_codex::oauth::OAuthError;
+use tau_provider_codex::responses::ResponsesMode;
 
 use crate::OpenAiAuth;
 

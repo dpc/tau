@@ -207,9 +207,8 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
     // metadata should describe the attempted WebSocket transport and must not
     // be produced by an HTTP/SSE fallback POST.
     let (base_url, counts) = spawn_ws_426_server();
-    let config = tau_provider_chatgpt::responses::ResponsesConfig {
+    let config = tau_provider_codex::responses::ResponsesConfig {
         mode: responses::ResponsesMode::Standard,
-        surface: tau_provider_chatgpt::responses::ResponsesSurface::ChatGpt,
         base_url: base_url.clone(),
         api_key: "token".to_owned(),
         model_id: "gpt-5.3-codex".to_owned(),
@@ -220,14 +219,13 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
         supports_verbosity: false,
         supports_phase: true,
         supports_encrypted_reasoning: false,
-        supports_websocket: true,
         supports_compaction: true,
         supports_prompt_cache_key: false,
     };
     let mut prompt = minimal_prompt();
     prompt.model = "chatgpt/gpt-5.3-codex".parse().expect("model id");
     let mut retry = RecordingRetrySleeper;
-    let runtime = ChatGptRuntime::new();
+    let runtime = CodexRuntime::new();
     let mut bytes = Vec::new();
     let mut writer = PeerOutputWriter::new(&mut bytes);
 
@@ -440,7 +438,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
         }
     })
     .to_string();
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(400, &rejection_body);
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(400, &rejection_body);
     let mut refresh_rejections = OAuthRefreshRejectionCache::default();
     let resolved = tracing::subscriber::with_default(subscriber, || {
         profiles.resolve_initial_quota_backends(|model, profiles| {
@@ -525,7 +523,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
             responses_lite_compatibility: false,
         }))
         .expect("save expired profile");
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused","message":"already used"}}"#,
     );
@@ -597,7 +595,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
         &mut cache,
         |_| {
             attempts += 1;
-            Err(tau_provider::oauth::OAuthError::from_http_response(
+            Err(tau_provider_codex::oauth::OAuthError::from_http_response(
                 400,
                 r#"{"error":{"code":"refresh_token_reused"}}"#,
             ))
@@ -658,7 +656,7 @@ fn refresh_credentials_error_debug_excludes_credentials() {
             expires_at_ms: 1,
             account_id: Some(secret.to_owned()),
         }),
-        error: tau_provider::oauth::OAuthError::from_http_response(
+        error: tau_provider_codex::oauth::OAuthError::from_http_response(
             400,
             r#"{"error":{"code":"refresh_token_reused"}}"#,
         ),
@@ -704,7 +702,8 @@ fn permanent_rejection_survives_unlock_failure() {
             }
         })
         .to_string();
-        let rejection = tau_provider::oauth::OAuthError::from_http_response(400, &rejection_body);
+        let rejection =
+            tau_provider_codex::oauth::OAuthError::from_http_response(400, &rejection_body);
         let mut subsequent_attempts = 0;
         let mut cache = OAuthRefreshRejectionCache::default();
         let failure = finish_chatgpt_refresh_attempt(
@@ -818,7 +817,7 @@ fn suppressed_generation_survives_unlock_failure() {
         expires_at_ms: now_ms().saturating_sub(1),
         account_id: Some(secret.to_owned()),
     };
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -899,7 +898,7 @@ fn authoritative_credentials_survive_unlock_failure() {
         expires_at_ms: now_ms().saturating_sub(1),
         account_id: None,
     };
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -974,7 +973,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         .expect("test auth file");
     let provider = ProviderName::new("chatgpt");
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -1076,7 +1075,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
 fn refresh_failure_falls_back_only_to_still_valid_access_token() {
     let provider = ProviderName::new("chatgpt");
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejection = tau_provider::oauth::OAuthError::from_http_response(
+    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -2027,7 +2026,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
             "ap-test",
             &prompt,
             &backend,
-            tau_provider_chatgpt::common::LlmError::RepetitionDetected(repetition),
+            tau_provider_codex::common::LlmError::RepetitionDetected(repetition),
             None,
             false,
             &mut writer,
@@ -2062,8 +2061,8 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     let (epoch, fetch_sequence) = quota
         .begin_fetch(&provider)
         .expect("valid quota test value");
-    let rolling = tau_provider_chatgpt::quota::RollingQuotaObservation {
-        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+    let rolling = tau_provider_codex::quota::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                 .expect("valid quota test value"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
@@ -2082,8 +2081,8 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
         quota.merge_rolling(model, 7, rolling, 2_000_000_000_000),
         Some(Event::ProviderQuotaPatch(_))
     ));
-    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
-        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+    let full = tau_provider_codex::quota::FullQuotaSnapshot {
+        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                 .expect("valid quota test value"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
@@ -2115,7 +2114,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     quota.ensure_profile(provider.clone(), 7);
     let (epoch, fetch_sequence) = quota.begin_fetch(&provider).expect("quota fetch");
     let window =
-        |limit_id: &str, used_basis_points| tau_provider_chatgpt::quota::QuotaWindowObservation {
+        |limit_id: &str, used_basis_points| tau_provider_codex::quota::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
             used_basis_points,
@@ -2123,7 +2122,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
             reset_at_unix_seconds: Some(2_100_000_000),
             remaining_seconds: Some(500_000),
         };
-    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
+    let full = tau_provider_codex::quota::FullQuotaSnapshot {
         windows: vec![window("codex", 4_400), window("codex_bengalfox", 0)],
     };
     let Event::ProviderQuotaReplace(replaced) = quota
@@ -2135,7 +2134,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     assert_eq!(replaced.windows.len(), 2);
     assert!(replaced.route_bindings.is_empty());
 
-    let observation = tau_provider_chatgpt::quota::parse_ws_event(
+    let observation = tau_provider_codex::quota::parse_ws_event(
         r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":45,"window_minutes":10080,"reset_at":2100000000}}}"#,
     )
     .expect("official nameless turn event");
@@ -2173,7 +2172,7 @@ fn quota_profile_rotation_rejects_old_fetch_completion() {
                 provider,
                 old_epoch,
                 sequence,
-                tau_provider_chatgpt::quota::FullQuotaSnapshot::default(),
+                tau_provider_codex::quota::FullQuotaSnapshot::default(),
                 1,
             )
             .is_none()
@@ -2189,8 +2188,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
     let mut quota = QuotaCoordinator::default();
     quota.ensure_profile(provider.clone(), 7);
     for index in 0..tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
-        let observation = tau_provider_chatgpt::quota::RollingQuotaObservation {
-            windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+        let observation = tau_provider_codex::quota::RollingQuotaObservation {
+            windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
                 limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("pool_{index}"))
                     .expect("pool id"),
                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
@@ -2209,8 +2208,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
         );
     }
     let sequence = quota.profiles[&provider].sequence;
-    let overflow = tau_provider_chatgpt::quota::RollingQuotaObservation {
-        windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
+    let overflow = tau_provider_codex::quota::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("overflow").expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
             used_basis_points: 100,
@@ -2241,20 +2240,19 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
     let model = ModelId::from("chatgpt/gpt-5.6-sol");
     let mut quota = QuotaCoordinator::default();
     quota.ensure_profile(provider.clone(), 7);
-    let rolling =
-        |prefix: &str, index: usize| tau_provider_chatgpt::quota::RollingQuotaObservation {
-            windows: vec![tau_provider_chatgpt::quota::QuotaWindowObservation {
-                limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("{prefix}_{index}"))
-                    .expect("pool id"),
-                window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
-                used_basis_points: 100,
-                window_seconds: Some(604_800),
-                reset_at_unix_seconds: Some(2_100_000_000),
-                remaining_seconds: None,
-            }],
-            active_limit_id: None,
-            binding_provenance: None,
-        };
+    let rolling = |prefix: &str, index: usize| tau_provider_codex::quota::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+            limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("{prefix}_{index}"))
+                .expect("pool id"),
+            window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+            used_basis_points: 100,
+            window_seconds: Some(604_800),
+            reset_at_unix_seconds: Some(2_100_000_000),
+            remaining_seconds: None,
+        }],
+        active_limit_id: None,
+        binding_provenance: None,
+    };
     for index in 0..16 {
         quota.merge_rolling(model.clone(), 7, rolling("old", index), 2_000_000_000_000);
     }
@@ -2263,20 +2261,17 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
         quota.merge_rolling(model.clone(), 7, rolling("new", index), 2_000_000_000_001);
     }
     let sequence = quota.profiles[&provider].sequence;
-    let full = tau_provider_chatgpt::quota::FullQuotaSnapshot {
+    let full = tau_provider_codex::quota::FullQuotaSnapshot {
         windows: (0..32)
-            .map(
-                |index| tau_provider_chatgpt::quota::QuotaWindowObservation {
-                    limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("full_{index}"))
-                        .expect("pool id"),
-                    window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
-                        .expect("window id"),
-                    used_basis_points: 200,
-                    window_seconds: Some(604_800),
-                    reset_at_unix_seconds: Some(2_100_000_000),
-                    remaining_seconds: Some(300_000),
-                },
-            )
+            .map(|index| tau_provider_codex::quota::QuotaWindowObservation {
+                limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("full_{index}"))
+                    .expect("pool id"),
+                window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+                used_basis_points: 200,
+                window_seconds: Some(604_800),
+                reset_at_unix_seconds: Some(2_100_000_000),
+                remaining_seconds: Some(300_000),
+            })
             .collect(),
     };
     assert!(

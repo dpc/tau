@@ -7,7 +7,7 @@ The distinct deterministic and live/VCR test-fixture boundaries are documented
 in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
 Authenticated ChatGPT quota acquisition and its credential-free lifecycle are
 documented in
-[`tau-provider-chatgpt/SECURITY.md`](crates/tau-provider-chatgpt/SECURITY.md)
+[`tau-provider-codex/SECURITY.md`](crates/tau-provider-codex/SECURITY.md)
 and
 [`tau-ext-provider-builtin/SECURITY.md`](crates/tau-ext-provider-builtin/SECURITY.md).
 

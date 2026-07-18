@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use tau_provider_chatgpt::TurnAbort;
+use tau_provider_codex::TurnAbort;
 
 use super::*;
 
@@ -35,7 +35,7 @@ fn stale_completion_cannot_remove_successor() {
 #[test]
 fn active_work_is_capped_at_pool_capacity() {
     let mut supervisor = PrewarmSupervisor::default();
-    for index in 0..tau_provider_chatgpt::responses::pool::DEFAULT_POOL_MAX {
+    for index in 0..tau_provider_codex::responses::pool::DEFAULT_POOL_MAX {
         assert!(
             supervisor
                 .begin(PrewarmKey {
