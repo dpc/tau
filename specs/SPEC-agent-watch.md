@@ -11,8 +11,8 @@ explicit values. Names must not encode parent/child lineage or watcher
 relationships. Topology and observation state belong in protocol facts instead,
 so the same agent label remains stable wherever the agent is referenced.
 
-Session-local watch state is represented by authoritative `agent.watches_updated`
-snapshots keyed by watcher. The harness maintains the forward watch set and reverse
+Session-local watch state is an acyclic directed graph represented by authoritative
+`agent.watches_updated` snapshots keyed by watcher. The harness maintains the forward watch set and reverse
 watcher index only as runtime/session state, publishes complete replacement snapshots
 for each watcher, and does not persist watch relationships into agent display names.
 Committed agent unload is an endpoint lifecycle boundary: it atomically retires every
@@ -24,7 +24,18 @@ subscription, or notification state; Stopped and Unknown targets fail without ch
 the forward or reverse topology, subscription identity, provider snapshot, or
 delivery-dedupe state. Reloading the same id does not revive retired relations and
 requires a fresh enable and subscription. Disable remains idempotent for known stopped
-endpoints.
+endpoints. After Live-target validation, a genuinely new `watcher -> watched` edge
+is rejected without changing any watch state when `watched` already reaches
+`watcher`, with diagnostic:
+
+```text
+agent watch would create a cycle: `<watcher>` -> `<watched>`
+```
+
+Rejection publishes no topology snapshot or initial turn/provider state event.
+Re-enabling an existing edge retains its established behavior and subscription
+identity. Disable bypasses cycle analysis. See
+[DECISION-agent-watch-acyclic-topology](DECISION-agent-watch-acyclic-topology.md).
 
 ## Model-visible notifications
 
@@ -45,8 +56,9 @@ response, message, tool, or error content. Initial snapshots are not model input
 model-visible transition wording is reconstructed from the typed state and watched
 identity, never trusted from the event's compatibility message field.
 
-A turn caused only by lifecycle notifications suppresses both lifecycle edges to prevent
-cyclic watches from self-exciting. If ordinary input joins that generation during a
+A turn caused only by lifecycle notifications suppresses both lifecycle edges so
+watch-derived activity cannot cascade along accepted acyclic chains. This is also
+defense in depth for malformed topology. If ordinary input joins that generation during a
 tool/provider continuation, the harness first emits the delayed start edge, then emits
 the matching stop normally; it never exposes an orphan stop.
 

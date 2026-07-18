@@ -487,8 +487,17 @@ impl Harness {
         )
     }
 
-    /// Enable or disable one session-local watch relation and publish the
-    /// authoritative watcher snapshot.
+    /// Validate and apply one session-local watch relation at the authoritative
+    /// production boundary.
+    ///
+    /// Self-watch is rejected first. Enable then classifies the target as Live,
+    /// Stopped, or Unknown before checking only genuinely new edges for a
+    /// closing path. Re-enabling an existing edge preserves snapshot behavior;
+    /// disable bypasses lifecycle and cycle analysis. Every failure precedes
+    /// mutation and event publication.
+    ///
+    /// See `SPEC-agent-watch` and
+    /// `DECISION-agent-watch-acyclic-topology`.
     pub(crate) fn try_set_agent_watch(
         &mut self,
         watcher_id: &str,
@@ -496,6 +505,9 @@ impl Harness {
         enable: bool,
         cause: AgentWatchUpdateCause,
     ) -> Result<(), String> {
+        if watcher_id == watched_agent_id {
+            return Err("`agent_id` must identify another agent".to_owned());
+        }
         if enable {
             match self.agent_message_recipient_status(watched_agent_id) {
                 AgentMessageRecipientStatus::Live => {}
@@ -506,14 +518,51 @@ impl Harness {
                     return Err(format!("unknown agent: `{watched_agent_id}`"));
                 }
             }
+            let already_present = self
+                .agent_watches
+                .get(watcher_id)
+                .is_some_and(|watched| watched.contains(watched_agent_id));
+            if !already_present && self.agent_watch_path_exists(watched_agent_id, watcher_id) {
+                return Err(format!(
+                    "agent watch would create a cycle: `{watcher_id}` -> `{watched_agent_id}`"
+                ));
+            }
         }
-        self.set_agent_watch(watcher_id, watched_agent_id, enable, cause);
+        self.apply_agent_watch(watcher_id, watched_agent_id, enable, cause);
         Ok(())
     }
 
-    /// Mutate one already-validated session-local watch relation and publish
-    /// the authoritative watcher snapshot.
-    pub(crate) fn set_agent_watch(
+    /// Return whether `target_id` is reachable from `start_id` through forward
+    /// watch edges.
+    ///
+    /// Iterative traversal avoids call-stack growth, while visitation also
+    /// terminates on deliberately malformed test or invariant-violating
+    /// topology.
+    pub(crate) fn agent_watch_path_exists(&self, start_id: &str, target_id: &str) -> bool {
+        let mut pending = vec![start_id.to_owned()];
+        let mut visited = HashSet::new();
+
+        while let Some(agent_id) = pending.pop() {
+            if agent_id == target_id {
+                return true;
+            }
+            if !visited.insert(agent_id.clone()) {
+                continue;
+            }
+            if let Some(watched) = self.agent_watches.get(&agent_id) {
+                pending.extend(watched.iter().cloned());
+            }
+        }
+        false
+    }
+
+    /// Apply one already-validated session-local watch relation and publish the
+    /// authoritative watcher snapshot.
+    ///
+    /// Production enables reach this helper only from
+    /// [`Self::try_set_agent_watch`]. Internal cleanup may call it directly
+    /// only for disable.
+    fn apply_agent_watch(
         &mut self,
         watcher_id: &str,
         watched_agent_id: &str,
@@ -576,6 +625,21 @@ impl Harness {
         self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
     }
 
+    /// Mutate watch topology without validation for focused harness fixtures.
+    ///
+    /// Production callers must use [`Self::try_set_agent_watch`], except for
+    /// internal disable-only cleanup through [`Self::apply_agent_watch`].
+    #[cfg(test)]
+    pub(crate) fn set_agent_watch(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        enable: bool,
+        cause: AgentWatchUpdateCause,
+    ) {
+        self.apply_agent_watch(watcher_id, watched_agent_id, enable, cause);
+    }
+
     /// Return a sorted snapshot of current watcher ids for a watched agent.
     pub(crate) fn watchers_for_agent(&self, watched_agent_id: &str) -> Vec<String> {
         self.agent_watchers
@@ -598,7 +662,7 @@ impl Harness {
 
     /// Remove a stale watch relation and publish the updated watcher snapshot.
     pub(crate) fn prune_agent_watch(&mut self, watcher_id: &str, watched_agent_id: &str) {
-        self.set_agent_watch(
+        self.apply_agent_watch(
             watcher_id,
             watched_agent_id,
             false,

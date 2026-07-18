@@ -634,13 +634,18 @@ impl<'a> InternalToolHost<'a> {
             .publish_agent_watch_response_from_agent(&sender_cid, recipient_id, message)
     }
 
-    /// Atomically validate the target lifecycle and mutate a watch relation.
+    /// Atomically validate self-watch, target lifecycle, and acyclic topology,
+    /// then mutate a watch relation.
     ///
     /// The topology mutation and endpoint lifecycle rules are specified by
     /// `SPEC-agent-watch`.
     ///
-    /// Enabling requires a live target. Disabling is idempotent, including for
-    /// stopped or unknown target ids.
+    /// Self-watch fails first. Enabling then requires a live target and rejects
+    /// only a genuinely new edge that would close a directed cycle, before any
+    /// watch mutation or event publication. Re-enabling retains established
+    /// snapshot behavior. Disabling bypasses lifecycle and cycle analysis and
+    /// is idempotent, including for stopped or unknown target ids. See
+    /// `DECISION-agent-watch-acyclic-topology`.
     pub fn try_set_agent_watch(
         &mut self,
         watcher_id: &str,
@@ -667,10 +672,10 @@ impl<'a> InternalToolHost<'a> {
     /// response.
     ///
     /// Generations caused only by watch notifications are suppressed to prevent
-    /// mutual watches from creating response feedback. Ordinary input promotes
-    /// the generation before completion and restores normal response fanout.
-    /// Missing or terminating watched endpoints are denied so a parked final
-    /// response cannot cross the unload boundary.
+    /// watch-derived activity from cascading along chains. Ordinary input
+    /// promotes the generation before completion and restores normal
+    /// response fanout. Missing or terminating watched endpoints are denied
+    /// so a parked final response cannot cross the unload boundary.
     pub fn agent_watch_response_allowed(&self, watched_agent_id: &str) -> bool {
         self.harness
             .agent_routes

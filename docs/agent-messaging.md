@@ -166,6 +166,12 @@ arrive as separate “started a turn” and “stopped its turn” notifications
 Enabling requires the target agent to be live. An enable request for a stopped
 or unknown target fails without creating any watch relation or notification
 state; after reloading the same agent id, explicitly enable a fresh watch.
+The session-local watch topology is a directed acyclic graph. Enabling
+`watcher -> watched` fails without changing watch state if `watched` already
+reaches `watcher`; self-watch is also rejected. Re-enabling an existing edge
+keeps the normal refresh behavior, while disabling a relation never performs
+cycle analysis. The reachability check and accepted mutation are serialized in
+one harness event-loop operation.
 An agent turn begins with activating input and ends with the terminal response
 or termination that returns control to the prompting user or agent. Each
 provider invocation inside it is a **model round**; requested-tool execution and

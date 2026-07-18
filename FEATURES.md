@@ -83,7 +83,9 @@ Messaging works within a session and can use an exact known address across
 cooperating local Tau sessions. Cross-session discovery, bare session routing,
 and authority to auto-start an entrypoint agent are separately opt-in. Watchers
 can see clear outer turn lifecycle and sanitized provider retry progress without
-receiving another agent's hidden prompts or raw provider data.
+receiving another agent's hidden prompts or raw provider data. The session-local
+watch graph is acyclic; an enable that would close a cycle is rejected without
+changing watch state.
 
 See [agent messaging](docs/agent-messaging.md),
 [agent roles](docs/agent-roles.md), and the

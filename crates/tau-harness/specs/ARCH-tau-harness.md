@@ -80,7 +80,7 @@ creation fact, and general metadata intake cannot set, unset, or inherit this ke
 
 ## Watch ownership
 
-The harness owns the live topology, endpoint retirement, sanitized provider-work snapshots, and notification fanout specified by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md). Display labels remain separate from topology.
+The harness owns the live acyclic topology, endpoint retirement, sanitized provider-work snapshots, and notification fanout specified by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md) and [DECISION-agent-watch-acyclic-topology](../../../specs/DECISION-agent-watch-acyclic-topology.md). Display labels remain separate from topology.
 
 
 ## Skills

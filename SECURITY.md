@@ -53,6 +53,19 @@ See
 [`SPEC-tau-cli-agent-message-labels`](crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md)
 for the rendering and session-provenance behavior.
 
+## Agent-watch topology
+
+The harness accepts only acyclic current-session agent-watch topology to prevent
+reciprocal or longer feedback paths from amplifying watch-derived interactions.
+For each genuinely new enable, Live-target validation and iterative reverse-path
+rejection occur before any watch state or event changes; the check and mutation
+share one synchronous, exclusively mutable harness event-loop operation.
+Repeated enables preserve their existing edge, while disables remain available
+to remove relations and bypass cycle analysis. Re-check this ordering and the
+no-mutation failure contract whenever watch topology ownership or event-loop
+serialization changes. See
+[`DECISION-agent-watch-acyclic-topology`](specs/DECISION-agent-watch-acyclic-topology.md).
+
 ## Local IPC and external ingress
 
 Configured extension processes are trusted local executables. “Less-trusted

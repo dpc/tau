@@ -356,8 +356,8 @@ pub(crate) enum PendingPromptSource {
     WatchNotifiedUser,
     /// A prompt created from an `agent.message_received` delivery.
     AgentMessageReceived,
-    /// A lifecycle/provider watch notification; isolated to prevent cyclic
-    /// watches.
+    /// A lifecycle/provider watch notification; isolated to prevent
+    /// watch-derived activity from cascading along chains.
     WatchNotification,
     /// Internal loop-guard pivot prompt.
     LoopGuard,

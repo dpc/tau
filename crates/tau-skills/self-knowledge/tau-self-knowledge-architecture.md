@@ -24,3 +24,11 @@ The harness process:
 Extensions are separate processes connected to the harness. They register tools and capabilities, then handle requests from the harness and return results/events. This separation keeps tool/runtime concerns outside the core harness loop.
 
 Clients connect to the harness over a Unix socket. This allows multiple clients to observe or interact with the same running session while the harness remains the single coordinator.
+
+## Multi-agent watch topology
+
+The harness owns a session-local directed acyclic agent-watch graph. Enabling a
+watch fails if the target already reaches the calling watcher; disabling can
+remove an existing edge. Watches and their notifications remain local to the
+current session. Remote peer addresses are supported by `message`, but are not
+watch targets.

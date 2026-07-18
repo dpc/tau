@@ -160,6 +160,8 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
     assert!(description.contains("Watched agent <agent-id> emitted a response"));
     assert!(description.contains("internal steering and tool-completion notices"));
     assert!(description.contains("enable: false"));
+    assert!(description.contains("edges that would make the current-session watch graph cyclic"));
+    assert!(description.contains("rejection leaves watch state unchanged"));
     assert_eq!(
         params
             .pointer("/properties/agent_id/maxLength")
@@ -533,6 +535,46 @@ fn agent_watch_stopped_target_errors_without_mutation() {
         call.display.expect("error display").status,
         ToolUseStatus::Error
     );
+}
+
+/// The tool-result adapter must pass a host cycle rejection through as an
+/// informative tool error with original details and no success completion.
+#[test]
+fn agent_watch_cycle_error_preserves_safe_display_and_details() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+    ]);
+    let parsed = parse_agent_watch_args(&args).expect("valid watch arguments");
+    let error = agent_watch_tool_result("agent-b", &parsed, |watcher, watched, enable| {
+        assert_eq!((watcher, watched, enable), ("agent-b", "agent-a", true));
+        Err("agent watch would create a cycle: `agent-b` -> `agent-a`".to_owned())
+    })
+    .expect_err("closing edge must fail");
+    let mut finisher = RecordingAgentWatchFinisher::default();
+    finish_agent_watch_error(
+        &mut finisher,
+        &AgentId::parse("watcher-cid").expect("valid agent id"),
+        ToolCallId::from("watch-cycle"),
+        ToolName::new(AGENT_WATCH_TOOL_NAME),
+        ToolType::Function,
+        &args,
+        error,
+    );
+
+    assert!(finisher.success.is_none());
+    let call = finisher.error.expect("tool error recorded");
+    assert_eq!(
+        call.message,
+        "agent watch would create a cycle: `agent-b` -> `agent-a`"
+    );
+    assert_eq!(call.details, Some(args));
+    let display = call.display.expect("error display");
+    assert_eq!(display.args, "watch agent-a");
+    assert_eq!(display.status, ToolUseStatus::Error);
 }
 
 #[test]

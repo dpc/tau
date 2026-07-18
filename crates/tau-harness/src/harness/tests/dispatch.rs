@@ -17117,6 +17117,166 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
     h.shutdown().expect("shutdown");
 }
 
+/// The authoritative harness boundary must accept DAG shapes and repeated
+/// enables, reject every closing edge atomically, let disables repair paths,
+/// and serialize reciprocal requests so exactly the first direction wins.
+#[test]
+fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cids = [
+        ensure_test_user_agent(&mut h),
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone()),
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone()),
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone()),
+    ];
+    let ids: Vec<_> = cids
+        .iter()
+        .map(|cid| durable_agent_id_for_conversation(&h, cid).to_string())
+        .collect();
+    let [a, b, c, d] = ids.as_slice() else {
+        unreachable!("four ids")
+    };
+    let enable = tau_proto::AgentWatchUpdateCause::AgentWatchEnable;
+    let disable = tau_proto::AgentWatchUpdateCause::AgentWatchDisable;
+
+    h.try_set_agent_watch(a, b, true, enable).expect("A -> B");
+    let subscription = h.agent_watch_subscriptions[&(a.clone(), b.clone())].clone();
+    h.try_set_agent_watch(a, b, true, enable)
+        .expect("re-enable existing edge");
+    assert_eq!(
+        h.agent_watch_subscriptions[&(a.clone(), b.clone())],
+        subscription,
+        "re-enable retains subscription identity"
+    );
+    assert_eq!(
+        h.try_set_agent_watch(b, a, true, enable),
+        Err(format!("agent watch would create a cycle: `{b}` -> `{a}`")),
+        "the first serialized reciprocal direction wins"
+    );
+    h.try_set_agent_watch(a, c, true, enable).expect("A -> C");
+    h.try_set_agent_watch(b, d, true, enable).expect("B -> D");
+    h.try_set_agent_watch(c, d, true, enable).expect("C -> D");
+    h.try_set_agent_watch(b, c, true, enable)
+        .expect("non-closing diamond cross-edge");
+
+    let maps_before = (
+        h.agent_watches.clone(),
+        h.agent_watchers.clone(),
+        h.agent_watch_subscriptions.clone(),
+        h.agent_watch_provider_status.clone(),
+        h.agent_watch_provider_deliveries.clone(),
+    );
+    let events_before = event_log_events(&h).len();
+    assert_eq!(
+        h.try_set_agent_watch(d, a, true, enable),
+        Err(format!("agent watch would create a cycle: `{d}` -> `{a}`"))
+    );
+    assert_eq!(
+        (
+            h.agent_watches.clone(),
+            h.agent_watchers.clone(),
+            h.agent_watch_subscriptions.clone(),
+            h.agent_watch_provider_status.clone(),
+            h.agent_watch_provider_deliveries.clone(),
+        ),
+        maps_before,
+        "cycle rejection must leave all watch authority unchanged"
+    );
+    assert_eq!(
+        event_log_events(&h).len(),
+        events_before,
+        "cycle rejection must publish no topology or initial-state event"
+    );
+    assert_eq!(
+        h.try_set_agent_watch(a, a, true, enable),
+        Err("`agent_id` must identify another agent".to_owned())
+    );
+
+    h.try_set_agent_watch(a, c, false, disable)
+        .expect("disable bypasses cycle analysis");
+    h.try_set_agent_watch(b, c, false, disable)
+        .expect("disable remaining path");
+    h.try_set_agent_watch(c, a, true, enable)
+        .expect("removed path permits formerly closing direction");
+    assert_eq!(
+        h.try_set_agent_watch(a, c, true, enable),
+        Err(format!("agent watch would create a cycle: `{a}` -> `{c}`"))
+    );
+
+    // A deliberately invariant-violating fixture proves disable never consults
+    // reachability and can dismantle malformed topology.
+    h.agent_watches
+        .entry(b.clone())
+        .or_default()
+        .insert(a.clone());
+    h.agent_watchers
+        .entry(a.clone())
+        .or_default()
+        .insert(b.clone());
+    h.try_set_agent_watch(b, a, false, disable)
+        .expect("disable repairs malformed cycle");
+    assert!(!h.agent_watches.get(b).is_some_and(|ids| ids.contains(a)));
+
+    h.remove_agent(&cids[3]);
+    h.agent_watches
+        .entry(d.clone())
+        .or_default()
+        .insert(a.clone());
+    let stopped_before = (
+        h.agent_watches.clone(),
+        h.agent_watchers.clone(),
+        h.agent_watch_subscriptions.clone(),
+        h.agent_watch_provider_status.clone(),
+        h.agent_watch_provider_deliveries.clone(),
+    );
+    let stopped_events_before = event_log_events(&h).len();
+    assert_eq!(
+        h.try_set_agent_watch(a, d, true, enable),
+        Err(format!("agent is not live: `{d}`")),
+        "Live-target classification must precede closing-path analysis"
+    );
+    assert_eq!(
+        (
+            h.agent_watches.clone(),
+            h.agent_watchers.clone(),
+            h.agent_watch_subscriptions.clone(),
+            h.agent_watch_provider_status.clone(),
+            h.agent_watch_provider_deliveries.clone(),
+        ),
+        stopped_before
+    );
+    assert_eq!(event_log_events(&h).len(), stopped_events_before);
+    h.shutdown().expect("shutdown");
+}
+
+/// Forward reachability must be iterative and visited: a long chain closes
+/// without stack recursion, while a malformed unrelated loop terminates and
+/// does not cause a false positive.
+#[test]
+fn agent_watch_reachability_is_iterative_and_cycle_defensive() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    for index in 0..4_000 {
+        h.agent_watches
+            .entry(format!("node-{index}"))
+            .or_default()
+            .insert(format!("node-{}", index + 1));
+    }
+    h.agent_watches
+        .entry("malformed-a".to_owned())
+        .or_default()
+        .insert("malformed-b".to_owned());
+    h.agent_watches
+        .entry("malformed-b".to_owned())
+        .or_default()
+        .insert("malformed-a".to_owned());
+
+    assert!(h.agent_watch_path_exists("node-0", "node-4000"));
+    assert!(!h.agent_watch_path_exists("malformed-a", "node-4000"));
+    h.shutdown().expect("shutdown");
+}
+
 /// Provider-watch fanout must sanitize payloads, dedupe retry storms without
 /// freezing the late-watcher snapshot, preserve phase/category transitions, and
 /// stop immediately when the relation or session is removed.
@@ -17339,8 +17499,11 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let upstream_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    let upstream_id = durable_agent_id_for_conversation(&h, &upstream_cid).to_string();
     h.set_agent_watch(
         &watcher_id,
         &watched_id,
@@ -17348,7 +17511,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
     h.set_agent_watch(
-        &watched_id,
+        &upstream_id,
         &watcher_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
@@ -18196,19 +18359,21 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     h.shutdown().expect("shutdown");
 }
 
-/// Mutual watches must not self-excite on lifecycle-only turns, while ordinary
+/// An acyclic watch chain must not cascade lifecycle-only turns, while ordinary
 /// input added during a tool continuation promotes the generation with a
 /// delayed start so its eventual stop remains paired.
 #[test]
-fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
+fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let c_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
     let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
+    let c_id = durable_agent_id_for_conversation(&h, &c_cid).to_string();
     for cid in [&a_cid, &b_cid] {
         h.agents.get_mut(cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
             agent_prompt_id: format!("busy-{cid}").into(),
@@ -18222,7 +18387,7 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
     );
     h.set_agent_watch(
         &b_id,
-        &a_id,
+        &c_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
@@ -18332,17 +18497,19 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
 }
 
 /// A successful model response to a provider-status-only turn must not be
-/// reflected back through a mutual watch and start an unbounded feedback loop.
+/// propagated up an acyclic watch chain and start an unbounded interaction.
 #[test]
-fn mutual_watch_provider_status_turn_does_not_fan_out_final_response() {
+fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let c_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
     let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
+    let c_id = durable_agent_id_for_conversation(&h, &c_cid).to_string();
     h.set_agent_watch(
         &a_id,
         &b_id,
@@ -18351,13 +18518,13 @@ fn mutual_watch_provider_status_turn_does_not_fan_out_final_response() {
     );
     h.set_agent_watch(
         &b_id,
-        &a_id,
+        &c_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
     h.update_agent_watch_provider_status(
-        &a_id,
+        &c_id,
         tau_proto::AgentWatchProviderStatusNotification {
             session_id: h.current_session_id.clone(),
             subscription_id: String::new(),
@@ -18391,7 +18558,7 @@ fn mutual_watch_provider_status_turn_does_not_fan_out_final_response() {
                     && message.sender_id.as_str() == b_id
                     && message.recipient_id.as_str() == a_id
             }),
-        "successful status-only completion must not feed back through mutual watch"
+        "successful status-only completion must not cascade up the watch chain"
     );
     h.shutdown().expect("shutdown");
 }
