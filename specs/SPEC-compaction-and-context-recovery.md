@@ -217,3 +217,12 @@ Exact serialized transcript-growth bytes remain separate telemetry and never
 substitute their JSON byte-array expansion for projected tokens. Threshold-fired
 standalone compaction persists `automatic_threshold`; only explicit UI
 compaction retains the legacy/default `manual` trigger.
+
+Named context-size alerts are advisory and independent of automatic compaction.
+They use provider-reported input-token usage from successful completed ordinary
+inference that did not itself install an inline compaction boundary. Failed and
+compaction responses do not create alert work, and any compaction boundary resets
+runtime crossing eligibility with the rest of context accounting. Their
+configured internal prompt does not itself authorize or initiate compaction. The
+default text asks the agent to use the separately authorized `compact` tool after
+finishing its current task.

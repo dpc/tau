@@ -9068,6 +9068,389 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Named context-size alerts fire as hidden prompts only after their thresholds
+/// are exceeded, remain one-shot while usage stays high, and become eligible
+/// again after usage falls back below the threshold.
+#[test]
+fn named_context_size_alerts_queue_once_per_usage_crossing() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let role = h
+        .available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role");
+    role.context_size_alerts.insert(
+        "compact-soon".to_owned(),
+        tau_config::settings::ContextSizeAlert {
+            threshold: 100,
+            enable: true,
+            message: "compact soon".to_owned(),
+        },
+    );
+    role.context_size_alerts.insert(
+        "later".to_owned(),
+        tau_config::settings::ContextSizeAlert {
+            threshold: 200,
+            enable: true,
+            message: "compact now".to_owned(),
+        },
+    );
+    role.context_size_alerts.insert(
+        "disabled".to_owned(),
+        tau_config::settings::ContextSizeAlert {
+            threshold: 1,
+            enable: false,
+            message: "must not appear".to_owned(),
+        },
+    );
+    let alerts = role.context_size_alerts.clone();
+
+    h.queue_crossed_context_size_alerts(&cid, Some(100), &alerts);
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
+    let prompts = h.agents[&cid]
+        .pending_prompts
+        .iter()
+        .map(|prompt| (prompt.text.as_str(), prompt.message_class))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts,
+        vec![
+            ("compact soon", tau_proto::PromptMessageClass::Internal),
+            ("compact now", tau_proto::PromptMessageClass::Internal),
+        ]
+    );
+
+    h.queue_crossed_context_size_alerts(&cid, Some(300), &alerts);
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    h.queue_crossed_context_size_alerts(&cid, Some(50), &alerts);
+    h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 4);
+    h.clear_agent_context_usage(&cid);
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A finished ordinary response with usage above an alert threshold must route
+/// the configured text through the normal durable internal-prompt path.
+#[test]
+fn finished_response_injects_crossed_context_size_alert() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "compact-soon".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: "compact after this task".to_owned(),
+            },
+        );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let mut response =
+        provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "finished work");
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 101,
+        prompt_cached_tokens: 0,
+        response_received_tokens: 2,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish response");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == "compact after this task"
+                && submitted.message_class == tau_proto::PromptMessageClass::Internal
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Alert policy belongs to the dispatched prompt, so changing the interactive
+/// role while the provider is running cannot substitute another role's message.
+#[test]
+fn context_size_alert_uses_prompt_owned_role_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "compact-soon".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: "original role alert".to_owned(),
+            },
+        );
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+
+    let mut replacement_role = tau_config::settings::AgentRole::default();
+    replacement_role.context_size_alerts.insert(
+        "compact-soon".to_owned(),
+        tau_config::settings::ContextSizeAlert {
+            threshold: 1,
+            enable: true,
+            message: "replacement role alert".to_owned(),
+        },
+    );
+    h.available_roles
+        .insert("replacement".to_owned(), replacement_role);
+    h.selected_role = "replacement".to_owned();
+
+    let mut response =
+        provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "finished work");
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 101,
+        prompt_cached_tokens: 0,
+        response_received_tokens: 2,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish response");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "original role alert"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "replacement role alert"
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Terminal provider errors may report usage for diagnostics, but must not turn
+/// an advisory context alert into autonomous retry work.
+#[test]
+fn failed_response_does_not_inject_context_size_alert() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "compact-soon".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: "must not continue".to_owned(),
+            },
+        );
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let mut response = provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "ignored");
+    response.output_items.clear();
+    response.stop_reason = tau_proto::ProviderStopReason::Error;
+    response.error = Some("terminal failure".to_owned());
+    response.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 101,
+        prompt_cached_tokens: 0,
+        response_received_tokens: 0,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish response");
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "must not continue"
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// An ordinary response that installs an inline compaction boundary must not
+/// issue a stale advisory and must re-arm alert crossings with context usage.
+#[test]
+fn inline_compaction_response_resets_context_size_alerts_without_injection() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "compact-soon".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: "stale compact advice".to_owned(),
+            },
+        );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .fired_context_size_alerts
+        .insert("compact-soon".to_owned());
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
+        .expect("dispatch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let mut response = provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "ignored");
+    response.output_items = vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
+        CborValue::Map(vec![]),
+    ))];
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 101,
+        prompt_cached_tokens: 0,
+        response_received_tokens: 1,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish response");
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "stale compact advice"
+    )));
+    assert!(h.agents[&cid].fired_context_size_alerts.is_empty());
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    h.shutdown().expect("shutdown");
+}
+
+/// A compaction reached while one of several crossed alerts is running must
+/// discard the remaining queued alerts from the obsolete usage climb.
+#[test]
+fn inline_compaction_discards_other_queued_context_size_alerts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let role = h
+        .available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role");
+    for (name, message) in [
+        ("alert-a", "first alert"),
+        ("alert-b", "stale second alert"),
+    ] {
+        role.context_size_alerts.insert(
+            name.to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: message.to_owned(),
+            },
+        );
+    }
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
+        .expect("dispatch work");
+    let work = read_nth_prompt_created(&h, 0);
+    let mut work_response =
+        provider_text_response(&work.agent_prompt_id, work.agent_id, "finished work");
+    work_response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 101,
+        prompt_cached_tokens: 0,
+        response_received_tokens: 1,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(work_response)
+        .expect("finish work");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "first alert"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "stale second alert"
+    )));
+
+    let first_alert = read_nth_prompt_created(&h, 1);
+    let mut compacting_response = provider_text_response(
+        &first_alert.agent_prompt_id,
+        first_alert.agent_id,
+        "ignored",
+    );
+    compacting_response.output_items = vec![ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::new(CborValue::Map(vec![])),
+    )];
+    h.handle_provider_response_finished(compacting_response)
+        .expect("finish alert with compaction");
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "stale second alert"
+    )));
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .all(|prompt| !prompt.is_context_size_alert())
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// An alert crossed by a response that starts tools must stay queued until the
+/// terminal tool completion gate folds it into the continuation.
+#[test]
+fn context_size_alert_waits_for_tool_round_completion() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .context_size_alerts
+        .insert(
+            "compact-soon".to_owned(),
+            tau_config::settings::ContextSizeAlert {
+                threshold: 100,
+                enable: true,
+                message: "compact after tools".to_owned(),
+            },
+        );
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::ToolsRunning {
+            remaining_calls: vec!["alert-tool".into()],
+        },
+    );
+    let alerts = h.available_roles[&h.selected_role]
+        .context_size_alerts
+        .clone();
+
+    h.queue_crossed_context_size_alerts(&cid, Some(101), &alerts);
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text == "compact after tools"
+    )));
+
+    h.maybe_complete_agent_turn_for(&cid, "alert-tool");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.text == "compact after tools"
+                && steered.message_class == tau_proto::PromptMessageClass::Internal
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Model-qualified durable usage must restore before the first cold-resumed
 /// activation so it runs the same compaction projection as live work.
 #[test]

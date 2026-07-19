@@ -101,6 +101,23 @@ a fixed harness-authored reason: first occurrence queues the pivot, recurrence
 after that pivot stops automatic continuation. Provider error text is displayed
 but is not trusted as model-visible guard instruction.
 
+Named context-size alerts compare a successful finished ordinary inference's
+provider-reported input-token usage with each enabled effective role threshold.
+The effective alert map is prompt-owned, so a role change during inference cannot
+alter response-time policy. Usage must strictly exceed the threshold. Failed,
+canceled, stale, duplicate, reactive-recovery, standalone-compaction, and
+inline-compacting responses do not create alert work. Each crossed alert queues
+its configured text as a hidden internal prompt after the current response; tool
+calls finish before the prompt continues the turn. Within one daemon lifetime,
+an alert fires once while usage remains above its threshold and becomes eligible
+again after usage falls to or below the threshold or context accounting resets.
+An accounting reset also removes any still-queued alert prompts so a compaction
+cannot be followed by stale advice from the old usage climb.
+Crossing and queued-delivery state are intentionally runtime-only, like other
+advisory prompt scheduling: cold replay neither synthesizes missed alert work nor
+persists one-shot suppression, and a later successful response re-evaluates
+restored usage. Disabled alerts remain inherited config but never inject prompts.
+
 ## Prompt dispatch lifecycle split
 
 Prompt dispatch emits a lightweight transient `agent.prompt_started` lifecycle

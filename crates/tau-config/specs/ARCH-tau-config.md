@@ -71,6 +71,10 @@ array replacement:
 - Role `order` is ordinary role metadata: lower values sort first within a
   group, with role name as the stable tie-breaker.
 - Prompt fragments and required skill names are additive and de-duplicated.
+- Named `context_size_alerts` merge field-by-field from agent-global defaults
+  through role-group defaults to role overrides. Each inherited alert can
+  therefore be customized or disabled without repeating its threshold and
+  message.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
   clears nullable/scalar fields; replacement lists can be cleared with `[]`.
   `tools` is a nullable replacement list: `tools: null` clears an inherited

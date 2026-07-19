@@ -21,6 +21,15 @@
 #       text: Keep answers short and plain, using only simple words.
 #   # Optional exact skill names required by every role.
 #   required_skills: [company-policy]
+#   # Optional named hidden prompts fired after provider-reported input usage
+#   # strictly exceeds the threshold. `enable` defaults true; `message` defaults
+#   # to asking the agent to use `compact` after its current task. Every new alert
+#   # requires a positive threshold, and an explicit message cannot be empty.
+#   context_size_alerts:
+#     compact-soon:
+#       threshold: 160000
+#       enable: true
+#       message: "Use the `compact` tool after finishing your current task."
 
 # Optional startup role. If omitted, Tau starts on the first role in
 # `agents.role_groups` order after roles inside that group are sorted by `order` and
@@ -37,6 +46,8 @@
 # provider-side automatic compaction: omit it or set `provider_default` for the
 # provider's model-specific default, `disabled` to turn it off, or `{ threshold:
 # 200000 }` for an explicit token threshold.
+# `context_size_alerts` entries inherit field-by-field from `agents` through the
+# role group to each role, so a specific role can set `enable: false`.
 # Per-role `prompt_fragments` add instructions only for that role.
 # `prompt_override` selects a system prompt template. `tools` and `disable_tools`
 # Prompt fragments may use strict capability helpers, for example:

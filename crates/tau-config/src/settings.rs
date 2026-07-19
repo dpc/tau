@@ -33,6 +33,9 @@ use tau_proto::{
 const BUILT_IN_CLI_YAML: &str = include_str!("../config/built-in.cli.yaml");
 const BUILT_IN_CLI_BINDINGS_YAML: &str = include_str!("../config/built-in.cli-bindings.yaml");
 const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yaml");
+/// Default model-visible instruction for a context-size alert.
+const DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE: &str =
+    "Use the `compact` tool after finishing your current task.";
 
 fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
     serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
@@ -652,6 +655,9 @@ pub struct HarnessSettings {
     /// Agent-global required skill names applied to every role.
     pub required_skills: Vec<tau_proto::SkillName>,
 
+    /// Agent-global named context-size alerts applied to every role.
+    pub context_size_alerts: BTreeMap<String, ContextSizeAlert>,
+
     /// User-configured prompt templates exposed in the CLI as `/prompt <id>`.
     /// Map keys are non-empty ids with no whitespace so they can be addressed
     /// unambiguously from the slash command.
@@ -692,6 +698,9 @@ struct AgentsSettings {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default, alias = "requiredSkills")]
     required_skills: Vec<tau_proto::SkillName>,
+    /// Agent-global alert patches applied before group and role settings.
+    #[serde(default, alias = "contextSizeAlerts")]
+    context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     #[serde(default, alias = "roleGroups")]
     role_groups: RawRoleGroups,
 }
@@ -713,11 +722,13 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             role_groups: Vec::new(),
             prompt_fragments: wire.agents.prompt_fragments,
             required_skills: wire.agents.required_skills,
+            context_size_alerts: BTreeMap::new(),
             custom_prompts: custom_prompt_map_to_vec(wire.custom_prompts),
             tool_policy: wire.tool_policy,
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
+        settings.apply_context_size_alert_overrides(wire.agents.context_size_alerts);
         settings
             .apply_role_group_overrides(wire.agents.role_groups)
             .map_err(D::Error::custom)?;
@@ -725,6 +736,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         settings.remove_disabled_roles();
         settings
             .validate_inter_session_roles()
+            .map_err(D::Error::custom)?;
+        settings
+            .validate_context_size_alerts()
             .map_err(D::Error::custom)?;
         Ok(settings)
     }
@@ -901,6 +915,10 @@ struct HarnessAgentRoleOverrides {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(alias = "requiredSkills")]
     required_skills: Vec<tau_proto::SkillName>,
+    /// Agent-global alert patches replayed through domain-specific role
+    /// merging.
+    #[serde(alias = "contextSizeAlerts")]
+    context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
 }
 
 /// One saved prompt template exposed through the CLI `/prompt <id>` command.
@@ -980,6 +998,9 @@ struct RawRoleGroup {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    /// Group-default alert patches applied to every member role.
+    #[serde(alias = "contextSizeAlerts")]
+    context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     #[serde(alias = "promptFragments")]
     prompt_fragments: Option<Vec<RolePromptFragment>>,
     #[serde(alias = "promptOverride", deserialize_with = "present_option")]
@@ -1044,6 +1065,9 @@ struct AgentRolePatch {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    /// Role-specific alert patches applied after group defaults.
+    #[serde(alias = "contextSizeAlerts")]
+    context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     #[serde(alias = "promptFragments")]
     prompt_fragments: Option<Vec<RolePromptFragment>>,
     #[serde(alias = "promptOverride", deserialize_with = "present_option")]
@@ -1080,6 +1104,7 @@ impl RawRoleGroup {
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
             compaction: self.compaction,
+            context_size_alerts: self.context_size_alerts.clone(),
             prompt_fragments: self.prompt_fragments.clone(),
             prompt_override: self.prompt_override.clone(),
             tools: self.tools.clone(),
@@ -1156,7 +1181,10 @@ impl HarnessSettings {
                 continue;
             }
             for (role_name, role_overrides) in group.roles {
-                let mut override_role = AgentRole::default();
+                let mut override_role = AgentRole {
+                    context_size_alerts: self.context_size_alerts.clone(),
+                    ..AgentRole::default()
+                };
                 override_role.apply_patch(&group_defaults);
                 override_role.apply_patch(&role_overrides);
                 self.ensure_role_group_member(&group_name, &role_name)?;
@@ -1262,6 +1290,28 @@ impl HarnessSettings {
         Ok(())
     }
 
+    fn validate_context_size_alerts(&self) -> Result<(), SettingsError> {
+        for (role_name, role) in &self.roles {
+            for (alert_name, alert) in &role.context_size_alerts {
+                if alert.threshold == 0 {
+                    return Err(SettingsError::Config(config::ConfigError::Message(
+                        format!(
+                            "role `{role_name}` context-size alert `{alert_name}` requires a positive threshold"
+                        ),
+                    )));
+                }
+                if alert.message.is_empty() {
+                    return Err(SettingsError::Config(config::ConfigError::Message(
+                        format!(
+                            "role `{role_name}` context-size alert `{alert_name}` message must not be empty"
+                        ),
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_prompt_fragment_overrides(&mut self, fragments: Vec<RolePromptFragment>) {
         for prompt_fragment in fragments {
             if !self.prompt_fragments.contains(&prompt_fragment) {
@@ -1275,6 +1325,16 @@ impl HarnessSettings {
             if !self.required_skills.contains(&skill) {
                 self.required_skills.push(skill);
             }
+        }
+    }
+
+    fn apply_context_size_alert_overrides(
+        &mut self,
+        alerts: BTreeMap<String, ContextSizeAlertPatch>,
+    ) {
+        apply_context_size_alert_patches(&mut self.context_size_alerts, &alerts);
+        for role in self.roles.values_mut() {
+            apply_context_size_alert_patches(&mut role.context_size_alerts, &alerts);
         }
     }
 
@@ -1301,6 +1361,13 @@ impl HarnessSettings {
     fn apply_agent_globals_to_roles(&mut self) {
         self.apply_global_prompt_fragments_to_roles();
         self.apply_global_required_skills_to_roles();
+        for role in self.roles.values_mut() {
+            for (name, alert) in &self.context_size_alerts {
+                role.context_size_alerts
+                    .entry(name.clone())
+                    .or_insert_with(|| alert.clone());
+            }
+        }
     }
 
     /// Returns the configured session retention duration.
@@ -1485,6 +1552,14 @@ pub struct AgentRole {
     /// [`RoleCompaction::ProviderDefault`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction: Option<RoleCompaction>,
+    /// Named internal prompts injected after provider-reported context usage
+    /// exceeds each enabled alert's token threshold.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        alias = "contextSizeAlerts"
+    )]
+    pub context_size_alerts: BTreeMap<String, ContextSizeAlert>,
     /// Prompt fragments contributed by this role. Fragments are rendered as
     /// Handlebars templates and ordered together with tool/extension fragments.
     #[serde(skip_serializing_if = "Vec::is_empty", alias = "promptFragments")]
@@ -1559,6 +1634,113 @@ pub enum RoleCompaction {
     Threshold(u64),
 }
 
+/// Effective configuration for one named context-size alert.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSizeAlert {
+    /// Provider-reported input-token count above which the alert fires.
+    #[serde(deserialize_with = "deserialize_positive_context_size_alert_threshold")]
+    pub threshold: u64,
+    /// Whether this alert is active. Defaults to `true`.
+    #[serde(default = "context_size_alert_enabled_default")]
+    pub enable: bool,
+    /// Internal prompt injected when the threshold is crossed.
+    #[serde(
+        default = "context_size_alert_message_default",
+        deserialize_with = "deserialize_nonempty_context_size_alert_message"
+    )]
+    pub message: String,
+}
+
+impl ContextSizeAlert {
+    /// Creates an incomplete private merge seed. Effective configuration is
+    /// validated before this value can leave the settings loader.
+    fn merge_seed() -> Self {
+        Self {
+            threshold: 0,
+            enable: true,
+            message: context_size_alert_message_default(),
+        }
+    }
+}
+
+fn context_size_alert_enabled_default() -> bool {
+    true
+}
+
+fn deserialize_positive_context_size_alert_threshold<'de, D>(
+    deserializer: D,
+) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let threshold = u64::deserialize(deserializer)?;
+    if threshold == 0 {
+        return Err(D::Error::custom(
+            "context-size alert threshold must be positive",
+        ));
+    }
+    Ok(threshold)
+}
+
+fn context_size_alert_message_default() -> String {
+    DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE.to_owned()
+}
+
+fn deserialize_nonempty_context_size_alert_message<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let message = String::deserialize(deserializer)?;
+    if message.is_empty() {
+        return Err(D::Error::custom(
+            "context-size alert message must not be empty",
+        ));
+    }
+    Ok(message)
+}
+
+/// Partial field update for one named alert during layered config merging.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ContextSizeAlertPatch {
+    /// Replacement threshold when the current layer specifies one.
+    threshold: Option<u64>,
+    /// Replacement enablement when the current layer specifies one.
+    enable: Option<bool>,
+    /// Replacement prompt message when the current layer specifies one.
+    message: Option<String>,
+}
+
+impl ContextSizeAlertPatch {
+    /// Applies every field present in this layer to an alert merge value.
+    fn apply_to(&self, alert: &mut ContextSizeAlert) {
+        if let Some(threshold) = self.threshold {
+            alert.threshold = threshold;
+        }
+        if let Some(enable) = self.enable {
+            alert.enable = enable;
+        }
+        if let Some(message) = &self.message {
+            alert.message.clone_from(message);
+        }
+    }
+}
+
+fn apply_context_size_alert_patches(
+    alerts: &mut BTreeMap<String, ContextSizeAlert>,
+    patches: &BTreeMap<String, ContextSizeAlertPatch>,
+) {
+    for (name, patch) in patches {
+        let alert = alerts
+            .entry(name.clone())
+            .or_insert_with(ContextSizeAlert::merge_seed);
+        patch.apply_to(alert);
+    }
+}
+
 impl AgentRole {
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
         if let Some(enable) = patch.enable {
@@ -1594,6 +1776,7 @@ impl AgentRole {
         if let Some(compaction) = patch.compaction {
             self.compaction = compaction;
         }
+        apply_context_size_alert_patches(&mut self.context_size_alerts, &patch.context_size_alerts);
         if let Some(prompt_fragments) = &patch.prompt_fragments {
             for prompt_fragment in prompt_fragments {
                 if !self.prompt_fragments.contains(prompt_fragment) {
@@ -1955,19 +2138,23 @@ pub fn load_harness_settings_with_cli_overrides_in(
     {
         role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
         role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
+        role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
         role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
     }
     for overrides in harness_role_cli_override_layers(harness_config_overrides)? {
         role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
         role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
+        role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
         role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
     role_settings.validate_inter_session_roles()?;
     role_settings.apply_agent_globals_to_roles();
+    role_settings.validate_context_size_alerts()?;
     settings.prompt_fragments = role_settings.prompt_fragments;
     settings.required_skills = role_settings.required_skills;
+    settings.context_size_alerts = role_settings.context_size_alerts;
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
     Ok(settings)
@@ -2038,6 +2225,13 @@ fn normalize_role_config_keys(
     normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
     normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
     normalize_alias_key(map, "requiredSkills", "required_skills", source, path)?;
+    normalize_alias_key(
+        map,
+        "contextSizeAlerts",
+        "context_size_alerts",
+        source,
+        path,
+    )?;
     Ok(())
 }
 
@@ -2113,6 +2307,13 @@ fn normalize_harness_config_value(
             agents,
             "requiredSkills",
             "required_skills",
+            source,
+            "agents",
+        )?;
+        normalize_alias_key(
+            agents,
+            "contextSizeAlerts",
+            "context_size_alerts",
             source,
             "agents",
         )?;
@@ -2306,6 +2507,7 @@ fn canonical_agents_key(key: &str) -> &str {
         "roleGroups" => "role_groups",
         "promptFragments" => "prompt_fragments",
         "requiredSkills" => "required_skills",
+        "contextSizeAlerts" => "context_size_alerts",
         _ => key,
     }
 }
@@ -2326,6 +2528,7 @@ fn canonical_role_key(key: &str) -> &str {
         "enableTools" => "enable_tools",
         "disableTools" => "disable_tools",
         "requiredSkills" => "required_skills",
+        "contextSizeAlerts" => "context_size_alerts",
         _ => key,
     }
 }

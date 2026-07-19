@@ -2028,6 +2028,10 @@ pub struct Harness {
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
     /// Immutable content-free context projection captured at provider dispatch.
     prompt_context_limits: HashMap<AgentPromptId, PromptContextLimitSnapshot>,
+    /// Effective named context-size alerts captured for each provider prompt so
+    /// a mid-flight role switch cannot change response-time alert policy.
+    prompt_context_size_alerts:
+        HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::ContextSizeAlert>>,
     /// Prompts for which streaming exposed semantic output, making automatic
     /// no-output recovery unsafe.
     prompt_semantic_output: HashSet<AgentPromptId>,
@@ -2688,6 +2692,7 @@ impl Harness {
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
             prompt_context_limits: HashMap::new(),
+            prompt_context_size_alerts: HashMap::new(),
             prompt_semantic_output: HashSet::new(),
             local_route_failure_prompts: HashSet::new(),
             suppressed_compaction_dispatches: HashSet::new(),
@@ -4111,6 +4116,7 @@ impl Harness {
         self.pending_provider_prompts.remove(&agent_prompt_id);
         self.prompt_operations.remove(&agent_prompt_id);
         self.prompt_context_limits.remove(&agent_prompt_id);
+        self.prompt_context_size_alerts.remove(&agent_prompt_id);
         self.clear_prompt_tool_snapshot(&agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
@@ -10374,6 +10380,7 @@ impl Harness {
         self.canceled_prompts.insert(canceled_prompt_id.clone());
         self.prompt_operations.remove(&canceled_prompt_id);
         self.prompt_context_limits.remove(&canceled_prompt_id);
+        self.prompt_context_size_alerts.remove(&canceled_prompt_id);
         self.prompt_semantic_output.remove(&canceled_prompt_id);
         self.publish_prompt_terminated(
             session_id,
@@ -10736,6 +10743,7 @@ impl Harness {
             self.prompt_agents.remove(&spid);
             self.prompt_operations.remove(&spid);
             self.prompt_context_limits.remove(&spid);
+            self.prompt_context_size_alerts.remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
@@ -14357,6 +14365,7 @@ impl Harness {
             self.prompt_agents.remove(spid);
             self.prompt_operations.remove(spid);
             self.prompt_context_limits.remove(spid);
+            self.prompt_context_size_alerts.remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -14592,6 +14601,7 @@ impl Harness {
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
         self.prompt_context_limits.clear();
+        self.prompt_context_size_alerts.clear();
         self.prompt_semantic_output.clear();
         self.local_route_failure_prompts.clear();
         self.prompt_operations.clear();
@@ -17341,6 +17351,14 @@ impl Harness {
         let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
         self.prompt_context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
+        let role_name = self.role_name_for_agent_id(cid);
+        let context_size_alerts = self
+            .available_roles
+            .get(&role_name)
+            .map(|role| role.context_size_alerts.clone())
+            .unwrap_or_default();
+        self.prompt_context_size_alerts
+            .insert(agent_prompt_id.clone(), context_size_alerts);
         self.prompt_operations.insert(
             agent_prompt_id.clone(),
             (
@@ -18125,6 +18143,10 @@ impl Harness {
             self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
             return Ok(());
         };
+        let context_size_alerts = self
+            .prompt_context_size_alerts
+            .remove(&response.agent_prompt_id)
+            .unwrap_or_default();
         self.assign_finished_response_agent_id(&cid, &mut response);
         let active_compaction_response = self.agents.get(&cid).is_some_and(|agent| {
             matches!(
@@ -18256,6 +18278,17 @@ impl Harness {
         }
 
         self.publish_finished_response_for_agent(&cid, source, &response);
+        if response_contains_compaction {
+            self.clear_agent_context_usage(&cid);
+        } else if response.error.is_none()
+            && response.failure_kind.is_none()
+            && !matches!(
+                response.stop_reason,
+                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+            )
+        {
+            self.queue_crossed_context_size_alerts(&cid, input_tokens, &context_size_alerts);
+        }
         if self.handle_finished_response_side_conversation(
             &cid,
             FinishedSideConversation {
@@ -18858,6 +18891,7 @@ impl Harness {
 
     fn discard_finished_response_prompt_tracking(&mut self, agent_prompt_id: &AgentPromptId) {
         self.prompt_context_limits.remove(agent_prompt_id);
+        self.prompt_context_size_alerts.remove(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
@@ -18884,6 +18918,38 @@ impl Harness {
         if let Some(cid) = response_cid {
             let usage_model = self.prompt_models.get(agent_prompt_id).cloned();
             self.update_agent_context_usage(cid, usage_model.as_ref(), input_tokens, cached_tokens);
+        }
+    }
+
+    /// Queue each enabled named context-size alert once while usage remains
+    /// above its threshold. Alerts ride the current tool round or dispatch
+    /// after the finished turn through the ordinary internal-prompt queue.
+    fn queue_crossed_context_size_alerts(
+        &mut self,
+        cid: &AgentId,
+        input_tokens: Option<u64>,
+        alerts: &BTreeMap<String, tau_config::settings::ContextSizeAlert>,
+    ) {
+        let Some(input_tokens) = input_tokens else {
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(cid) else {
+            return;
+        };
+        agent.fired_context_size_alerts.retain(|name| {
+            alerts
+                .get(name)
+                .is_some_and(|alert| alert.enable && input_tokens > alert.threshold)
+        });
+        for (name, alert) in alerts {
+            if alert.enable
+                && input_tokens > alert.threshold
+                && agent.fired_context_size_alerts.insert(name.clone())
+            {
+                agent
+                    .pending_prompts
+                    .push_back(PendingPrompt::context_size_alert(alert.message.clone()));
+            }
         }
     }
 
@@ -19750,6 +19816,9 @@ impl Harness {
             conv.context_usage_model = None;
             conv.context_cached_tokens = None;
             conv.context_percent_used = None;
+            conv.fired_context_size_alerts.clear();
+            conv.pending_prompts
+                .retain(|prompt| !prompt.is_context_size_alert());
         }
     }
 

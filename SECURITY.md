@@ -168,6 +168,22 @@ terminal and late-response rejection do not establish crash-exact cancellation
 persistence; standalone-compaction ownership remains covered by the durable
 rules above.
 
+## Named context-size alert reliability
+
+Named context-size alerts are operator-configured, model-visible advisory
+prompts. Provider token usage may trigger an alert only for an accepted,
+successful, non-compacting ordinary response under the policy captured for that
+prompt. Canceled, stale, duplicate, failed, and compaction responses create no
+alert work. Alert messages grant no tool authority: `compact` remains separately
+controlled by effective tool policy.
+
+Crossing suppression and queued alert delivery are daemon-local best-effort
+state, not durable recovery obligations. A crash can lose a queued alert, and a
+later successful response after cold replay can evaluate restored high usage
+again. Warm-process regressions cover threshold crossings, failure exclusion,
+tool-round deferral, accounting resets (including stale queued-alert removal),
+and prompt-owned role policy.
+
 ## Release build resource reliability
 
 The universal release binary's accepted build-time, memory, size, and runtime

@@ -12,6 +12,8 @@ A role can set:
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`
 - `compaction`: automatic compaction policy: `provider_default`, `disabled`, or `{ threshold: 200000 }`; the harness schedules standalone compaction for models that publish it, while legacy models may use inline provider context management
+- `context_size_alerts`: named token thresholds that queue configurable hidden
+  internal prompts after a turn
 - `prompt_fragments`: role-specific prompt fragments
 - `prompt_override`: system prompt template name
 - `tools`: explicit internal tools enabled for this role
@@ -64,6 +66,35 @@ for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", pri
 65, text: "Follow the run policy." }]'`.
 
 Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
+
+Named context-size alerts can be set globally, on a role group, or on one role.
+Their fields merge from broad to specific scope, so a role can customize or
+disable an inherited alert. `enable` defaults to `true`, and `message` defaults
+to `Use the \`compact\` tool after finishing your current task.`. Every new alert
+requires a positive `threshold`; an explicitly configured `message` cannot be
+empty:
+
+```yaml
+agents:
+  context_size_alerts:
+    compact-soon:
+      threshold: 160000
+  role_groups:
+    engineer:
+      roles:
+        reviewer:
+          context_size_alerts:
+            compact-soon:
+              enable: false
+```
+
+When completed inference reports input usage strictly above the threshold, Tau
+queues the message as a hidden internal prompt after the current response and
+any tool calls. Failed and compaction responses do not fire alerts. During one
+running Tau daemon, each alert fires once until usage falls back to or below its
+threshold or context accounting resets. Alert crossing and queued-delivery state
+is advisory runtime state and is not reconstructed after a restart. Alerts only
+advise the model; the `compact` tool must still be enabled separately.
 
 Roles opt into bare inter-session messages with ordinary inherited capabilities.
 `inter_session_receiver` allows a role's agents to receive them, while

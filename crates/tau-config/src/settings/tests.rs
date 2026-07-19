@@ -653,6 +653,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             "displayNameTemplate": "Agent {{n}}",
             "promptFragments": [],
             "requiredSkills": [],
+            "contextSizeAlerts": {},
             "roleGroups": {
                 "engineer": {
                     "enabled": true,
@@ -667,6 +668,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                     "disableTools": [],
                     "enableTools": [],
                     "requiredSkills": [],
+                    "contextSizeAlerts": {},
                     "roles": {
                         "engineer": {
                             "enabled": true,
@@ -681,6 +683,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                             "disableTools": [],
                             "enableTools": [],
                             "requiredSkills": [],
+                            "contextSizeAlerts": {},
                         }
                     }
                 }
@@ -719,6 +722,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     assert!(value.pointer("/agents/display_name_template").is_some());
     assert!(value.pointer("/agents/prompt_fragments").is_some());
     assert!(value.pointer("/agents/required_skills").is_some());
+    assert!(value.pointer("/agents/context_size_alerts").is_some());
     let group = value
         .pointer("/agents/role_groups/engineer")
         .expect("group");
@@ -737,6 +741,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         "disable_tools",
         "enable_tools",
         "required_skills",
+        "context_size_alerts",
     ] {
         assert!(group.get(key).is_some(), "missing group key {key}");
         assert!(
@@ -757,6 +762,10 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         ("agents.defaultRole", "agents.default_role"),
         ("agents.promptFragments", "agents.prompt_fragments"),
         ("agents.requiredSkills", "agents.required_skills"),
+        (
+            "agents.contextSizeAlerts.compact-soon.enable",
+            "agents.context_size_alerts.compact-soon.enable",
+        ),
         ("agents.idTemplate", "agents.id_template"),
         ("agents.displayNameTemplate", "agents.display_name_template"),
         (
@@ -766,6 +775,14 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "agents.roleGroups.engineer.enabled",
             "agents.role_groups.engineer.enable",
+        ),
+        (
+            "agents.roleGroups.engineer.contextSizeAlerts.compact-soon.enable",
+            "agents.role_groups.engineer.context_size_alerts.compact-soon.enable",
+        ),
+        (
+            "agents.roleGroups.engineer.roles.engineer.contextSizeAlerts.compact-soon.enable",
+            "agents.role_groups.engineer.roles.engineer.context_size_alerts.compact-soon.enable",
         ),
         (
             "agents.roleGroups.engineer.interSessionReceiver",
@@ -1749,6 +1766,145 @@ fn harness_settings_load_role_compaction() {
         s.roles["disabled"].compaction,
         Some(RoleCompaction::Disabled)
     );
+}
+
+/// Ensures named context-size alerts merge field-by-field from agent globals
+/// through group defaults and role overrides, including default enablement and
+/// the default compaction reminder.
+#[test]
+fn harness_settings_merge_named_context_size_alerts() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          context_size_alerts:
+            compact-soon:
+              threshold: 160000
+            final-warning:
+              threshold: 190000
+              message: Finish immediately.
+            default-message:
+              threshold: 120000
+          role_groups:
+            custom:
+              context_size_alerts:
+                compact-soon:
+                  message: Compact after this task.
+              roles:
+                reviewer:
+                  context_size_alerts:
+                    compact-soon:
+                      enable: false
+                implementer: {}
+        "#,
+    )
+    .expect("write");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let reviewer = &settings.roles["reviewer"].context_size_alerts;
+    assert_eq!(reviewer["compact-soon"].threshold, 160_000);
+    assert!(!reviewer["compact-soon"].enable);
+    assert_eq!(reviewer["compact-soon"].message, "Compact after this task.");
+    assert_eq!(reviewer["final-warning"].message, "Finish immediately.");
+
+    let implementer = &settings.roles["implementer"].context_size_alerts;
+    assert!(implementer["compact-soon"].enable);
+    assert_eq!(
+        implementer["compact-soon"].message,
+        "Compact after this task."
+    );
+    assert_eq!(implementer["final-warning"].message, "Finish immediately.");
+    assert_eq!(
+        implementer["default-message"].message,
+        DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE
+    );
+}
+
+/// Ensures legacy and canonical alert-map spellings normalize before file-layer
+/// merging, so a drop-in can disable an inherited camel-case role alert.
+#[test]
+fn harness_settings_merge_context_size_alert_alias_across_layers() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          roleGroups:
+            custom:
+              roles:
+                reviewer:
+                  contextSizeAlerts:
+                    compact-soon:
+                      threshold: 160000
+        "#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        dir.join("harness.d/10-disable.yaml"),
+        r#"
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  context_size_alerts:
+                    compact-soon:
+                      enable: false
+        "#,
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let alert = &settings.roles["reviewer"].context_size_alerts["compact-soon"];
+    assert_eq!(alert.threshold, 160_000);
+    assert!(!alert.enable);
+}
+
+/// Ensures a newly declared named alert cannot omit the threshold that defines
+/// when it fires, even when the entry only attempts to disable itself.
+#[test]
+fn harness_settings_reject_context_size_alert_without_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+        agents:
+          context_size_alerts:
+            incomplete:
+              enable: false
+        "#,
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("missing threshold must fail");
+    assert!(error.to_string().contains("requires a positive threshold"));
+}
+
+/// Ensures an explicitly empty internal-prompt message is rejected instead of
+/// creating a context alert that silently activates the model.
+#[test]
+fn harness_settings_reject_empty_context_size_alert_message() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+        agents:
+          context_size_alerts:
+            silent:
+              threshold: 100
+              message: ""
+        "#,
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("empty message must fail");
+    assert!(error.to_string().contains("message must not be empty"));
 }
 
 /// Ensures group-level tool defaults update inherited roles without relisting

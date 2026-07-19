@@ -13,7 +13,7 @@
 
 mod loop_guard;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::{AgentPersistenceMode, NodeId};
@@ -333,6 +333,10 @@ pub(crate) struct Agent {
     /// agent has used. Computed from `context_input_tokens` and the
     /// model's window size; `None` when the window is unknown.
     pub(crate) context_percent_used: Option<u8>,
+    /// Named context-size alerts already emitted for the current usage climb.
+    /// An alert becomes eligible again after usage falls back to or below its
+    /// threshold or context accounting is reset.
+    pub(crate) fired_context_size_alerts: HashSet<String>,
 
     /// Per-conversation map from tool-result-content hash to the first
     /// `call_id` on this branch that produced that content. Consulted
@@ -361,6 +365,8 @@ pub(crate) enum PendingPromptSource {
     WatchNotification,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
+    /// Advisory prompt created by a named context-size alert.
+    ContextSizeAlert,
     /// An activating notice for an unsuppressed background completion.
     ActivatingBackgroundCompletion,
     /// A passive background-completion notice that should be folded into the
@@ -449,6 +455,13 @@ impl PendingPrompt {
             ctx_id: None,
             peer_admission_bytes: None,
         }
+    }
+
+    /// Create a hidden advisory prompt from a named context-size alert.
+    pub(crate) fn context_size_alert(text: String) -> Self {
+        let mut prompt = Self::internal(text);
+        prompt.source = PendingPromptSource::ContextSizeAlert;
+        prompt
     }
 
     /// Create a hidden watch notification prompt.
@@ -564,6 +577,12 @@ impl PendingPrompt {
         self.source == PendingPromptSource::LoopGuard
     }
 
+    /// Whether this queued prompt came from a named context-size alert.
+    #[must_use]
+    pub(crate) fn is_context_size_alert(&self) -> bool {
+        self.source == PendingPromptSource::ContextSizeAlert
+    }
+
     /// Whether this prompt is a passive background-completion notice.
     #[must_use]
     pub(crate) fn is_passive_background_completion(&self) -> bool {
@@ -645,6 +664,7 @@ impl Agent {
             context_usage_model: None,
             context_cached_tokens: None,
             context_percent_used: None,
+            fired_context_size_alerts: HashSet::new(),
             result_dedup: ResultDedupMap::new(),
             loop_guard: LoopGuardState::default(),
         }
