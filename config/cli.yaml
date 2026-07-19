@@ -20,6 +20,8 @@
 # bind:
 #   C-b:
 #     action: agent-pick
+#   C-B:
+#     action: agent-pick-all
 #   C-g:
 #     action: shell-prompt-insert
 #     command: git status --short

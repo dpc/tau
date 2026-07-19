@@ -685,6 +685,7 @@ impl SharedState {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum KeyBinding {
     Ctrl(char),
+    CtrlShift(char),
     CtrlKey(KeyCode),
     Key(KeyCode),
 }
@@ -726,7 +727,11 @@ fn parse_key_binding(input: &str) -> Option<KeyBinding> {
     if chars.next().is_some() {
         return None;
     }
-    Some(KeyBinding::Ctrl(ch.to_ascii_lowercase()))
+    if ch.is_ascii_uppercase() {
+        Some(KeyBinding::CtrlShift(ch.to_ascii_lowercase()))
+    } else {
+        Some(KeyBinding::Ctrl(ch.to_ascii_lowercase()))
+    }
 }
 
 fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
@@ -735,6 +740,13 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
     let ctrl_only = modifiers == KeyModifiers::CONTROL;
 
     match key.code {
+        KeyCode::Char(ch)
+            if ctrl
+                && ch.is_ascii_alphabetic()
+                && (modifiers.contains(KeyModifiers::SHIFT) || ch.is_ascii_uppercase()) =>
+        {
+            Some(KeyBinding::CtrlShift(ch.to_ascii_lowercase()))
+        }
         KeyCode::Char(ch) if ctrl => Some(KeyBinding::Ctrl(ch.to_ascii_lowercase())),
         KeyCode::Char(ch @ '\u{1}'..='\u{1a}') => {
             let letter = (b'a' + ch as u8 - 1) as char;
@@ -1807,7 +1819,8 @@ impl Term {
     ///
     /// Supported key spellings include `Tab`, `BackTab`, `Shift-Tab`, `Enter`,
     /// `Esc`, arrow/navigation/editing keys, `C-Enter`, `C-Up`, `C-Down`, and
-    /// `C-<letter>`.
+    /// `C-<letter>`. Control letters are case-sensitive: `C-b` and shifted
+    /// `C-B` may have different actions when the terminal reports Shift.
     pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (String, String)>) {
         self.bindings = bindings
             .into_iter()

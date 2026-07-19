@@ -42,6 +42,34 @@ impl AgentListFilter {
     }
 }
 
+/// Category selected by an attached terminal agent-picker binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentPickerFilter {
+    /// Include only agents currently eligible for automatic navigation.
+    Active,
+    /// Include every live agent regardless of navigation eligibility.
+    All,
+}
+
+impl AgentPickerFilter {
+    /// Return whether one lifecycle snapshot belongs in this picker category.
+    pub(crate) fn admits(self, lifecycle: SessionAgentLifecycle) -> bool {
+        let SessionAgentLifecycle::Live {
+            runtime_state,
+            navigation_mode,
+        } = lifecycle
+        else {
+            return false;
+        };
+        match self {
+            Self::Active => {
+                crate::agent_navigation::is_navigation_eligible(navigation_mode, runtime_state)
+            }
+            Self::All => true,
+        }
+    }
+}
+
 /// Runs `tau agent list`.
 pub(crate) fn run(args: &crate::cli::AgentListArgs) -> Result<(), CliError> {
     let filter = AgentListFilter::from_args(args);
@@ -173,6 +201,30 @@ pub(crate) fn visible_agents(
         })
         .collect();
     topological_order(agents)
+}
+
+/// Filters current live roster rows for an attached terminal picker.
+pub(crate) fn picker_agents(
+    agents: Vec<SessionAgentListEntry>,
+    filter: AgentPickerFilter,
+) -> Vec<SessionAgentListEntry> {
+    topological_order(
+        agents
+            .into_iter()
+            .filter(|agent| filter.admits(agent.lifecycle))
+            .collect(),
+    )
+}
+
+/// Revalidates one picker selection against a fresh current-session snapshot.
+pub(crate) fn picker_selection_is_current(
+    agents: &[SessionAgentListEntry],
+    selected: &tau_proto::AgentId,
+    filter: AgentPickerFilter,
+) -> bool {
+    agents
+        .iter()
+        .any(|agent| &agent.agent_id == selected && filter.admits(agent.lifecycle))
 }
 
 /// Formats rows as stable, headerless, escaped TSV.

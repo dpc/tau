@@ -7,6 +7,21 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) use tau_proto::AgentNavigationMode as AgentNavigationState;
 
+/// Return whether one harness-authored mode/runtime pair is
+/// navigation-eligible.
+pub(crate) fn is_navigation_eligible(
+    mode: tau_proto::AgentNavigationMode,
+    runtime_state: tau_proto::AgentRuntimeState,
+) -> bool {
+    match mode {
+        tau_proto::AgentNavigationMode::Active => true,
+        tau_proto::AgentNavigationMode::ActiveAuto => {
+            runtime_state == tau_proto::AgentRuntimeState::Running
+        }
+        tau_proto::AgentNavigationMode::Suspended => false,
+    }
+}
+
 /// One atomic snapshot of the facts used to route terminal input.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentNavigation {
@@ -60,13 +75,10 @@ impl AgentNavigation {
     /// Return whether a loaded agent is an effective navigation target.
     pub(crate) fn is_active(&self, agent_id: &str) -> bool {
         self.live_agents.contains(agent_id)
-            && self.modes.get(agent_id).is_some_and(|mode| match mode {
-                tau_proto::AgentNavigationMode::Active => true,
-                tau_proto::AgentNavigationMode::ActiveAuto => {
-                    self.runtime_states.get(agent_id)
-                        == Some(&tau_proto::AgentRuntimeState::Running)
-                }
-                tau_proto::AgentNavigationMode::Suspended => false,
+            && self.modes.get(agent_id).is_some_and(|mode| {
+                self.runtime_states
+                    .get(agent_id)
+                    .is_some_and(|runtime| is_navigation_eligible(*mode, *runtime))
             })
     }
 

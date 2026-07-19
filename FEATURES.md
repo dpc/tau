@@ -92,9 +92,11 @@ navigation classification for each loaded agent while keeping their selected
 transcript, drafts, and presentation local. Explicit classifications survive UI
 reconnect while the agent remains loaded in the same daemon session. Unload,
 session switch, and daemon exit forget them.
-Running sessions also expose a bounded, pipe-friendly `tau agent list` roster,
-and the terminal's C-b binding can pick a current non-suspended agent through
-optional `fzf` without changing durable navigation state.
+Running sessions also expose a bounded, pipe-friendly `tau agent list` roster.
+The terminal's C-b binding picks an effectively active agent, while C-B includes
+all current live agents, through optional `fzf` without changing durable
+navigation state. The shifted chord requires enhanced keyboard reporting and
+can be rebound on legacy terminal paths.
 
 See [agent messaging](docs/agent-messaging.md),
 [agent roles](docs/agent-roles.md), and the

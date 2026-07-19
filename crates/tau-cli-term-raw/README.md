@@ -206,6 +206,10 @@ Several execution contexts cooperate:
   Helpers are not persistent, so normal external programs such as `$EDITOR` are
   launched only after the current input read has completed and do not race Tau
   for stdin.
+- **Enhanced keyboard reporting** — real terminals are asked to enable the
+  Kitty/CSI-u disambiguation protocol while Tau owns the terminal. This lets
+  case-sensitive control-letter bindings distinguish `C-b` from shifted `C-B`.
+  Unsupported terminal paths retain legacy behavior and collapse both chords.
 - **Virtual input bridge** — tests keep the public `Sender<RawEvent>` returned
   by `Term::new_virtual()`. A small bridge thread forwards those events into the
   internal input channel and sends the sticky EOF wakeup when all virtual input

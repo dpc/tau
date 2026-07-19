@@ -255,3 +255,6 @@ treats it as trusted local code. Tau invokes fixed arguments directly, bounds it
 stdin/stdout and runtime, restores foreground ownership and raw terminal state,
 and revalidates the selected agent. Cancellation, subprocess/RPC errors, and stale
 selection are no-mutation outcomes.
+Picker membership follows live lifecycle/navigation authority independently of
+missing, invalid, or unreadable creation-fact enrichment. Selection never
+changes navigation mode, runtime state, or agent loading.

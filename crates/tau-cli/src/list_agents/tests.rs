@@ -48,6 +48,159 @@ fn default_filter_is_mode_not_suspended() {
     );
 }
 
+/// The active picker follows effective navigation eligibility without treating
+/// idle as globally suspended or running as globally active.
+#[test]
+fn active_picker_filters_navigation_and_runtime_state_independently() {
+    let cases = [
+        (
+            "active-running",
+            tau_proto::AgentNavigationMode::Active,
+            tau_proto::AgentRuntimeState::Running,
+            true,
+        ),
+        (
+            "active-idle",
+            tau_proto::AgentNavigationMode::Active,
+            tau_proto::AgentRuntimeState::Idle,
+            true,
+        ),
+        (
+            "auto-running",
+            tau_proto::AgentNavigationMode::ActiveAuto,
+            tau_proto::AgentRuntimeState::Running,
+            true,
+        ),
+        (
+            "auto-idle",
+            tau_proto::AgentNavigationMode::ActiveAuto,
+            tau_proto::AgentRuntimeState::Idle,
+            false,
+        ),
+        (
+            "suspended-running",
+            tau_proto::AgentNavigationMode::Suspended,
+            tau_proto::AgentRuntimeState::Running,
+            false,
+        ),
+        (
+            "suspended-idle",
+            tau_proto::AgentNavigationMode::Suspended,
+            tau_proto::AgentRuntimeState::Idle,
+            false,
+        ),
+    ];
+    let rows = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (id, mode, runtime, _))| {
+            let mut row = entry(id, None, Some(index as u64));
+            row.lifecycle = SessionAgentLifecycle::Live {
+                runtime_state: *runtime,
+                navigation_mode: *mode,
+            };
+            row
+        })
+        .collect();
+
+    let visible = picker_agents(rows, AgentPickerFilter::Active)
+        .into_iter()
+        .map(|agent| agent.agent_id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+
+    for (id, _, _, expected) in cases {
+        assert_eq!(visible.contains(id), expected, "{id}");
+    }
+}
+
+/// The all-agent picker includes every live navigation mode while retaining
+/// each row's independent running or idle output column.
+#[test]
+fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
+    let mut running = entry("suspended-running", None, Some(1));
+    running.lifecycle = SessionAgentLifecycle::Live {
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        navigation_mode: tau_proto::AgentNavigationMode::Suspended,
+    };
+    let mut idle = entry("auto-idle", None, Some(2));
+    idle.lifecycle = SessionAgentLifecycle::Live {
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+    };
+    idle.facts = SessionAgentFacts::Missing;
+
+    let output = format_rows(&picker_agents(vec![running, idle], AgentPickerFilter::All));
+
+    assert!(output.contains("suspended-running\tlive\trunning\tsuspended\t"));
+    assert!(output.contains("auto-idle\tlive\tidle\tactive_auto\tdurable\tmissing\t"));
+}
+
+/// Picker membership uses live lifecycle authority even when independent
+/// creation-fact enrichment is missing, invalid, or unreadable.
+#[test]
+fn pickers_keep_live_agents_without_available_creation_facts() {
+    let mut missing = entry("missing", None, Some(1));
+    missing.facts = SessionAgentFacts::Missing;
+    let mut invalid = entry("invalid", None, Some(2));
+    invalid.facts = SessionAgentFacts::Invalid;
+    let mut unreadable = entry("unreadable", None, Some(3));
+    unreadable.facts = SessionAgentFacts::Unreadable;
+    let mut unavailable = entry("unavailable", None, Some(4));
+    unavailable.lifecycle = SessionAgentLifecycle::Unavailable;
+    let mut unloaded = entry("unloaded", None, Some(5));
+    unloaded.lifecycle = SessionAgentLifecycle::Unloaded;
+
+    for filter in [AgentPickerFilter::Active, AgentPickerFilter::All] {
+        let visible = picker_agents(
+            vec![
+                missing.clone(),
+                invalid.clone(),
+                unreadable.clone(),
+                unavailable.clone(),
+                unloaded.clone(),
+            ],
+            filter,
+        )
+        .into_iter()
+        .map(|agent| agent.agent_id.to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(visible, vec!["invalid", "missing", "unreadable"]);
+    }
+}
+
+/// Revalidation keeps the initiating picker category when an automatic agent
+/// becomes idle between the displayed and fresh snapshots.
+#[test]
+fn picker_revalidation_preserves_active_or_all_category() {
+    let mut running = entry("auto", None, Some(1));
+    running.lifecycle = SessionAgentLifecycle::Live {
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+    };
+    let mut idle = running.clone();
+    idle.lifecycle = SessionAgentLifecycle::Live {
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+    };
+
+    let selected = &running.agent_id;
+    assert!(picker_selection_is_current(
+        &[running.clone()],
+        selected,
+        AgentPickerFilter::Active
+    ));
+    assert!(!picker_selection_is_current(
+        &[idle.clone()],
+        selected,
+        AgentPickerFilter::Active
+    ));
+    assert!(picker_selection_is_current(
+        &[idle],
+        selected,
+        AgentPickerFilter::All
+    ));
+}
+
 /// The all-categories filter admits suspended, unavailable, unreadable, and
 /// unloaded rows.
 #[test]

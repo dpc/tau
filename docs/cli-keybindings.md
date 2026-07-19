@@ -25,7 +25,8 @@ sample `config/cli.yaml`.
 | `Left`, `Right` | `cursor-left`, `cursor-right` | Move by one character. |
 | `Up`, `Down` | `cursor-up`, `cursor-down` | Cycle completion candidates, move/scroll within capped multiline input, then step prompt history at the input edges. |
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
-| `C-b` | `agent-pick` | Pick a current non-suspended agent with optional `fzf`. |
+| `C-b` | `agent-pick` | Pick a currently active agent with optional `fzf`. |
+| `C-B` | `agent-pick-all` | Pick any current live agent, including automatically or manually suspended agents. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
 | `C-k` | `agent-previous` | Cycle to the previous active agent or overview. |
 | `C-j` | `agent-next` | Cycle to the next active agent or overview. |
@@ -78,6 +79,11 @@ These keys are handled by named actions in the default binding file, with raw fa
 ## Configurable actions
 
 Bindings live under `cli.bind` in config. The built-in bindings are merged below user bindings, so configuring one key does not remove the rest.
+Control-letter bindings are case-sensitive: for example, `C-b` means Ctrl+B
+without Shift, while `C-B` means Ctrl+Shift+B. Distinguishing those two chords
+requires a terminal path that supports enhanced keyboard reporting (Kitty
+keyboard protocol/CSI-u). Legacy terminal paths collapse both to `C-b`; bind
+`agent-pick-all` to another distinguishable key there.
 
 - `submit-prompt` — submit the current prompt, or accept a previewed completion without submitting.
 - `insert-newline` — insert a newline at the cursor.
@@ -104,10 +110,13 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
 - `cycle-role-group` — cycle to the first role in the next role group.
 - `agent-previous` — cycle to the previous active agent or all-agent overview.
 - `agent-next` — cycle to the next active agent or all-agent overview.
-- `agent-pick` — invoke `fzf` directly over a bounded current-session agent
-  snapshot and switch only after revalidating the selected live,
-  non-suspended id. Cancel, failure, and stale selections preserve the current
-  transcript and prompt draft. See [Listing and picking agents](list-agents.md).
+- `agent-pick` / `agent-pick-all` — invoke `fzf` directly over a bounded
+  current-session agent snapshot. The active picker admits unconditional
+  `active` agents and running `active_auto` agents; the all picker also admits
+  idle `active_auto` and explicitly suspended agents. Both preserve the
+  independent running/idle display column and revalidate the selected id.
+  Cancel, failure, and stale selections preserve the current transcript and
+  prompt draft. See [Listing and picking agents](list-agents.md).
 - `prompt-history-search` — feed indexed prompt-history rows
   (`<index>\t<single-line summary>`) to `command`; bounded original-prompt
   previews are also written under `$TAU_PROMPT_HISTORY_DIR/<index>`. Replace the

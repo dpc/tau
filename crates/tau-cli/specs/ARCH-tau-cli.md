@@ -160,9 +160,15 @@ new durable session-wide message index.
 
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
-parent-before-child TSV ordering, and escaping. The C-b action invokes `fzf`
-directly through `tau-cli-term`, which projects width-aware aligned display
-columns without changing the stable TSV selection row. The CLI revalidates the
-chosen current non-suspended agent with a second snapshot and uses the existing
+parent-before-child TSV ordering, and escaping. The C-b active action and C-B
+all-agent action invoke `fzf` directly through `tau-cli-term`, which projects
+width-aware aligned display columns without changing the stable TSV selection
+row. Active filtering uses navigation mode plus runtime eligibility without
+replacing the independent running/idle display column; the all-agent action
+includes every current live navigation mode. The CLI revalidates the chosen
+agent against the same category with a second snapshot and uses the existing
 local selection transition. Picker cancellation and failure do not retarget the
-prompt draft.
+prompt draft. This eligibility projection follows
+[DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).
+The default C-B distinction depends on enhanced keyboard reporting; legacy
+terminal paths collapse it with C-b and require a different user binding.

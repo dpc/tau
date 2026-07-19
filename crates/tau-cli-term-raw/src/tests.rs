@@ -4724,6 +4724,95 @@ fn enter_bindings_override_default_newline_and_submit() {
     assert_eq!(handle.get_buffer(), "draft");
 }
 
+/// Lowercase and shifted uppercase control-letter bindings remain distinct so
+/// applications can assign C-b and C-B different actions.
+#[test]
+fn control_letter_bindings_distinguish_shift() {
+    let buf = SharedBuffer::new();
+    let (mut term, _handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_bindings(vec![
+        ("C-b".to_owned(), "lower".to_owned()),
+        ("C-B".to_owned(), "upper".to_owned()),
+    ]);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("send C-b");
+    assert!(matches!(
+        term.get_next_event().expect("C-b event"),
+        Event::Binding(action) if action == "lower"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('B'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )))
+        .expect("send C-B");
+    assert!(matches!(
+        term.get_next_event().expect("C-B event"),
+        Event::Binding(action) if action == "upper"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )))
+        .expect("send lowercase shifted C-B");
+    assert!(matches!(
+        term.get_next_event().expect("lowercase shifted C-B event"),
+        Event::Binding(action) if action == "upper"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('B'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("send uppercase C-B without explicit shift");
+    assert!(matches!(
+        term.get_next_event().expect("uppercase C-B event"),
+        Event::Binding(action) if action == "upper"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('\u{2}'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send legacy Ctrl-B byte");
+    assert!(matches!(
+        term.get_next_event().expect("legacy C-b event"),
+        Event::Binding(action) if action == "lower"
+    ));
+}
+
+/// Shifted punctuation remains a plain control binding because uppercase
+/// binding syntax distinguishes shifted letters only.
+#[test]
+fn control_punctuation_binding_ignores_shift_modifier() {
+    let buf = SharedBuffer::new();
+    let (mut term, _handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_bindings(vec![("C-!".to_owned(), "punctuation".to_owned())]);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )))
+        .expect("send Ctrl+Shift+!");
+    assert!(matches!(
+        term.get_next_event().expect("punctuation event"),
+        Event::Binding(action) if action == "punctuation"
+    ));
+}
+
 /// When the completion menu is open, completion navigation keys must be
 /// consumed before matching configurable bindings. This keeps global bindings
 /// such as Shift-Tab role cycling from stealing completion-menu navigation.

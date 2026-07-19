@@ -2,6 +2,8 @@
 //! loop, draft debouncer, and the threading glue that joins them.
 
 #[cfg(test)]
+mod agent_picker_tests;
+#[cfg(test)]
 mod recorded_line_routing_tests;
 
 use std::collections::HashMap;
@@ -1928,7 +1930,8 @@ impl<'a> TerminalInputSession<'a> {
             "cycle-role-group" => self.cycle_role_group(),
             "agent-previous" => self.switch_agent_by_delta(-1),
             "agent-next" => self.switch_agent_by_delta(1),
-            "agent-pick" => self.pick_agent(),
+            "agent-pick" => self.pick_agent(crate::list_agents::AgentPickerFilter::Active),
+            "agent-pick-all" => self.pick_agent(crate::list_agents::AgentPickerFilter::All),
             _ => self
                 .output
                 .system_info(&format!("binding: unknown application action `{action}`")),
@@ -2830,7 +2833,7 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn pick_agent(&mut self) {
+    fn pick_agent(&mut self, filter: crate::list_agents::AgentPickerFilter) {
         let session_id = self.session_id.clone();
         let agents = match crate::list_agents::request_at_socket(
             &self.ctx.harness_socket_path,
@@ -2843,60 +2846,31 @@ impl<'a> TerminalInputSession<'a> {
                 return;
             }
         };
-        let visible = crate::list_agents::visible_agents(
+        let resolution = resolve_agent_picker(
             agents,
-            crate::list_agents::AgentListFilter::default(),
-        );
-        if visible.is_empty() {
-            self.output
-                .system_info("agent-picker: no non-suspended agents available");
-            return;
-        }
-        let rows = crate::list_agents::format_rows(&visible);
-        let selected = match self.term.pick_agent_row_with_fzf(&rows) {
-            Ok(Some(row)) => row,
-            Ok(None) => return,
-            Err(error) => {
-                self.output.system_info(&format!("agent-picker: {error}"));
-                return;
-            }
-        };
-        let agent_id = match crate::list_agents::selected_agent_id(&selected) {
-            Ok(agent_id) => agent_id,
-            Err(error) => {
-                self.output.system_info(&format!("agent-picker: {error}"));
-                return;
-            }
-        };
-        let revalidated = crate::list_agents::request_at_socket(
-            &self.ctx.harness_socket_path,
-            &session_id,
-            tau_proto::SessionAgentListScope::Current,
-        )
-        .ok()
-        .into_iter()
-        .flatten()
-        .any(|agent| {
-            agent.agent_id == agent_id
-                && matches!(
-                    agent.lifecycle,
-                    tau_proto::SessionAgentLifecycle::Live {
-                        navigation_mode: tau_proto::AgentNavigationMode::Active
-                            | tau_proto::AgentNavigationMode::ActiveAuto,
-                        ..
-                    }
+            filter,
+            |rows| self.term.pick_agent_row_with_fzf(rows),
+            || {
+                crate::list_agents::request_at_socket(
+                    &self.ctx.harness_socket_path,
+                    &session_id,
+                    tau_proto::SessionAgentListScope::Current,
                 )
-        });
-        if self.session_id != &session_id
-            || !revalidated
-            || !self.ctx.routing.agent_is_known(agent_id.as_str())
-        {
-            self.output
-                .system_info("agent-picker: selected agent is no longer available");
-            return;
-        }
-        if self.selected_agent_id().as_deref() != Some(agent_id.as_str()) {
-            self.switch_to_agent(agent_id.to_string());
+                .ok()
+            },
+            || self.session_id == &session_id,
+            |agent_id| self.ctx.routing.agent_is_known(agent_id),
+        );
+        match resolution {
+            AgentPickerResolution::NoChange => {}
+            AgentPickerResolution::Notice(message) => {
+                self.output.system_info(&format!("agent-picker: {message}"));
+            }
+            AgentPickerResolution::Select(agent_id) => {
+                if self.selected_agent_id().as_deref() != Some(agent_id.as_str()) {
+                    self.switch_to_agent(agent_id.to_string());
+                }
+            }
         }
     }
 
@@ -2979,6 +2953,49 @@ impl<'a> TerminalInputSession<'a> {
             self.pending_new_agent_options.stage_role(role);
         }
     }
+}
+
+/// Terminal-local outcome from one complete agent picker interaction.
+#[derive(Debug, Eq, PartialEq)]
+enum AgentPickerResolution {
+    /// Preserve selection and draft without a notice.
+    NoChange,
+    /// Preserve selection and draft while showing this notice.
+    Notice(String),
+    /// Switch to this freshly revalidated agent.
+    Select(tau_proto::AgentId),
+}
+
+/// Runs picker projection, selection, and fresh-snapshot revalidation.
+fn resolve_agent_picker(
+    agents: Vec<tau_proto::SessionAgentListEntry>,
+    filter: crate::list_agents::AgentPickerFilter,
+    pick: impl FnOnce(&str) -> Result<Option<String>, String>,
+    refresh: impl FnOnce() -> Option<Vec<tau_proto::SessionAgentListEntry>>,
+    session_is_current: impl FnOnce() -> bool,
+    agent_is_known: impl FnOnce(&str) -> bool,
+) -> AgentPickerResolution {
+    let visible = crate::list_agents::picker_agents(agents, filter);
+    if visible.is_empty() {
+        return AgentPickerResolution::Notice("no agents available".to_owned());
+    }
+    let rows = crate::list_agents::format_rows(&visible);
+    let selected = match pick(&rows) {
+        Ok(Some(row)) => row,
+        Ok(None) => return AgentPickerResolution::NoChange,
+        Err(error) => return AgentPickerResolution::Notice(error),
+    };
+    let agent_id = match crate::list_agents::selected_agent_id(&selected) {
+        Ok(agent_id) => agent_id,
+        Err(error) => return AgentPickerResolution::Notice(error),
+    };
+    let revalidated = refresh().is_some_and(|agents| {
+        crate::list_agents::picker_selection_is_current(&agents, &agent_id, filter)
+    });
+    if !session_is_current() || !revalidated || !agent_is_known(agent_id.as_str()) {
+        return AgentPickerResolution::Notice("selected agent is no longer available".to_owned());
+    }
+    AgentPickerResolution::Select(agent_id)
 }
 
 impl RecordedLineHandlers for TerminalInputSession<'_> {
