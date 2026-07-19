@@ -212,7 +212,7 @@ fn self_knowledge_pim_example_matches_extension_config_shape() {
 
 #[test]
 fn action_schema_contains_email_and_calendar_roots() {
-    let roots = action_schema()
+    let roots = action_schema_with_accounts(&[], &[])
         .roots
         .into_iter()
         .map(|root| root.name)
@@ -221,11 +221,318 @@ fn action_schema_contains_email_and_calendar_roots() {
     assert_eq!(roots, vec!["/email", "/calendar"]);
 }
 
+/// Effective interactive OAuth inventories must drive both deep account
+/// completions and omitted-argument guidance without changing usage syntax.
+#[test]
+fn google_auth_schema_uses_sorted_effective_account_names() {
+    let schema = action_schema_with_accounts(
+        &["zeta".to_owned(), "alpha".to_owned()],
+        &["work".to_owned(), "personal".to_owned()],
+    );
+
+    let email_arg = action_arg(&schema, &["/email", "auth", "google", "start"], "account");
+    assert_eq!(
+        email_arg
+            .suggestions
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zeta"]
+    );
+    let email_error = schema
+        .parse_line("/email auth google start")
+        .expect_err("account is required");
+    assert_eq!(
+        email_error.usage(),
+        Some("/email auth google start <account>")
+    );
+    assert!(email_error.message().contains("alpha, zeta"));
+
+    let calendar_arg = action_arg(
+        &schema,
+        &["/calendar", "auth", "google", "start"],
+        "account",
+    );
+    assert_eq!(
+        calendar_arg
+            .suggestions
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["personal", "work"]
+    );
+    let calendar_error = schema
+        .parse_line("/calendar auth google start")
+        .expect_err("account is required");
+    assert_eq!(
+        calendar_error.usage(),
+        Some("/calendar auth google start <account>")
+    );
+    assert!(calendar_error.message().contains("personal, work"));
+}
+
+/// An empty effective OAuth inventory should produce no completion candidates
+/// and should explicitly explain that configuration, rather than imply that an
+/// undisclosed account name exists.
+#[test]
+fn google_auth_schema_explains_empty_account_inventory() {
+    let schema = action_schema_with_accounts(&[], &[]);
+
+    for (line, path) in [
+        (
+            "/email auth google start",
+            vec!["/email", "auth", "google", "start"],
+        ),
+        (
+            "/calendar auth google start",
+            vec!["/calendar", "auth", "google", "start"],
+        ),
+    ] {
+        assert!(action_arg(&schema, &path, "account").suggestions.is_empty());
+        let error = schema.parse_line(line).expect_err("account is required");
+        assert!(
+            error
+                .message()
+                .contains("no accounts are available for interactive Google authorization"),
+            "{error}"
+        );
+    }
+}
+
+/// Large configured inventories remain within shared action-schema budgets:
+/// completion choices and diagnostic account-name repetition are both bounded.
+#[test]
+fn google_auth_schema_bounds_large_account_inventory() {
+    let accounts = (0..(tau_proto::MAX_ACTION_CHOICES + 2))
+        .map(|index| format!("id-{index:03}-{}", "a".repeat(121)))
+        .collect::<Vec<_>>();
+    let schema = action_schema_with_accounts(&accounts, &accounts);
+    schema.validate().expect("bounded schema validates");
+
+    let arg = action_arg(&schema, &["/email", "auth", "google", "start"], "account");
+    assert_eq!(arg.suggestions.len(), AUTH_ACCOUNT_COMPLETION_LIMIT);
+    assert!(arg.description.contains("showing 6 of 130"));
+    assert!(!arg.description.contains("id-006"));
+}
+
+/// Effective module configuration, rather than raw account declarations,
+/// determines auth account names: disabled, wrong-backend, and manual-refresh
+/// accounts must not be advertised, and a later configuration generation must
+/// replace the inventory.
+#[test]
+fn effective_config_and_reconfigure_replace_google_auth_inventory() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let storage = Rc::new(storage::FsStorage::new(temp.path().join("storage")));
+    let secrets = BTreeMap::from([
+        (
+            "email_client".to_owned(),
+            tau_proto::SecretValue::new("native-email-client-id"),
+        ),
+        (
+            "calendar_client".to_owned(),
+            tau_proto::SecretValue::new("native-calendar-client-id"),
+        ),
+        (
+            "manual_refresh".to_owned(),
+            tau_proto::SecretValue::new("native-refresh-token"),
+        ),
+    ]);
+    let config = tau_proto::json_to_cbor(&serde_json::json!({
+        "email": {
+            "enable": true,
+            "accounts": [
+                {
+                    "id": "zeta",
+                    "enable": true,
+                    "from": "zeta@example.test",
+                    "auth": {
+                        "method": "oauth2",
+                        "provider": "google",
+                        "client_id_secret": "email_client"
+                    }
+                },
+                {
+                    "id": "manual-email",
+                    "enable": true,
+                    "from": "manual@example.test",
+                    "auth": {
+                        "method": "oauth2",
+                        "provider": "google",
+                        "client_id_secret": "email_client",
+                        "refresh_token_secret": "manual_refresh"
+                    }
+                },
+                {
+                    "id": "disabled-email",
+                    "enable": false,
+                    "from": "disabled@example.test"
+                },
+                {
+                    "id": "unsafe email",
+                    "enable": true,
+                    "from": "unsafe@example.test",
+                    "auth": {
+                        "method": "oauth2",
+                        "provider": "google",
+                        "client_id_secret": "email_client"
+                    }
+                }
+            ]
+        },
+        "calendar": {
+            "enable": true,
+            "accounts": [
+                {
+                    "id": "alpha",
+                    "enable": true,
+                    "backend": {
+                        "type": "google",
+                        "client_id_secret": "calendar_client"
+                    }
+                },
+                {
+                    "id": "manual-calendar",
+                    "enable": true,
+                    "backend": {
+                        "type": "google",
+                        "client_id_secret": "calendar_client",
+                        "refresh_token_secret": "manual_refresh"
+                    }
+                },
+                {
+                    "id": "feed",
+                    "enable": true,
+                    "backend": {
+                        "type": "ics_feed",
+                        "url": "https://example.test/calendar.ics"
+                    }
+                },
+                {
+                    "id": "unsafe calendar",
+                    "enable": true,
+                    "backend": {
+                        "type": "google",
+                        "client_id_secret": "calendar_client"
+                    }
+                }
+            ]
+        }
+    }));
+    let mut runtime = RuntimeState::default();
+    runtime
+        .configure(
+            tau_proto::Configure {
+                tool_prefix: Some(
+                    tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"),
+                ),
+                config,
+                instance_name: tau_proto::ExtensionName::new("work-pim"),
+                state_dir: Some(temp.path().join("state")),
+                secrets: secrets.clone(),
+            },
+            storage.clone(),
+        )
+        .expect("effective config");
+    let schema = runtime.action_schema();
+    assert_eq!(
+        action_arg(&schema, &["/email", "auth", "google", "start"], "account")
+            .suggestions
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta"]
+    );
+    assert_eq!(
+        action_arg(
+            &schema,
+            &["/calendar", "auth", "google", "start"],
+            "account"
+        )
+        .suggestions
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>(),
+        vec!["alpha"]
+    );
+    let debug = format!("{schema:?}");
+    assert!(!debug.contains("native-email-client-id"));
+    assert!(!debug.contains("native-calendar-client-id"));
+    assert!(!debug.contains("native-refresh-token"));
+
+    runtime
+        .configure(
+            tau_proto::Configure {
+                tool_prefix: Some(
+                    tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"),
+                ),
+                config: tau_proto::json_to_cbor(&serde_json::json!({
+                    "email": {"enable": true, "accounts": []},
+                    "calendar": {
+                        "enable": true,
+                        "accounts": [{
+                            "id": "current",
+                            "enable": true,
+                            "backend": {
+                                "type": "google",
+                                "client_id_secret": "calendar_client"
+                            }
+                        }]
+                    }
+                })),
+                instance_name: tau_proto::ExtensionName::new("work-pim"),
+                state_dir: Some(temp.path().join("state")),
+                secrets,
+            },
+            storage,
+        )
+        .expect("replacement config");
+    let schema = runtime.action_schema();
+    assert!(
+        action_arg(&schema, &["/email", "auth", "google", "start"], "account")
+            .suggestions
+            .is_empty()
+    );
+    assert_eq!(
+        action_arg(
+            &schema,
+            &["/calendar", "auth", "google", "start"],
+            "account"
+        )
+        .suggestions[0]
+            .value,
+        "current"
+    );
+}
+
+fn action_arg<'a>(
+    schema: &'a ActionSchema,
+    path: &[&str],
+    arg_name: &str,
+) -> &'a tau_proto::ActionArg {
+    let mut command = schema
+        .roots
+        .iter()
+        .find(|command| command.name == path[0])
+        .expect("root exists");
+    for segment in &path[1..] {
+        command = command
+            .children
+            .iter()
+            .find(|child| child.name == *segment)
+            .expect("child exists");
+    }
+    command
+        .args
+        .iter()
+        .find(|arg| arg.name == arg_name)
+        .expect("argument exists")
+}
+
 /// Calendar Google auth intentionally remains device-flow based and its finish
 /// action does not accept Gmail's pasted redirect URL argument.
 #[test]
 fn calendar_google_auth_schema_remains_device_flow_shape() {
-    let schema = action_schema();
+    let schema = action_schema_with_accounts(&[], &[]);
     let start = schema
         .parse_line("/calendar auth google start google")
         .expect("calendar auth start parses");
@@ -278,16 +585,77 @@ fn startup_registers_email_and_calendar_tools() {
     let writer = SharedWriter::default();
     let written = writer.clone();
     let state_root = tempfile::TempDir::new().expect("state root");
+    let secrets = BTreeMap::from([
+        (
+            "email_client".to_owned(),
+            tau_proto::SecretValue::new("email-client-id"),
+        ),
+        (
+            "calendar_client".to_owned(),
+            tau_proto::SecretValue::new("calendar-client-id"),
+        ),
+    ]);
+    let configured = |config| {
+        let mut configured = configure(tau_proto::json_to_cbor(&config), state_root.path());
+        configured.tool_prefix =
+            Some(tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"));
+        configured.secrets = secrets.clone();
+        configured
+    };
     let input = {
         let mut bytes = Vec::new();
         let mut input = HarnessOutputWriter::new(&mut bytes);
         input
-            .write_message(&HarnessOutputMessage::Configure(configure(
-                CborValue::Map(Vec::new()),
-                state_root.path(),
+            .write_message(&HarnessOutputMessage::Configure(configured(
+                serde_json::json!({
+                    "email": {
+                        "enable": true,
+                        "accounts": [{
+                            "id": "email-initial",
+                            "enable": true,
+                            "from": "email-initial@example.test",
+                            "auth": {
+                                "method": "oauth2",
+                                "provider": "google",
+                                "client_id_secret": "email_client"
+                            }
+                        }]
+                    },
+                    "calendar": {
+                        "enable": true,
+                        "accounts": [{
+                            "id": "calendar-initial",
+                            "enable": true,
+                            "backend": {
+                                "type": "google",
+                                "client_id_secret": "calendar_client"
+                            }
+                        }]
+                    }
+                }),
             )))
-            .expect("configure");
-        input.flush().expect("flush configure");
+            .expect("initial configure");
+        input
+            .write_message(&HarnessOutputMessage::Configure(configured(
+                serde_json::json!({
+                    "email": {
+                        "enable": true,
+                        "accounts": [{
+                            "id": "email-current",
+                            "enable": true,
+                            "from": "email-current@example.test",
+                            "auth": {
+                                "method": "oauth2",
+                                "provider": "google",
+                                "client_id_secret": "email_client"
+                            }
+                        }]
+                    },
+                    "calendar": {"enable": true, "accounts": []}
+                }),
+            )))
+            .expect("replacement configure");
+        input.flush().expect("flush configures");
         bytes
     };
     let state = RuntimeState {
@@ -306,8 +674,8 @@ fn startup_registers_email_and_calendar_tools() {
     let mut prompt_tools = Vec::new();
     let mut per_tool_prompt_tools = Vec::new();
     let mut saw_subscription = false;
-    let mut saw_action_schema = false;
     let mut saw_ready = false;
+    let mut action_schemas = Vec::new();
     while let Some(frame) = reader.read_message().expect("frame decodes") {
         match frame {
             HarnessInputMessage::Subscribe(subscribe) => {
@@ -348,8 +716,10 @@ fn startup_registers_email_and_calendar_tools() {
             HarnessInputMessage::Emit(emit)
                 if matches!(emit.event.as_ref(), Event::ActionSchemaPublished(_)) =>
             {
-                assert!(!saw_ready, "actions should be published before Ready");
-                saw_action_schema = true;
+                let Event::ActionSchemaPublished(published) = *emit.event else {
+                    unreachable!();
+                };
+                action_schemas.push((saw_ready, published.schema));
             }
             HarnessInputMessage::Ready(_) => {
                 saw_ready = true;
@@ -359,35 +729,101 @@ fn startup_registers_email_and_calendar_tools() {
     }
 
     assert!(saw_subscription);
-    assert!(saw_action_schema);
     assert!(saw_ready);
+    assert_eq!(action_schemas.len(), 2);
+    assert!(!action_schemas[0].0, "initial schema precedes Ready");
+    assert!(action_schemas[1].0, "replacement schema follows Ready");
+    for (_, schema) in &action_schemas {
+        assert_eq!(
+            schema
+                .roots
+                .iter()
+                .map(|root| root.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/email", "/calendar"],
+            "tool prefixes must not rewrite action roots"
+        );
+    }
+    assert_eq!(
+        action_arg(
+            &action_schemas[0].1,
+            &["/email", "auth", "google", "start"],
+            "account",
+        )
+        .suggestions
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>(),
+        vec!["email-initial"]
+    );
+    assert_eq!(
+        action_arg(
+            &action_schemas[0].1,
+            &["/calendar", "auth", "google", "start"],
+            "account",
+        )
+        .suggestions
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>(),
+        vec!["calendar-initial"]
+    );
+    assert_eq!(
+        action_arg(
+            &action_schemas[1].1,
+            &["/email", "auth", "google", "start"],
+            "account",
+        )
+        .suggestions
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>(),
+        vec!["email-current"]
+    );
+    assert!(
+        action_arg(
+            &action_schemas[1].1,
+            &["/calendar", "auth", "google", "start"],
+            "account",
+        )
+        .suggestions
+        .is_empty()
+    );
     assert!(
         tools
             .iter()
-            .any(|tool| tool.as_str() == "email_list_folders")
+            .any(|tool| tool.as_str() == "work_email_list_folders")
     );
-    assert!(tools.iter().any(|tool| tool.as_str() == "email_send"));
+    assert!(tools.iter().any(|tool| tool.as_str() == "work_email_send"));
     assert!(
         tools
             .iter()
-            .any(|tool| tool.as_str() == "calendar_list_calendars")
+            .any(|tool| tool.as_str() == "work_calendar_list_calendars")
     );
-    assert!(tools.iter().any(|tool| tool.as_str() == "calendar_respond"));
-    assert!(prompt_tools.iter().any(|group| group.as_str() == "email"));
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.as_str() == "work_calendar_respond")
+    );
     assert!(
         prompt_tools
             .iter()
-            .any(|group| group.as_str() == "calendar")
+            .any(|group| group.as_str() == "work_email")
+    );
+    assert!(
+        prompt_tools
+            .iter()
+            .any(|group| group.as_str() == "work_calendar")
     );
     assert!(
         per_tool_prompt_tools
             .iter()
-            .any(|tool| tool.as_str() == "email_read")
+            .any(|tool| tool.as_str() == "work_email_read")
     );
     assert!(
         per_tool_prompt_tools
             .iter()
-            .any(|tool| tool.as_str() == "calendar_get")
+            .any(|tool| tool.as_str() == "work_calendar_get")
     );
     assert!(!tools.iter().any(|tool| tool.as_str() == email::TOOL_NAME));
     assert!(

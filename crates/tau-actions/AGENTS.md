@@ -15,3 +15,4 @@ invocation.
   deterministic and bounded.
 - Update `specs/ARCH-tau-actions.md` when changing schema validation budgets,
   tokenization, parser semantics, or action invocation shape.
+- Follow [`testing.md`](testing.md) for parser/validation test ownership.

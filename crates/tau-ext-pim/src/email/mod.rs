@@ -118,30 +118,26 @@ impl tau_client::TauExtension for EmailExtension {
             email_prompt_fragment(),
         );
         builder
-            .publish_actions(email_action_schema())
             .ready_message("email extension ready")
             .configure_raw(|cx| {
                 let Some(state_dir) = cx.configure.state_dir.clone() else {
-                    return Err(tau_client::ClientError::handler(
-                        "email extension requires Configure.state_dir",
-                    ));
-                };
-                let cfg = match crate::parse_config::<EmailExtensionConfig>(&cx.configure.config) {
-                    Ok(cfg) => cfg,
-                    Err(message) => {
-                        cx.state.reject(message.clone());
-                        return Err(tau_client::ClientError::handler(message));
-                    }
+                    let message = "email extension requires Configure.state_dir".to_owned();
+                    cx.state.reject(message.clone());
+                    return Err(tau_client::ClientError::handler(message));
                 };
                 let storage = Rc::new(FsStorage::new(state_dir)) as SharedStorage;
                 cx.state
-                    .configure_with_config(
-                        cfg,
-                        cx.configure.state_dir.clone(),
-                        cx.configure.secrets.clone(),
-                        storage,
-                    )
-                    .map_err(tau_client::ClientError::handler)
+                    .configure(cx.configure.clone(), storage)
+                    .map_err(tau_client::ClientError::handler)?;
+                cx.handle.emit(Event::ActionSchemaPublished(
+                    tau_proto::ActionSchemaPublished {
+                        extension_name: tau_proto::ExtensionName::default(),
+                        instance_id: 0.into(),
+                        schema: email_action_schema_with_accounts(
+                            &cx.state.google_auth_account_ids(),
+                        ),
+                    },
+                ))
             })
             .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
@@ -5233,6 +5229,35 @@ impl RuntimeState {
         self.config_state = ConfigState::Rejected { reason };
     }
 
+    /// Return effective accounts accepted by interactive Google email OAuth.
+    pub(crate) fn google_auth_account_ids(&self) -> Vec<String> {
+        let ConfigState::Configured(engine) = &self.config_state else {
+            return Vec::new();
+        };
+        if !engine.config.enable {
+            return Vec::new();
+        }
+        engine
+            .config
+            .accounts
+            .values()
+            .filter(|account| {
+                account.enable
+                    && crate::is_safe_action_account_id(&account.id)
+                    && matches!(
+                        account.auth.as_ref(),
+                        Some(ValidatedAuthConfig {
+                            method: AuthMethod::Oauth2,
+                            provider: Some(EmailOauth2Provider::Google),
+                            refresh_token_secret: None,
+                            ..
+                        })
+                    )
+            })
+            .map(|account| account.id.clone())
+            .collect()
+    }
+
     /// Configure the email module from harness-supplied extension config.
     pub(crate) fn configure(
         &mut self,
@@ -5636,6 +5661,11 @@ pub fn email_prompt_fragment() -> PromptFragment {
 
 /// Return the `/email` action schema.
 pub fn email_action_schema() -> ActionSchema {
+    email_action_schema_with_accounts(&[])
+}
+
+/// Return the `/email` action schema with current Google OAuth account choices.
+pub(crate) fn email_action_schema_with_accounts(accounts: &[String]) -> ActionSchema {
     fn string_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
             name: name.to_owned(),
@@ -5716,14 +5746,14 @@ pub fn email_action_schema() -> ActionSchema {
                                 "start",
                                 "email.auth.google.start",
                                 "Start Google email authorization",
-                                vec![string_arg("account", "Email account id")],
+                                vec![crate::google_auth_account_arg("Email", accounts)],
                             ),
                             leaf(
                                 "finish",
                                 "email.auth.google.finish",
                                 "Finish Google email authorization",
                                 vec![
-                                    string_arg("account", "Email account id"),
+                                    crate::google_auth_account_arg("Email", accounts),
                                     rest_string_arg(
                                         "redirect_url",
                                         "Full failed loopback URL copied from the browser address bar",

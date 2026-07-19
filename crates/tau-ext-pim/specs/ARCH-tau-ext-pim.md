@@ -22,6 +22,14 @@ subscriptions, configuration error emission, live-only tool/action dispatch, and
 writer lifecycle. The top-level `RuntimeState` keeps separate email and calendar
 runtime states plus shared extension configuration.
 
+Each configured instance projects its validated effective email and calendar
+runtime state into its own action schema. Initial Configure-derived publication
+is staged before `Ready`; a later successful Configure replaces that instance's
+schema. A rejected Configure disconnects the extension and unregisters its
+schema. The harness stamps schema owner identity, while structural tool prefixes
+do not rewrite action roots or mix inventories between instances, following
+[`DECISION-extension-tool-prefixes`](../../../specs/DECISION-extension-tool-prefixes.md).
+
 Persistent extension-data storage goes through tau-client's manual-runtime
 `ExtensionDataClient`. It generates request ids, waits for matching
 `ExtensionDataResult` frames, and returns unrelated harness frames to the manual

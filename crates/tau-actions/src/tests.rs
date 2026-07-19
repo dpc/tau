@@ -426,5 +426,77 @@ fn parse_missing_arg_reports_leaf_usage() {
         .expect_err("missing id should fail");
 
     assert_eq!(error.kind(), &ParseErrorKind::InvalidArguments);
+    assert_eq!(error.message(), "missing required argument `id`: id value");
     assert_eq!(error.usage(), Some("/email out approve <id>"));
+}
+
+/// Every required argument kind shares missing-argument diagnostics. Keep all
+/// branches aligned on description inclusion, empty-description fallback, and
+/// unchanged usage rendering.
+#[test]
+fn parse_missing_arg_descriptions_cover_every_argument_kind() {
+    let choices = vec![
+        ActionChoice {
+            value: "one".to_owned(),
+            description: String::new(),
+        },
+        ActionChoice {
+            value: "two".to_owned(),
+            description: String::new(),
+        },
+    ];
+    let cases = [
+        (
+            ActionArgKind::String,
+            "text value",
+            "missing required argument `value`: text value",
+            "/test <value>",
+        ),
+        (
+            ActionArgKind::Integer,
+            "integer value",
+            "missing required argument `value`: integer value",
+            "/test <value:int>",
+        ),
+        (
+            ActionArgKind::Enum { values: choices },
+            "selected value",
+            "missing required argument `value`: selected value",
+            "/test <one|two>",
+        ),
+        (
+            ActionArgKind::RestString,
+            "remaining text",
+            "missing required argument `value`: remaining text",
+            "/test <value...>",
+        ),
+        (
+            ActionArgKind::String,
+            "",
+            "missing required argument `value`",
+            "/test <value>",
+        ),
+    ];
+
+    for (kind, description, expected_message, expected_usage) in cases {
+        let schema = ActionSchema {
+            version: ACTION_SCHEMA_VERSION,
+            roots: vec![leaf(
+                "/test",
+                "test.action",
+                vec![ActionArg {
+                    name: "value".to_owned(),
+                    description: description.to_owned(),
+                    required: true,
+                    suggestions: Vec::new(),
+                    kind,
+                }],
+            )],
+        };
+        let error = schema
+            .parse_line("/test")
+            .expect_err("required argument is missing");
+        assert_eq!(error.message(), expected_message);
+        assert_eq!(error.usage(), Some(expected_usage));
+    }
 }

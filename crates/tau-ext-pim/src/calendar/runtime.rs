@@ -173,6 +173,33 @@ impl RuntimeState {
         self.config_state = ConfigState::Rejected { reason };
     }
 
+    /// Return effective accounts accepted by interactive Google Calendar OAuth.
+    pub(crate) fn google_auth_account_ids(&self) -> Vec<String> {
+        let ConfigState::Configured(engine) = &self.config_state else {
+            return Vec::new();
+        };
+        if !engine.config.enable {
+            return Vec::new();
+        }
+        engine
+            .config
+            .accounts
+            .values()
+            .filter(|account| {
+                account.enable
+                    && crate::is_safe_action_account_id(&account.id)
+                    && matches!(
+                        &account.backend,
+                        Some(ValidatedBackendConfig::Google {
+                            refresh_token_secret: None,
+                            ..
+                        })
+                    )
+            })
+            .map(|account| account.id.clone())
+            .collect()
+    }
+
     /// Configure the calendar module from an already-decoded calendar config.
     pub(crate) fn configure_with_config(
         &mut self,

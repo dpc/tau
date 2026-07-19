@@ -44,7 +44,10 @@ consume the same schemas.
 
 The parser intentionally uses Tau's simple whitespace-token convention. It does
 not implement shell quoting or escaping. `RestString` may appear only as the
-final argument and joins the remaining tokens with single spaces.
+final argument and joins the remaining tokens with single spaces. Missing
+required-argument errors include the argument's bounded human-readable
+description when it is nonempty, while retaining the ordinary command usage
+string.
 
 ## Sensitive argument gap
 

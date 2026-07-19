@@ -118,6 +118,14 @@ Deprecated password sources such as `auth.password_env`, `auth.command`, `auth.p
 
 Gmail can use Google-only OAuth2/XOAUTH2 by setting `auth.method: oauth2` and `auth.provider: google`. Configure `client_id_secret`, optional `client_secret_secret`, and either omit `refresh_token_secret` to authorize with `/email auth google start <account>` then `/email auth google finish <account> <copied-url>`, or provide a manually provisioned refresh-token secret. Gmail IMAP/SMTP requires the broad `https://mail.google.com/` scope, which Google's device flow rejects, so state-owned Gmail auth uses a Google OAuth client of type `Desktop app` with installed-app authorization-code + PKCE. Start prints a browser URL; after approval the browser fails to connect to `http://127.0.0.1:<port>/`, and the user pastes the full final address-bar URL into finish. Refresh tokens and pending PKCE state are stored only in private extension state when state-owned auth is used; action output never includes pasted codes, PKCE verifiers, refresh tokens, or access tokens. `/email auth google` is not controlled by `policy.allow_state_policy_extensions` and is refused when `auth.refresh_token_secret` is configured. Google access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure. Google OAuth apps left in Testing mode may issue refresh tokens that expire after roughly 7 days for sensitive/restricted scopes; real use should use an Internal/trusted Workspace app or a properly published/verified app. Workspace administrators may still block untrusted OAuth apps even when the app is technically valid.
 
+At each Google auth account argument, slash completion lists the enabled
+accounts currently eligible for that interactive flow. Omitted-account errors
+show the same bounded, sorted inventory while preserving the documented
+`<account>` usage; when no account is eligible, the error says so explicitly.
+Manual-refresh-token, disabled, non-Google, and account ids that cannot be
+inserted exactly as one safe slash-command token are not offered. Eligible ids
+are at most 128 bytes and contain only printable, non-whitespace ASCII.
+
 Use TLS defaults unless you are connecting to a trusted local relay:
 
 - IMAP defaults to implicit TLS on port 993 with `tls: required`.

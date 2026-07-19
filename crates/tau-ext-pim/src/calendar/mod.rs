@@ -12,6 +12,7 @@ mod state;
 mod tool;
 
 pub use actions::calendar_action_schema;
+pub(crate) use actions::calendar_action_schema_with_accounts;
 pub use config::{
     CalendarAccountConfig, CalendarBackendConfig, CalendarExtensionConfig, CalendarPolicyConfig,
     CalendarReadPolicyConfig, CalendarSelectionConfig, CalendarWritePolicyConfig,

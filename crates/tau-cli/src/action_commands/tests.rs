@@ -120,6 +120,58 @@ fn nested_published() -> ActionSchemaPublished {
     }
 }
 
+fn google_auth_published(accounts: &[&str], instance_id: u64) -> ActionSchemaPublished {
+    let account_arg = ActionArg {
+        name: "account".to_owned(),
+        description: if accounts.is_empty() {
+            "Email account id; no accounts are available".to_owned()
+        } else {
+            format!("Email account id; available: {}", accounts.join(", "))
+        },
+        required: true,
+        suggestions: accounts
+            .iter()
+            .map(|account| ActionChoice {
+                value: (*account).to_owned(),
+                description: "Available Email account".to_owned(),
+            })
+            .collect(),
+        kind: ActionArgKind::String,
+    };
+    ActionSchemaPublished {
+        extension_name: "work-pim".into(),
+        instance_id: instance_id.into(),
+        schema: ActionSchema {
+            version: ACTION_SCHEMA_VERSION,
+            roots: vec![ActionCommand {
+                name: "/email".to_owned(),
+                description: "Email actions".to_owned(),
+                action_id: None,
+                args: Vec::new(),
+                children: vec![ActionCommand {
+                    name: "auth".to_owned(),
+                    description: "Authorization".to_owned(),
+                    action_id: None,
+                    args: Vec::new(),
+                    children: vec![ActionCommand {
+                        name: "google".to_owned(),
+                        description: "Google authorization".to_owned(),
+                        action_id: None,
+                        args: Vec::new(),
+                        children: vec![ActionCommand {
+                            name: "start".to_owned(),
+                            description: "Start authorization".to_owned(),
+                            action_id: Some("email.auth.google.start".to_owned()),
+                            args: vec![account_arg],
+                            children: Vec::new(),
+                        }],
+                    }],
+                }],
+            }],
+        },
+    }
+}
+
 #[test]
 fn parses_known_dynamic_action_line() {
     let state = ActionCommandState::new(["/quit"]);
@@ -165,6 +217,47 @@ fn completes_dynamic_action_subcommands_and_enum_args() {
         labels("/email out mode "),
         vec!["approve".to_owned(), "block".to_owned()]
     );
+}
+
+/// Account suggestions published by a configured extension must reach the deep
+/// slash-argument position, and a replacement schema generation must remove
+/// stale account names from both completion and omitted-argument errors.
+#[test]
+fn google_auth_account_completions_follow_latest_schema_generation() {
+    let state = ActionCommandState::new(["/quit"]);
+    state.apply_schema_published(&google_auth_published(&["zeta", "alpha"], 7));
+
+    let labels = |state: &ActionCommandState| {
+        let data = tau_cli_term::CompletionData::new();
+        let (commands, arg_completers) = state.dynamic_completions();
+        data.set_dynamic_commands_and_arg_completers(commands, arg_completers);
+        tau_cli_term::completion::build_candidates(
+            &[],
+            &data,
+            "/email auth google start ",
+            "/email auth google start ".len(),
+        )
+        .into_iter()
+        .map(|candidate| candidate.label)
+        .collect::<Vec<_>>()
+    };
+
+    assert_eq!(labels(&state), vec!["zeta".to_owned(), "alpha".to_owned()]);
+    let error = state
+        .parse_line("/email auth google start")
+        .expect("known action")
+        .expect_err("account is required");
+    assert!(error.message().contains("zeta, alpha"));
+    assert_eq!(error.usage(), Some("/email auth google start <account>"));
+
+    state.apply_schema_published(&google_auth_published(&["current"], 7));
+    assert_eq!(labels(&state), vec!["current".to_owned()]);
+    let error = state
+        .parse_line("/email auth google start")
+        .expect("known action")
+        .expect_err("account is required");
+    assert!(error.message().contains("current"));
+    assert!(!error.message().contains("alpha"));
 }
 
 #[test]

@@ -336,6 +336,14 @@ fn spawn_extension() -> FramePair {
 }
 
 fn spawn_extension_with_prefix(tool_prefix: Option<&str>) -> FramePair {
+    spawn_extension_with_config(tool_prefix, CborValue::Map(Vec::new()), configure_secrets())
+}
+
+fn spawn_extension_with_config(
+    tool_prefix: Option<&str>,
+    config: CborValue,
+    secrets: BTreeMap<String, tau_proto::SecretValue>,
+) -> FramePair {
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
@@ -359,9 +367,9 @@ fn spawn_extension_with_prefix(tool_prefix: Option<&str>) -> FramePair {
             tool_prefix: tool_prefix
                 .map(|prefix| tau_proto::ToolNamePrefix::parse(prefix).expect("tool prefix")),
             instance_name: tau_proto::ExtensionName::new("test-extension"),
-            config: CborValue::Map(Vec::new()),
+            config,
             state_dir: Some(state_dir),
-            secrets: configure_secrets(),
+            secrets,
         }))
         .expect("initial configure");
     pair.writer.flush().expect("flush initial configure");
@@ -1014,6 +1022,78 @@ fn publishes_email_action_schema_at_startup() {
         .expect("parse default log");
     assert_eq!(default_log.action_id, "email.log.last");
     assert!(default_log.argv.is_empty());
+}
+
+/// Production `configure_raw` publication must carry the effective account
+/// inventory for a prefixed instance and replace stale names after a later
+/// accepted Configure generation.
+#[test]
+fn email_runner_republishes_effective_google_auth_accounts() {
+    let email_config = |accounts: &[&str]| {
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "enable": true,
+            "accounts": accounts
+                .iter()
+                .map(|id| serde_json::json!({
+                    "id": id,
+                    "enable": true,
+                    "from": format!("{id}@example.test"),
+                    "auth": {
+                        "method": "oauth2",
+                        "provider": "google",
+                        "client_id_secret": "google_client"
+                    }
+                }))
+                .collect::<Vec<_>>()
+        }))
+    };
+    let secrets = BTreeMap::from([(
+        "google_client".to_owned(),
+        tau_proto::SecretValue::new("native-client-id"),
+    )]);
+    let mut pair = spawn_extension_with_config(
+        Some("work"),
+        email_config(&["zeta", "alpha"]),
+        secrets.clone(),
+    );
+    let schema = drain_action_schema(&mut pair.reader);
+    assert_eq!(schema.roots[0].name, "/email");
+    let account_arg = &schema.roots[0].children[0].children[0].children[0].args[0];
+    assert_eq!(
+        account_arg
+            .suggestions
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zeta"]
+    );
+    assert!(!format!("{schema:?}").contains("native-client-id"));
+    drain_ready(&mut pair.reader);
+
+    let state_dir = tempfile::TempDir::new().expect("state dir");
+    pair.writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: Some(
+                tau_proto::ToolNamePrefix::parse("work").expect("unchanged tool prefix"),
+            ),
+            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            config: email_config(&["current"]),
+            state_dir: Some(state_dir.path().to_path_buf()),
+            secrets,
+        }))
+        .expect("replacement configure");
+    pair.writer.flush().expect("flush replacement configure");
+    let schema = drain_action_schema(&mut pair.reader);
+    assert_eq!(schema.roots[0].name, "/email");
+    let account_arg = &schema.roots[0].children[0].children[0].children[0].args[0];
+    assert_eq!(
+        account_arg
+            .suggestions
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["current"]
+    );
 }
 
 #[test]

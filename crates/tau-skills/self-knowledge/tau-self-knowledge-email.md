@@ -215,6 +215,7 @@ Google OAuth actions:
 
 - `/email auth google start <account>` prints a Google installed-app browser authorization URL for Gmail OAuth.
 - `/email auth google finish <account> <copied-url>` completes OAuth from the full pasted failed loopback redirect URL and stores the refresh token privately.
+- Google auth account arguments complete from enabled state-owned Google email accounts whose ids are at most 128 bytes of printable, non-whitespace ASCII. Omitting the account lists the bounded sorted eligible inventory, or states explicitly that no eligible accounts are available.
 - These actions are separate from `policy.allow_state_policy_extensions`; that policy controls whitelist actions only. `/email auth google` is refused for accounts that set `auth.refresh_token_secret`, because those accounts use a manually supplied token secret.
 
 

@@ -77,6 +77,14 @@ Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWO
 
 For Gmail IMAP/SMTP, set `auth.method: oauth2`, `auth.provider: google`, `auth.client_id_secret`, and optionally `auth.client_secret_secret`. Omit `auth.refresh_token_secret` and authorize with `/email auth google start <account>` then `/email auth google finish <account> <copied-url>`, or set `refresh_token_secret` for a manually provisioned refresh token. Gmail requires the broad `https://mail.google.com/` scope for IMAP/SMTP XOAUTH2, and Google's device flow rejects that scope, so state-owned Gmail auth uses installed-app authorization-code + PKCE with manual loopback URL paste.
 
+Google auth account arguments complete from the current enabled,
+interactive-flow-eligible account inventory for that email or calendar module.
+Omitting the account lists a bounded sorted inventory, or states that no
+eligible accounts are available. Disabled, non-Google, and manual-refresh-token
+accounts are excluded, as are account ids that cannot be inserted exactly as one
+safe slash-command token. Eligible ids are at most 128 bytes and contain only
+printable, non-whitespace ASCII.
+
 Use a Google OAuth client of type `Desktop app` for Gmail; do not reuse the Calendar TVs/Limited Input device-flow client. Start prints a browser URL, the browser eventually fails to connect to `http://127.0.0.1:<port>/`, and finish expects the full copied address-bar URL. Google OAuth apps left in Testing mode may issue refresh tokens that expire after roughly 7 days for sensitive/restricted scopes; real use should use an Internal/trusted Workspace app or a properly published/verified app. Workspace administrators may still block untrusted OAuth apps. If `refresh_token_secret` is set, `/email auth google` refuses to overwrite it; remove that field first to use state-owned OAuth. These OAuth actions are not controlled by `email.policy.allow_state_policy_extensions`; that policy only controls whitelist actions. Access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure. Action output never includes pasted codes, PKCE verifiers, refresh tokens, or access tokens.
 
 

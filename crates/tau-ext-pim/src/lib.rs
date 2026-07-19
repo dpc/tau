@@ -11,13 +11,27 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use tau_proto::{ActionSchema, CborValue, Event};
+use tau_proto::{ActionArg, ActionArgKind, ActionChoice, ActionSchema, CborValue, Event};
 
 pub mod calendar;
 pub mod email;
 mod google_oauth;
 mod opaque_id;
 mod storage;
+
+/// Maximum current account names offered at one auth argument position.
+///
+/// Each inventory appears on both `start` and `finish`, and PIM publishes email
+/// plus calendar together, so this is deliberately below the per-list action
+/// schema maximum to preserve the aggregate schema text budget.
+const AUTH_ACCOUNT_COMPLETION_LIMIT: usize = 64;
+
+/// Maximum account names repeated in a missing-argument diagnostic.
+///
+/// Completion choices have their separate schema-owned bound. Keeping
+/// diagnostics shorter avoids turning a large configured inventory into an
+/// oversized notice.
+const AUTH_ACCOUNT_DIAGNOSTIC_LIMIT: usize = 6;
 
 /// `tracing` target for extension-level events emitted by the PIM wrapper.
 pub const LOG_TARGET: &str = "pim";
@@ -208,6 +222,15 @@ impl RuntimeState {
             })
         }
     }
+
+    /// Build the action schema from the effective, validated module
+    /// inventories.
+    fn action_schema(&self) -> ActionSchema {
+        action_schema_with_accounts(
+            &self.email.google_auth_account_ids(),
+            &self.calendar.google_auth_account_ids(),
+        )
+    }
 }
 
 fn has_pim_module_keys(config: &CborValue) -> bool {
@@ -257,7 +280,6 @@ impl tau_client::TauExtension for PimExtension {
             calendar::calendar_prompt_fragment(),
         );
         builder
-            .publish_actions(action_schema())
             .ready_message("pim extension ready")
             .configure_raw(|cx| {
                 let storage = cx
@@ -268,7 +290,14 @@ impl tau_client::TauExtension for PimExtension {
                     .ok_or_else(|| tau_client::ClientError::handler("pim storage not ready"))?;
                 cx.state
                     .configure(cx.configure.clone(), storage)
-                    .map_err(tau_client::ClientError::handler)
+                    .map_err(tau_client::ClientError::handler)?;
+                cx.handle.emit(Event::ActionSchemaPublished(
+                    tau_proto::ActionSchemaPublished {
+                        extension_name: tau_proto::ExtensionName::default(),
+                        instance_id: 0.into(),
+                        schema: cx.state.action_schema(),
+                    },
+                ))
             })
             .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
@@ -319,16 +348,74 @@ fn register_tools_with_prompt_fragment(
     }
 }
 
-fn action_schema() -> ActionSchema {
+/// Build the combined action schema with current interactive Google OAuth
+/// account inventories.
+fn action_schema_with_accounts(
+    email_accounts: &[String],
+    calendar_accounts: &[String],
+) -> ActionSchema {
     let mut schema = ActionSchema {
         version: tau_proto::ACTION_SCHEMA_VERSION,
         roots: Vec::new(),
     };
-    schema.roots.extend(email::email_action_schema().roots);
     schema
         .roots
-        .extend(calendar::calendar_action_schema().roots);
+        .extend(email::email_action_schema_with_accounts(email_accounts).roots);
     schema
+        .roots
+        .extend(calendar::calendar_action_schema_with_accounts(calendar_accounts).roots);
+    schema
+}
+
+/// Build one open-ended account argument with bounded authoritative
+/// suggestions.
+fn google_auth_account_arg(account_kind: &str, accounts: &[String]) -> ActionArg {
+    let mut accounts = accounts.to_vec();
+    accounts.sort();
+    accounts.dedup();
+
+    let description = if accounts.is_empty() {
+        format!(
+            "{account_kind} account id; no accounts are available for interactive Google authorization"
+        )
+    } else {
+        let shown = accounts
+            .iter()
+            .take(AUTH_ACCOUNT_DIAGNOSTIC_LIMIT)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if accounts.len() <= AUTH_ACCOUNT_DIAGNOSTIC_LIMIT {
+            format!("{account_kind} account id; available account names: {shown}")
+        } else {
+            format!(
+                "{account_kind} account id; available account names (showing {} of {}): {shown}",
+                AUTH_ACCOUNT_DIAGNOSTIC_LIMIT,
+                accounts.len()
+            )
+        }
+    };
+    let suggestions = accounts
+        .into_iter()
+        .take(AUTH_ACCOUNT_COMPLETION_LIMIT)
+        .map(|value| ActionChoice {
+            value,
+            description: format!("{account_kind} account"),
+        })
+        .collect();
+    ActionArg {
+        name: "account".to_owned(),
+        description,
+        required: true,
+        suggestions,
+        kind: ActionArgKind::String,
+    }
+}
+
+/// Return whether an account id can be inserted exactly as one bounded, safe
+/// slash-action token.
+fn is_safe_action_account_id(id: &str) -> bool {
+    id.len() <= tau_proto::MAX_ACTION_TOKEN_BYTES && id.chars().all(|ch| ch.is_ascii_graphic())
 }
 
 #[cfg(test)]

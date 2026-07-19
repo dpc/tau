@@ -4,6 +4,11 @@ use tau_proto::{
 
 /// Return the `/calendar` action schema.
 pub fn calendar_action_schema() -> ActionSchema {
+    calendar_action_schema_with_accounts(&[])
+}
+
+/// Return the `/calendar` schema with current Google OAuth account choices.
+pub(crate) fn calendar_action_schema_with_accounts(accounts: &[String]) -> ActionSchema {
     fn string_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
             name: name.to_owned(),
@@ -68,14 +73,14 @@ pub fn calendar_action_schema() -> ActionSchema {
                                 name: "start".to_owned(),
                                 description: "Start Google Calendar authorization".to_owned(),
                                 action_id: Some("calendar.auth.google.start".to_owned()),
-                                args: vec![string_arg("account", "Calendar account id")],
+                                args: vec![crate::google_auth_account_arg("Calendar", accounts)],
                                 children: Vec::new(),
                             },
                             ActionCommand {
                                 name: "finish".to_owned(),
                                 description: "Finish Google Calendar authorization".to_owned(),
                                 action_id: Some("calendar.auth.google.finish".to_owned()),
-                                args: vec![string_arg("account", "Calendar account id")],
+                                args: vec![crate::google_auth_account_arg("Calendar", accounts)],
                                 children: Vec::new(),
                             },
                         ],

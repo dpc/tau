@@ -17,6 +17,21 @@ expired state fails closed and requires a new start.
 Extension storage is installed before configuration so config handlers never
 race OAuth state access. Gmail pending PKCE/CSRF state expires after 10 minutes.
 
+The extension publishes Google auth account argument suggestions from the
+current validated effective configuration. Only enabled accounts accepted by
+the corresponding interactive state-owned Google flow and exactly representable
+as one safe slash token are available. Such ids are at most 128 bytes and contain
+only printable, non-whitespace ASCII. Disabled modules/accounts, other
+providers/backends, and accounts with a manual refresh token secret are excluded.
+Email and calendar inventories remain separate, sort lexicographically, and
+replace the prior action schema after successful reconfiguration. Completion
+choices are capped at 64 per inventory to fit the combined schema's shared
+budgets, while missing-account diagnostics repeat at most six names and report
+any omitted count. An empty inventory offers no account candidates and says
+explicitly that no accounts are available for interactive Google authorization.
+Usage remains `<account>`. Published choices and diagnostics contain account ids
+only, never secret names/values or native OAuth state.
+
 OAuth JSON is capped at 1 MiB. Model-visible output may contain only the browser
 or verification URL, user code, and instructions. It never contains an auth or
 device code, PKCE verifier, refresh/access token, client secret, pasted redirect,

@@ -10,6 +10,13 @@ subscriptions, dispatch boundaries, storage-before-config/backend selection,
 OAuth parsing and caching tests stay beside the helper so Gmail and Calendar
 cannot drift.
 
+Action-schema tests cover sorted effective email/calendar Google auth
+inventories, explicit empty behavior, shared-schema bounds, safe-token filtering,
+and omitted-account diagnostics without secrets or native OAuth state. Public
+runner tests exercise Configure-derived initial schema publication and successful
+same-instance replacement for both combined PIM and legacy email-only wiring,
+including structural tool prefixes that leave action roots unchanged.
+
 Manual live Gmail or Calendar tests remain outside all automation and use
 throwaway accounts.
 Never commit credentials, refresh/access tokens, device codes, PKCE verifiers,

@@ -12,6 +12,9 @@ theme tests only check parsing and intentional theme-level invariants.
 Input-loop routing tests cover emitted notices and harness events or prompts,
 including the shared surface syntax of CLI commands, extension actions,
 harness-owned prompt commands, and unknown leading-slash fallback.
+Dynamic action tests apply successive owner-stamped schema generations and
+verify that deep argument completions plus parse errors use the latest
+suggestions while stale candidates disappear.
 
 Prompt-history tests cover ordered length-prefixed round trips, malformed or
 unsupported records, torn or oversized tails, and command-layer redaction and

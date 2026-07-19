@@ -630,7 +630,7 @@ fn parse_args(
                 let value = tokens[token_index..].join(" ");
                 if value.is_empty() {
                     if arg.required {
-                        return Err(missing_arg(command, path, &arg.name));
+                        return Err(missing_arg(command, path, arg));
                     }
                 } else {
                     argv.push(value.clone());
@@ -641,7 +641,7 @@ fn parse_args(
             ActionArgKind::String => {
                 let Some(token) = tokens.get(token_index).copied() else {
                     if arg.required {
-                        return Err(missing_arg(command, path, &arg.name));
+                        return Err(missing_arg(command, path, arg));
                     }
                     continue;
                 };
@@ -652,7 +652,7 @@ fn parse_args(
             ActionArgKind::Integer => {
                 let Some(token) = tokens.get(token_index).copied() else {
                     if arg.required {
-                        return Err(missing_arg(command, path, &arg.name));
+                        return Err(missing_arg(command, path, arg));
                     }
                     continue;
                 };
@@ -670,7 +670,7 @@ fn parse_args(
             ActionArgKind::Enum { values } => {
                 let Some(token) = tokens.get(token_index).copied() else {
                     if arg.required {
-                        return Err(missing_arg(command, path, &arg.name));
+                        return Err(missing_arg(command, path, arg));
                     }
                     continue;
                 };
@@ -704,10 +704,18 @@ fn parse_args(
     Ok((argv, named_args))
 }
 
-fn missing_arg(command: &ActionCommand, path: &[String], arg_name: &str) -> ParseError {
+fn missing_arg(command: &ActionCommand, path: &[String], arg: &ActionArg) -> ParseError {
+    let message = if arg.description.is_empty() {
+        format!("missing required argument `{}`", arg.name)
+    } else {
+        format!(
+            "missing required argument `{}`: {}",
+            arg.name, arg.description
+        )
+    };
     ParseError::new(
         ParseErrorKind::InvalidArguments,
-        format!("missing required argument `{arg_name}`"),
+        message,
         Some(usage_for(command, path)),
     )
 }
