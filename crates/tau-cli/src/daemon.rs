@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tau_cli_picker::{PickerError, PickerItem, pick};
 use tau_harness::{SessionLaunchStatus, runtime_dir};
@@ -13,6 +14,8 @@ use crate::{CliError, mint_short_id};
 const RESUME_PICKER_LIMIT: usize = 10;
 const SESSION_ID_SUFFIX_BYTES: usize = 7;
 const SESSION_ID_MAX_BYTES: usize = 128;
+const OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const OWNED_DAEMON_EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
 /// How this CLI invocation is related to its harness daemon.
 ///
@@ -42,6 +45,11 @@ impl DaemonHandle {
         runtime_dir::socket_path(self.harness_path())
     }
 
+    /// Transfers the initial transport to a connected client.
+    ///
+    /// The client must close the returned input/write half before dropping this
+    /// handle so the daemon observes EOF before the handle waits for normal
+    /// exit.
     pub(crate) fn take_initial_ui_stdio(&mut self) -> Option<InitialUiStdio> {
         match self {
             Self::Owned { initial_ui, .. } => initial_ui.take(),
@@ -74,16 +82,47 @@ impl DaemonHandle {
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         if let Self::Owned {
-            child: Some(child), ..
+            child, initial_ui, ..
         } = self
+            && let Some(mut child) = child.take()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_owned_daemon(
+                &mut child,
+                initial_ui.take(),
+                OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT,
+            );
         }
         // Attached, or Owned-after-leak: do nothing. The daemon keeps
         // running so other UIs can still use it, or this same UI can
         // `tau -a` back in later.
     }
+}
+
+/// Stops a CLI-owned daemon, preferring its normal disconnect cleanup while
+/// retaining a bounded forced-termination fallback.
+fn stop_owned_daemon(
+    child: &mut std::process::Child,
+    initial_ui: Option<InitialUiStdio>,
+    graceful_timeout: Duration,
+) {
+    // Closing the initial UI transport is the daemon's normal shutdown signal.
+    // Give exit-on-disconnect time to stop extensions and remove runtime files.
+    drop(initial_ui);
+    let deadline = Instant::now() + graceful_timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                // dpc approved this bounded polling exception. std::process has
+                // no portable timed child-exit notification; revisit when Rust
+                // adds one or Tau adopts a race-safe timed process-handle API.
+                std::thread::sleep(OWNED_DAEMON_EXIT_CHECK_INTERVAL);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Resolves the session id for one `tau` invocation.

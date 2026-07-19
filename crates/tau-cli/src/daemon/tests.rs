@@ -1,5 +1,68 @@
 use super::*;
 
+/// Once a connected client closes its taken input pipe, dropping the owned
+/// handle waits for normal lifecycle cleanup before forced termination.
+#[cfg(unix)]
+#[test]
+fn owned_daemon_drop_allows_disconnect_cleanup() {
+    let temp = tempfile::TempDir::new().expect("temporary directory");
+    let marker = temp.path().join("clean-exit");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("cat >/dev/null; : > \"$1\"")
+        .arg("tau-daemon-drop-test")
+        .arg(&marker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn pipe-waiting child");
+    let initial_ui = InitialUiStdio {
+        stdin: child.stdin.take().expect("child stdin"),
+        stdout: child.stdout.take().expect("child stdout"),
+    };
+    let mut handle = DaemonHandle::Owned {
+        child: Some(child),
+        harness_path: temp.path().join("unused"),
+        initial_ui: Some(initial_ui),
+    };
+    let connected_transport = handle
+        .take_initial_ui_stdio()
+        .expect("connected client transport");
+
+    drop(connected_transport);
+    drop(handle);
+
+    assert!(
+        marker.exists(),
+        "child must observe EOF and finish cleanup before forced termination"
+    );
+}
+
+/// A child that does not exit after transport closure is still reaped once the
+/// bounded graceful-cleanup allowance expires.
+#[cfg(unix)]
+#[test]
+fn owned_daemon_cleanup_has_forced_termination_fallback() {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("trap '' HUP TERM; while :; do read _ || :; done")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn non-exiting child");
+    let initial_ui = InitialUiStdio {
+        stdin: child.stdin.take().expect("child stdin"),
+        stdout: child.stdout.take().expect("child stdout"),
+    };
+
+    stop_owned_daemon(&mut child, Some(initial_ui), Duration::ZERO);
+
+    assert!(
+        child.try_wait().expect("query reaped child").is_some(),
+        "forced fallback must reap a child that cannot clean up"
+    );
+}
+
 #[test]
 fn daemon_command_sets_and_clears_harness_config_override_env() {
     let override_ = tau_config::settings::HarnessConfigCliOverride {

@@ -89,10 +89,11 @@ delivery to agents without receiver capability. Authenticated peer bodies remain
 escaped agent content in a typed peer-message prompt envelope, never harness
 instructions.
 Runtime-dir discovery verifies matching candidates by connecting to their
-sockets. A failed probe is not enough to unlink discovery files while the
-metadata pid is still live; dead-pid entries are eligible for cleanup on
-platforms where Tau has a safe pid-liveness backend, so a transient probe
-failure does not permanently hide a running daemon.
+sockets. Discovery never unlinks runtime files because a failed probe, metadata
+PID liveness check, and pathname identity check cannot atomically exclude PID
+reuse or a replacement listener. Owned CLI shutdown closes the initial-client
+transport first so the daemon's exit-on-disconnect cleanup normally removes its
+own lifecycle pair; forced termination remains a bounded fallback.
 
 ## Extension configuration errors
 

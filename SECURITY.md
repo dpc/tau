@@ -98,6 +98,17 @@ Robust framing and cleanup improvements are welcome when scoped, but unrelated
 features must not be expanded into slowloris, connection-flood, or sandbox
 hardening without an approved threat-model design.
 
+Runtime discovery is non-destructive under the cooperative local boundary.
+Checking a metadata PID, socket reachability, and pathname identity cannot be
+atomic with PID reuse and a daemon replacing that pathname, so scanners must
+not unlink apparently stale lifecycle pairs. Owned CLI shutdown closes the
+initial transport first so the daemon normally removes its own pair, with
+bounded forced termination retained as a last-resort availability safeguard.
+Targeted session lookup bounds raw traversal, matching candidates, metadata
+bytes, and total time and fails closed when uniqueness remains unproven,
+including unreadable conventional metadata owned by a live or
+liveness-unknown PID.
+
 Inter-harness/session communication is likewise cooperative same-UID IPC, with
 correlation and bounded model-spend admission rather than hostile-sender ACLs.
 Genuinely untrusted ingress is external network/service content received through

@@ -126,6 +126,14 @@ identity checks in `tau-socket`; a daemon-owned listener should outlive cloned r
 listener fds used by accept-forwarder threads, and socket-activated listeners must
 not be unlinked by the harness.
 
+Discovery is non-destructive because liveness and filesystem identity checks
+cannot be made atomic with PID reuse and listener replacement. An owned CLI
+first closes its initial-client transport and gives the daemon's
+exit-on-disconnect path a bounded grace period to shut down and remove its own
+runtime pair; forced termination is only the fallback. Targeted session lookup
+may traverse a larger bounded raw catalog than general peer discovery so stale
+unrelated pairs do not consume the much smaller matching-candidate budget.
+
 Accept-loop shutdown must use an owned wake/cancellation primitive tied to the
 accept thread, not polling sleeps and not the filesystem socket pathname. Runtime
 socket paths can be removed or replaced while a cloned listener fd remains live, so

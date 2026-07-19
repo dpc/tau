@@ -62,9 +62,12 @@ harness with a sender-minted per-message capability bound to the message body an
 routing fields. Runtime daemon metadata is discovery data only: `session_id`
 means the daemon's current active session and is updated on `/session new`; stale
 or ambiguous metadata must fail discovery rather than silently choosing a target.
-A failed socket probe alone must not delete runtime discovery files while the
-metadata pid is still live; dead-pid entries remain eligible for cleanup on
-platforms where Tau has a safe pid-liveness backend.
+A discovery scan never deletes runtime files: even a dead-pid and file-identity
+check cannot be atomic with PID reuse and a replacement daemon binding the same
+pathname. Daemons remove their own pair after graceful shutdown. Targeted
+session lookup scans a larger bounded raw catalog than general peer listing,
+while retaining a candidate cap, deadline, live probe, incomplete-scan failure,
+and true-ambiguity rejection.
 The binding carries a tagged exact-agent or bare-entrypoint recipient. Bare
 selection and exact-agent inventory validation happen only after callback
 authentication and target-policy/session revalidation; exact known-address

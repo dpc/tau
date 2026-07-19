@@ -21,6 +21,7 @@ const HARNESSES_DIR: &str = "harnesses";
 const SOCK_EXTENSION: &str = "sock";
 const METADATA_EXTENSION: &str = "json";
 const SESSION_DISCOVERY_MAX_CANDIDATES: usize = 128;
+const SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const SESSION_DISCOVERY_MAX_METADATA_BYTES: u64 = 16 * 1024;
 const SESSION_DISCOVERY_MAX_PROBES: usize = 8;
 const SESSION_DISCOVERY_MAX_CALLS: usize = 8;
@@ -195,6 +196,7 @@ pub(crate) fn override_test_runtime_dir(path: &Path) -> RuntimeDirOverride {
 #[cfg(test)]
 thread_local! {
     static TEST_RUNTIME_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_CANCEL_AFTER_SESSION_METADATA_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Returns the directory containing discoverable harness sockets.
@@ -735,12 +737,10 @@ fn current_euid() -> u32 {
 
 /// Finds a running harness daemon for the given project root.
 ///
-/// Discovery verifies matching candidates by connecting to their sockets. If a
-/// matching socket cannot be reached, its runtime files are removed only when
-/// the metadata pid is known to be no longer running; live-pid files are
-/// preserved so a transient liveness-probe failure cannot make a daemon
-/// permanently undiscoverable. Platforms without a safe pid-liveness backend
-/// conservatively preserve unreachable candidates.
+/// Discovery verifies matching candidates by connecting to their sockets.
+/// Runtime discovery never removes an unreachable candidate. A liveness check
+/// and a pathname unlink cannot be made atomic with daemon startup and PID
+/// reuse, so cleanup belongs to the daemon's owned shutdown path.
 #[must_use]
 pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
     let runtime_dir = harnesses_dir();
@@ -765,12 +765,9 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
             .project_root
             .as_deref()
             .is_some_and(|stored_root| paths_equal(stored_root, project_root))
+            && verify_harness_running(&harness_path)
         {
-            if verify_harness_running(&harness_path) {
-                return Some(harness_path);
-            } else if process_liveness(metadata.pid) == ProcessLiveness::Dead {
-                remove_harness_files(&harness_path);
-            }
+            return Some(harness_path);
         }
     }
 
@@ -780,17 +777,13 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
 /// Finds the single live harness advertising `session_id` as its active
 /// session.
 ///
-/// Discovery verifies candidates by connecting to their sockets. If a matching
-/// socket cannot be reached, its runtime files are removed only when the
-/// metadata pid is known to be no longer running. When the pid is still alive
-/// or cannot be safely checked, discovery returns `Incomplete` for a matching
-/// unreachable claimant and
-/// preserves the files so a transient liveness-probe failure does not make a
-/// live daemon permanently undiscoverable. A scan exhausted by conventional
-/// dead-pid records may non-destructively ignore identity-revalidated lifecycle
-/// files and retry once under the same deadline. Returns `Ok(None)` when no
-/// live daemon advertises the session and `Err` when uniqueness cannot be
-/// proven, including ambiguous, truncated, and expired lookups.
+/// Discovery verifies candidates by connecting to their sockets. A matching
+/// unreachable record with a live or unverifiable metadata pid leaves
+/// uniqueness unresolved. Dead unreachable records are ignored but preserved:
+/// pathname deletion cannot be made atomic with liveness and identity checks
+/// needed to exclude PID reuse. Returns `Ok(None)` when no live daemon
+/// advertises the session and `Err` when uniqueness cannot be proven, including
+/// ambiguous, truncated, and expired lookups.
 pub fn find_harness_for_session(
     session_id: &str,
 ) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
@@ -830,95 +823,80 @@ pub(crate) fn find_harness_for_session_until(
             session_id: session_id.to_owned(),
         });
     }
-    if !runtime_dir.exists() {
-        return Ok(None);
+    match runtime_dir.try_exists() {
+        Ok(false) => return Ok(None),
+        Err(_) => {
+            return Err(FindHarnessForSessionError::Incomplete {
+                session_id: session_id.to_owned(),
+            });
+        }
+        Ok(true) => {}
     }
 
-    let mut ignored_dead_stems = Vec::new();
-    loop {
-        let mut matches = Vec::new();
+    let mut matches = Vec::new();
+    let mut unresolved_match = false;
+    let mut matching_candidates = 0;
+    let mut entries_visited = 0;
+    let mut scan_exhausted = false;
+    {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return Err(FindHarnessForSessionError::Incomplete {
                 session_id: session_id.to_owned(),
             });
         }
         let Ok(entries) = std::fs::read_dir(&runtime_dir) else {
-            return Ok(None);
+            return Err(incomplete_or_ambiguous(session_id, &matches));
         };
-        let (entries, scan_exhausted) =
-            if ignored_dead_stems.is_empty() {
-                let entries = collect_directory_entries_bounded(entries, deadline, cancelled)
-                    .map_err(|()| FindHarnessForSessionError::Incomplete {
-                        session_id: session_id.to_owned(),
-                    })?;
-                let scan_exhausted = entries.len() == SESSION_DISCOVERY_MAX_CANDIDATES;
-                (entries, scan_exhausted)
-            } else {
-                collect_directory_entries_ignoring_dead_bounded(
-                    entries,
-                    &ignored_dead_stems,
-                    deadline,
-                    cancelled,
-                )
-                .map_err(|()| FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                })?
-            };
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(FindHarnessForSessionError::Incomplete {
-                session_id: session_id.to_owned(),
-            });
-        }
-        if scan_exhausted && ignored_dead_stems.is_empty() {
-            let dead_stems =
-                definitely_dead_pid_stems(&entries, deadline, cancelled).map_err(|()| {
-                    FindHarnessForSessionError::Incomplete {
-                        session_id: session_id.to_owned(),
-                    }
-                })?;
-            if !dead_stems.is_empty() {
-                ignored_dead_stems = dead_stems;
-                continue;
-            }
-        }
-        for entry in entries {
+        for entry in entries.take(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES) {
             if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                });
+                return Err(incomplete_or_ambiguous(session_id, &matches));
             }
+            entries_visited += 1;
             let Ok(entry) = entry else {
-                return Err(FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                });
+                return Err(incomplete_or_ambiguous(session_id, &matches));
             };
-            let sock = entry.path();
-            if sock.extension().and_then(|ext| ext.to_str()) != Some(SOCK_EXTENSION) {
+            let metadata_path = entry.path();
+            if metadata_path.extension().and_then(|ext| ext.to_str()) != Some(METADATA_EXTENSION) {
                 continue;
             }
-            let harness_path = sock.with_extension("");
+            let harness_path = metadata_path.with_extension("");
             let metadata = match read_metadata_bounded(&harness_path, deadline, cancelled) {
                 Some(metadata) => metadata,
                 None if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline => {
-                    return Err(FindHarnessForSessionError::Incomplete {
-                        session_id: session_id.to_owned(),
-                    });
+                    return Err(incomplete_or_ambiguous(session_id, &matches));
                 }
-                None => continue,
+                None => {
+                    if numeric_stem_liveness(&harness_path)
+                        .is_some_and(|liveness| liveness != ProcessLiveness::Dead)
+                    {
+                        unresolved_match = true;
+                    }
+                    continue;
+                }
             };
+            #[cfg(test)]
+            TEST_CANCEL_AFTER_SESSION_METADATA_READ.with(|enabled| {
+                if enabled.replace(false) {
+                    cancelled.store(true, Ordering::Release);
+                }
+            });
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(incomplete_or_ambiguous(session_id, &matches));
+            }
             if metadata.session_id != session_id {
                 continue;
             }
+            matching_candidates += 1;
+            if matching_candidates > SESSION_DISCOVERY_MAX_CANDIDATES {
+                scan_exhausted = true;
+                continue;
+            }
             if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                });
+                return Err(incomplete_or_ambiguous(session_id, &matches));
             }
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .ok_or_else(|| FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                })?;
+                .ok_or_else(|| incomplete_or_ambiguous(session_id, &matches))?;
             if tau_socket::SocketPeer::connect_with_io_timeout(
                 socket_path(&harness_path),
                 remaining,
@@ -928,133 +906,62 @@ pub(crate) fn find_harness_for_session_until(
                 matches.push(harness_path);
             } else {
                 match process_liveness(metadata.pid) {
-                    ProcessLiveness::Dead => remove_harness_files(&harness_path),
+                    ProcessLiveness::Dead => {}
                     ProcessLiveness::Running | ProcessLiveness::Unknown => {
-                        return Err(FindHarnessForSessionError::Incomplete {
-                            session_id: session_id.to_owned(),
-                        });
+                        unresolved_match = true;
                     }
                 }
             }
             if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(FindHarnessForSessionError::Incomplete {
-                    session_id: session_id.to_owned(),
-                });
+                return Err(incomplete_or_ambiguous(session_id, &matches));
             }
         }
-        if scan_exhausted {
-            return Err(FindHarnessForSessionError::Incomplete {
-                session_id: session_id.to_owned(),
-            });
-        }
-        return match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.pop()),
-            _ => Err(FindHarnessForSessionError::Ambiguous {
-                session_id: session_id.to_owned(),
-                matches,
-            }),
-        };
+        scan_exhausted |= entries_visited == SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES;
+    }
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(incomplete_or_ambiguous(session_id, &matches));
+    }
+    match matches.len() {
+        2.. => Err(FindHarnessForSessionError::Ambiguous {
+            session_id: session_id.to_owned(),
+            matches,
+        }),
+        _ if scan_exhausted || unresolved_match => Err(FindHarnessForSessionError::Incomplete {
+            session_id: session_id.to_owned(),
+        }),
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
     }
 }
 
-/// Collects lifecycle-shaped bounded-scan stems whose metadata and numeric path
-/// stem agree on a process that is definitely no longer running.
-///
-/// The returned snapshots only authorize non-destructive filtering during one
-/// retry. Each snapshot is revalidated before an entry is ignored.
-fn definitely_dead_pid_stems(
-    entries: &[Result<std::fs::DirEntry, std::io::Error>],
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<Vec<(PathBuf, DeadPidStemSnapshot)>, ()> {
-    let mut snapshots = Vec::new();
-    for entry in entries.iter().filter_map(|entry| entry.as_ref().ok()) {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
+/// Classifies an incomplete scan without losing already-proven ambiguity.
+fn incomplete_or_ambiguous(
+    session_id: &str,
+    live_matches: &[PathBuf],
+) -> FindHarnessForSessionError {
+    if live_matches.len() >= 2 {
+        FindHarnessForSessionError::Ambiguous {
+            session_id: session_id.to_owned(),
+            matches: live_matches.to_vec(),
         }
-        let path = entry.path();
-        if !matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some(SOCK_EXTENSION) | Some(METADATA_EXTENSION)
-        ) {
-            continue;
-        }
-        let Some(pid) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u32>().ok())
-            .filter(|pid| *pid > 0)
-        else {
-            continue;
-        };
-        let harness_path = path.with_extension("");
-        if snapshots
-            .iter()
-            .any(|(existing, _)| existing == &harness_path)
-        {
-            continue;
-        }
-        let Some(snapshot) = dead_pid_stem_snapshot(&harness_path, pid, deadline, cancelled)?
-        else {
-            continue;
-        };
-        snapshots.push((harness_path, snapshot));
-    }
-    Ok(snapshots)
-}
-
-/// Performs the sole retry scan while non-destructively ignoring revalidated
-/// dead lifecycle entries.
-///
-/// The retry collects at most 128 candidates and traverses at most 256 raw
-/// entries, bounding work even when every ignored stem has two files.
-fn collect_directory_entries_ignoring_dead_bounded(
-    mut entries: impl Iterator<Item = Result<std::fs::DirEntry, std::io::Error>>,
-    ignored_dead_stems: &[(PathBuf, DeadPidStemSnapshot)],
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<(Vec<Result<std::fs::DirEntry, std::io::Error>>, bool), ()> {
-    let mut collected = Vec::new();
-    let mut visited = 0;
-    while collected.len() < SESSION_DISCOVERY_MAX_CANDIDATES
-        && visited < SESSION_DISCOVERY_MAX_CANDIDATES * 2
-    {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err(());
-        }
-        let Some(entry) = entries.next() else {
-            return Ok((collected, false));
-        };
-        visited += 1;
-        let ignored_snapshot = entry.as_ref().ok().and_then(|entry| {
-            let path = entry.path();
-            if !matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some(SOCK_EXTENSION) | Some(METADATA_EXTENSION)
-            ) {
-                return None;
-            }
-            let harness_path = path.with_extension("");
-            ignored_dead_stems
-                .iter()
-                .find(|(ignored_path, _)| ignored_path == &harness_path)
-                .map(|(_, snapshot)| (harness_path, snapshot))
-        });
-        let should_ignore = match ignored_snapshot {
-            Some((harness_path, snapshot)) => {
-                dead_pid_stem_unchanged(&harness_path, snapshot, deadline, cancelled)?
-            }
-            None => false,
-        };
-        if !should_ignore {
-            collected.push(entry);
+    } else {
+        FindHarnessForSessionError::Incomplete {
+            session_id: session_id.to_owned(),
         }
     }
-    Ok((collected, true))
 }
 
-/// Conservative process-liveness result used to gate dead-entry filtering.
+/// Returns liveness only for a conventional numeric daemon path stem.
+fn numeric_stem_liveness(harness_path: &Path) -> Option<ProcessLiveness> {
+    harness_path
+        .file_name()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .map(process_liveness)
+}
+
+/// Conservative process-liveness result used for unreachable session claims.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcessLiveness {
     /// The process entry is observable.
@@ -1063,114 +970,6 @@ enum ProcessLiveness {
     Dead,
     /// Process liveness cannot be proven.
     Unknown,
-}
-
-/// Stable identities proving one dead PID's runtime pair was lifecycle-shaped.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DeadPidStemSnapshot {
-    /// PID agreed by the numeric stem and bounded metadata.
-    pid: u32,
-    /// Device/inode identity of the Unix socket.
-    socket_identity: RuntimeFileIdentity,
-    /// Device/inode identity of the regular metadata file.
-    metadata_identity: RuntimeFileIdentity,
-}
-
-/// Unix filesystem identity used only for retry-time revalidation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RuntimeFileIdentity {
-    #[cfg(unix)]
-    /// Filesystem device number.
-    device: u64,
-    #[cfg(unix)]
-    /// Filesystem inode number.
-    inode: u64,
-}
-
-fn dead_pid_stem_snapshot(
-    harness_path: &Path,
-    pid: u32,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<Option<DeadPidStemSnapshot>, ()> {
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(());
-    }
-    let Some(metadata) = read_metadata_bounded(harness_path, deadline, cancelled) else {
-        return if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            Err(())
-        } else {
-            Ok(None)
-        };
-    };
-    if metadata.pid != pid || process_liveness(pid) != ProcessLiveness::Dead {
-        return Ok(None);
-    }
-    let Some(socket_identity) = runtime_socket_identity(&socket_path(harness_path)) else {
-        return Ok(None);
-    };
-    let Some(metadata_identity) = runtime_metadata_identity(&metadata_path(harness_path)) else {
-        return Ok(None);
-    };
-    Ok(Some(DeadPidStemSnapshot {
-        pid,
-        socket_identity,
-        metadata_identity,
-    }))
-}
-
-fn dead_pid_stem_unchanged(
-    harness_path: &Path,
-    snapshot: &DeadPidStemSnapshot,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-) -> Result<bool, ()> {
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return Err(());
-    }
-    let Some(current) = dead_pid_stem_snapshot(harness_path, snapshot.pid, deadline, cancelled)?
-    else {
-        return Ok(false);
-    };
-    Ok(&current == snapshot)
-}
-
-#[cfg(unix)]
-fn runtime_socket_identity(path: &Path) -> Option<RuntimeFileIdentity> {
-    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
-
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_socket() {
-        return None;
-    }
-    Some(RuntimeFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(not(unix))]
-fn runtime_socket_identity(_path: &Path) -> Option<RuntimeFileIdentity> {
-    None
-}
-
-#[cfg(unix)]
-fn runtime_metadata_identity(path: &Path) -> Option<RuntimeFileIdentity> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() {
-        return None;
-    }
-    Some(RuntimeFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(not(unix))]
-fn runtime_metadata_identity(_path: &Path) -> Option<RuntimeFileIdentity> {
-    None
 }
 
 #[cfg(test)]
@@ -1214,12 +1013,6 @@ impl Drop for TestSessionHarnessGuard {
 /// socket.
 pub(crate) fn verify_harness_running(harness_path: &Path) -> bool {
     UnixStream::connect(socket_path(harness_path)).is_ok()
-}
-
-/// Removes the socket and metadata for a stale harness path stem.
-pub fn remove_harness_files(harness_path: &Path) {
-    let _ = std::fs::remove_file(socket_path(harness_path));
-    let _ = std::fs::remove_file(metadata_path(harness_path));
 }
 
 #[cfg(target_os = "linux")]
@@ -1675,11 +1468,11 @@ mod tests {
         );
     }
 
-    /// Ensures session discovery removes dead socket metadata instead of
-    /// returning a daemon that cannot accept the external-message RPC.
+    /// A dead unreachable claimant is ignored but preserved because discovery
+    /// cannot atomically exclude a concurrent PID-reuse/startup replacement.
     #[cfg(target_os = "linux")]
     #[test]
-    fn find_harness_for_session_removes_stale_socket() {
+    fn find_harness_for_session_preserves_dead_socket() {
         let temp = TempDir::new().expect("temp runtime");
         let _guard = runtime_override(&temp);
         let project_root = temp.path().join("project");
@@ -1689,8 +1482,8 @@ mod tests {
         std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
 
         assert_eq!(find_harness_for_session("session").expect("lookup"), None);
-        assert!(!metadata_path(paths.path()).exists());
-        assert!(!paths.socket_path().exists());
+        assert!(metadata_path(paths.path()).exists());
+        assert!(paths.socket_path().exists());
     }
 
     /// Ensures a transient connection failure cannot unlink runtime metadata
@@ -1716,12 +1509,11 @@ mod tests {
         assert!(paths.socket_path().exists());
     }
 
-    /// A saturated catalog of conventional files left by definitely dead
-    /// daemon pids must not hide the one live session claimant. The bounded
-    /// retry ignores revalidated pairs without deleting lifecycle files.
+    /// Hundreds of unrelated stale lifecycle pairs must not hide one live
+    /// claimant merely because they exceed the general discovery candidate cap.
     #[cfg(target_os = "linux")]
     #[test]
-    fn find_harness_for_session_ignores_dead_pid_catalog_for_one_retry() {
+    fn find_harness_for_session_crosses_unrelated_stale_flood() {
         let temp = TempDir::new().expect("temp runtime");
         let _guard = runtime_override(&temp);
         let dir = harnesses_dir();
@@ -1731,15 +1523,12 @@ mod tests {
             .trim()
             .parse()
             .expect("numeric pid max");
-        let dead_pids: Vec<_> = (1..=(SESSION_DISCOVERY_MAX_CANDIDATES as u32 / 2 + 1))
-            .map(|offset| pid_max + offset)
-            .collect();
-        for pid in &dead_pids {
+        for offset in 1..=300 {
+            let pid = pid_max + offset;
             let path = dir.join(pid.to_string());
             drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-            write_metadata_with_pid(&path, temp.path(), "stale-session", *pid);
+            write_metadata_with_pid(&path, temp.path(), "unrelated-session", pid);
         }
-
         let live = dir.join("live-target");
         let _listener = UnixListener::bind(socket_path(&live)).expect("live socket");
         write_peer_metadata(&live, "live-session", temp.path(), true);
@@ -1748,277 +1537,71 @@ mod tests {
             find_harness_for_session("live-session").expect("bounded lookup"),
             Some(live)
         );
-        assert!(dead_pids.iter().all(|pid| {
-            socket_path(&dir.join(pid.to_string())).exists()
-                && metadata_path(&dir.join(pid.to_string())).exists()
-        }));
-    }
-
-    /// Dead-pid filtering recognizes a lifecycle-shaped socket/metadata pair
-    /// without deleting either file.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_catalog_filter_recognizes_paired_lifecycle_files() {
-        let temp = TempDir::new().expect("temp runtime");
-        let _guard = runtime_override(&temp);
-        let dir = harnesses_dir();
-        std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let pid = dead_pid();
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", pid);
-        let entries: Vec<_> = std::fs::read_dir(&dir).expect("runtime entries").collect();
-
-        let snapshots = definitely_dead_pid_stems(
-            &entries,
-            Instant::now() + Duration::from_secs(1),
-            &AtomicBool::new(false),
-        )
-        .expect("filter");
-        assert_eq!(snapshots.len(), 1);
-        assert!(socket_path(&path).exists());
-        assert!(metadata_path(&path).exists());
-    }
-
-    /// A numeric stem is not ownership authority: filtering must preserve both
-    /// files when the bounded metadata record names a different pid.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_catalog_cleanup_preserves_mismatched_metadata_pid() {
-        let temp = TempDir::new().expect("temp runtime");
-        let _guard = runtime_override(&temp);
-        let dir = harnesses_dir();
-        std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let stem_pid = dead_pid();
-        let metadata_pid = dead_pid();
-        let path = dir.join(stem_pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", metadata_pid);
-        let entries: Vec<_> = std::fs::read_dir(&dir).expect("runtime entries").collect();
-
-        assert!(
-            definitely_dead_pid_stems(
-                &entries,
-                Instant::now() + Duration::from_secs(1),
-                &AtomicBool::new(false)
-            )
-            .expect("filter")
-            .is_empty()
-        );
-        assert!(socket_path(&path).exists());
-        assert!(metadata_path(&path).exists());
-    }
-
-    /// Cancellation is checked before stale metadata or path identities are
-    /// inspected, so filtering cannot extend a cancelled bounded lookup.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_catalog_cleanup_honors_pre_cancel() {
-        let temp = TempDir::new().expect("temp runtime");
-        let _guard = runtime_override(&temp);
-        let dir = harnesses_dir();
-        std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let pid = dead_pid();
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", pid);
-        let entries: Vec<_> = std::fs::read_dir(&dir).expect("runtime entries").collect();
-
         assert_eq!(
-            definitely_dead_pid_stems(
-                &entries,
-                Instant::now() + Duration::from_secs(1),
-                &AtomicBool::new(true)
-            ),
-            Err(())
-        );
-        assert!(socket_path(&path).exists());
-        assert!(metadata_path(&path).exists());
-    }
-
-    /// Procfs lookup failures other than a missing pid are unverifiable and
-    /// must never authorize lifecycle filtering.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn process_liveness_preserves_unknown_procfs_errors() {
-        let temp = TempDir::new().expect("temp runtime");
-        let not_directory = temp.path().join("not-directory");
-        std::fs::write(&not_directory, b"x").expect("regular file");
-
-        assert_eq!(
-            process_liveness_at(&not_directory, 123),
-            ProcessLiveness::Unknown
+            std::fs::read_dir(&dir).expect("runtime entries").count(),
+            602,
+            "lookup must remain non-destructive"
         );
     }
 
-    /// An empty directory is not sufficient evidence that procfs is mounted;
-    /// missing target entries there remain unverifiable.
+    /// More session-matching records than the candidate budget keep uniqueness
+    /// incomplete even when one early claimant is live.
     #[cfg(target_os = "linux")]
     #[test]
-    fn process_liveness_preserves_empty_unmounted_procfs() {
-        let temp = TempDir::new().expect("empty procfs stand-in");
-
-        assert_eq!(
-            process_liveness_at(temp.path(), 123),
-            ProcessLiveness::Unknown
-        );
-    }
-
-    /// An expired shared lookup deadline rejects filtering before touching a
-    /// definitely-dead lifecycle pair.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_catalog_cleanup_honors_expired_deadline() {
+    fn find_harness_for_session_fails_closed_at_matching_candidate_bound() {
         let temp = TempDir::new().expect("temp runtime");
         let _guard = runtime_override(&temp);
         let dir = harnesses_dir();
         std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let pid = dead_pid();
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", pid);
-        let entries: Vec<_> = std::fs::read_dir(&dir).expect("runtime entries").collect();
-
-        assert_eq!(
-            definitely_dead_pid_stems(&entries, Instant::now(), &AtomicBool::new(false)),
-            Err(())
-        );
-        assert!(socket_path(&path).exists());
-        assert!(metadata_path(&path).exists());
-    }
-
-    /// Replacing metadata after the dead-pid snapshot invalidates filtering
-    /// authority and preserves the replacement.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_catalog_cleanup_rejects_replaced_metadata() {
-        let temp = TempDir::new().expect("temp runtime");
-        let _guard = runtime_override(&temp);
-        let dir = harnesses_dir();
-        std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let pid = dead_pid();
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", pid);
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let cancelled = AtomicBool::new(false);
-        let snapshot = dead_pid_stem_snapshot(&path, pid, deadline, &cancelled)
-            .expect("snapshot")
-            .expect("dead stem");
-        std::fs::remove_file(metadata_path(&path)).expect("remove old metadata");
-        write_metadata_with_pid(&path, temp.path(), "replacement-session", pid);
-
-        assert!(
-            !dead_pid_stem_unchanged(&path, &snapshot, deadline, &cancelled).expect("revalidation")
-        );
-        assert!(socket_path(&path).exists());
-        assert!(metadata_path(&path).exists());
-    }
-
-    /// A proven-dead conventional pair never grants authority to ignore
-    /// arbitrary same-stem entries during the retry.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_retry_preserves_arbitrary_same_stem_entry() {
-        let temp = TempDir::new().expect("temp runtime");
-        let _guard = runtime_override(&temp);
-        let dir = harnesses_dir();
-        std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let pid = dead_pid();
-        let path = dir.join(pid.to_string());
-        drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-        write_metadata_with_pid(&path, temp.path(), "stale-session", pid);
-        let arbitrary = dir.join(format!("{pid}.txt"));
-        std::fs::write(&arbitrary, b"arbitrary").expect("same-stem junk");
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let cancelled = AtomicBool::new(false);
-        let first_entries: Vec<_> = std::fs::read_dir(&dir).expect("runtime entries").collect();
-        let snapshots =
-            definitely_dead_pid_stems(&first_entries, deadline, &cancelled).expect("snapshots");
-
-        let (retry_entries, exhausted) = collect_directory_entries_ignoring_dead_bounded(
-            std::fs::read_dir(&dir).expect("retry entries"),
-            &snapshots,
-            deadline,
-            &cancelled,
-        )
-        .expect("retry scan");
-
-        assert!(!exhausted);
-        assert_eq!(retry_entries.len(), 1);
-        assert_eq!(retry_entries[0].as_ref().expect("entry").path(), arbitrary);
-    }
-
-    /// The sole retry independently caps admitted candidates at 128 and raw
-    /// traversal at 256, preserving fail-closed truncation at either boundary.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dead_pid_retry_enforces_admitted_and_raw_entry_bounds() {
-        let admitted_temp = TempDir::new().expect("admitted temp runtime");
-        let admitted_dir = admitted_temp.path();
-        for index in 0..=SESSION_DISCOVERY_MAX_CANDIDATES {
-            std::fs::write(admitted_dir.join(format!("junk-{index:03}")), b"x")
-                .expect("junk entry");
-        }
-        let admitted_deadline = Instant::now() + Duration::from_secs(2);
-        let cancelled = AtomicBool::new(false);
-        let (admitted, admitted_exhausted) = collect_directory_entries_ignoring_dead_bounded(
-            std::fs::read_dir(admitted_dir).expect("admitted entries"),
-            &[],
-            admitted_deadline,
-            &cancelled,
-        )
-        .expect("admitted-bound scan");
-        assert_eq!(admitted.len(), SESSION_DISCOVERY_MAX_CANDIDATES);
-        assert!(admitted_exhausted);
-
-        let raw_temp = TempDir::new().expect("raw temp runtime");
-        let raw_dir = raw_temp.path();
+        let live = dir.join("live-target");
+        let _listener = UnixListener::bind(socket_path(&live)).expect("live socket");
+        write_peer_metadata(&live, "bounded-session", temp.path(), true);
         let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")
             .expect("pid max")
             .trim()
             .parse()
             .expect("numeric pid max");
-        let mut snapshots = Vec::new();
-        let snapshot_deadline = Instant::now() + Duration::from_secs(10);
         for offset in 1..=SESSION_DISCOVERY_MAX_CANDIDATES as u32 {
             let pid = pid_max + offset;
-            let path = raw_dir.join(pid.to_string());
+            let path = dir.join(pid.to_string());
             drop(UnixListener::bind(socket_path(&path)).expect("stale socket"));
-            write_metadata_with_pid(&path, raw_dir, "stale-session", pid);
-            let snapshot = dead_pid_stem_snapshot(&path, pid, snapshot_deadline, &cancelled)
-                .expect("snapshot")
-                .expect("dead lifecycle pair");
-            snapshots.push((path, snapshot));
+            write_metadata_with_pid(&path, temp.path(), "bounded-session", pid);
         }
-        let beyond_raw_cap = raw_dir.join("zzzz-beyond-raw-cap");
-        std::fs::write(&beyond_raw_cap, b"must not be visited").expect("tail entry");
-        let mut raw_entries: Vec<_> = std::fs::read_dir(raw_dir).expect("raw entries").collect();
-        raw_entries.sort_by_key(|entry| {
-            entry
-                .as_ref()
-                .expect("readable entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        });
-        let raw_deadline = Instant::now() + Duration::from_secs(2);
-        let (raw_admitted, raw_exhausted) = collect_directory_entries_ignoring_dead_bounded(
-            raw_entries.into_iter(),
-            &snapshots,
-            raw_deadline,
-            &cancelled,
-        )
-        .expect("raw-bound scan");
-        assert!(raw_admitted.is_empty());
-        assert!(raw_exhausted);
-        assert!(beyond_raw_cap.exists());
+
+        assert!(matches!(
+            find_harness_for_session("bounded-session"),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("runtime entries").count(),
+            (SESSION_DISCOVERY_MAX_CANDIDATES + 1) * 2
+        );
     }
 
-    /// Ensures project-root discovery uses the same pid-gated stale cleanup as
-    /// session discovery. External-message sends use session lookup, while CLI
-    /// attach uses project lookup; both must avoid destroying live daemon
-    /// markers after a transient probe failure.
+    /// Cancellation that arrives after parsing the final unrelated metadata
+    /// record must still prevent a false complete `None` result.
+    #[test]
+    fn find_harness_for_session_checks_cancellation_after_metadata_read() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let dir = harnesses_dir();
+        std::fs::create_dir_all(&dir).expect("harnesses dir");
+        let unrelated = dir.join("unrelated");
+        write_peer_metadata(&unrelated, "other-session", temp.path(), true);
+        TEST_CANCEL_AFTER_SESSION_METADATA_READ.with(|enabled| enabled.set(true));
+
+        assert!(matches!(
+            find_harness_for_session_until(
+                "missing-session",
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false)
+            ),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+    }
+
+    /// Project and session discovery are both non-destructive: a failed probe
+    /// cannot destroy live daemon markers during a transient failure.
     #[test]
     fn find_harness_for_dir_keeps_files_when_pid_is_alive() {
         let temp = TempDir::new().expect("temp runtime");
@@ -2069,45 +1652,42 @@ mod tests {
         ));
     }
 
-    /// A lookup that exhausts its visit budget must not return an early live
-    /// claimant because another daemon with the same session may be entry 129.
+    /// Once two live claimants are proven, later truncation, cancellation, or
+    /// storage failure must retain the stronger true-ambiguity classification.
+    #[test]
+    fn incomplete_scan_preserves_proven_ambiguity() {
+        let matches = vec![PathBuf::from("first"), PathBuf::from("second")];
+
+        assert!(matches!(
+            incomplete_or_ambiguous("same-session", &matches),
+            FindHarnessForSessionError::Ambiguous {
+                session_id,
+                matches: classified,
+            } if session_id == "same-session" && classified == matches
+        ));
+    }
+
+    /// A lookup that exhausts the expanded raw-entry budget must not return a
+    /// live claimant because an omitted entry could advertise the same session.
     #[test]
     fn find_harness_for_session_fails_closed_when_scan_is_incomplete() {
         let temp = TempDir::new().expect("temp runtime");
         let _guard = runtime_override(&temp);
         let dir = harnesses_dir();
         std::fs::create_dir_all(&dir).expect("harnesses dir");
-        let live_pid_socket = dir.join(format!("{}.sock", std::process::id()));
-        let live_pid_metadata = dir.join(format!("{}.json", std::process::id()));
-        std::fs::write(&live_pid_socket, b"unverifiable").expect("live-pid socket marker");
-        std::fs::write(&live_pid_metadata, b"unverifiable").expect("live-pid metadata marker");
-        for index in 0..(SESSION_DISCOVERY_MAX_CANDIDATES - 4) {
-            std::fs::write(dir.join(format!("junk-{index:03}")), b"x").expect("junk entry");
+        for index in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+            std::fs::write(dir.join(format!("junk-{index:04}")), b"x").expect("junk entry");
         }
-        let mut listeners = Vec::new();
-        for name in ["claimant-a", "claimant-b"] {
-            let path = dir.join(name);
-            listeners.push(UnixListener::bind(socket_path(&path)).expect("claimant socket"));
-            std::fs::write(
-                metadata_path(&path),
-                serde_json::to_vec(&DaemonMetadata {
-                    version: DAEMON_METADATA_VERSION,
-                    pid: std::process::id(),
-                    project_root: None,
-                    session_id: "bounded-session".to_owned(),
-                    peer_entrypoint: true,
-                })
-                .expect("metadata"),
-            )
-            .expect("write metadata");
-        }
+        let claimant = dir.join("claimant");
+        let _listener = UnixListener::bind(socket_path(&claimant)).expect("claimant socket");
+        write_peer_metadata(&claimant, "bounded-session", temp.path(), true);
 
         assert!(matches!(
             find_harness_for_session("bounded-session"),
             Err(FindHarnessForSessionError::Incomplete { .. })
         ));
-        assert!(live_pid_socket.exists());
-        assert!(live_pid_metadata.exists());
+        assert!(socket_path(&claimant).exists());
+        assert!(metadata_path(&claimant).exists());
     }
 
     /// A same-session record owned by a live process but temporarily
@@ -2140,6 +1720,107 @@ mod tests {
 
         assert!(matches!(
             find_harness_for_session("same-session"),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+    }
+
+    /// A partial live-PID metadata rewrite may hide a second claimant, so one
+    /// valid live match is not enough to claim uniqueness.
+    #[test]
+    fn find_harness_for_session_fails_closed_for_malformed_live_metadata() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let dir = harnesses_dir();
+        std::fs::create_dir_all(&dir).expect("harnesses dir");
+        let reachable = dir.join("reachable");
+        let _reachable_listener =
+            UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
+        write_peer_metadata(&reachable, "same-session", temp.path(), true);
+        let unresolved = dir.join(std::process::id().to_string());
+        let _unresolved_listener =
+            UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
+        std::fs::write(metadata_path(&unresolved), b"{\"session_id\":").expect("partial metadata");
+
+        assert!(matches!(
+            find_harness_for_session("same-session"),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+        assert!(socket_path(&unresolved).exists());
+        assert!(metadata_path(&unresolved).exists());
+    }
+
+    /// A symlinked live-PID metadata record is never followed or ignored when
+    /// doing so could hide a second session claimant.
+    #[cfg(unix)]
+    #[test]
+    fn find_harness_for_session_fails_closed_for_symlinked_live_metadata() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let dir = harnesses_dir();
+        std::fs::create_dir_all(&dir).expect("harnesses dir");
+        let reachable = dir.join("reachable");
+        let _reachable_listener =
+            UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
+        write_peer_metadata(&reachable, "same-session", temp.path(), true);
+        let unresolved = dir.join(std::process::id().to_string());
+        let _unresolved_listener =
+            UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
+        let target = temp.path().join("metadata-target");
+        std::fs::write(&target, b"{}").expect("symlink target");
+        std::os::unix::fs::symlink(&target, metadata_path(&unresolved)).expect("symlink metadata");
+
+        assert!(matches!(
+            find_harness_for_session("same-session"),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+        assert!(socket_path(&unresolved).exists());
+        assert!(metadata_path(&unresolved).is_symlink());
+    }
+
+    /// Oversized live-PID metadata remains unresolved without reading beyond
+    /// the byte bound or returning an early live match as unique.
+    #[test]
+    fn find_harness_for_session_fails_closed_for_oversized_live_metadata() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let dir = harnesses_dir();
+        std::fs::create_dir_all(&dir).expect("harnesses dir");
+        let reachable = dir.join("reachable");
+        let _reachable_listener =
+            UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
+        write_peer_metadata(&reachable, "same-session", temp.path(), true);
+        let unresolved = dir.join(std::process::id().to_string());
+        let _unresolved_listener =
+            UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
+        std::fs::write(
+            metadata_path(&unresolved),
+            vec![b' '; SESSION_DISCOVERY_MAX_METADATA_BYTES as usize + 1],
+        )
+        .expect("oversized metadata");
+
+        assert!(matches!(
+            find_harness_for_session("same-session"),
+            Err(FindHarnessForSessionError::Incomplete { .. })
+        ));
+        assert_eq!(
+            std::fs::metadata(metadata_path(&unresolved))
+                .expect("metadata remains")
+                .len(),
+            SESSION_DISCOVERY_MAX_METADATA_BYTES + 1
+        );
+    }
+
+    /// Failure to enumerate an existing runtime catalog is incomplete rather
+    /// than evidence that no matching daemon exists.
+    #[test]
+    fn find_harness_for_session_fails_closed_when_catalog_is_not_a_directory() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(root_runtime_dir()).expect("runtime root");
+        std::fs::write(harnesses_dir(), b"not a directory").expect("catalog marker");
+
+        assert!(matches!(
+            find_harness_for_session("missing-session"),
             Err(FindHarnessForSessionError::Incomplete { .. })
         ));
     }

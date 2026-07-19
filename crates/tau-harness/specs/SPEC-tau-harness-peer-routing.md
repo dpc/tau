@@ -18,18 +18,23 @@ misrouting and unintended spend; it is not an ACL against malicious same-user
 processes. Peer text remains escaped agent-authored model input, never a
 harness/system instruction.
 
-Runtime lookup's initial scan visits at most 128 raw entries and reads at most
-16 KiB of regular metadata per candidate. An exhausted scan may ignore only conventional
-records whose numeric stem, metadata pid, dead-process result, Unix-socket
-shape, and lifecycle-file identities agree, then non-destructively ignore those
-revalidated records during one retry. That retry admits at most 128 candidates
-while traversing at most 256 raw entries (384 raw visits total) under the same
-deadline. Live, liveness-unknown, malformed, mismatched, replaced, ambiguous,
-and still-truncated catalogs fail closed. Outbound and inbound socket jobs use
+Targeted runtime lookup visits at most 4096 raw entries, accepts at most 16 KiB
+of regular metadata for each metadata-shaped entry, and reads at most 16 KiB
+plus one byte to detect oversize input, while admitting at most 128 records that
+claim the requested session. It never deletes runtime files:
+pathname identity and PID liveness checks cannot be atomic with PID reuse and a
+replacement daemon binding that pathname. Unreachable matching records whose
+metadata PID is live or liveness-unknown, ambiguous catalogs, matching-candidate
+exhaustion, raw-entry-budget exhaustion, and deadline expiry fail closed; two
+successfully probed claimants establish ambiguity even if the scan is otherwise
+incomplete. Unreadable, malformed, non-regular, symlinked, or oversized metadata
+at a conventional numeric stem leaves uniqueness unresolved when that PID is
+live or liveness-unknown. Definitely-dead numeric stems and non-lifecycle-shaped
+filenames may be ignored non-destructively. Outbound and inbound socket jobs use
 bounded global admission and absolute deadlines. Potentially blocking runtime lookup is
 isolated behind a separate 16-job non-queued lease; a stalled storage worker
-retains that lease after caller timeout so repeated stalls remain bounded. A
-64 KiB message limit bounds accepted peer text. Disconnect and session rollover
+retains that lease after caller timeout so repeated stalls remain bounded. A 64
+KiB message limit bounds accepted peer text. Disconnect and session rollover
 cancel live work, and generation-tagged completions cannot enter a replacement
 session.
 

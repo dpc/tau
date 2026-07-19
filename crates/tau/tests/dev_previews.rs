@@ -4,19 +4,42 @@ use tempfile::TempDir;
 
 fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
     let work = home.path().join("work");
+    let runtime = home.path().join(".runtime");
     std::fs::create_dir_all(&work).expect("create preview cwd");
+    std::fs::create_dir_all(&runtime).expect("create preview runtime");
     let mut command = Command::new(env!("CARGO_BIN_EXE_tau"));
     command
         .current_dir(work)
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_STATE_HOME", home.path().join(".state"))
+        .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("TAU_ENABLE_EXTENSIONS")
         .args(args);
     if let Some(environment) = environment {
         command.env("TAU_ENABLE_EXTENSIONS", environment);
     }
     command.output().expect("run tau preview")
+}
+
+/// Short-lived prompt and tool render daemons must complete their owned
+/// shutdown path and leave no runtime discovery metadata or socket behind.
+#[test]
+fn previews_remove_owned_daemon_runtime_pairs() {
+    let home = TempDir::new().expect("temporary home");
+
+    for command in ["print-prompt", "print-tools"] {
+        let output = preview(&home, None, &["--role", "engineer", "dev", command]);
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let harnesses = home.path().join(".runtime/tau/harnesses");
+        assert_eq!(
+            std::fs::read_dir(harnesses)
+                .expect("harness runtime directory")
+                .count(),
+            0,
+            "{command} must not leave a lifecycle pair"
+        );
+    }
 }
 
 /// Proves prompt previews wait for extension startup, honor public environment
