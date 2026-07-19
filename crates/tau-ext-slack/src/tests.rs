@@ -9,6 +9,10 @@ use std::sync::Mutex;
 
 use tau_proto::{ContentPart, HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
+use super::reactions::{
+    ReactionActionKind, ReactionApiError, ReactionAttemptDisposition, ReactionKey, ReactionOwner,
+    ReactionReservation, reaction_error_message, valid_outbound_emoji,
+};
 use super::send_delivery::ImmediateSendScheduler;
 use super::*;
 
@@ -16,6 +20,20 @@ impl Extension {
     /// Create a test extension whose logical waits advance without real sleeps.
     fn new(client: Arc<dyn SlackClient>, output: impl Into<Output>) -> Self {
         Self::new_with_scheduler(client, output, Arc::new(ImmediateSendScheduler))
+    }
+
+    /// Create a test extension with a separately supplied reaction client.
+    fn new_with_reaction_client(
+        client: Arc<dyn SlackClient>,
+        reaction_client: Arc<dyn ReactionClient>,
+        output: impl Into<Output>,
+    ) -> Self {
+        Self::new_with_clients_and_scheduler(
+            client,
+            reaction_client,
+            output,
+            Arc::new(ImmediateSendScheduler),
+        )
     }
 }
 
@@ -184,7 +202,9 @@ impl SlackClient for FakeClient {
             thread_ts: body.thread_ts().map(str::to_owned),
         })
     }
+}
 
+impl ReactionClient for FakeClient {
     fn react(
         &self,
         _cfg: &RuntimeConfig,
@@ -207,45 +227,14 @@ impl SlackClient for FakeClient {
     }
 }
 
-/// Reaction client whose one API call can complete after a fatal writer
-/// barrier.
+/// Reaction-only client proving reaction lifecycle tests need no transport,
+/// identity, or message-posting implementation.
 struct BlockingReactionClient {
     started: Mutex<Option<mpsc::Sender<()>>>,
     release: Mutex<mpsc::Receiver<()>>,
 }
 
-impl SlackClient for BlockingReactionClient {
-    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, SlackApiError> {
-        Ok("ws://127.0.0.1:9/socket-ticket".to_owned())
-    }
-
-    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<SlackInstallationIdentity, SlackApiError> {
-        Ok(SlackInstallationIdentity {
-            bot_user_id: "UBOT123".to_owned(),
-            team_id: "T123".to_owned(),
-        })
-    }
-
-    fn verified_human_identity(
-        &self,
-        _cfg: &RuntimeConfig,
-        user_id: &str,
-    ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
-        Ok(test_verified_human(user_id, true))
-    }
-
-    fn post_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        body: &FrozenPostBody,
-    ) -> PostAttemptOutcome<PostedMessage> {
-        PostAttemptOutcome::Accepted(PostedMessage {
-            channel_id: body.channel_id().to_owned(),
-            ts: "1.0".to_owned(),
-            thread_ts: body.thread_ts().map(str::to_owned),
-        })
-    }
-
+impl ReactionClient for BlockingReactionClient {
     fn react(
         &self,
         _cfg: &RuntimeConfig,
@@ -698,7 +687,7 @@ fn extension() -> (
 ) {
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = Extension::new_with_reaction_client(client.clone(), client.clone(), tx);
     ext.apply_config(cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("lock");
@@ -1111,14 +1100,14 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
     };
     {
         let mut state = ext.state.lock().expect("state");
-        state.reaction_owners.insert(
+        state.reactions.owners.insert(
             reaction_key.clone(),
             ReactionOwner {
                 agent_id: agent_id("agent-a"),
                 message_ref: delivered.message_id.clone(),
             },
         );
-        state.reaction_in_flight.insert(
+        state.reactions.in_flight.insert(
             reaction_key,
             ReactionReservation {
                 agent_id: agent_id("agent-a"),
@@ -1142,9 +1131,9 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
     assert!(deleted.actor.is_none());
     let state = ext.state.lock().expect("state");
     assert!(!state.reply_routes.contains_key(&delivered.message_id));
-    assert!(!state.reaction_targets.contains_key(&delivered.message_id));
-    assert!(state.reaction_owners.is_empty());
-    assert!(state.reaction_in_flight.is_empty());
+    assert!(!state.reactions.targets.contains_key(&delivered.message_id));
+    assert!(state.reactions.owners.is_empty());
+    assert!(state.reactions.in_flight.is_empty());
 }
 
 /// Lax static-route ingress reports its existing verified conversation
@@ -1186,7 +1175,7 @@ fn outgoing_message_delete_revokes_post_authority() {
     );
     {
         let mut state = ext.state.lock().expect("state");
-        assert!(state.insert_reaction_target(
+        assert!(state.reactions.insert_target(
             message_id.clone(),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1198,7 +1187,7 @@ fn outgoing_message_delete_revokes_post_authority() {
                 },
             },
         ));
-        state.reaction_owners.insert(
+        state.reactions.owners.insert(
             ReactionKey {
                 channel_id: "C123".to_owned(),
                 message_ts: "9.0".to_owned(),
@@ -1228,8 +1217,8 @@ fn outgoing_message_delete_revokes_post_authority() {
             .get(&PostedMessageKey::new("C123", "9.0"))
             .is_none()
     );
-    assert!(!state.reaction_targets.contains_key(&message_id));
-    assert!(state.reaction_owners.is_empty());
+    assert!(!state.reactions.targets.contains_key(&message_id));
+    assert!(state.reactions.owners.is_empty());
 }
 
 /// Unregistering receive authority preserves proactive post provenance so a
@@ -1376,7 +1365,7 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     );
     {
         let mut state = ext.state.lock().expect("state");
-        assert!(state.insert_reaction_target(
+        assert!(state.reactions.insert_target(
             MessageFactId::new("slack-message:test-c123-12.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1403,8 +1392,8 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     assert!(!state.session_active);
     assert!(state.send_ledger.is_empty());
     assert!(state.reply_routes.is_empty());
-    assert!(state.reaction_targets.is_empty());
-    assert!(state.reaction_in_flight.is_empty());
+    assert!(state.reactions.targets.is_empty());
+    assert!(state.reactions.in_flight.is_empty());
     drop(state);
     let result = ext.handle_send(tool(
         SEND_TOOL_NAME,
@@ -1423,13 +1412,17 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
 fn deletion_writer_failure_rejects_late_reaction_completion() {
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let client = Arc::new(BlockingReactionClient {
+    let reaction_client = Arc::new(BlockingReactionClient {
         started: Mutex::new(Some(started_tx)),
         release: Mutex::new(release_rx),
     });
     let (output_tx, output_rx) = mpsc::channel();
     drop(output_rx);
-    let ext = Arc::new(Extension::new(client, output_tx));
+    let ext = Arc::new(Extension::new_with_reaction_client(
+        FakeClient::new(),
+        reaction_client,
+        output_tx,
+    ));
     ext.apply_config(proactive_cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("state");
@@ -1437,7 +1430,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
         state.installation_team_id = Some("T123".to_owned());
         state.instance_name = Some("std-slack".into());
         state.session_active = true;
-        assert!(state.insert_reaction_target(
+        assert!(state.reactions.insert_target(
             MessageFactId::new("slack-message:test-c456-1.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1493,9 +1486,9 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
         Event::ToolError(_)
     ));
     let state = ext.state.lock().expect("state");
-    assert!(state.reaction_targets.is_empty());
-    assert!(state.reaction_owners.is_empty());
-    assert!(state.reaction_in_flight.is_empty());
+    assert!(state.reactions.targets.is_empty());
+    assert!(state.reactions.owners.is_empty());
+    assert!(state.reactions.in_flight.is_empty());
 }
 
 /// The early output-failure latch closes reaction and local-reply admission
@@ -2340,7 +2333,7 @@ fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
             installation_team_id: "T123".to_owned(),
         },
     );
-    assert!(state.insert_reaction_target(
+    assert!(state.reactions.insert_target(
         MessageFactId::new(message_ref),
         ReactionTarget {
             agent_id: agent_id("agent-a"),
@@ -2363,8 +2356,8 @@ fn reaction_ownership_capacity_is_enforced_before_io() {
     install_source_reaction_target(&ext, "slack-message:test-c123-1.0");
     {
         let mut state = ext.state.lock().expect("state");
-        for index in 0..REACTION_OWNERSHIP_LIMIT {
-            state.reaction_owners.insert(
+        for index in 0..reactions::OWNERSHIP_LIMIT {
+            state.reactions.owners.insert(
                 ReactionKey {
                     channel_id: "C999".to_owned(),
                     message_ts: format!("{index}.0"),
@@ -2403,13 +2396,13 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         },
     };
     let mut state = State::default();
-    for index in 0..REACTION_TARGET_LIMIT {
-        assert!(state.insert_reaction_target(
+    for index in 0..reactions::TARGET_LIMIT {
+        assert!(state.reactions.insert_target(
             MessageFactId::new(format!("slack-message:test-c123-{index}.0")),
             target.clone()
         ));
     }
-    state.reaction_in_flight.insert(
+    state.reactions.in_flight.insert(
         ReactionKey {
             channel_id: "C123".to_owned(),
             message_ts: "0.0".to_owned(),
@@ -2422,27 +2415,33 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             unowned_add: false,
         },
     );
-    assert!(state.insert_reaction_target(
+    assert!(state.reactions.insert_target(
         MessageFactId::new("slack-message:test-c123-new"),
         target.clone()
     ));
     assert!(
         state
-            .reaction_targets
+            .reactions
+            .targets
             .contains_key(&MessageFactId::new("slack-message:test-c123-0.0"))
     );
     assert!(
         !state
-            .reaction_targets
+            .reactions
+            .targets
             .contains_key(&MessageFactId::new("slack-message:test-c123-1.0"))
     );
-    assert_eq!(state.reaction_targets.len(), REACTION_TARGET_LIMIT);
+    assert_eq!(state.reactions.targets.len(), reactions::TARGET_LIMIT);
 
-    state.clear_reaction_state();
-    for index in 0..REACTION_TARGET_LIMIT {
+    state.reactions.clear();
+    for index in 0..reactions::TARGET_LIMIT {
         let message_ref = MessageFactId::new(format!("slack-message:test-c123-{index}.0"));
-        assert!(state.insert_reaction_target(message_ref.clone(), target.clone()));
-        state.reaction_owners.insert(
+        assert!(
+            state
+                .reactions
+                .insert_target(message_ref.clone(), target.clone())
+        );
+        state.reactions.owners.insert(
             ReactionKey {
                 channel_id: "C123".to_owned(),
                 message_ts: format!("{index}.0"),
@@ -2454,20 +2453,20 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             },
         );
     }
-    assert!(!state.insert_reaction_target(
+    assert!(!state.reactions.insert_target(
         MessageFactId::new("slack-message:test-c123-blocked"),
         target
     ));
 
-    state.clear_reaction_state();
-    for index in 0..REACTION_ATTEMPT_LIMIT {
+    state.reactions.clear();
+    for index in 0..reactions::ATTEMPT_LIMIT {
         let invoke = tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             &format!("completed-{index}"),
             reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         );
-        assert!(state.remember_reaction_attempt(
+        assert!(state.reactions.remember_attempt(
             &invoke,
             ReactionAttemptDisposition::Success(CborValue::Null),
         ));
@@ -2478,26 +2477,31 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         "completed-new",
         reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
-    assert!(state.remember_reaction_attempt(
+    assert!(state.reactions.remember_attempt(
         &replacement,
         ReactionAttemptDisposition::Success(CborValue::Null),
     ));
-    assert_eq!(state.reaction_attempts.len(), REACTION_ATTEMPT_LIMIT);
+    assert_eq!(state.reactions.attempts.len(), reactions::ATTEMPT_LIMIT);
     assert!(
         !state
-            .reaction_attempts
+            .reactions
+            .attempts
             .contains_key(&tau_proto::ToolCallId::new("completed-0"))
     );
 
-    state.clear_reaction_state();
-    for index in 0..REACTION_ATTEMPT_LIMIT {
+    state.reactions.clear();
+    for index in 0..reactions::ATTEMPT_LIMIT {
         let invoke = tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             &format!("in-flight-{index}"),
             reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         );
-        assert!(state.remember_reaction_attempt(&invoke, ReactionAttemptDisposition::InFlight));
+        assert!(
+            state
+                .reactions
+                .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight)
+        );
     }
     let blocked = tool_call(
         REACT_TOOL_NAME,
@@ -2505,7 +2509,11 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         "in-flight-blocked",
         reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
-    assert!(!state.remember_reaction_attempt(&blocked, ReactionAttemptDisposition::InFlight));
+    assert!(
+        !state
+            .reactions
+            .remember_attempt(&blocked, ReactionAttemptDisposition::InFlight)
+    );
 }
 
 /// A current Tau-issued reply selector resolves to its retained private route
@@ -2613,7 +2621,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
         Event::ToolResult(_)
     ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 2);
-    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
 }
 
 /// Slack idempotency outcomes never adopt an unowned shared-bot reaction, while
@@ -2634,7 +2642,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolError(_)
     ));
-    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
 
     client.push_reaction_result(Ok(()));
     assert!(matches!(
@@ -2656,7 +2664,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolResult(_)
     ));
-    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
 
     client.push_reaction_result(Err(ReactionApiError::OutcomeUnknown));
     assert!(matches!(
@@ -2668,7 +2676,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolError(_)
     ));
-    assert!(ext.state.lock().expect("state").reaction_owners.is_empty());
+    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
 }
 
 /// Malformed fields, native selectors, unknown refs, and ambiguous failures

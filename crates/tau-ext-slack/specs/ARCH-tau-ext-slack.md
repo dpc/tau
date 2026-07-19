@@ -154,3 +154,8 @@ Targets, same-agent reaction ownership, in-flight reservations, and tool-call
 attempts are bounded runtime state. Adds establish ownership only after
 unambiguous Slack success; removes require that ownership. Ambiguous effects are
 not adopted.
+
+The focused reactions module owns target authority, ownership, reservations,
+attempt replay, capacity/pinning, tool execution, and typed reaction HTTP
+outcomes. Its separately injected reaction client keeps that API surface out of
+the transport, identity, and message-posting client boundary.

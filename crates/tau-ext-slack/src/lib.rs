@@ -36,11 +36,16 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 mod admission;
 mod posted_message_cache;
+mod reactions;
 mod send_delivery;
 mod transport_mentions;
 
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
+use reactions::{
+    ReactionAuthority, ReactionClient, ReactionState, ReactionTarget, UnavailableReactionClient,
+    react_tool_spec,
+};
 use send_delivery::{
     FrozenPostBody, PostAttemptFailure, PostAttemptOutcome, SendFailureCategory, SendLedgerEntry,
     SendQueueReservation, SendScheduler, SendWake, SlackApiError, SlackPostMode,
@@ -115,12 +120,6 @@ const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
 const SEND_LEDGER_LIMIT: usize = 1024;
 const ACTIVE_SEND_WORKER_LIMIT: usize = 64;
-// Ownership can pin at most `REACTION_OWNERSHIP_LIMIT` entries; the additional
-// send-ledger headroom guarantees every accepted send can activate
-// without evicting a pinned target.
-const REACTION_TARGET_LIMIT: usize = REACTION_OWNERSHIP_LIMIT + SEND_LEDGER_LIMIT;
-const REACTION_OWNERSHIP_LIMIT: usize = 1024;
-const REACTION_ATTEMPT_LIMIT: usize = 256;
 const CONVERSATION_LIMIT: usize = 64;
 const CONVERSATION_ALIAS_PATTERN: &str = "^[a-z][a-z0-9_-]{0,63}$";
 const MAX_CONVERSATION_ALIAS_BYTES: usize = 64;
@@ -290,18 +289,6 @@ trait SlackClient: Send + Sync + 'static {
         cfg: &RuntimeConfig,
         body: &FrozenPostBody,
     ) -> PostAttemptOutcome<PostedMessage>;
-
-    /// Add or remove the bot's reaction on one exact cached Slack item.
-    fn react(
-        &self,
-        _cfg: &RuntimeConfig,
-        _action: ReactionActionKind,
-        _channel_id: &str,
-        _message_ts: &str,
-        _emoji: &str,
-    ) -> Result<(), ReactionApiError> {
-        Err(ReactionApiError::OutcomeUnknown)
-    }
 }
 
 /// Exact bot and installing workspace returned by one `auth.test`.
@@ -320,51 +307,6 @@ struct VerifiedSlackHuman {
     user_id: String,
     /// Optional bounded, presentation-only Slack display snapshot.
     display_name: Option<String>,
-}
-
-/// Explicit outbound reaction operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReactionActionKind {
-    /// Add the named reaction.
-    Add,
-    /// Remove the named reaction.
-    Remove,
-}
-
-impl ReactionActionKind {
-    /// Parse the exact public action spelling.
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "add" => Some(Self::Add),
-            "remove" => Some(Self::Remove),
-            _ => None,
-        }
-    }
-
-    /// Return the exact public action spelling.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Remove => "remove",
-        }
-    }
-}
-
-/// Safe, typed outcomes from Slack's reaction methods.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ReactionApiError {
-    /// Slack reports the bot already has the reaction.
-    AlreadyReacted,
-    /// Slack reports the bot has no such reaction.
-    NoReaction,
-    /// Slack throttled the request for this bounded duration.
-    RateLimited(u64),
-    /// The app lacks the separately documented write scope.
-    MissingScope,
-    /// A definitive bounded Slack error category.
-    Definitive(&'static str),
-    /// The remote effect may have happened.
-    OutcomeUnknown,
 }
 
 /// Stable identity returned by Slack for one successfully posted message.
@@ -1145,91 +1087,6 @@ struct ReplyRoute {
     installation_team_id: String,
 }
 
-/// Live authority retained for one reaction target.
-#[derive(Clone, Eq, PartialEq)]
-enum ReactionAuthority {
-    /// Exact published incoming source route.
-    Source {
-        /// Publisher-scoped message fact id.
-        message_id: MessageFactId,
-        /// Verified source user bound to the route.
-        user_id: String,
-    },
-    /// Exact operator-configured proactive destination.
-    ConfiguredDestination {
-        /// Stable model-facing destination alias.
-        alias: String,
-    },
-}
-
-/// One exact Slack item addressable only through a Tau-issued reference.
-#[derive(Clone, Eq, PartialEq)]
-struct ReactionTarget {
-    /// Agent that received or authored the message.
-    agent_id: AgentId,
-    /// Exact authenticated conversation route.
-    conversation: SlackConversation,
-    /// Exact item timestamp, which may be a thread child.
-    message_ts: String,
-    /// Exact installation team that minted this private authority.
-    installation_team_id: String,
-    /// Live route authority revalidated on every use.
-    authority: ReactionAuthority,
-}
-
-/// Private semantic identity shared by refs naming the same reaction.
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct ReactionKey {
-    /// Native conversation identity.
-    channel_id: String,
-    /// Native exact message timestamp.
-    message_ts: String,
-    /// Strict canonical emoji spelling.
-    emoji: String,
-}
-
-/// Local ownership for one unambiguously added reaction.
-struct ReactionOwner {
-    /// Agent allowed to remove the reaction.
-    agent_id: AgentId,
-    /// Reference pinned while ownership remains live.
-    message_ref: MessageFactId,
-}
-
-/// One exact in-flight reservation protected against late completion races.
-struct ReactionReservation {
-    /// Agent whose call owns the reservation.
-    agent_id: AgentId,
-    /// Monotonic token unique within this extension process.
-    token: u64,
-    /// Target reference pinned until the call finishes.
-    message_ref: MessageFactId,
-    /// Whether this is an unowned add counted against ownership capacity.
-    unowned_add: bool,
-}
-
-/// Terminal disposition retained for same-process tool-call replay.
-#[derive(Clone)]
-enum ReactionAttemptDisposition {
-    /// Authorized call is currently awaiting Slack.
-    InFlight,
-    /// Structured successful result.
-    Success(CborValue),
-    /// Stable bounded error.
-    Error(String),
-}
-
-/// Fingerprint and terminal result for one reaction call.
-#[derive(Clone)]
-struct ReactionAttempt {
-    /// Exact calling agent.
-    agent_id: AgentId,
-    /// Exact invocation arguments.
-    arguments: CborValue,
-    /// Terminal result returned without repeating Slack I/O.
-    disposition: ReactionAttemptDisposition,
-}
-
 /// Locally written incoming Slack create eligible for later edit references.
 #[derive(Clone, Eq, PartialEq)]
 struct IncomingMessageOwner {
@@ -1335,22 +1192,8 @@ struct State {
     received_occurrences: ReceivedOccurrenceCache,
     /// Recent bridge-authored Slack posts and their owning agents.
     posted_messages: PostedMessageCache,
-    /// Tau-issued fact refs mapped to private exact targets.
-    reaction_targets: HashMap<MessageFactId, ReactionTarget>,
-    /// Oldest-first target insertion order.
-    reaction_target_order: VecDeque<MessageFactId>,
-    /// Locally owned bot reactions.
-    reaction_owners: HashMap<ReactionKey, ReactionOwner>,
-    /// Reaction tuples reserved during Slack I/O.
-    reaction_in_flight: HashMap<ReactionKey, ReactionReservation>,
-    /// Monotonic token preventing late calls from clearing newer reservations.
-    next_reaction_reservation: u64,
-    /// Lifecycle epoch preventing late calls from mutating restored state.
-    reaction_epoch: u64,
-    /// Same-process terminal reaction attempts.
-    reaction_attempts: HashMap<tau_proto::ToolCallId, ReactionAttempt>,
-    /// Oldest-first attempt insertion order.
-    reaction_attempt_order: VecDeque<tau_proto::ToolCallId>,
+    /// Focused source-bound reaction ownership and replay state.
+    reactions: ReactionState,
 }
 
 impl State {
@@ -1358,7 +1201,7 @@ impl State {
     fn latch_installation_mismatch(&mut self) {
         self.ingress_epoch = self.ingress_epoch.wrapping_add(1);
         self.installation_mismatch = true;
-        self.clear_reaction_state();
+        self.reactions.clear();
         self.clear_reply_routes();
         self.clear_incoming_messages();
         self.posted_messages.clear();
@@ -1404,171 +1247,17 @@ impl State {
         }
     }
 
-    /// Insert a target, evicting only the oldest target without live ownership.
-    fn insert_reaction_target(
-        &mut self,
-        message_ref: MessageFactId,
-        target: ReactionTarget,
-    ) -> bool {
-        if let std::collections::hash_map::Entry::Occupied(mut entry) =
-            self.reaction_targets.entry(message_ref.clone())
-        {
-            if entry.get() == &target {
-                entry.insert(target);
-                return true;
-            }
-            return false;
-        }
-        while self.reaction_targets.len() >= REACTION_TARGET_LIMIT {
-            let Some(index) = self.reaction_target_order.iter().position(|candidate| {
-                !self
-                    .reaction_owners
-                    .values()
-                    .any(|owner| &owner.message_ref == candidate)
-                    && !self
-                        .reaction_in_flight
-                        .values()
-                        .any(|reservation| &reservation.message_ref == candidate)
-            }) else {
-                return false;
-            };
-            if let Some(evicted) = self.reaction_target_order.remove(index) {
-                self.reaction_targets.remove(&evicted);
-            }
-        }
-        self.reaction_target_order.push_back(message_ref.clone());
-        self.reaction_targets.insert(message_ref, target);
-        true
-    }
-
-    /// Store one bounded terminal reaction attempt.
-    fn remember_reaction_attempt(
-        &mut self,
-        invoke: &ToolStarted,
-        disposition: ReactionAttemptDisposition,
-    ) -> bool {
-        if let Some(existing) = self.reaction_attempts.get_mut(&invoke.call_id) {
-            if existing.agent_id != invoke.agent_id || existing.arguments != invoke.arguments {
-                return false;
-            }
-            existing.disposition = disposition;
-            return true;
-        }
-        while self.reaction_attempts.len() >= REACTION_ATTEMPT_LIMIT {
-            let Some(index) = self.reaction_attempt_order.iter().position(|call_id| {
-                self.reaction_attempts.get(call_id).is_some_and(|attempt| {
-                    !matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
-                })
-            }) else {
-                return false;
-            };
-            if let Some(evicted) = self.reaction_attempt_order.remove(index) {
-                self.reaction_attempts.remove(&evicted);
-            }
-        }
-        self.reaction_attempt_order
-            .retain(|call_id| call_id != &invoke.call_id);
-        self.reaction_attempt_order
-            .push_back(invoke.call_id.clone());
-        self.reaction_attempts.insert(
-            invoke.call_id.clone(),
-            ReactionAttempt {
-                agent_id: invoke.agent_id.clone(),
-                arguments: invoke.arguments.clone(),
-                disposition,
-            },
-        );
-        true
-    }
-
-    /// Clear all reaction target, ownership, in-flight, and replay state.
-    fn clear_reaction_state(&mut self) {
-        self.reaction_epoch = self.reaction_epoch.wrapping_add(1);
-        self.reaction_targets.clear();
-        self.reaction_target_order.clear();
-        self.reaction_owners.clear();
-        self.reaction_in_flight.clear();
-        self.reaction_attempts.clear();
-        self.reaction_attempt_order.clear();
-    }
-
-    /// Remove all reaction state belonging to one unloaded agent.
-    fn remove_agent_reaction_state(&mut self, agent_id: &AgentId) {
-        self.reaction_targets
-            .retain(|_, target| &target.agent_id != agent_id);
-        self.reaction_target_order
-            .retain(|message_ref| self.reaction_targets.contains_key(message_ref));
-        self.reaction_owners
-            .retain(|_, owner| &owner.agent_id != agent_id);
-        self.reaction_attempts
-            .retain(|_, attempt| &attempt.agent_id != agent_id);
-        self.reaction_attempt_order
-            .retain(|call_id| self.reaction_attempts.contains_key(call_id));
-        self.reaction_in_flight
-            .retain(|_, reservation| &reservation.agent_id != agent_id);
-    }
-
-    /// Revoke source-authorized targets for an unregistered agent, preserving
-    /// proactive targets.
-    fn remove_agent_source_reaction_state(&mut self, agent_id: &AgentId) {
-        let revoked = self
-            .reaction_targets
-            .iter()
-            .filter(|(_, target)| {
-                &target.agent_id == agent_id
-                    && matches!(target.authority, ReactionAuthority::Source { .. })
-            })
-            .map(|(message_ref, _)| message_ref.clone())
-            .collect::<HashSet<_>>();
-        self.reaction_targets
-            .retain(|message_ref, _| !revoked.contains(message_ref));
-        self.reaction_target_order
-            .retain(|message_ref| !revoked.contains(message_ref));
-        self.reaction_owners
-            .retain(|_, owner| !revoked.contains(&owner.message_ref));
-        self.reaction_in_flight
-            .retain(|_, reservation| !revoked.contains(&reservation.message_ref));
-        // Attempt fingerprints survive unregister so late calls terminalize
-        // safely and same-call replay cannot regain Slack I/O authority.
-    }
-
     /// Revoke every private route or reaction state keyed to one message fact.
     fn revoke_message_authority(&mut self, message_id: &MessageFactId) {
         self.reply_routes.remove(message_id);
         self.reply_route_order
             .retain(|candidate| candidate != message_id);
-        self.reaction_targets.remove(message_id);
-        self.reaction_target_order
-            .retain(|candidate| candidate != message_id);
-        self.reaction_owners
-            .retain(|_, owner| &owner.message_ref != message_id);
-        self.reaction_in_flight
-            .retain(|_, reservation| &reservation.message_ref != message_id);
+        self.reactions.revoke_message(message_id);
     }
 
     /// Return whether live reaction ownership pins this source reply route.
     fn reply_route_is_pinned(&self, message_id: &MessageFactId) -> bool {
-        self.reaction_owners
-            .values()
-            .map(|owner| &owner.message_ref)
-            .chain(
-                self.reaction_in_flight
-                    .values()
-                    .map(|reservation| &reservation.message_ref),
-            )
-            .any(|message_ref| {
-                self.reaction_targets
-                    .get(message_ref)
-                    .is_some_and(|target| {
-                        matches!(
-                            &target.authority,
-                            ReactionAuthority::Source {
-                                message_id: owned_id,
-                                ..
-                            } if owned_id == message_id
-                        )
-                    })
-            })
+        self.reactions.source_route_is_pinned(message_id)
     }
 
     /// Insert or refresh one canonical route while evicting the oldest route.
@@ -1730,7 +1419,10 @@ struct Extension {
     /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
     /// retirement barrier.
     output_publication_gate: Arc<Mutex<()>>,
+    /// Slack transport, identity, and message-posting operations.
     client: Arc<dyn SlackClient>,
+    /// Separately injected outbound reaction API boundary.
+    reaction_client: Arc<dyn ReactionClient>,
     output: Output,
     shutdown: Arc<ShutdownSignal>,
     /// Event-driven cancellation for delivery retry waits.
@@ -1781,8 +1473,25 @@ fn run_blocking_test_hook(slot: &Mutex<Option<BlockingTestHook>>) {
 
 impl Extension {
     /// Create an extension with an injected event-driven send scheduler.
+    #[cfg(test)]
     fn new_with_scheduler(
         client: Arc<dyn SlackClient>,
+        output: impl Into<Output>,
+        send_scheduler: Arc<dyn SendScheduler>,
+    ) -> Self {
+        Self::new_with_clients_and_scheduler(
+            client,
+            Arc::new(UnavailableReactionClient),
+            output,
+            send_scheduler,
+        )
+    }
+
+    /// Create an extension with independently injected Slack and reaction API
+    /// boundaries.
+    fn new_with_clients_and_scheduler(
+        client: Arc<dyn SlackClient>,
+        reaction_client: Arc<dyn ReactionClient>,
         output: impl Into<Output>,
         send_scheduler: Arc<dyn SendScheduler>,
     ) -> Self {
@@ -1790,6 +1499,7 @@ impl Extension {
             state: Arc::new(Mutex::new(State::default())),
             output_publication_gate: Arc::new(Mutex::new(())),
             client,
+            reaction_client,
             output: output.into(),
             shutdown: Arc::new(ShutdownSignal::new()),
             send_wake: Arc::new(SendWake::default()),
@@ -1820,6 +1530,7 @@ impl Extension {
             state,
             output_publication_gate,
             client,
+            reaction_client: Arc::new(UnavailableReactionClient),
             output,
             shutdown,
             send_wake: wake,
@@ -1849,7 +1560,7 @@ impl Extension {
         state.clear_reply_routes();
         state.clear_incoming_messages();
         state.posted_messages.clear();
-        state.clear_reaction_state();
+        state.reactions.clear();
         state.bot_user_id = None;
         state.installation_team_id = None;
         state.received_occurrences = ReceivedOccurrenceCache::default();
@@ -1878,7 +1589,7 @@ impl Extension {
         state.bot_user_id = None;
         state.installation_team_id = None;
         state.received_occurrences = ReceivedOccurrenceCache::default();
-        state.clear_reaction_state();
+        state.reactions.clear();
         self.send_wake.notify_lifecycle_change();
     }
 
@@ -1913,7 +1624,7 @@ impl Extension {
         state.remove_agent_reply_routes(agent_id);
         state.remove_agent_incoming_messages(agent_id);
         state.posted_messages.remove_agent(agent_id);
-        state.remove_agent_reaction_state(agent_id);
+        state.reactions.remove_agent(agent_id);
         drop(state);
         self.send_wake.notify_lifecycle_change();
     }
@@ -1964,13 +1675,8 @@ impl Extension {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .reaction_attempts
-            .get(&invoke.call_id)
-            .is_some_and(|attempt| {
-                attempt.agent_id == invoke.agent_id
-                    && attempt.arguments == invoke.arguments
-                    && matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
-            })
+            .reactions
+            .identical_call_in_flight(invoke)
     }
 
     /// Return one bounded page of static, operator-authored conversation
@@ -2118,7 +1824,7 @@ impl Extension {
                 .selected_agent_by_route
                 .retain(|_, agent| agent != &invoke.agent_id);
             state.remove_agent_reply_routes(&invoke.agent_id);
-            state.remove_agent_source_reaction_state(&invoke.agent_id);
+            state.reactions.remove_agent_sources(&invoke.agent_id);
             state.remove_agent_incoming_messages(&invoke.agent_id);
             self.send_wake.notify_lifecycle_change();
         }
@@ -2401,292 +2107,6 @@ impl Extension {
                 }
                 None
             }
-        }
-    }
-
-    /// Execute one separately authorized, exact-reference Slack reaction call.
-    fn handle_react(&self, invoke: ToolStarted) -> Event {
-        {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(attempt) = state.reaction_attempts.get(&invoke.call_id) {
-                if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
-                    return tool_error(
-                        invoke,
-                        "slack_react call id was replayed with conflicting arguments".to_owned(),
-                    );
-                }
-                return match &attempt.disposition {
-                    ReactionAttemptDisposition::InFlight => reaction_coalesced(invoke),
-                    ReactionAttemptDisposition::Success(result) => {
-                        structured_tool_result(invoke, result.clone())
-                    }
-                    ReactionAttemptDisposition::Error(message) => {
-                        tool_error(invoke, message.clone())
-                    }
-                };
-            }
-        }
-        let parsed = (|| {
-            validate_object_fields(&invoke.arguments, &["message_ref", "emoji", "action"])?;
-            let message_ref = cbor_string_field(&invoke.arguments, "message_ref")?;
-            let emoji = cbor_string_field(&invoke.arguments, "emoji")?;
-            let action_text = cbor_string_field(&invoke.arguments, "action")?;
-            if message_ref.is_empty() || message_ref.len() > 128 {
-                return Err("`message_ref` must contain 1 to 128 bytes".to_owned());
-            }
-            if !valid_outbound_emoji(&emoji) {
-                return Err("`emoji` must be a valid lowercase Slack emoji name".to_owned());
-            }
-            let action = ReactionActionKind::parse(&action_text)
-                .ok_or_else(|| "`action` must be `add` or `remove`".to_owned())?;
-            Ok((MessageFactId::new(message_ref), emoji, action))
-        })();
-        let (message_ref, emoji, action) = match parsed {
-            Ok(parsed) => parsed,
-            Err(message) => return self.finish_reaction_error(invoke, message),
-        };
-        let prepared = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if self.output_failed.load(Ordering::Acquire)
-                || self.shutdown.is_requested()
-                || !state.session_active
-            {
-                return self.finish_reaction_error_locked(
-                    &mut state,
-                    invoke,
-                    "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
-            }
-            let Some(cfg) = state.config.clone() else {
-                return self.finish_reaction_error_locked(
-                    &mut state,
-                    invoke,
-                    "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
-            };
-            let Some(target) = state.reaction_targets.get(&message_ref).cloned() else {
-                return self.finish_reaction_error_locked(
-                    &mut state,
-                    invoke,
-                    "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
-            };
-            if target.agent_id != invoke.agent_id
-                || !reaction_target_authorized(&state, &cfg, &target)
-            {
-                return self.finish_reaction_error_locked(
-                    &mut state,
-                    invoke,
-                    "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
-            }
-            if let Some(attempt) = state.reaction_attempts.get(&invoke.call_id) {
-                if attempt.agent_id == invoke.agent_id && attempt.arguments == invoke.arguments {
-                    return reaction_coalesced(invoke);
-                }
-                return tool_error(
-                    invoke,
-                    "slack_react call id was replayed with conflicting arguments".to_owned(),
-                );
-            }
-            if state.reaction_attempts.len() >= REACTION_ATTEMPT_LIMIT
-                && state.reaction_attempts.values().all(|attempt| {
-                    matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
-                })
-            {
-                return tool_error(invoke, "Slack reaction attempt capacity is full".to_owned());
-            }
-            let key = ReactionKey {
-                channel_id: target.conversation.channel_id.clone(),
-                message_ts: target.message_ts.clone(),
-                emoji: emoji.clone(),
-            };
-            if state.reaction_in_flight.contains_key(&key) {
-                return self.finish_reaction_error_locked(
-                    &mut state,
-                    invoke,
-                    "Slack reaction is already in progress".to_owned(),
-                );
-            }
-            let owner_agent = state
-                .reaction_owners
-                .get(&key)
-                .map(|owner| owner.agent_id.clone());
-            let owned_before = owner_agent.as_ref() == Some(&invoke.agent_id);
-            match action {
-                ReactionActionKind::Add => {
-                    if owner_agent
-                        .as_ref()
-                        .is_some_and(|owner| owner != &invoke.agent_id)
-                    {
-                        return self.finish_reaction_error_locked(
-                            &mut state,
-                            invoke,
-                            "Slack reaction is owned by another agent".to_owned(),
-                        );
-                    }
-                    if owner_agent.is_none()
-                        && state.reaction_owners.len()
-                            + state
-                                .reaction_in_flight
-                                .values()
-                                .filter(|reservation| reservation.unowned_add)
-                                .count()
-                            >= REACTION_OWNERSHIP_LIMIT
-                    {
-                        return self.finish_reaction_error_locked(
-                            &mut state,
-                            invoke,
-                            "Slack reaction ownership capacity is full".to_owned(),
-                        );
-                    }
-                }
-                ReactionActionKind::Remove => {
-                    if !owned_before {
-                        return self.finish_reaction_error_locked(
-                            &mut state,
-                            invoke,
-                            "Slack reaction is not owned by this agent".to_owned(),
-                        );
-                    }
-                }
-            }
-            state.next_reaction_reservation = state.next_reaction_reservation.wrapping_add(1);
-            let reservation = state.next_reaction_reservation;
-            state.reaction_in_flight.insert(
-                key.clone(),
-                ReactionReservation {
-                    agent_id: invoke.agent_id.clone(),
-                    token: reservation,
-                    message_ref: message_ref.clone(),
-                    unowned_add: action == ReactionActionKind::Add && !owned_before,
-                },
-            );
-            debug_assert!(
-                state.remember_reaction_attempt(&invoke, ReactionAttemptDisposition::InFlight)
-            );
-            state.config_frozen = true;
-            (
-                cfg,
-                target,
-                key,
-                state.config_generation,
-                state.reaction_epoch,
-                reservation,
-                owned_before,
-            )
-        };
-        let (cfg, target, key, generation, epoch, reservation, owned_before) = prepared;
-        let outcome = self.client.react(
-            &cfg,
-            action,
-            &target.conversation.channel_id,
-            &target.message_ts,
-            &emoji,
-        );
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let reservation_matches = state
-            .reaction_in_flight
-            .get(&key)
-            .is_some_and(|current| current.token == reservation);
-        if reservation_matches {
-            state.reaction_in_flight.remove(&key);
-        }
-        let current = state.config_generation == generation
-            && state.reaction_epoch == epoch
-            && reservation_matches
-            && state.config.as_ref().is_some_and(|current_cfg| {
-                state
-                    .reaction_targets
-                    .get(&message_ref)
-                    .is_some_and(|current_target| {
-                        current_target == &target
-                            && current_target.agent_id == invoke.agent_id
-                            && reaction_target_authorized(&state, current_cfg, current_target)
-                    })
-            });
-        if !current {
-            let message = "Slack message reference is unknown, stale, or unauthorized".to_owned();
-            if state
-                .reaction_attempts
-                .get(&invoke.call_id)
-                .is_some_and(|attempt| {
-                    attempt.agent_id == invoke.agent_id
-                        && attempt.arguments == invoke.arguments
-                        && matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
-                })
-            {
-                return self.finish_reaction_error_locked(&mut state, invoke, message);
-            }
-            return tool_error(invoke, message);
-        }
-        let success = match (action, outcome) {
-            (ReactionActionKind::Add, Ok(())) if current => {
-                state.reaction_owners.insert(
-                    key,
-                    ReactionOwner {
-                        agent_id: invoke.agent_id.clone(),
-                        message_ref: message_ref.clone(),
-                    },
-                );
-                true
-            }
-            (ReactionActionKind::Add, Err(ReactionApiError::AlreadyReacted))
-                if current && owned_before =>
-            {
-                true
-            }
-            (ReactionActionKind::Remove, Ok(()))
-            | (ReactionActionKind::Remove, Err(ReactionApiError::NoReaction))
-                if current && owned_before =>
-            {
-                state.reaction_owners.remove(&key);
-                true
-            }
-            (_, outcome) => {
-                let message = reaction_error_message(outcome.err(), action, current, owned_before);
-                return self.finish_reaction_error_locked(&mut state, invoke, message);
-            }
-        };
-        debug_assert!(success);
-        let result = CborValue::Map(vec![
-            example_field("status", example_text("ok")),
-            example_field("action", example_text(action.as_str())),
-            example_field("emoji", example_text(&emoji)),
-        ]);
-        if !state
-            .remember_reaction_attempt(&invoke, ReactionAttemptDisposition::Success(result.clone()))
-        {
-            return tool_error(
-                invoke,
-                "slack_react call id was replayed with conflicting arguments".to_owned(),
-            );
-        }
-        structured_tool_result(invoke, result)
-    }
-
-    /// Store and return one terminal reaction error after acquiring state.
-    fn finish_reaction_error(&self, invoke: ToolStarted, message: String) -> Event {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        self.finish_reaction_error_locked(&mut state, invoke, message)
-    }
-
-    /// Store and return one terminal reaction error while state is locked.
-    fn finish_reaction_error_locked(
-        &self,
-        state: &mut State,
-        invoke: ToolStarted,
-        message: String,
-    ) -> Event {
-        if state
-            .remember_reaction_attempt(&invoke, ReactionAttemptDisposition::Error(message.clone()))
-        {
-            tool_error(invoke, message)
-        } else {
-            tool_error(
-                invoke,
-                "slack_react call id was replayed with conflicting arguments".to_owned(),
-            )
         }
     }
 
@@ -3986,7 +3406,7 @@ impl Extension {
                 },
             );
             if let Some(message_ts) = reaction_message_ts {
-                let _ = state.insert_reaction_target(
+                let _ = state.reactions.insert_target(
                     reply_message_id.clone(),
                     ReactionTarget {
                         agent_id,
@@ -5130,23 +4550,29 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
     }))
 }
 
-fn run_with_client<R, W>(
-    reader: R,
-    writer: W,
-    client: Arc<dyn SlackClient>,
-) -> Result<(), Box<dyn Error>>
+fn run_with_client<R, W, C>(reader: R, writer: W, client: Arc<C>) -> Result<(), Box<dyn Error>>
 where
     R: Read,
     W: Write + Send + 'static,
+    C: SlackClient + ReactionClient,
 {
-    run_with_client_and_scheduler(reader, writer, client, Arc::new(SystemSendScheduler))
+    let slack_client: Arc<dyn SlackClient> = client.clone();
+    let reaction_client: Arc<dyn ReactionClient> = client;
+    run_with_clients_and_scheduler(
+        reader,
+        writer,
+        slack_client,
+        reaction_client,
+        Arc::new(SystemSendScheduler),
+    )
 }
 
-/// Run the protocol client with an injected delivery scheduler.
-fn run_with_client_and_scheduler<R, W>(
+/// Run the protocol client with independently injected API boundaries.
+fn run_with_clients_and_scheduler<R, W>(
     reader: R,
     writer: W,
     client: Arc<dyn SlackClient>,
+    reaction_client: Arc<dyn ReactionClient>,
     scheduler: Arc<dyn SendScheduler>,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -5161,7 +4587,12 @@ where
     let install_boundary = Arc::clone(&boundary);
     let state = tau_client::TauExtensionRunner::new(SlackExtension)
         .run_detached_writer_with_state(reader, writer, move |handle| {
-            let ext = Extension::new_with_scheduler(client, handle, scheduler);
+            let ext = Extension::new_with_clients_and_scheduler(
+                client,
+                reaction_client,
+                handle,
+                scheduler,
+            );
             install_boundary.install(&ext);
             SlackRuntime { ext }
         })?;
@@ -5277,7 +4708,7 @@ fn retire_after_output_failure(
         state.clear_incoming_messages();
         state.clear_send_ledger();
         state.posted_messages.clear();
-        state.clear_reaction_state();
+        state.reactions.clear();
     }
     wake.notify_lifecycle_change();
     shutdown.request();
@@ -5505,7 +4936,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.clear_incoming_messages();
             state.clear_send_ledger();
             state.posted_messages.clear();
-            state.clear_reaction_state();
+            state.reactions.clear();
             cx.state.ext.send_wake.notify_lifecycle_change();
         }
         _ => {}
@@ -5611,55 +5042,6 @@ fn send_tool_spec() -> ToolSpec {
         enabled_by_default: false,
         background_support: None,
         examples,
-    }
-}
-
-/// Fixed schema for explicit source-bound Slack reaction mutations.
-fn react_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: tau_proto::ToolName::new(REACT_TOOL_NAME),
-        model_visible_name: Some(tau_proto::ToolName::new(REACT_TOOL_NAME)),
-        description: Some(
-            "Add or remove one emoji reaction on an exact Slack message reference issued by Tau. Channel IDs and timestamps are not accepted as separate route arguments; aliases, toggle, list, and discovery are rejected."
-                .to_owned(),
-        ),
-        tool_type: tau_proto::ToolType::Function,
-        parameters: Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "message_ref": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                    "description": "Tau-issued message fact ID from a locally written Slack fact or successful slack_send result"
-                },
-                "emoji": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 77,
-                    "pattern": "^[a-z0-9_+-]{1,64}(::skin-tone-[2-6])?$",
-                    "description": "Slack emoji name without surrounding colons"
-                },
-                "action": { "type": "string", "enum": ["add", "remove"] }
-            },
-            "required": ["message_ref", "emoji", "action"],
-            "additionalProperties": false
-        })),
-        format: None,
-        tags: vec![tau_proto::ToolTag::new(REACT_TOOL_TAG)],
-        enabled_by_default: false,
-        background_support: None,
-        examples: vec![ToolExample {
-            id: "react-eyes".to_owned(),
-            title: Some("Add an eyes reaction".to_owned()),
-            arguments: CborValue::Map(vec![
-                example_field("message_ref", example_text("slack-message:0123456789abcdef")),
-                example_field("emoji", example_text("eyes")),
-                example_field("action", example_text("add")),
-            ]),
-            note: Some("Use action=remove only for a reaction this agent added.".to_owned()),
-            subcommand: None,
-        }],
     }
 }
 
@@ -5857,109 +5239,6 @@ fn cbor_string_field(arguments: &CborValue, field: &str) -> Result<String, Strin
     Err(format!("missing required argument `{field}`"))
 }
 
-/// Validate the strict outbound emoji grammar without normalization.
-fn valid_outbound_emoji(value: &str) -> bool {
-    let (base, tone) = match value.split_once("::") {
-        Some((base, tone)) => (base, Some(tone)),
-        None => (value, None),
-    };
-    (1..=64).contains(&base.len())
-        && base.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_+-".contains(&byte)
-        })
-        && tone.is_none_or(|tone| {
-            matches!(
-                tone.as_bytes(),
-                [
-                    b's',
-                    b'k',
-                    b'i',
-                    b'n',
-                    b'-',
-                    b't',
-                    b'o',
-                    b'n',
-                    b'e',
-                    b'-',
-                    b'2'..=b'6'
-                ]
-            )
-        })
-}
-
-/// Revalidate the exact current route authority for one cached target.
-fn reaction_target_authorized(state: &State, cfg: &RuntimeConfig, target: &ReactionTarget) -> bool {
-    if state.installation_team_id.as_deref() != Some(target.installation_team_id.as_str()) {
-        return false;
-    }
-    match &target.authority {
-        ReactionAuthority::Source {
-            message_id,
-            user_id,
-        } => {
-            state.registered_agents.contains(&target.agent_id)
-                && state.reply_routes.get(message_id).is_some_and(|route| {
-                    route.agent_id == target.agent_id
-                        && route.user_id == *user_id
-                        && route.conversation == target.conversation
-                        && state.installation_team_id.as_deref()
-                            == Some(route.installation_team_id.as_str())
-                })
-                && is_route_authorized(state, cfg, &target.conversation, user_id)
-        }
-        ReactionAuthority::ConfiguredDestination { alias } => cfg
-            .proactive_aliases
-            .contains(alias)
-            .then(|| cfg.conversations.get(alias))
-            .flatten()
-            .is_some_and(|policy| {
-                policy.conversation_id == target.conversation.channel_id
-                    && policy.thread_ts == target.conversation.thread_ts
-                    && policy.kind == target.conversation.kind
-            }),
-    }
-}
-
-/// Convert typed reaction failures to bounded non-sensitive terminal text.
-fn reaction_error_message(
-    error: Option<ReactionApiError>,
-    action: ReactionActionKind,
-    current: bool,
-    owned_before: bool,
-) -> String {
-    if !current {
-        return "Slack message reference is unknown, stale, or unauthorized".to_owned();
-    }
-    match error {
-        Some(ReactionApiError::AlreadyReacted) if action == ReactionActionKind::Add => {
-            if owned_before {
-                "Slack reaction replay could not be confirmed".to_owned()
-            } else {
-                "Slack reaction already exists but is not owned by this agent".to_owned()
-            }
-        }
-        Some(ReactionApiError::AlreadyReacted) => {
-            "Slack reaction failed: already_reacted".to_owned()
-        }
-        Some(ReactionApiError::NoReaction) => {
-            "Slack reaction does not exist or is not locally owned".to_owned()
-        }
-        Some(ReactionApiError::RateLimited(seconds)) => {
-            format!("Slack reactions are rate limited; retry after {seconds}s")
-        }
-        Some(ReactionApiError::MissingScope) => {
-            "Slack reactions require the reactions:write scope; add it and reinstall the Slack app"
-                .to_owned()
-        }
-        Some(ReactionApiError::Definitive(category)) => {
-            format!("Slack reaction failed: {category}")
-        }
-        Some(ReactionApiError::OutcomeUnknown) | None => {
-            "Slack reaction outcome is unknown; the request was not retried".to_owned()
-        }
-    }
-}
-
 fn validate_object_fields(arguments: &CborValue, allowed_fields: &[&str]) -> Result<(), String> {
     let CborValue::Map(entries) = arguments else {
         return Err("arguments must be an object".to_owned());
@@ -6015,21 +5294,6 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
         // native-control sentinels; errors expose only the closed message.
         details: None,
         originator: invoke.originator,
-    })
-}
-
-/// Return a non-terminal progress event when a duplicate shares active I/O.
-fn reaction_coalesced(invoke: ToolStarted) -> Event {
-    Event::ToolProgress(ToolProgress {
-        call_id: invoke.call_id,
-        tool_name: invoke.tool_name,
-        message: Some("identical slack_react call is already in progress".to_owned()),
-        progress: None,
-        display: Some(ToolUseState {
-            status: ToolUseStatus::InProgress,
-            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-            ..Default::default()
-        }),
     })
 }
 
@@ -6315,90 +5579,6 @@ impl HttpSlackClient {
             .map_err(|_| SlackApiError::Transport)?;
         parse_slack_api_response(status.as_u16(), &text)
     }
-
-    /// Call one reaction method with typed, body-safe failure handling.
-    fn post_reaction(
-        &self,
-        cfg: &RuntimeConfig,
-        action: ReactionActionKind,
-        channel_id: &str,
-        message_ts: &str,
-        emoji: &str,
-    ) -> Result<(), ReactionApiError> {
-        let method = match action {
-            ReactionActionKind::Add => "reactions.add",
-            ReactionActionKind::Remove => "reactions.remove",
-        };
-        let url = format!("{}/{method}", cfg.api_base);
-        let mut response = self
-            .agent
-            .post(&url)
-            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
-            .content_type("application/json")
-            .send(
-                serde_json::json!({
-                    "channel": channel_id,
-                    "timestamp": message_ts,
-                    "name": emoji
-                })
-                .to_string(),
-            )
-            .map_err(|_| ReactionApiError::OutcomeUnknown)?;
-        let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| seconds.clamp(1, 3_600));
-        if status == 429 {
-            return Err(ReactionApiError::RateLimited(retry_after.unwrap_or(1)));
-        }
-        if status >= 500 {
-            return Err(ReactionApiError::OutcomeUnknown);
-        }
-        let text = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_SLACK_API_RESPONSE_BYTES)
-            .read_to_string()
-            .map_err(|_| ReactionApiError::OutcomeUnknown)?;
-        let value: serde_json::Value =
-            serde_json::from_str(&text).map_err(|_| ReactionApiError::OutcomeUnknown)?;
-        if (200..300).contains(&status)
-            && value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
-        {
-            return Ok(());
-        }
-        let code = value
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown_error");
-        Err(match code {
-            "already_reacted" => ReactionApiError::AlreadyReacted,
-            "no_reaction" => ReactionApiError::NoReaction,
-            "ratelimited" => ReactionApiError::RateLimited(retry_after.unwrap_or(1)),
-            "missing_scope" => ReactionApiError::MissingScope,
-            "fatal_error" | "internal_error" | "request_timeout" | "service_unavailable" => {
-                ReactionApiError::OutcomeUnknown
-            }
-            "invalid_name" => ReactionApiError::Definitive("invalid emoji name"),
-            "too_many_emoji" | "too_many_reactions" => {
-                ReactionApiError::Definitive("reaction limit reached")
-            }
-            "is_archived" | "message_not_found" | "channel_not_found" | "not_found"
-            | "thread_locked" | "not_reactable" => {
-                ReactionApiError::Definitive("target unavailable")
-            }
-            "not_in_channel" | "restricted_action" | "missing_permission" => {
-                ReactionApiError::Definitive("permission denied")
-            }
-            "invalid_auth" | "not_authed" | "account_inactive" | "token_revoked" => {
-                ReactionApiError::Definitive("authentication failed")
-            }
-            _ => ReactionApiError::Definitive("request rejected"),
-        })
-    }
 }
 
 impl Default for HttpSlackClient {
@@ -6552,17 +5732,6 @@ impl SlackClient for HttpSlackClient {
             return PostAttemptOutcome::DefinitiveFailure(SendFailureCategory::ConflictingRoute);
         }
         PostAttemptOutcome::Accepted(posted)
-    }
-
-    fn react(
-        &self,
-        cfg: &RuntimeConfig,
-        action: ReactionActionKind,
-        channel_id: &str,
-        message_ts: &str,
-        emoji: &str,
-    ) -> Result<(), ReactionApiError> {
-        self.post_reaction(cfg, action, channel_id, message_ts, emoji)
     }
 }
 

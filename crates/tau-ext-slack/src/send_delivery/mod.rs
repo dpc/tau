@@ -1325,7 +1325,7 @@ impl SendDeliveryWorker {
         if result_sent {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.send_authority_is_current(prepared) {
-                let _ = state.insert_reaction_target(
+                let _ = state.reactions.insert_target(
                     message_id.clone(),
                     ReactionTarget {
                         agent_id: prepared.invoke.agent_id.clone(),
