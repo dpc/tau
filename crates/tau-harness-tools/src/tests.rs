@@ -991,22 +991,44 @@ fn cancel_args_reject_whitespace_only_tool_call_id() {
     assert_eq!(err, "`tool_call_id` must not be empty");
 }
 
+/// Ensures a started agent receives only the standard internal notification
+/// and its initial prompt, preserving unusual safe ids and prompt formatting.
 #[test]
-fn delegate_instruction_names_parent_and_message_followup_path() {
-    // Delegated agents get a fresh context, so their injected instruction
-    // must explicitly name the parent and explain that responses flow back
-    // through the unified agent_watch notification path while the watch is enabled.
+fn delegate_instruction_is_compact_and_exact() {
+    let prompt = "  inspect `this`\n\n<task>café</task>\n";
+    let instruction = delegate_instruction("engineer-A_9", prompt);
+
+    assert_eq!(
+        instruction,
+        concat!(
+            "[tau-internal]: You were started by an agent `engineer-A_9`. ",
+            "Your responses will be delivered to it. You can use the `message` ",
+            "tool to communicate with agents.\n\n",
+            "  inspect `this`\n\n<task>café</task>\n",
+        )
+    );
+}
+
+/// Ensures the compact bootstrap does not regress to stale tool, watch
+/// lifecycle, follow-up, or task-heading instructions.
+#[test]
+fn delegate_instruction_omits_stale_bootstrap_prose() {
     let instruction = delegate_instruction("engineer_parent", "inspect the change");
 
-    assert!(
-        instruction
-            .contains("You were started by agent `engineer_parent` using `agent_start` tool")
-    );
-    assert!(instruction.contains("automatically watching this conversation"));
-    assert!(instruction.contains("async `agent_watch` notifications"));
-    assert!(instruction.contains("while that watch remains enabled"));
-    assert!(instruction.contains("the `message` tool to communicate with any agent at any time"));
-    assert!(instruction.contains("### Task\n\ninspect the change"));
+    for stale_text in [
+        "using `agent_start` tool",
+        "automatically watching this conversation",
+        "`agent_watch`",
+        "while that watch remains enabled",
+        "Complete your task",
+        "Respond to additional requests",
+        "### Task",
+    ] {
+        assert!(
+            !instruction.contains(stale_text),
+            "bootstrap unexpectedly contained {stale_text:?}"
+        );
+    }
 }
 
 #[test]
