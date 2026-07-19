@@ -31,6 +31,12 @@ an exact configured model in the selected namespace. Missing or invalid mutable
 profile, model, or auth state remains visibly pending and is resolved again for
 later attempts.
 
+The extension also owns the serialized Chat Completions and OpenRouter DTOs,
+OpenRouter discovery/cache behavior, configured-model publication, and conversion
+to the Chat Completions backend's non-serialized finite-attempt inputs. The
+backend returns typed success, retry, cancellation, terminal failure, and
+semantic-progress facts; it cannot serialize harness frames.
+
 ChatGPT profiles capture Responses mode at process startup. Model publication,
 prompt, prewarm, retry, and quota resolution share that captured value. Mutable
 credential reload and OAuth refresh preserve it; an on-disk mode edit takes
@@ -71,11 +77,12 @@ captures.
 Streamed assistant text, reasoning text, and tool-call/custom-tool input cross
 the same external-provider boundary. Never copy raw streamed
 text/reasoning/argument/input bytes into status text, notices, traces, or final
-transcript rendering. Provider response stats are public, content-free metadata on transient
-`provider.response_updated` events: providers own the prompt-local byte counter,
-may emit the first non-empty previous/current sample promptly, emit later
-non-terminal samples at no more than 1Hz, and may emit a final flush. The harness
-validates ownership and broadcasts the stats unchanged.
+transcript rendering. Provider response stats are public, content-free metadata
+on transient `provider.response_updated` events: backends own prompt-local byte
+counters and the extension owns public sampling and writes. It may emit the first
+non-empty previous/current sample promptly, emits later non-terminal samples at
+no more than 1Hz, and may emit a final flush. The harness validates ownership and
+broadcasts these stats unchanged.
 
 ## Prompt worker wakeups
 

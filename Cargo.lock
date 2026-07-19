@@ -3756,7 +3756,9 @@ name = "tau-ext-provider-builtin"
 version = "0.1.0"
 dependencies = [
  "dialoguer",
+ "dirs",
  "proptest",
+ "reqwest",
  "serde",
  "serde_json",
  "tau-client",
@@ -3766,6 +3768,7 @@ dependencies = [
  "tau-provider-chat-completions",
  "tau-provider-codex",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3998,7 +4001,6 @@ dependencies = [
 name = "tau-provider-chat-completions"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "reqwest",
  "serde",
  "serde_json",

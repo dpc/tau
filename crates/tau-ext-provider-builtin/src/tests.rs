@@ -1,8 +1,7 @@
 mod compatibility;
 
-use tau_provider_chat_completions::openrouter::OpenRouterProfile;
-
 use super::*;
+use crate::chat_completions::OpenRouterProfile;
 
 /// Cloneable in-memory sink used to inspect structured tracing output.
 #[derive(Clone, Default)]
@@ -1209,6 +1208,7 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        supports_parallel_tool_calls: true,
     }
 }
 

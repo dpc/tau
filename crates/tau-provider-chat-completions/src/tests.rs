@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use super::*;
 
 /// Ensures shared outbound categories retain their intended scheduler cadence
@@ -27,50 +29,32 @@ fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
         std::process::id()
     ))
 }
-
-fn decode_frames(bytes: &[u8]) -> Vec<HarnessInputMessage> {
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::BufReader::new(bytes));
-    let mut frames = Vec::new();
-    while let Some(frame) = reader.read_message().expect("decode frame") {
-        frames.push(frame);
-    }
-    frames
-}
-
-fn provider() -> ChatCompletionsProvider {
-    ChatCompletionsProvider {
-        base_url: "https://api.openai.com/v1".to_owned(),
-        api_key: "key".to_owned(),
-        models: vec![ChatCompletionsModel {
-            id: ModelName::new("gpt-4o"),
-            display_name: None,
-            context_window: 128_000,
-            compat: None,
-            tags: Vec::new(),
+fn provider() -> TestProvider {
+    TestProvider {
+        base_url: "http://localhost:1234/v1".to_owned(),
+        api_key: String::new(),
+        models: vec![AttemptModel {
+            id: ModelName::new("test-model"),
         }],
         max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
-        tags: Vec::new(),
-        compat: ChatCompletionsCompat::openai_defaults(),
+        compat: AttemptCompat {
+            stream_options: true,
+            parallel_tool_calls: true,
+            prompt_cache_key: true,
+            reasoning_effort: true,
+            max_completion_tokens: true,
+        },
     }
 }
 
-/// Reads through the HTTP request line without assuming one TCP read contains
-/// it.
-fn read_request_line(socket: &mut std::net::TcpStream) -> String {
-    use std::io::Read as _;
-
-    let mut bytes = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !bytes.ends_with(b"\r\n") {
-        assert!(
-            bytes.len() < 8 * 1024,
-            "fixture request line must remain bounded"
-        );
-        socket.read_exact(&mut byte).expect("read request line");
-        bytes.push(byte[0]);
-    }
-    String::from_utf8(bytes).expect("ASCII HTTP request line")
+struct TestProvider {
+    base_url: String,
+    api_key: String,
+    models: Vec<AttemptModel>,
+    max_output_tokens: u32,
+    extra_body: BTreeMap<String, serde_json::Value>,
+    compat: AttemptCompat,
 }
 
 #[test]
@@ -114,31 +98,8 @@ fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
 
     assert!(debug_provider_request_dir_in(&state_dir, session_id, false).is_none());
 }
-
-/// Ensures provider-wide and model-local model tags are both published once so
-/// harness policy can reason about OpenAI-compatible model capabilities.
-#[test]
-fn models_for_provider_unions_provider_and_model_tags() {
-    let mut provider = provider();
-    provider.tags = vec![ModelTag::new("tools:function-json")];
-    provider.models[0].tags = vec![
-        ModelTag::new("tools:function-json"),
-        ModelTag::new("shell:custom"),
-    ];
-
-    let models = models_for_provider(&ProviderName::new("openai"), &provider);
-
-    assert_eq!(
-        models[0].tags,
-        vec![
-            ModelTag::new("tools:function-json"),
-            ModelTag::new("shell:custom")
-        ]
-    );
-}
-
-fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {
-    ResolvedProvider {
+fn resolved_provider(provider: &TestProvider) -> AttemptConfig {
+    AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
@@ -146,157 +107,6 @@ fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {
         compat: provider.compat,
     }
 }
-
-/// Ensures the production reqwest transport consumes an actual local HTTP/SSE
-/// response and returns a successful one-attempt outcome.
-#[test]
-fn reqwest_transport_streams_local_success_response() {
-    use std::io::{Read as _, Write as _};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
-    let address = listener.local_addr().expect("server address");
-    let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().expect("accept request");
-        let mut request = [0_u8; 8192];
-        let _ = socket.read(&mut request).expect("read request");
-        let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},",
-            "\"finish_reason\":\"stop\"}]}\n\n",
-            "data: [DONE]\n\n"
-        );
-        write!(
-            socket,
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .expect("write response");
-    });
-    let mut configured = provider();
-    configured.base_url = format!("http://{address}");
-    let model = configured.models[0].clone();
-    let prompt = prompt();
-    let mut bytes = Vec::new();
-    let mut writer = PeerOutputWriter::new(&mut bytes);
-    let outcome = run_prompt_attempt_for_provider(
-        &prompt.agent_prompt_id,
-        &prompt,
-        &configured,
-        &model,
-        false,
-        &mut writer,
-        &mut || false,
-        &tau_provider::OutboundNetworkPolicy::from_environment(
-            std::collections::BTreeMap::new(),
-            None,
-        ),
-    );
-    let PromptAttemptOutcome::Finished(finished) = outcome else {
-        panic!("local success must finish");
-    };
-    assert_eq!(finished.stop_reason, ProviderStopReason::EndTurn);
-    assert!(!finished.output_items.is_empty());
-    server.join().expect("server join");
-}
-
-/// Ensures both generic Chat Completions and the OpenRouter compatibility route
-/// turn a real local 429 response into the same scheduler-owned throttle retry.
-#[test]
-fn local_http_throttle_contract_covers_generic_and_openrouter_routes() {
-    use std::io::Write as _;
-
-    let model = provider().models[0].clone();
-    let openrouter = crate::openrouter::OpenRouterProfile {
-        api_key: "fixture-openrouter-key".to_owned(),
-        models: vec![model.clone()],
-    }
-    .to_chat_completions();
-    for mut configured in [provider(), openrouter] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
-        let address = listener.local_addr().expect("server address");
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept request");
-            assert!(
-                read_request_line(&mut socket).contains("/chat/completions"),
-                "attempt must traverse the production Chat Completions route"
-            );
-            let body = r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#;
-            write!(
-                socket,
-                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 37\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .expect("write response");
-        });
-        configured.base_url = format!("http://{address}");
-        let configured_model = configured.models[0].clone();
-        let prompt = prompt();
-        let mut bytes = Vec::new();
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let outcome = run_prompt_attempt_for_provider(
-            &prompt.agent_prompt_id,
-            &prompt,
-            &configured,
-            &configured_model,
-            false,
-            &mut writer,
-            &mut || false,
-            &tau_provider::OutboundNetworkPolicy::from_environment(
-                std::collections::BTreeMap::new(),
-                None,
-            ),
-        );
-        let PromptAttemptOutcome::Retry(decision) = outcome else {
-            panic!("canonical local 429 must remain scheduler-owned");
-        };
-        assert_eq!(decision.class, RetryClass::Throttle);
-        assert_eq!(decision.retry_after, Some(Duration::from_secs(37)));
-        server.join().expect("server join");
-    }
-}
-
-/// Ensures Chat Completions streaming updates emit append deltas rather than
-/// full accumulated assistant/reasoning snapshots.
-#[test]
-fn stream_delta_emitter_emits_append_deltas() {
-    let mut state = StreamState::new();
-    let mut emitter = StreamDeltaEmitter::default();
-
-    state
-        .append_assistant_text_delta("hel")
-        .expect("stream event should apply");
-    state
-        .append_reasoning_delta("think")
-        .expect("stream event should apply");
-    assert_eq!(
-        emitter.deltas(&state),
-        vec![
-            tau_proto::ProviderResponseTextDelta::Message {
-                output_index: 0,
-                text: "hel".to_owned(),
-                phase: None,
-            },
-            tau_proto::ProviderResponseTextDelta::ReasoningText {
-                output_index: 1,
-                kind: tau_proto::ReasoningTextKind::Full,
-                text: "think".to_owned(),
-            },
-        ]
-    );
-
-    state
-        .append_assistant_text_delta("lo")
-        .expect("stream event should apply");
-    assert_eq!(
-        emitter.deltas(&state),
-        vec![tau_proto::ProviderResponseTextDelta::Message {
-            output_index: 2,
-            text: "lo".to_owned(),
-            phase: None,
-        }]
-    );
-}
-
 /// Ensures streamed Chat Completions tool-call arguments contribute only
 /// content-free bytes to provider-owned response stats.
 #[test]
@@ -451,15 +261,13 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
         configured.base_url = format!("http://{address}/v1");
         let model = configured.models[0].clone();
         let prompt = prompt();
-        let mut bytes = Vec::new();
-        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
-        let outcome = run_prompt_attempt_for_provider(
-            &"ap-cancel".into(),
+        let resolved = resolved_provider(&configured);
+        let outcome = run_attempt(
             &prompt,
-            &configured,
+            &resolved,
             &model,
             false,
-            &mut writer,
+            &mut |_| {},
             &mut || attempt_canceled.load(std::sync::atomic::Ordering::SeqCst),
             &tau_provider::OutboundNetworkPolicy::from_environment(
                 std::collections::BTreeMap::new(),
@@ -476,7 +284,7 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
         result_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("canceled reqwest attempt stayed blocked"),
-        PromptAttemptOutcome::Canceled
+        AttemptOutcome::Canceled { .. }
     ));
     dropped_rx
         .recv_timeout(Duration::from_secs(2))
@@ -553,512 +361,6 @@ fn stream_idle_progress_requires_data_event() {
         "data: {}".to_owned(),
     ]));
 }
-
-/// Ensures the provider emission boundary does not suppress public stats-only
-/// updates that have no displayable text deltas.
-#[test]
-fn stream_update_emits_response_stats_without_text_deltas() {
-    let mut state = StreamState::new();
-    state
-        .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
-        .expect("argument delta");
-    let mut bytes = Vec::new();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut delta_emitter = StreamDeltaEmitter::default();
-        emit_stream_update(
-            &AgentPromptId::from("sp-tool-args"),
-            &prompt(),
-            &state,
-            &mut delta_emitter,
-            ProviderResponseStats {
-                current: tau_proto::ProviderResponseStatsSample {
-                    response_bytes_received: state.response_bytes_received(),
-                    elapsed_micros: 1_000_000,
-                },
-                previous: tau_proto::ProviderResponseStatsSample::default(),
-            },
-            &mut writer,
-        );
-    }
-
-    let frames = decode_frames(&bytes);
-    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
-        panic!("expected provider response update frame: {frames:?}");
-    };
-    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
-        panic!("expected provider response update: {:?}", emit.event);
-    };
-    assert!(update.deltas.is_empty());
-    assert_eq!(
-        update
-            .response_stats
-            .as_ref()
-            .map(|stats| stats.current.response_bytes_received),
-        Some("{\"cmd\":\"ls\"}".len() as u64),
-    );
-}
-
-/// Ensures Chat Completions progress frames publish the first streamed chunk
-/// promptly, then follow provider-prompt cadence instead of emitting once per
-/// upstream chunk or byte change.
-#[test]
-fn response_update_emitter_rate_limits_non_terminal_updates() {
-    let prompt = prompt();
-    let agent_prompt_id = AgentPromptId::from("sp-rate-limit");
-    let mut state = StreamState::new();
-    let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
-
-        state
-            .append_assistant_text_delta("hel")
-            .expect("first text delta");
-        emitter.emit_at(&agent_prompt_id, &prompt, &state, &mut writer, start, false);
-        state
-            .append_assistant_text_delta("lo")
-            .expect("second text delta");
-        state
-            .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
-            .expect("tool argument delta");
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
-            false,
-        );
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
-            false,
-        );
-    }
-
-    let updates: Vec<_> = decode_frames(&bytes)
-        .into_iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderResponseUpdated(update) => Some(update),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
-    assert_eq!(
-        updates[0].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "hel".to_owned(),
-            phase: None,
-        },]
-    );
-    assert_eq!(
-        updates[0].response_stats,
-        Some(ProviderResponseStats {
-            current: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: "hel".len() as u64,
-                elapsed_micros: 0,
-            },
-            previous: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 0,
-            },
-        })
-    );
-    assert_eq!(
-        updates[1].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "lo".to_owned(),
-            phase: None,
-        },]
-    );
-    assert_eq!(
-        updates[1].response_stats,
-        Some(ProviderResponseStats {
-            current: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: ("hello".len() + "{\"cmd\":\"ls\"}".len()) as u64,
-                elapsed_micros: 1_000_000,
-            },
-            previous: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: "hel".len() as u64,
-                elapsed_micros: 0,
-            },
-        })
-    );
-}
-
-/// Ensures due provider response samples are emitted even when no bytes
-/// changed, so the last emitted sample remains the `previous` point for
-/// stateless UI interval-rate calculations.
-#[test]
-fn response_update_emitter_emits_due_stats_only_sample() {
-    let prompt = prompt();
-    let agent_prompt_id = AgentPromptId::from("sp-stats-only");
-    let state = StreamState::new();
-    let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
-            false,
-        );
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
-            false,
-        );
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL * 2,
-            false,
-        );
-    }
-
-    let updates: Vec<_> = decode_frames(&bytes)
-        .into_iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderResponseUpdated(update) => Some(update),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
-    assert!(updates.iter().all(|update| update.deltas.is_empty()));
-    assert_eq!(
-        updates[0].response_stats,
-        Some(ProviderResponseStats {
-            current: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 1_000_000,
-            },
-            previous: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 0,
-            },
-        })
-    );
-    assert_eq!(
-        updates[1].response_stats,
-        Some(ProviderResponseStats {
-            current: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 2_000_000,
-            },
-            previous: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 1_000_000,
-            },
-        })
-    );
-}
-
-/// Ensures a due zero-byte idle sample does not consume the first non-empty
-/// bypass for streamed output, while later non-terminal bytes still obey the
-/// one-second cadence.
-#[test]
-fn response_update_emitter_emits_first_bytes_after_idle_sample_promptly() {
-    let prompt = prompt();
-    let agent_prompt_id = AgentPromptId::from("sp-first-bytes-after-idle");
-    let mut state = StreamState::new();
-    let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
-            false,
-        );
-        state
-            .append_assistant_text_delta("hi")
-            .expect("first text delta");
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
-            false,
-        );
-        state
-            .append_assistant_text_delta("!")
-            .expect("second text delta");
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 4,
-            false,
-        );
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
-                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
-            false,
-        );
-    }
-
-    let updates: Vec<_> = decode_frames(&bytes)
-        .into_iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderResponseUpdated(update) => Some(update),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(updates.len(), 3, "updates: {updates:#?}");
-    assert!(updates[0].deltas.is_empty());
-    assert_eq!(
-        updates[1].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "hi".to_owned(),
-            phase: None,
-        }]
-    );
-    assert_eq!(
-        updates[1].response_stats,
-        Some(ProviderResponseStats {
-            current: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: "hi".len() as u64,
-                elapsed_micros: 1_500_000,
-            },
-            previous: tau_proto::ProviderResponseStatsSample {
-                response_bytes_received: 0,
-                elapsed_micros: 1_000_000,
-            },
-        })
-    );
-    assert_eq!(
-        updates[2].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "!".to_owned(),
-            phase: None,
-        }]
-    );
-}
-
-/// Ensures the first non-empty progress bypass applies to stats-only tool
-/// argument bytes, not just visible assistant text.
-#[test]
-fn response_update_emitter_emits_first_stats_only_sample_promptly() {
-    let prompt = prompt();
-    let agent_prompt_id = AgentPromptId::from("sp-first-semantic-output");
-    let mut state = StreamState::new();
-    let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
-        state
-            .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
-            .expect("tool argument delta");
-        emitter.emit_at(&agent_prompt_id, &prompt, &state, &mut writer, start, false);
-    }
-
-    let updates: Vec<_> = decode_frames(&bytes)
-        .into_iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderResponseUpdated(update) => Some(update),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
-    assert!(updates[0].deltas.is_empty());
-    assert_eq!(
-        updates[0]
-            .response_stats
-            .as_ref()
-            .expect("stats-only update should carry provider stats")
-            .current
-            .response_bytes_received,
-        "{\"cmd\":\"ls\"}".len() as u64
-    );
-}
-
-/// Ensures a terminal flush can publish the final suffix immediately before
-/// `provider.response_finished`, without losing text suppressed by the
-/// non-terminal one-second cadence after the first streamed chunk.
-#[test]
-fn response_update_emitter_terminal_flush_emits_batched_suffix() {
-    let prompt = prompt();
-    let agent_prompt_id = AgentPromptId::from("sp-terminal-flush");
-    let mut state = StreamState::new();
-    let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
-        state
-            .append_assistant_text_delta("hel")
-            .expect("first text delta");
-        emitter.emit_at(&agent_prompt_id, &prompt, &state, &mut writer, start, false);
-        state
-            .append_assistant_text_delta("lo")
-            .expect("second text delta");
-        emitter.emit_at(
-            &agent_prompt_id,
-            &prompt,
-            &state,
-            &mut writer,
-            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
-            true,
-        );
-    }
-
-    let updates: Vec<_> = decode_frames(&bytes)
-        .into_iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderResponseUpdated(update) => Some(update),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
-    assert_eq!(
-        updates[0].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "hel".to_owned(),
-            phase: None,
-        }]
-    );
-    assert_eq!(
-        updates[0]
-            .response_stats
-            .as_ref()
-            .expect("initial update should carry provider stats")
-            .current
-            .response_bytes_received,
-        "hel".len() as u64
-    );
-    assert_eq!(
-        updates[1].deltas,
-        vec![ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "lo".to_owned(),
-            phase: None,
-        }]
-    );
-    assert_eq!(
-        updates[1]
-            .response_stats
-            .expect("terminal flush should carry provider stats")
-            .current
-            .response_bytes_received,
-        "hello".len() as u64
-    );
-}
-
-/// Ensures rare provider corrections do not produce corrupt suffix deltas; the
-/// final complete response is responsible for correcting the UI.
-#[test]
-fn stream_delta_emitter_drops_non_prefix_corrections() {
-    let mut state = StreamState::new();
-    let mut emitter = StreamDeltaEmitter::default();
-
-    state
-        .append_assistant_text_delta("abcd")
-        .expect("stream event should apply");
-    assert_eq!(
-        emitter.deltas(&state),
-        vec![tau_proto::ProviderResponseTextDelta::Message {
-            output_index: 0,
-            text: "abcd".to_owned(),
-            phase: None,
-        }]
-    );
-
-    let OutputItemAccumulator::Message(text) = &mut state.output_items[0] else {
-        panic!("expected message output item");
-    };
-    *text = "wxyz12".to_owned();
-
-    assert!(
-        emitter.deltas(&state).is_empty(),
-        "non-prefix rewrite must not emit a misleading suffix"
-    );
-}
-
-/// Empty-response retry diagnostics are provider status text, not assistant
-/// deltas, so they must not pollute live assistant accumulation.
-#[test]
-fn empty_response_retry_emits_status_not_message_delta() {
-    let mut bytes = Vec::new();
-    {
-        let mut writer = PeerOutputWriter::new(&mut bytes);
-        emit_empty_response_retry_update(
-            &AgentPromptId::from("sp-retry"),
-            &prompt(),
-            1,
-            &mut writer,
-        );
-    }
-
-    let frames = decode_frames(&bytes);
-    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
-        panic!("expected emitted retry update frame: {frames:?}");
-    };
-    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
-        panic!("expected provider response update: {:?}", emit.event);
-    };
-    assert!(update.deltas.is_empty());
-    assert!(matches!(
-        update.status.as_ref(),
-        Some(tau_proto::ProviderResponseStatusUpdate {
-            text,
-            clear_response: true,
-            retry: None,
-        }) if text.contains("provider returned an empty response")
-    ));
-}
-
 fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "ap-test".into(),
@@ -1116,29 +418,36 @@ fn chat_request_rejects_custom_tool_definition() {
     ));
 }
 
+/// Ensures request emission depends only on wire compatibility and tool
+/// presence: both booleans are independently represented in the 2x2 matrix.
 #[test]
-fn publishes_configured_models_for_registered_provider() {
-    // Built-in provider profiles derive the Tau provider namespace from the
-    // profile filename; the Chat Completions backend only turns one registered
-    // profile into model publication records.
-    let models = models_for_provider(&ProviderName::new("openai"), &provider());
-
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].id.to_string(), "openai/gpt-4o");
-    assert!(!models[0].supports_compaction);
+fn parallel_tool_request_field_follows_compatibility_and_tool_presence() {
+    for (compatibility, has_tools, expected) in [
+        (false, false, None),
+        (false, true, None),
+        (true, false, None),
+        (true, true, Some(true)),
+    ] {
+        let mut provider = provider();
+        provider.compat.parallel_tool_calls = compatibility;
+        let mut created = prompt();
+        if has_tools {
+            created.tools.push(tau_proto::ToolDefinition {
+                name: tau_proto::ToolName::new("lookup"),
+                model_visible_name: None,
+                description: Some("lookup".to_owned()),
+                parameters: Some(serde_json::json!({"type": "object"})),
+                format: None,
+                tool_type: ToolType::Function,
+            });
+        }
+        let request = build_request(&resolved_provider(&provider), &provider.models[0], &created);
+        assert_eq!(
+            request.parallel_tool_calls, expected,
+            "compatibility={compatibility}, has_tools={has_tools}"
+        );
+    }
 }
-
-#[test]
-fn provider_with_reasoning_effort_publishes_effort_levels() {
-    // Role effort selection is clamped to provider-advertised levels. OpenAI
-    // compatible profiles that opt into reasoning_effort must publish the
-    // corresponding choices.
-    let models = models_for_provider(&ProviderName::new("openai"), &provider());
-
-    assert!(models[0].efforts.contains(&tau_proto::Effort::High));
-    assert!(models[0].efforts.contains(&tau_proto::Effort::Off));
-}
-
 #[test]
 fn tool_result_text_uses_structured_status_headers() {
     // Chat Completions and Responses API providers should expose identical
@@ -1420,20 +729,6 @@ fn think_tags_are_persisted_as_reasoning_content() {
         ContentPart::Text { text } if text == "visible"
     ));
 }
-
-#[test]
-fn provider_config_rejects_unknown_fields() {
-    // Chat Completions profiles are user-authored provider config. Unknown
-    // fields should fail fast instead of silently disabling an intended setting.
-    let error = serde_json::from_value::<ChatCompletionsProvider>(serde_json::json!({
-        "base_url": "https://api.openai.com/v1",
-        "models": [{ "id": "gpt-4o", "extra": true }],
-    }))
-    .expect_err("model entry should reject unknown fields");
-
-    assert!(error.to_string().contains("unknown field"), "got: {error}");
-}
-
 #[test]
 fn chat_request_sets_default_max_tokens_for_generic_providers() {
     // llama.cpp and other local Chat Completions servers can default to a tiny
@@ -1486,24 +781,55 @@ fn chat_request_uses_max_completion_tokens_when_enabled() {
 }
 
 #[test]
-fn extra_body_output_token_cap_overrides_automatic_cap() {
-    // Provider profiles can still use non-standard caps or deliberately lower
-    // limits through extra_body. Avoid serializing a duplicate max token field
-    // when the profile already owns either Chat Completions cap spelling.
+fn extra_body_rejects_every_reserved_request_member() {
+    // A flattened duplicate would make request meaning serializer-dependent.
+    // Reject reserved keys before any provider dispatch.
+    for field in [
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "reasoning_effort",
+        "max_tokens",
+        "max_completion_tokens",
+    ] {
+        let mut provider = provider();
+        provider
+            .extra_body
+            .insert(field.to_owned(), serde_json::json!("collision"));
+        let Err(error) = try_build_request(
+            &resolved_provider(&provider),
+            &provider.models[0],
+            &prompt(),
+        ) else {
+            panic!("reserved extra_body member {field} must be rejected");
+        };
+        assert!(matches!(error, LlmError::ExtraBodyCollision(actual) if actual == field));
+    }
+}
+
+/// Ensures genuinely provider-specific request members still pass through
+/// unchanged after reserved-member validation.
+#[test]
+fn extra_body_preserves_non_conflicting_member() {
     let mut provider = provider();
-    provider.compat.max_completion_tokens = false;
-    provider
-        .extra_body
-        .insert("max_tokens".to_owned(), serde_json::json!(128));
+    provider.extra_body.insert(
+        "chat_template_kwargs".to_owned(),
+        serde_json::json!({"enable_thinking": true}),
+    );
     let request = build_request(
         &resolved_provider(&provider),
         &provider.models[0],
         &prompt(),
     );
-    let json = serde_json::to_value(request).expect("request json");
-
-    assert_eq!(json["max_tokens"], 128);
-    assert!(json.get("max_completion_tokens").is_none());
+    assert_eq!(
+        request.extra_body["chat_template_kwargs"],
+        serde_json::json!({"enable_thinking": true})
+    );
 }
 
 #[test]
@@ -1633,6 +959,33 @@ fn repeated_tool_argument_delta_aborts_stream_event() {
 }
 
 #[test]
+fn accepted_content_preserves_progress_when_later_tool_delta_repeats() {
+    let mut state = StreamState::new();
+    let mut observed_progress = SemanticProgress::None;
+    let result = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "ok",
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "shell",
+                            "arguments": "_clone".repeat(180)
+                        }
+                    }]
+                }
+            }]
+        }),
+        &mut |state| observed_progress = state.semantic_progress,
+    );
+
+    assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
+    assert_eq!(observed_progress, SemanticProgress::Parsed);
+}
+
+#[test]
 fn repeated_reasoning_delta_aborts_stream_event() {
     // Ensures Chat Completions catches tight reasoning loops independently from
     // assistant text and before accepting the reasoning suffix.
@@ -1650,55 +1003,6 @@ fn repeated_reasoning_delta_aborts_stream_event() {
     assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
     assert!(state.output_items().is_empty());
 }
-
-#[test]
-fn repetition_error_finishes_with_clear_response_contract() {
-    // The Chat Completions provider must clear transient output and then finish
-    // with an empty repetition-detected response instead of retrying or shipping
-    // partial model text.
-    let prompt = prompt();
-    let repetition = tau_provider::StreamRepetition {
-        key: tau_provider::StreamRepetitionKey::AssistantText { output_index: 0 },
-        mode: tau_provider::RepetitionMode::Fragment,
-        snippet: ".".to_owned(),
-    };
-    let mut bytes = Vec::new();
-    {
-        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
-        emit_repetition_detected_update(&"ap-test".into(), &prompt, &repetition, &mut writer);
-    }
-    let frames = decode_frames(&bytes);
-    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
-        panic!("expected emitted repetition update frame: {frames:?}");
-    };
-    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
-        panic!("expected provider response update: {:?}", emit.event);
-    };
-    assert!(matches!(
-        &update.status,
-        Some(tau_proto::ProviderResponseStatusUpdate {
-            clear_response: true,
-            text,
-            ..
-        }) if text.contains("repetition detected")
-    ));
-
-    let finished = finish_error(
-        &"ap-test".into(),
-        &prompt,
-        &ResolvedProvider {
-            base_url: "https://example.invalid".to_owned(),
-            api_key: String::new(),
-            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            extra_body: BTreeMap::new(),
-            compat: ChatCompletionsCompat::default(),
-        },
-        LlmError::RepetitionDetected(repetition),
-    );
-    assert_eq!(finished.stop_reason, ProviderStopReason::RepetitionDetected);
-    assert!(finished.output_items.is_empty());
-    assert!(finished.error.as_deref().unwrap_or_default().len() <= 520);
-}
 /// OpenAI and OpenRouter canonical context errors are typed and terminal,
 /// independent of an outer scheduler's retry budget.
 #[test]
@@ -1712,6 +1016,24 @@ fn canonical_context_error_bypasses_retry_scheduler() {
         error.failure_kind(),
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+}
+
+/// Ensures bounded raw HTTP bodies remain private classification/debug input
+/// and never cross the typed attempt facade into a public final error.
+#[test]
+fn terminal_http_failure_redacts_provider_body() {
+    let secret = "SENTINEL_PROVIDER_BODY_SECRET";
+    let error = LlmError::HttpStatus(400, format!(r#"{{"error":{{"message":"{secret}"}}}}"#));
+    let AttemptOutcome::Terminal(failure) = finish_attempt(Err(error), SemanticProgress::None)
+    else {
+        panic!("deterministic HTTP 400 must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert!(!failure.message.contains(secret));
+    assert_eq!(failure.message, "LLM error: provider returned HTTP 400");
 }
 
 /// Retry ownership remains unchanged for transient provider throttling.
@@ -1741,4 +1063,206 @@ fn deterministic_status_transient_override_uses_only_error_envelope() {
         http_failure_kind(400, echoed),
         Some(tau_proto::ProviderFailureKind::RequestRejected)
     );
+}
+
+/// Ensures streamed provider failures remain typed backend failures and can
+/// never be converted into assistant transcript text.
+#[test]
+fn streamed_context_error_is_typed_terminal_without_assistant_output() {
+    let mut state = StreamState::new();
+    let error = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "error": {
+                "code": 400,
+                "metadata": {"error_type": "context_length_exceeded"},
+                "message": "untrusted provider prose"
+            }
+        }),
+        &mut |_| {},
+    )
+    .expect_err("stream error must stop parsing");
+
+    assert!(state.output_items().is_empty());
+    assert_eq!(error.to_string(), "provider returned a streamed error");
+    let AttemptOutcome::Terminal(failure) = finish_attempt(Err(error), SemanticProgress::None)
+    else {
+        panic!("context stream error must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// Ensures a typed transient stream code retains scheduler classification while
+/// provider-authored prose remains outside the structured outcome.
+#[test]
+fn streamed_rate_limit_error_is_typed_retryable() {
+    let mut state = StreamState::new();
+    let error = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "error": {
+                "code": 429,
+                "metadata": {"error_type": "provider_error"},
+                "message": "secret-bearing arbitrary text"
+            }
+        }),
+        &mut |_| {},
+    )
+    .expect_err("stream error must stop parsing");
+
+    assert!(state.output_items().is_empty());
+    assert!(!error.to_string().contains("secret-bearing"));
+    let AttemptOutcome::Retryable { decision, progress } =
+        finish_attempt(Err(error), SemanticProgress::Parsed)
+    else {
+        panic!("numeric streamed 429 must be retryable");
+    };
+    assert_eq!(decision.class, RetryClass::Throttle);
+    assert_eq!(progress, SemanticProgress::Parsed);
+}
+
+#[test]
+fn malformed_non_null_stream_error_fails_closed_before_choices() {
+    for malformed in [
+        serde_json::json!("fatal"),
+        serde_json::json!(500),
+        serde_json::json!(["fatal"]),
+    ] {
+        let mut state = StreamState::new();
+        let result = apply_event(
+            &mut state,
+            &serde_json::json!({
+                "error": malformed,
+                "choices": [{"delta": {"content": "must-not-commit"}}]
+            }),
+            &mut |_| {},
+        );
+        assert!(matches!(result, Err(LlmError::StreamError(_))));
+        assert!(state.output_items().is_empty());
+    }
+}
+
+/// Ensures OpenRouter numeric overload codes retain their closed typed
+/// scheduler category rather than degrading to an unknown retry.
+#[test]
+fn streamed_numeric_overload_is_typed_retryable() {
+    for code in [500, 503, 599] {
+        let error = classify_stream_error(
+            serde_json::json!({"code": code, "message": "ignored"})
+                .as_object()
+                .expect("error object"),
+        );
+        assert_eq!(
+            error.retry.expect("retryable overload").class,
+            RetryClass::Overload
+        );
+    }
+}
+
+/// Ensures nullable optional error members on ordinary stream chunks are not
+/// mistaken for provider failures.
+#[test]
+fn null_stream_error_is_ignored() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "error": null,
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]
+        }),
+        &mut |_| {},
+    )
+    .expect("nullable error is not a failure");
+    assert_eq!(state.output_items(), vec![assistant_text_item("ok")]);
+}
+
+/// Ensures incomplete tool slots retain their backend index so later metadata
+/// cannot shift and duplicate already-sampled assistant text.
+#[test]
+fn progress_materialization_preserves_incomplete_tool_slot_indices() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "function": {"arguments": "{}"}
+            }]}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("partial tool");
+    apply_event(
+        &mut state,
+        &serde_json::json!({"choices": [{"delta": {"content": "hello"}}]}),
+        &mut |_| {},
+    )
+    .expect("interleaved text");
+    let before = state.indexed_output_items();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].output_index, 1);
+
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "function": {"name": "lookup"}
+            }]}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("late tool name");
+    let after = state.indexed_output_items();
+    assert_eq!(
+        after
+            .iter()
+            .map(|output| output.output_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+/// Ensures semantic tracking at chunk cadence is constant-time and does not
+/// materialize/reparse the growing output until the extension sampler asks.
+#[test]
+fn semantic_progress_checks_do_not_materialize_growing_output() {
+    OUTPUT_MATERIALIZATIONS.with(|count| count.set(0));
+    let mut state = StreamState::new();
+    for index in 0..1_000 {
+        state
+            .append_tool_arguments_delta(0, &format!("{index},"))
+            .expect("tool argument delta");
+        let progress = AttemptProgress { state: &state };
+        assert_eq!(progress.semantic_progress(), SemanticProgress::Parsed);
+        let _ = progress.response_bytes_received();
+    }
+    assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
+    let _ = AttemptProgress { state: &state }.materialize_output();
+    assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 1);
+}
+
+/// Ensures buffered think-tag prefixes and incomplete tool metadata count as
+/// semantic progress even before either can render as a complete output item.
+#[test]
+fn partial_buffer_and_tool_metadata_are_semantic_progress() {
+    let mut content = StreamState::new();
+    append_content_delta(&mut content, "<thi").expect("partial think tag");
+    assert_eq!(content.semantic_progress, SemanticProgress::Parsed);
+    assert!(content.output_items().is_empty());
+
+    let mut tool = StreamState::new();
+    apply_event(
+        &mut tool,
+        &serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call-only", "function": {}
+            }]}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("partial tool metadata");
+    assert_eq!(tool.semantic_progress, SemanticProgress::Parsed);
+    assert!(tool.output_items().is_empty());
 }

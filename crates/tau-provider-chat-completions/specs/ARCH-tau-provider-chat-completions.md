@@ -2,9 +2,11 @@
 
 Provider output is constrained by [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 
-This crate contains OpenAI-compatible Chat Completions request construction,
-stream parsing, provider-model publication helpers, and replay conversion shared
-by built-in Chat Completions and OpenRouter-style profiles.
+This crate contains only the OpenAI-compatible Chat Completions wire adapter:
+request construction, HTTP/SSE transport, stream parsing, accumulation,
+classification, and replay conversion. Serialized profiles, OpenRouter
+discovery, model publication, public response sampling, and harness event writes
+belong to `tau-ext-provider-builtin`.
 
 ## Function-call argument replay identity
 
@@ -25,10 +27,10 @@ bytes received by the provider transport before semantic parsing; they do not
 carry provider content and are not transcript data.
 
 Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
-protocol updates are sampled. The provider response sampler starts when the
-backend request is dispatched. Received stream data advances in-memory
+protocol updates are sampled. The extension response sampler starts when the
+finite backend attempt begins. Received stream data advances backend-owned,
 prompt-local response byte counters before semantic event handling, while parsed
-chunks update pending visible/non-visible deltas. The rate-limited emitter writes
+chunks update the typed progress view. The extension's rate-limited emitter writes
 the first non-empty `provider.response_updated` sample as soon as streamed output
 is observed, then writes later non-terminal samples only on one-second response
 deadlines; later byte changes never bypass that cadence. Each public
@@ -106,10 +108,11 @@ boundary.
 Providers must not copy raw streamed text, reasoning, or function-call argument
 chunks into status text, logs, notices, or UI-only diagnostics. Provider response
 stats are public, content-free metadata on transient `provider.response_updated`
-events: providers own the prompt-local byte counter, may emit the first non-empty
-previous/current sample promptly, emit later non-terminal samples at no more than
-1Hz, and may emit a final flush. The harness validates ownership and broadcasts
-the stats unchanged. Stats must contain only byte counts, elapsed timing, and
+events: the backend owns the prompt-local byte counter and the extension owns
+sampling and event writes. The extension may emit the first non-empty
+previous/current sample promptly, emits later non-terminal samples at no more
+than 1Hz, and may emit a final flush. The harness validates ownership and
+broadcasts the stats unchanged. Stats must contain only byte counts, elapsed timing, and
 routing metadata, never raw provider text, tool arguments, prompt text, or wire
 payloads. Parsed `ToolCallItem.arguments` and `raw_arguments_json` remain the
 provider/tool replay surface once the tool call is complete.

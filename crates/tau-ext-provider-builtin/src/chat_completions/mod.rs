@@ -1,0 +1,141 @@
+//! Extension-owned Chat Completions profiles, publication, sampling, and
+//! events.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use tau_proto::ModelName;
+
+/// Default context window advertised by configured compatible models.
+const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
+/// One serialized Chat Completions-compatible provider profile.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCompletionsProvider {
+    /// Base URL without `/chat/completions`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    /// Optional bearer token.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+    /// Models published under the profile namespace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ChatCompletionsModel>,
+    /// Provider-wide model tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<tau_proto::ModelTag>,
+    /// Requested output-token limit, or zero to omit.
+    #[serde(
+        default = "default_max_output_tokens",
+        skip_serializing_if = "is_default_max_output_tokens"
+    )]
+    pub max_output_tokens: u32,
+    /// Non-standard, non-conflicting request members.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_body: BTreeMap<String, serde_json::Value>,
+    /// Optional OpenAI-compatible request controls.
+    #[serde(default)]
+    pub compat: ChatCompletionsCompat,
+}
+
+/// One configured compatible model.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCompletionsModel {
+    /// Upstream wire model id.
+    pub id: ModelName,
+    /// Optional display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Published context window.
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    /// Optional model-level wire compatibility override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<ChatCompletionsCompat>,
+    /// Model-specific tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<tau_proto::ModelTag>,
+    /// Whether this model may produce multiple Function calls in one turn.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_parallel_tool_calls: bool,
+}
+
+/// Serialized OpenAI-compatible request controls.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCompletionsCompat {
+    /// Request streamed usage.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream_options: bool,
+    /// Emit `parallel_tool_calls` when tools exist.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parallel_tool_calls: bool,
+    /// Emit a stable prompt cache key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prompt_cache_key: bool,
+    /// Emit reasoning effort.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reasoning_effort: bool,
+    /// Use `max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub max_completion_tokens: bool,
+}
+
+impl Default for ChatCompletionsProvider {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            models: Vec::new(),
+            tags: Vec::new(),
+            max_output_tokens: default_max_output_tokens(),
+            extra_body: BTreeMap::new(),
+            compat: ChatCompletionsCompat::default(),
+        }
+    }
+}
+
+impl ChatCompletionsCompat {
+    /// Controls used for OpenAI-compatible public endpoints.
+    #[must_use]
+    pub const fn openai_defaults() -> Self {
+        Self {
+            stream_options: true,
+            parallel_tool_calls: true,
+            prompt_cache_key: true,
+            reasoning_effort: true,
+            max_completion_tokens: true,
+        }
+    }
+}
+
+const fn default_context_window() -> u64 {
+    DEFAULT_CONTEXT_WINDOW
+}
+const fn default_max_output_tokens() -> u32 {
+    tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS
+}
+const fn default_true() -> bool {
+    true
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
+fn is_default_max_output_tokens(value: &u32) -> bool {
+    *value == default_max_output_tokens()
+}
+
+mod attempt;
+mod openrouter;
+mod sampling;
+#[cfg(test)]
+mod tests;
+
+pub(super) use attempt::{PromptAttemptOutcome, models_for_provider, run_prompt_attempt};
+pub(super) use openrouter::fetch_openrouter_models;
+pub use openrouter::{OpenRouterDiscoveryError, OpenRouterProfile};

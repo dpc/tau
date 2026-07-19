@@ -1,4 +1,4 @@
-//! OpenRouter provider backend helpers.
+//! OpenRouter profile and bounded discovery/cache behavior.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tau_proto::ModelName;
 
-use crate::{ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider};
+use super::{ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider};
 
 const OPENROUTER_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_OPENROUTER_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -94,7 +94,7 @@ impl OpenRouterProfile {
             api_key: self.api_key.clone(),
             models: self.models.clone(),
             tags: Vec::new(),
-            max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body: BTreeMap::new(),
             compat: ChatCompletionsCompat {
                 stream_options: true,
@@ -225,6 +225,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             max_completion_tokens: true,
         }),
         tags: Vec::new(),
+        supports_parallel_tool_calls: true,
     })
 }
 

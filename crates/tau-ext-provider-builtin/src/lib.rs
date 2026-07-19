@@ -11,6 +11,7 @@
 //! `DECISION-tau-ext-provider-builtin-structured-retry-facts` and
 //! `DECISION-tau-ext-provider-builtin-durable-session-diagnostics`.
 
+mod chat_completions;
 mod oauth_refresh_rejection;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
@@ -28,6 +29,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub use chat_completions::{
+    ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider, OpenRouterDiscoveryError,
+    OpenRouterProfile,
+};
+use chat_completions::{
+    PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
+    models_for_provider as chat_models_for_provider, run_prompt_attempt,
+};
 use dialoguer::{Confirm, Input};
 use oauth_refresh_rejection::{
     LockedRefreshOutcome, OAuthRefreshRejectionCache, RefreshCredentialsError,
@@ -50,11 +59,6 @@ use tau_proto::{
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider::storage::{AuthFile, AuthFileLockResult, ProviderStore};
-use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
-use tau_provider_chat_completions::{
-    ChatCompletionsModel, ChatCompletionsProvider, PromptAttemptOutcome,
-    models_for_provider as chat_models_for_provider, run_prompt_attempt_for_provider,
-};
 use tau_provider_codex::{
     CodexRuntime, StreamUpdate, TurnAbort, TurnAbortWaker, common, responses,
 };
@@ -768,10 +772,10 @@ fn cmd_add_chat_completions() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn chat_completions_add_compat() -> tau_provider_chat_completions::ChatCompletionsCompat {
-    tau_provider_chat_completions::ChatCompletionsCompat {
+fn chat_completions_add_compat() -> ChatCompletionsCompat {
+    ChatCompletionsCompat {
         max_completion_tokens: false,
-        ..tau_provider_chat_completions::ChatCompletionsCompat::openai_defaults()
+        ..ChatCompletionsCompat::openai_defaults()
     }
 }
 
@@ -896,6 +900,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             context_window: 128_000,
             compat: None,
             tags: Vec::new(),
+            supports_parallel_tool_calls: true,
         });
     }
     if models.is_empty() {
@@ -2254,6 +2259,9 @@ fn validate_worker_output_for_commit(
     if dispatch_generation == current_generation && !input_closed && !targeted {
         return Some(*message);
     }
+    if is_intentional_partial_clear_for(message.as_ref(), agent_prompt_id) {
+        return Some(*message);
+    }
     let HarnessInputMessage::Emit(emit) = message.as_ref() else {
         return None;
     };
@@ -2269,6 +2277,22 @@ fn validate_worker_output_for_commit(
             "(cancelled by harness)",
         ),
     )))
+}
+
+fn is_intentional_partial_clear_for(
+    message: &HarnessInputMessage,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+) -> bool {
+    matches!(
+        message,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ProviderResponseUpdated(update)
+                    if update.agent_prompt_id == *agent_prompt_id
+                        && update.status.as_ref().is_some_and(|status| status.clear_response)
+            )
+    )
 }
 
 /// Validates cancellation before deriving any successful-probe release action.
@@ -4245,7 +4269,12 @@ where
             on_quota,
         ),
         PromptBackend::ChatCompletions { provider, model } => {
-            let outcome = run_prompt_attempt_for_provider(
+            let canceled_before = TurnAbort::is_aborted(retry_ctx);
+            if canceled_before {
+                finish_canceled(agent_prompt_id, prompt, writer)?;
+                return Ok(None);
+            }
+            let outcome = run_prompt_attempt(
                 agent_prompt_id,
                 prompt,
                 provider,
@@ -4256,8 +4285,14 @@ where
                 context.runtime.network(),
             );
             match outcome {
-                PromptAttemptOutcome::Finished(finished) => {
+                ChatCompletionsAttemptOutcome::Finished(finished) => {
                     if TurnAbort::is_aborted(retry_ctx) {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "request canceled; discarding tentative provider output",
+                            writer,
+                        )?;
                         finish_canceled(agent_prompt_id, prompt, writer)?;
                         return Ok(None);
                     }
@@ -4267,14 +4302,72 @@ where
                     writer.flush()?;
                     Ok(None)
                 }
-                PromptAttemptOutcome::Retry(decision) => Ok(Some(decision)),
-                PromptAttemptOutcome::Canceled => {
+                ChatCompletionsAttemptOutcome::Terminal { finished, progress } => {
+                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "provider stream ended with an error; discarding partial output",
+                            writer,
+                        )?;
+                    }
+                    writer.write_message(&HarnessInputMessage::emit(
+                        Event::ProviderResponseFinished(*finished),
+                    ))?;
+                    writer.flush()?;
+                    Ok(None)
+                }
+                ChatCompletionsAttemptOutcome::Retry { decision, progress } => {
+                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "provider stream interrupted after partial output; preparing retry",
+                            writer,
+                        )?;
+                    }
+                    Ok(Some(decision))
+                }
+                ChatCompletionsAttemptOutcome::Canceled { progress } => {
+                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "request canceled; discarding partial provider output",
+                            writer,
+                        )?;
+                    }
                     finish_canceled(agent_prompt_id, prompt, writer)?;
                     Ok(None)
                 }
             }
         }
     }
+}
+
+fn emit_chat_completions_partial_clear<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    text: &str,
+    writer: &mut PeerOutputWriter<W>,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: agent_prompt_id.clone(),
+            agent_id: prompt.agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text: text.to_owned(),
+                clear_response: true,
+                retry: None,
+            }),
+            response_stats: None,
+            originator: prompt.originator.clone(),
+        },
+    )))?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Shared immutable inputs for one ChatGPT provider prompt attempt.

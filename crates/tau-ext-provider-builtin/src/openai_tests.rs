@@ -310,7 +310,7 @@ fn model_id(provider: &str, model: &str) -> ModelId {
     ModelId::new(ProviderName::new(provider), ModelName::new(model))
 }
 
-fn prompt() -> tau_proto::AgentPromptCreated {
+pub(super) fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "sp-1".into(),
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -866,6 +866,7 @@ fn chat_model(id: &str) -> ChatCompletionsModel {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        supports_parallel_tool_calls: true,
     }
 }
 
@@ -1340,20 +1341,18 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         "generic Chat Completions base URL is material identity"
     );
 
-    let router_old = tau_provider_chat_completions::openrouter::OpenRouterProfile {
+    let router_old = crate::chat_completions::OpenRouterProfile {
         api_key: "router-old".to_owned(),
         models: vec![chat_model("route/model")],
     };
-    let router_new = tau_provider_chat_completions::openrouter::OpenRouterProfile {
+    let router_new = crate::chat_completions::OpenRouterProfile {
         api_key: "router-new".to_owned(),
         ..router_old.clone()
     };
     let router_backend =
-        |profile: &tau_provider_chat_completions::openrouter::OpenRouterProfile| {
-            PromptBackend::ChatCompletions {
-                provider: profile.to_chat_completions(),
-                model: chat_model("route/model"),
-            }
+        |profile: &crate::chat_completions::OpenRouterProfile| PromptBackend::ChatCompletions {
+            provider: profile.to_chat_completions(),
+            model: chat_model("route/model"),
         };
     assert_ne!(
         backend_profile_identity(&router_backend(&router_old)),
@@ -1516,6 +1515,27 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         cooldown_probe: None,
     })
     .expect("queue target delta");
+    tx.send(WorkerMessage::Output {
+        message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+            ProviderResponseUpdated {
+                agent_prompt_id: target.clone(),
+                agent_id: agent_id.clone(),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "discarding tentative output".to_owned(),
+                    clear_response: true,
+                    retry: None,
+                }),
+                response_stats: None,
+                originator: originator.clone(),
+            },
+        ))),
+        cancel_generation: 0,
+        agent_prompt_id: target.clone(),
+        cooldown_probe: None,
+    })
+    .expect("queue target clear");
     for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
         tx.send(WorkerMessage::Output {
             message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseFinished(
@@ -1557,11 +1577,35 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
                 input_event(message),
                 Some(Event::ProviderResponseUpdated(update))
                     if update.agent_prompt_id == target
+                        && !update.status.as_ref().is_some_and(|status| status.clear_response)
             ))
             .count(),
         0,
         "queued tentative target delta must be discarded"
     );
+    let clear_position = committed
+        .iter()
+        .position(|message| {
+            matches!(
+                input_event(message),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id == target
+                        && update.status.as_ref().is_some_and(|status| status.clear_response)
+            )
+        })
+        .expect("intentional target clear must commit");
+    let canceled_position = committed
+        .iter()
+        .position(|message| {
+            matches!(
+                input_event(message),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id == target
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            )
+        })
+        .expect("canceled final must commit");
+    assert!(clear_position < canceled_position);
     assert_eq!(
         committed
             .iter()

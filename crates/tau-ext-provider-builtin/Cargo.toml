@@ -20,6 +20,8 @@ quota-test-support = []
 
 [dependencies]
 dialoguer.workspace = true
+dirs.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true
@@ -27,6 +29,7 @@ tau-proto.workspace = true
 tau-provider.workspace = true
 tau-provider-chat-completions.workspace = true
 tau-provider-codex.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

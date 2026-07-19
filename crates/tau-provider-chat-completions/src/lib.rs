@@ -3,23 +3,16 @@
 //! Component responsibilities and provider/replay trust boundaries are
 //! documented in `ARCH-tau-provider-chat-completions`.
 
-pub mod openrouter;
-
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tau_proto::{
-    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
-    ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
-    ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseStats, ProviderResponseStatusUpdate,
-    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
-    ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice,
+    ContentPart, ContextItem, ContextRole, ModelName, OpaqueProviderItem, ProviderStopReason,
+    ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ToolCallItem, ToolChoice,
     ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 use tau_provider::retry_policy::{
@@ -28,13 +21,10 @@ use tau_provider::retry_policy::{
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
-const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 const LOG_TARGET: &str = "provider-chat-completions";
 /// Default Chat Completions output-token cap Tau sends when no
 /// provider-specific override is set.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
-const EMPTY_RESPONSE_MAX_RETRIES: usize = 10;
-const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_READ_POLL_TIMEOUT: Duration = Duration::from_secs(1);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ATTEMPT_PHASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -42,476 +32,46 @@ const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DEBUG_EVENTS: usize = 4096;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+std::thread_local! {
+    static OUTPUT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// One Chat Completions-compatible provider entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatCompletionsProvider {
-    /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+/// Resolved wire configuration for one finite Chat Completions attempt.
+#[derive(Clone)]
+pub struct AttemptConfig {
+    /// Base URL without `/chat/completions`.
     pub base_url: String,
-    /// Bearer token sent in the `Authorization` header. Empty for local or
-    /// otherwise keyless providers.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Optional bearer token.
     pub api_key: String,
-    /// Model ids to publish under this provider namespace.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<ChatCompletionsModel>,
-    /// Provider-wide model capability tags applied to every published model.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<ModelTag>,
-    /// Maximum output tokens requested from the upstream provider.
-    ///
-    /// Chat Completions servers often have small server-side defaults when the
-    /// client omits this field. Set to `0` to omit Tau's automatic cap and rely
-    /// on provider defaults or `extra_body` overrides.
-    #[serde(
-        default = "default_max_output_tokens",
-        skip_serializing_if = "is_default_max_output_tokens"
-    )]
+    /// Maximum requested output tokens, or zero to omit the cap.
     pub max_output_tokens: u32,
-    /// Extra JSON fields merged into each Chat Completions request body.
-    ///
-    /// Local and OpenAI-compatible servers use non-standard knobs for reasoning
-    /// (`chat_template_kwargs`, `reasoning`, `enable_thinking`, etc.). Keeping
-    /// this map provider-scoped lets users opt into those fields without Tau
-    /// needing a compatibility switch for every backend.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Non-standard, non-conflicting request members.
     pub extra_body: BTreeMap<String, serde_json::Value>,
-    /// Explicit provider compatibility switches.
-    #[serde(default)]
-    pub compat: ChatCompletionsCompat,
+    /// Optional OpenAI-compatible request fields supported by this route.
+    pub compat: AttemptCompat,
 }
 
-/// One model published by a Chat Completions-compatible provider.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatCompletionsModel {
-    /// Upstream model id sent in the `model` request field.
-    pub id: ModelName,
-    /// Optional UI display name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// Context window size surfaced to the harness.
-    #[serde(default = "default_context_window")]
-    pub context_window: u64,
-    /// Optional model-specific compatibility overrides.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compat: Option<ChatCompletionsCompat>,
-    /// Model-specific capability tags added to the provider-wide tags.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<ModelTag>,
-}
-
-/// Compatibility switches for OpenAI-compatible Chat Completions APIs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatCompletionsCompat {
-    /// Whether to send `stream_options: { include_usage: true }`.
-    #[serde(default, skip_serializing_if = "is_false")]
+/// Wire capabilities selected by the extension for one attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AttemptCompat {
+    /// Send `stream_options.include_usage`.
     pub stream_options: bool,
-    /// Whether to send `parallel_tool_calls` when tools are declared.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Send `parallel_tool_calls` when tools are present.
     pub parallel_tool_calls: bool,
-    /// Whether to send OpenAI's `prompt_cache_key` field.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Send an agent-derived prompt cache key.
     pub prompt_cache_key: bool,
-    /// Whether to send `reasoning_effort`.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Send the selected reasoning effort.
     pub reasoning_effort: bool,
-    /// Whether to use `max_completion_tokens` for future output caps.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Use `max_completion_tokens` rather than `max_tokens`.
     pub max_completion_tokens: bool,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-const fn default_context_window() -> u64 {
-    DEFAULT_CONTEXT_WINDOW
-}
-
-const fn default_max_output_tokens() -> u32 {
-    DEFAULT_MAX_OUTPUT_TOKENS
-}
-
-fn is_default_max_output_tokens(value: &u32) -> bool {
-    *value == DEFAULT_MAX_OUTPUT_TOKENS
-}
-
-impl Default for ChatCompletionsProvider {
-    fn default() -> Self {
-        Self {
-            base_url: String::new(),
-            api_key: String::new(),
-            models: Vec::new(),
-            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            extra_body: BTreeMap::new(),
-            tags: Vec::new(),
-            compat: ChatCompletionsCompat::default(),
-        }
-    }
-}
-
-impl ChatCompletionsCompat {
-    /// Compatibility switches for OpenAI's public Chat Completions API.
-    #[must_use]
-    pub const fn openai_defaults() -> Self {
-        Self {
-            stream_options: true,
-            parallel_tool_calls: true,
-            prompt_cache_key: true,
-            reasoning_effort: true,
-            max_completion_tokens: true,
-        }
-    }
-}
-
-fn run_prompt<W: Write>(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    mut provider: ResolvedProvider,
-    model: ChatCompletionsModel,
-    debug_provider_requests: bool,
-    writer: &mut PeerOutputWriter<W>,
-    network: &tau_provider::OutboundNetworkPolicy,
-) -> ProviderResponseFinished {
-    if let Some(model_compat) = model.compat {
-        provider.compat = model_compat;
-    }
-    let mut empty_response_retries = 0_usize;
-    loop {
-        let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
-        let result = {
-            let mut on_update = |state: &StreamState| {
-                response_update_emitter.emit_if_due(agent_prompt_id, prompt, state, writer);
-            };
-            chat_completions_stream(
-                &provider,
-                &model,
-                prompt,
-                debug_provider_requests,
-                &mut on_update,
-                &mut || false,
-                network,
-            )
-        };
-        match result {
-            Ok(state) => {
-                response_update_emitter.emit_terminal_flush(
-                    agent_prompt_id,
-                    prompt,
-                    &state,
-                    writer,
-                );
-                return finish_success(agent_prompt_id, prompt, &provider, state);
-            }
-            Err(LlmError::EmptyResponse) if empty_response_retries < EMPTY_RESPONSE_MAX_RETRIES => {
-                empty_response_retries += 1;
-                emit_empty_response_retry_update(
-                    agent_prompt_id,
-                    prompt,
-                    empty_response_retries,
-                    writer,
-                );
-            }
-            Err(error @ LlmError::RepetitionDetected(_)) => {
-                let LlmError::RepetitionDetected(repetition) = &error else {
-                    unreachable!()
-                };
-                emit_repetition_detected_update(agent_prompt_id, prompt, repetition, writer);
-                return finish_error(agent_prompt_id, prompt, &provider, error);
-            }
-            Err(error) => return finish_error(agent_prompt_id, prompt, &provider, error),
-        }
-    }
-}
-
-struct RateLimitedResponseUpdateEmitter {
-    delta_emitter: StreamDeltaEmitter,
-    started_at: Instant,
-    last_update_emitted_at: Option<Instant>,
-    last_stats_sample: tau_proto::ProviderResponseStatsSample,
-    emitted_non_empty_sample: bool,
-}
-
-impl RateLimitedResponseUpdateEmitter {
-    fn new() -> Self {
-        Self::new_at(Instant::now())
-    }
-
-    fn new_at(started_at: Instant) -> Self {
-        Self {
-            delta_emitter: StreamDeltaEmitter::default(),
-            started_at,
-            last_update_emitted_at: None,
-            last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
-            emitted_non_empty_sample: false,
-        }
-    }
-
-    fn emit_if_due<W: Write>(
-        &mut self,
-        agent_prompt_id: &AgentPromptId,
-        prompt: &tau_proto::AgentPromptCreated,
-        state: &StreamState,
-        writer: &mut PeerOutputWriter<W>,
-    ) {
-        self.emit_at(
-            agent_prompt_id,
-            prompt,
-            state,
-            writer,
-            Instant::now(),
-            false,
-        );
-    }
-
-    fn emit_terminal_flush<W: Write>(
-        &mut self,
-        agent_prompt_id: &AgentPromptId,
-        prompt: &tau_proto::AgentPromptCreated,
-        state: &StreamState,
-        writer: &mut PeerOutputWriter<W>,
-    ) {
-        self.emit_at(agent_prompt_id, prompt, state, writer, Instant::now(), true);
-    }
-
-    fn emit_at<W: Write>(
-        &mut self,
-        agent_prompt_id: &AgentPromptId,
-        prompt: &tau_proto::AgentPromptCreated,
-        state: &StreamState,
-        writer: &mut PeerOutputWriter<W>,
-        now: Instant,
-        terminal_flush: bool,
-    ) {
-        let response_stats = self.response_stats_at(state, now);
-        let first_non_empty_sample =
-            !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
-        if !terminal_flush
-            && !first_non_empty_sample
-            && self.last_update_emitted_at.map_or_else(
-                || {
-                    response_stats.current.response_bytes_received == 0
-                        && now.saturating_duration_since(self.started_at)
-                            < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-                },
-                |last| now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
-            )
-        {
-            return;
-        }
-        if emit_stream_update(
-            agent_prompt_id,
-            prompt,
-            state,
-            &mut self.delta_emitter,
-            response_stats,
-            writer,
-        ) {
-            self.last_stats_sample = response_stats.current;
-            self.last_update_emitted_at = Some(now);
-            self.emitted_non_empty_sample |= response_stats.current.response_bytes_received > 0;
-        }
-    }
-
-    fn response_stats_at(&self, state: &StreamState, now: Instant) -> ProviderResponseStats {
-        let current = tau_proto::ProviderResponseStatsSample {
-            response_bytes_received: state.response_bytes_received(),
-            elapsed_micros: now
-                .saturating_duration_since(self.started_at)
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64,
-        };
-        ProviderResponseStats {
-            current,
-            previous: self.last_stats_sample,
-        }
-    }
-}
-
-fn emit_stream_update<W: Write>(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    state: &StreamState,
-    delta_emitter: &mut StreamDeltaEmitter,
-    response_stats: ProviderResponseStats,
-    writer: &mut PeerOutputWriter<W>,
-) -> bool {
-    // Transient delta/stat emission follows `SPEC-provider-response-streaming`.
-    // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
-    // provider.response_updated is a bus/event-log event, not a per-chunk
-    // callback. After the first prompt update, progress/byte updates MUST be
-    // batched and emitted no faster than PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-    // (1s) per prompt. A byte change is NOT a reason to emit early. Only
-    // `RateLimitedResponseUpdateEmitter` may bypass this for the first non-empty
-    // progress sample and for a terminal flush immediately before the turn is
-    // closed.
-    let deltas = delta_emitter.deltas(state);
-    if deltas.is_empty() && response_stats.current == response_stats.previous {
-        return false;
-    }
-    let Ok(()) = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.clone(),
-            agent_id: prompt.agent_id.clone(),
-            deltas,
-            compaction: None,
-            status: None,
-            response_stats: Some(response_stats),
-            originator: prompt.originator.clone(),
-        },
-    ))) else {
-        return false;
-    };
-    writer.flush().is_ok()
-}
-
-fn emit_empty_response_retry_update<W: Write>(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    retry: usize,
-    writer: &mut PeerOutputWriter<W>,
-) {
-    let text = format!(
-        "provider returned an empty response; retrying ({retry}/{EMPTY_RESPONSE_MAX_RETRIES})"
-    );
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.clone(),
-            agent_id: prompt.agent_id.clone(),
-            deltas: Vec::new(),
-            compaction: None,
-            status: Some(ProviderResponseStatusUpdate {
-                text,
-                clear_response: true,
-                retry: None,
-            }),
-            response_stats: None,
-            originator: prompt.originator.clone(),
-        },
-    )));
-    let _ = writer.flush();
-}
-
-fn emit_repetition_detected_update<W: Write>(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    repetition: &tau_provider::StreamRepetition,
-    writer: &mut PeerOutputWriter<W>,
-) {
-    let text = bounded_provider_error(&format!(
-        "provider stream repetition detected; aborting response ({repetition})"
-    ));
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.clone(),
-            agent_id: prompt.agent_id.clone(),
-            deltas: Vec::new(),
-            compaction: None,
-            status: Some(ProviderResponseStatusUpdate {
-                text,
-                clear_response: true,
-                retry: None,
-            }),
-            response_stats: None,
-            originator: prompt.originator.clone(),
-        },
-    )));
-    let _ = writer.flush();
-}
-
-/// Runs one prompt against a registered Chat Completions-compatible provider
-/// profile.
-pub fn run_prompt_for_provider<W: Write>(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    provider: &ChatCompletionsProvider,
-    model: &ChatCompletionsModel,
-    debug_provider_requests: bool,
-    writer: &mut PeerOutputWriter<W>,
-    network: &tau_provider::OutboundNetworkPolicy,
-) -> ProviderResponseFinished {
-    run_prompt(
-        agent_prompt_id,
-        prompt,
-        ResolvedProvider {
-            base_url: provider.base_url.clone(),
-            api_key: provider.api_key.clone(),
-            max_output_tokens: provider.max_output_tokens,
-            extra_body: provider.extra_body.clone(),
-            compat: provider.compat,
-        },
-        model.clone(),
-        debug_provider_requests,
-        writer,
-        network,
-    )
-}
-
-#[derive(Clone)]
-struct ResolvedProvider {
-    base_url: String,
-    api_key: String,
-    max_output_tokens: u32,
-    extra_body: BTreeMap<String, serde_json::Value>,
-    compat: ChatCompletionsCompat,
-}
-
-/// Returns model publication records for one Chat Completions-compatible
-/// provider profile.
-pub fn models_for_provider(
-    provider_name: &ProviderName,
-    provider: &ChatCompletionsProvider,
-) -> Vec<ProviderModelInfo> {
-    provider
-        .models
-        .iter()
-        .map(|model| ProviderModelInfo {
-            id: ModelId::new(provider_name.clone(), model.id.clone()),
-            display_name: model.display_name.clone(),
-            tags: merged_model_tags(&provider.tags, &model.tags),
-            supported_tool_types: vec![tau_proto::ToolType::Function],
-            input_modalities: Vec::new(),
-            tool_result_modalities: Vec::new(),
-            supports_parallel_tool_calls: true,
-            default_affinity: 0,
-            context_window: model.context_window,
-            efforts: model_efforts(model.compat.unwrap_or(provider.compat)),
-            verbosities: vec![tau_proto::Verbosity::Medium],
-            thinking_summaries: vec![ThinkingSummary::Off],
-            supports_compaction: false,
-            supports_standalone_compaction: false,
-            standalone_compaction_threshold: None,
-        })
-        .collect()
-}
-
-fn merged_model_tags(provider_tags: &[ModelTag], model_tags: &[ModelTag]) -> Vec<ModelTag> {
-    let mut tags = provider_tags.to_vec();
-    for tag in model_tags {
-        if !tags.iter().any(|existing| existing == tag) {
-            tags.push(tag.clone());
-        }
-    }
-    tags
-}
-
-fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {
-    if compat.reasoning_effort {
-        vec![
-            tau_proto::Effort::Off,
-            tau_proto::Effort::Minimal,
-            tau_proto::Effort::Low,
-            tau_proto::Effort::Medium,
-            tau_proto::Effort::High,
-            tau_proto::Effort::XHigh,
-        ]
-    } else {
-        vec![tau_proto::Effort::Off]
-    }
+/// Model wire identity for one attempt.
+#[derive(Clone, Debug)]
+pub struct AttemptModel {
+    /// Upstream model id sent in the request.
+    pub id: ModelName,
 }
 
 #[derive(Debug)]
@@ -526,6 +86,14 @@ enum LlmError {
     RepetitionDetected(tau_provider::StreamRepetition),
     Canceled,
     UnsupportedToolType(ToolType),
+    ExtraBodyCollision(String),
+    StreamError(StreamFailure),
+}
+
+#[derive(Debug)]
+struct StreamFailure {
+    retry: Option<RetryDecision>,
+    failure_kind: Option<tau_proto::ProviderFailureKind>,
 }
 
 impl std::fmt::Display for LlmError {
@@ -533,8 +101,9 @@ impl std::fmt::Display for LlmError {
         match self {
             Self::EmptyResponse => write!(f, "provider returned an empty response"),
             Self::Outbound(error) => error.fmt(f),
-            Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
-            Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
+            Self::HttpStatus(code, _) | Self::HttpStatusHinted(code, _, _) => {
+                write!(f, "provider returned HTTP {code}")
+            }
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Json(error) => write!(f, "JSON error: {error}"),
             Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
@@ -542,6 +111,13 @@ impl std::fmt::Display for LlmError {
             Self::UnsupportedToolType(tool_type) => {
                 write!(f, "Chat Completions does not support {tool_type:?} tools")
             }
+            Self::ExtraBodyCollision(field) => {
+                write!(
+                    f,
+                    "extra_body conflicts with reserved request field `{field}`"
+                )
+            }
+            Self::StreamError(_) => f.write_str("provider returned a streamed error"),
         }
     }
 }
@@ -549,7 +125,11 @@ impl std::fmt::Display for LlmError {
 impl LlmError {
     fn retry_decision(&self) -> Option<RetryDecision> {
         match self {
-            Self::RepetitionDetected(_) | Self::Canceled | Self::UnsupportedToolType(_) => None,
+            Self::RepetitionDetected(_)
+            | Self::Canceled
+            | Self::UnsupportedToolType(_)
+            | Self::ExtraBodyCollision(_) => None,
+            Self::StreamError(failure) => failure.retry.clone(),
             Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
             Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::EmptyResponse | Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
@@ -561,11 +141,14 @@ impl LlmError {
     }
 
     fn failure_kind(&self) -> Option<tau_proto::ProviderFailureKind> {
-        let (Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _)) = self
-        else {
-            return None;
-        };
-        http_failure_kind(*status, body)
+        match self {
+            Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _) => {
+                http_failure_kind(*status, body)
+            }
+            Self::ExtraBodyCollision(_) => Some(tau_proto::ProviderFailureKind::RequestRejected),
+            Self::StreamError(failure) => failure.failure_kind,
+            _ => None,
+        }
     }
 }
 
@@ -641,49 +224,121 @@ fn canonical_error_identifiers(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// One fallible Chat Completions attempt for the outer logical-prompt
-/// scheduler.
-pub enum PromptAttemptOutcome {
-    /// The logical prompt reached a terminal success or proven deterministic
-    /// error.
-    Finished(Box<ProviderResponseFinished>),
-    /// The logical prompt remains pending and should be parked before another
-    /// attempt.
-    Retry(RetryDecision),
-    /// The harness canceled this logical prompt during the active attempt.
-    Canceled,
+/// Successful parsed result of one finite backend attempt.
+#[derive(Debug)]
+pub struct AttemptSuccess {
+    /// Parsed semantic output items in provider order.
+    pub output_items: Vec<ContextItem>,
+    /// Provider stop reason.
+    pub stop_reason: ProviderStopReason,
+    /// Provider token usage, when reported.
+    pub usage: Option<ProviderTokenUsage>,
+    /// Cumulative transport/semantic response bytes at completion.
+    pub response_bytes_received: u64,
+    /// Stable backend output slots used by the terminal sampler flush.
+    pub progress_items: Vec<AttemptOutputItem>,
 }
 
-/// Run exactly one provider attempt without sleeping or closing a retryable
-/// prompt.
-#[allow(clippy::too_many_arguments)] // Transitional phase-4 ownership API; transport injection is intentionally explicit.
-pub fn run_prompt_attempt_for_provider<W: Write>(
-    agent_prompt_id: &AgentPromptId,
+/// One materialized semantic item with its stable backend output index.
+#[derive(Clone, Debug)]
+pub struct AttemptOutputItem {
+    /// Backend-owned output index, including earlier incomplete slots.
+    pub output_index: u32,
+    /// Current semantic item value for this slot.
+    pub item: ContextItem,
+}
+
+/// Typed terminal backend failure.
+#[derive(Debug)]
+pub struct AttemptFailure {
+    /// Bounded safe diagnostic suitable for the final provider event.
+    pub message: String,
+    /// Durable closed failure category, when known.
+    pub failure_kind: Option<tau_proto::ProviderFailureKind>,
+    /// Stop reason distinguishing repetition from other failures.
+    pub stop_reason: ProviderStopReason,
+    /// Whether semantic model output was parsed before failure.
+    pub progress: SemanticProgress,
+}
+
+/// Semantic progress observed during a finite attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SemanticProgress {
+    /// No model-authored output was parsed.
+    #[default]
+    None,
+    /// Model-authored text, reasoning, or tool data was parsed.
+    Parsed,
+}
+
+/// Result of exactly one Chat Completions backend attempt.
+#[derive(Debug)]
+pub enum AttemptOutcome {
+    /// The provider completed successfully.
+    Completed(AttemptSuccess),
+    /// The logical prompt remains pending for extension-owned scheduling.
+    Retryable {
+        /// Structured facts for extension-owned scheduling.
+        decision: RetryDecision,
+        /// Semantic progress parsed before the failure.
+        progress: SemanticProgress,
+    },
+    /// The harness canceled the active attempt.
+    Canceled {
+        /// Semantic progress parsed before cancellation.
+        progress: SemanticProgress,
+    },
+    /// The provider deterministically rejected the request or stream.
+    Terminal(AttemptFailure),
+}
+
+/// Read-only accumulated progress exposed to the extension-owned sampler.
+pub struct AttemptProgress<'a> {
+    /// Prompt-local backend state borrowed only for the callback invocation.
+    state: &'a StreamState,
+}
+
+impl AttemptProgress<'_> {
+    /// Return the semantic output accumulated so far.
+    #[must_use]
+    pub fn materialize_output(&self) -> Vec<AttemptOutputItem> {
+        self.state.indexed_output_items()
+    }
+
+    /// Return cumulative provider response bytes.
+    #[must_use]
+    pub fn response_bytes_received(&self) -> u64 {
+        self.state.response_bytes_received()
+    }
+
+    /// Return whether any model-authored semantic bytes were parsed.
+    #[must_use]
+    pub fn semantic_progress(&self) -> SemanticProgress {
+        self.state.semantic_progress
+    }
+}
+
+/// Run exactly one finite provider attempt without event writes or retry
+/// sleeps.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attempt(
     prompt: &tau_proto::AgentPromptCreated,
-    provider: &ChatCompletionsProvider,
-    model: &ChatCompletionsModel,
+    config: &AttemptConfig,
+    model: &AttemptModel,
     debug_provider_requests: bool,
-    writer: &mut PeerOutputWriter<W>,
+    on_progress: &mut impl FnMut(AttemptProgress<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> PromptAttemptOutcome {
-    let mut resolved = ResolvedProvider {
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        max_output_tokens: provider.max_output_tokens,
-        extra_body: provider.extra_body.clone(),
-        compat: provider.compat,
-    };
-    if let Some(model_compat) = model.compat {
-        resolved.compat = model_compat;
-    }
-    let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
+) -> AttemptOutcome {
+    let mut progress = SemanticProgress::None;
     let result = {
         let mut on_update = |state: &StreamState| {
-            response_update_emitter.emit_if_due(agent_prompt_id, prompt, state, writer);
+            let snapshot = AttemptProgress { state };
+            progress = snapshot.semantic_progress();
+            on_progress(snapshot);
         };
         chat_completions_stream(
-            &resolved,
+            config,
             model,
             prompt,
             debug_provider_requests,
@@ -692,25 +347,34 @@ pub fn run_prompt_attempt_for_provider<W: Write>(
             network,
         )
     };
+    finish_attempt(result, progress)
+}
+
+fn finish_attempt(
+    result: Result<StreamState, LlmError>,
+    progress: SemanticProgress,
+) -> AttemptOutcome {
     match result {
-        Ok(state) => {
-            response_update_emitter.emit_terminal_flush(agent_prompt_id, prompt, &state, writer);
-            PromptAttemptOutcome::Finished(Box::new(finish_success(
-                agent_prompt_id,
-                prompt,
-                &resolved,
-                state,
-            )))
-        }
-        Err(LlmError::Canceled) => PromptAttemptOutcome::Canceled,
+        Ok(state) => AttemptOutcome::Completed(AttemptSuccess {
+            progress_items: state.indexed_output_items(),
+            output_items: state.output_items(),
+            stop_reason: state.stop_reason,
+            usage: state.usage(),
+            response_bytes_received: state.response_bytes_received(),
+        }),
+        Err(LlmError::Canceled) => AttemptOutcome::Canceled { progress },
         Err(error) => match error.retry_decision() {
-            Some(decision) => PromptAttemptOutcome::Retry(decision),
-            None => PromptAttemptOutcome::Finished(Box::new(finish_error(
-                agent_prompt_id,
-                prompt,
-                &resolved,
-                error,
-            ))),
+            Some(decision) => AttemptOutcome::Retryable { decision, progress },
+            None => AttemptOutcome::Terminal(AttemptFailure {
+                message: bounded_provider_error(&format!("LLM error: {error}")),
+                failure_kind: error.failure_kind(),
+                stop_reason: if matches!(error, LlmError::RepetitionDetected(_)) {
+                    ProviderStopReason::RepetitionDetected
+                } else {
+                    ProviderStopReason::Error
+                },
+                progress,
+            }),
         },
     }
 }
@@ -728,69 +392,7 @@ struct StreamState {
     stop_reason: ProviderStopReason,
     repetition_guard: StreamRepetitionGuard,
     transport_response_bytes: u64,
-}
-
-/// Tracks displayable text already emitted on transient response updates.
-#[derive(Default)]
-struct StreamDeltaEmitter {
-    /// Assistant message text already emitted per output item.
-    emitted_messages: HashMap<usize, String>,
-    /// Reasoning text already emitted per output item.
-    emitted_reasoning: HashMap<usize, String>,
-}
-
-impl StreamDeltaEmitter {
-    /// Returns only newly appended assistant/reasoning text since the last
-    /// call.
-    fn deltas(&mut self, state: &StreamState) -> Vec<ProviderResponseTextDelta> {
-        let mut deltas = Vec::new();
-        for (output_index, item) in state.output_items.iter().enumerate() {
-            match item {
-                OutputItemAccumulator::Message(text) => {
-                    if let Some(delta) =
-                        append_suffix(self.emitted_messages.entry(output_index).or_default(), text)
-                    {
-                        deltas.push(ProviderResponseTextDelta::Message {
-                            output_index: output_index as u32,
-                            text: delta,
-                            phase: None,
-                        });
-                    }
-                }
-                OutputItemAccumulator::Reasoning(text) => {
-                    if let Some(delta) = append_suffix(
-                        self.emitted_reasoning.entry(output_index).or_default(),
-                        text,
-                    ) {
-                        deltas.push(ProviderResponseTextDelta::ReasoningText {
-                            output_index: output_index as u32,
-                            kind: ReasoningTextKind::Full,
-                            text: delta,
-                        });
-                    }
-                }
-                OutputItemAccumulator::ToolCall(_) => {}
-            }
-        }
-        deltas
-    }
-}
-
-fn append_suffix(previous: &mut String, current: &str) -> Option<String> {
-    if current == previous {
-        return None;
-    }
-    if let Some(suffix) = current.strip_prefix(previous.as_str()) {
-        previous.push_str(suffix);
-        if suffix.is_empty() {
-            None
-        } else {
-            Some(suffix.to_owned())
-        }
-    } else {
-        tracing::trace!("stream text stopped being append-only; waiting for final response");
-        None
-    }
+    semantic_progress: SemanticProgress,
 }
 
 impl StreamState {
@@ -808,6 +410,7 @@ impl StreamState {
             stop_reason: ProviderStopReason::EndTurn,
             repetition_guard: StreamRepetitionGuard::new(),
             transport_response_bytes: 0,
+            semantic_progress: SemanticProgress::None,
         }
     }
 
@@ -815,6 +418,21 @@ impl StreamState {
         self.output_items
             .iter()
             .filter_map(OutputItemAccumulator::context_item)
+            .collect()
+    }
+
+    fn indexed_output_items(&self) -> Vec<AttemptOutputItem> {
+        #[cfg(test)]
+        OUTPUT_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        self.output_items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                Some(AttemptOutputItem {
+                    output_index: index.try_into().unwrap_or(u32::MAX),
+                    item: item.context_item()?,
+                })
+            })
             .collect()
     }
 
@@ -851,6 +469,7 @@ impl StreamState {
         if delta.is_empty() {
             return Ok(());
         }
+        self.semantic_progress = SemanticProgress::Parsed;
         let output_index = match self.output_items.last() {
             Some(OutputItemAccumulator::Message(_)) => self.output_items.len() - 1,
             _ => self.output_items.len(),
@@ -875,6 +494,7 @@ impl StreamState {
         if delta.is_empty() {
             return Ok(());
         }
+        self.semantic_progress = SemanticProgress::Parsed;
         let output_index = match self.output_items.last() {
             Some(OutputItemAccumulator::Reasoning(_)) => self.output_items.len() - 1,
             _ => self.output_items.len(),
@@ -900,6 +520,9 @@ impl StreamState {
         stream_index: usize,
         delta: &str,
     ) -> Result<(), LlmError> {
+        if !delta.is_empty() {
+            self.semantic_progress = SemanticProgress::Parsed;
+        }
         let output_index = *self
             .tool_call_output_indices
             .get(&stream_index)
@@ -1143,8 +766,8 @@ fn apply_chat_stream_lines(
 }
 
 fn chat_completions_stream(
-    provider: &ResolvedProvider,
-    model: &ChatCompletionsModel,
+    provider: &AttemptConfig,
+    model: &AttemptModel,
     prompt: &tau_proto::AgentPromptCreated,
     debug_provider_requests: bool,
     on_update: &mut impl FnMut(&StreamState),
@@ -1193,13 +816,13 @@ struct AsyncAttemptContext<'a> {
     /// Fully resolved Chat Completions endpoint.
     url: &'a str,
     /// Mutable-profile values resolved for this attempt.
-    provider: &'a ResolvedProvider,
+    provider: &'a AttemptConfig,
     /// Serialized request body owned by the synchronous caller.
     body: &'a str,
     /// Logical prompt used for diagnostics.
     prompt: &'a tau_proto::AgentPromptCreated,
     /// Selected model used for diagnostics.
-    model: &'a ChatCompletionsModel,
+    model: &'a AttemptModel,
     /// Whether durable-session private diagnostics are allowed.
     debug_provider_requests: bool,
 }
@@ -1374,10 +997,11 @@ struct StreamOptions {
 }
 
 fn try_build_request(
-    provider: &ResolvedProvider,
-    model: &ChatCompletionsModel,
+    provider: &AttemptConfig,
+    model: &AttemptModel,
     prompt: &tau_proto::AgentPromptCreated,
 ) -> Result<ChatRequest, LlmError> {
+    validate_extra_body(&provider.extra_body)?;
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({
@@ -1424,10 +1048,33 @@ fn try_build_request(
     })
 }
 
+fn validate_extra_body(extra_body: &BTreeMap<String, serde_json::Value>) -> Result<(), LlmError> {
+    const RESERVED: &[&str] = &[
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "reasoning_effort",
+        "max_tokens",
+        "max_completion_tokens",
+    ];
+    if let Some(field) = RESERVED
+        .iter()
+        .find(|field| extra_body.contains_key(**field))
+    {
+        return Err(LlmError::ExtraBodyCollision((*field).to_owned()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn build_request(
-    provider: &ResolvedProvider,
-    model: &ChatCompletionsModel,
+    provider: &AttemptConfig,
+    model: &AttemptModel,
     prompt: &tau_proto::AgentPromptCreated,
 ) -> ChatRequest {
     try_build_request(provider, model, prompt).expect("test request tools must be supported")
@@ -1454,7 +1101,7 @@ fn debug_provider_request_dir_in(
 
 fn debug_file_prefix(
     prompt: &tau_proto::AgentPromptCreated,
-    model: &ChatCompletionsModel,
+    model: &AttemptModel,
 ) -> serde_json::Value {
     serde_json::json!({
         "session_id": prompt.session_id,
@@ -1494,7 +1141,7 @@ fn write_debug_json(
 
 fn maybe_debug_write_provider_request(
     prompt: &tau_proto::AgentPromptCreated,
-    model: &ChatCompletionsModel,
+    model: &AttemptModel,
     debug_provider_requests: bool,
     body: &ChatRequest,
 ) {
@@ -1521,7 +1168,7 @@ fn maybe_debug_write_provider_request(
 
 fn maybe_debug_write_provider_response(
     prompt: &tau_proto::AgentPromptCreated,
-    model: &ChatCompletionsModel,
+    model: &AttemptModel,
     debug_provider_requests: bool,
     state: &StreamState,
     raw_events: &[serde_json::Value],
@@ -1557,7 +1204,7 @@ fn maybe_debug_write_provider_response(
 
 fn maybe_debug_write_provider_http_error(
     prompt: &tau_proto::AgentPromptCreated,
-    model: &ChatCompletionsModel,
+    model: &AttemptModel,
     debug_provider_requests: bool,
     status: u16,
     body: &str,
@@ -1586,11 +1233,8 @@ fn reasoning_text_context_item(reasoning: &str) -> Option<ContextItem> {
     })
 }
 
-fn output_token_cap_fields(provider: &ResolvedProvider) -> (Option<u32>, Option<u32>) {
-    if provider.max_output_tokens == 0
-        || provider.extra_body.contains_key("max_tokens")
-        || provider.extra_body.contains_key("max_completion_tokens")
-    {
+fn output_token_cap_fields(provider: &AttemptConfig) -> (Option<u32>, Option<u32>) {
+    if provider.max_output_tokens == 0 {
         return (None, None);
     }
     if provider.compat.max_completion_tokens {
@@ -1779,42 +1423,100 @@ fn apply_event(
     if let Some(usage) = event.get("usage") {
         capture_usage(state, usage);
     }
-    if apply_stream_error(state, event)? {
-        on_update(state);
-        return Ok(());
-    }
+    apply_stream_error(event)?;
     let Some(choice) = first_stream_choice(event) else {
         return Ok(());
     };
     let delta = &choice["delta"];
-    if apply_text_delta(state, delta)? {
+    if let Err(error) = apply_text_delta(state, delta) {
+        if state.semantic_progress == SemanticProgress::Parsed {
+            on_update(state);
+        }
+        return Err(error);
+    }
+    // Preserve the semantic fact before a later parser for the same event can
+    // fail (for example, repetitive tool arguments after accepted content).
+    if state.semantic_progress == SemanticProgress::Parsed {
         on_update(state);
     }
-    if apply_tool_call_deltas(state, delta)? {
-        on_update(state);
+    if let Err(error) = apply_tool_call_deltas(state, delta) {
+        if state.semantic_progress == SemanticProgress::Parsed {
+            on_update(state);
+        }
+        return Err(error);
     }
     apply_finish_reason(state, choice);
+    if state.semantic_progress == SemanticProgress::Parsed {
+        on_update(state);
+    }
     Ok(())
 }
 
-fn apply_stream_error(
-    state: &mut StreamState,
-    event: &serde_json::Value,
-) -> Result<bool, LlmError> {
+fn apply_stream_error(event: &serde_json::Value) -> Result<(), LlmError> {
     let Some(error) = event.get("error") else {
-        return Ok(false);
+        return Ok(());
     };
-    let Some(message) = error.get("message").and_then(|m| m.as_str()) else {
-        return Ok(false);
-    };
-    let mut text = String::new();
-    if !state.text.is_empty() {
-        text.push_str("\n\n");
+    if error.is_null() {
+        return Ok(());
     }
-    text.push_str(&format!("[OpenRouter Stream Error: {message}]"));
-    state.append_assistant_text_delta(&text)?;
-    state.stop_reason = ProviderStopReason::Error;
-    Ok(true)
+    let Some(error) = error.as_object() else {
+        return Err(LlmError::StreamError(StreamFailure {
+            retry: Some(RetryDecision::new(RetryClass::Unknown)),
+            failure_kind: None,
+        }));
+    };
+    Err(LlmError::StreamError(classify_stream_error(error)))
+}
+
+fn classify_stream_error(error: &serde_json::Map<String, serde_json::Value>) -> StreamFailure {
+    let identifiers = [
+        error.get("code").and_then(serde_json::Value::as_str),
+        error.get("type").and_then(serde_json::Value::as_str),
+        error
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("error_type"))
+            .and_then(serde_json::Value::as_str),
+    ];
+    if identifiers
+        .into_iter()
+        .flatten()
+        .any(|identifier| identifier == "context_length_exceeded")
+    {
+        return StreamFailure {
+            retry: None,
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        };
+    }
+    if let Some(class) = identifiers
+        .into_iter()
+        .flatten()
+        .map(classify_error_code)
+        .find(|class| *class != RetryClass::Unknown)
+    {
+        return StreamFailure {
+            retry: Some(RetryDecision::new(class)),
+            failure_kind: None,
+        };
+    }
+    match error.get("code").and_then(serde_json::Value::as_u64) {
+        Some(400 | 404 | 409 | 413 | 422) => StreamFailure {
+            retry: None,
+            failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
+        },
+        Some(401 | 403) => stream_retry(RetryClass::Auth),
+        Some(408 | 425) => stream_retry(RetryClass::Transport),
+        Some(429) => stream_retry(RetryClass::Throttle),
+        Some(500..=599) => stream_retry(RetryClass::Overload),
+        _ => stream_retry(RetryClass::Unknown),
+    }
+}
+
+fn stream_retry(class: RetryClass) -> StreamFailure {
+    StreamFailure {
+        retry: Some(RetryDecision::new(class)),
+        failure_kind: None,
+    }
 }
 
 fn first_stream_choice(event: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -1871,13 +1573,18 @@ fn update_tool_call_metadata(
     tool_call: &serde_json::Value,
     function: &serde_json::Value,
 ) -> bool {
+    let id = non_empty_str(&tool_call["id"]);
+    let name = non_empty_str(&function["name"]);
+    if id.is_some() || name.is_some() {
+        state.semantic_progress = SemanticProgress::Parsed;
+    }
     let entry = state.tool_call_at_mut(index);
     let mut changed = false;
-    if let Some(id) = non_empty_str(&tool_call["id"]) {
+    if let Some(id) = id {
         entry.id = id.to_owned();
         changed = true;
     }
-    if let Some(name) = non_empty_str(&function["name"]) {
+    if let Some(name) = name {
         entry.name = name.to_owned();
         changed = true;
     }
@@ -1898,6 +1605,9 @@ fn apply_finish_reason(state: &mut StreamState, choice: &serde_json::Value) {
 }
 
 fn append_content_delta(state: &mut StreamState, content: &str) -> Result<bool, LlmError> {
+    if !content.is_empty() {
+        state.semantic_progress = SemanticProgress::Parsed;
+    }
     state.pending_content.push_str(content);
     let mut changed = false;
     loop {
@@ -1979,59 +1689,6 @@ fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
     state.cached_tokens = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
 }
 
-fn finish_success(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    provider: &ResolvedProvider,
-    state: StreamState,
-) -> ProviderResponseFinished {
-    ProviderResponseFinished {
-        agent_prompt_id: agent_prompt_id.clone(),
-        agent_id: prompt.agent_id.clone(),
-        output_items: state.output_items(),
-        stop_reason: state.stop_reason,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: prompt.originator.clone(),
-        usage: state.usage(),
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: Some(backend_descriptor(provider)),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }
-}
-
-fn finish_error(
-    agent_prompt_id: &AgentPromptId,
-    prompt: &tau_proto::AgentPromptCreated,
-    provider: &ResolvedProvider,
-    error: LlmError,
-) -> ProviderResponseFinished {
-    ProviderResponseFinished {
-        agent_prompt_id: agent_prompt_id.clone(),
-        agent_id: prompt.agent_id.clone(),
-        output_items: Vec::new(),
-        stop_reason: match &error {
-            LlmError::RepetitionDetected(_) => ProviderStopReason::RepetitionDetected,
-            _ => ProviderStopReason::Error,
-        },
-        error: Some(bounded_provider_error(&format!("LLM error: {error}"))),
-        failure_kind: error.failure_kind(),
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: prompt.originator.clone(),
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: Some(backend_descriptor(provider)),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }
-}
-
 fn bounded_provider_error(text: &str) -> String {
     const MAX_CHARS: usize = 512;
     let mut out = text.chars().take(MAX_CHARS).collect::<String>();
@@ -2039,15 +1696,6 @@ fn bounded_provider_error(text: &str) -> String {
         out.push('…');
     }
     out
-}
-
-fn backend_descriptor(provider: &ResolvedProvider) -> ProviderBackend {
-    ProviderBackend {
-        kind: ProviderBackendKind::ChatCompletions,
-        base_url: provider.base_url.clone(),
-        transport: ProviderBackendTransport::HttpSse,
-        stale_chain_fallback: false,
-    }
 }
 
 fn assistant_text_item(text: impl Into<String>) -> ContextItem {
