@@ -785,6 +785,15 @@ impl VtWriter {
         self.screen_text(w).iter().any(|r| r.contains(needle))
     }
 
+    fn cell_style(&self, row: u16, col: u16) -> (vt100::Color, vt100::Color, bool) {
+        let parser = self.parser.lock().expect("vt");
+        let cell = parser
+            .screen()
+            .cell(row, col)
+            .expect("visible terminal cell");
+        (cell.fgcolor(), cell.bgcolor(), cell.bold())
+    }
+
     fn frame_generation(&self) -> usize {
         self.frames.0.lock().expect("frames").len()
     }
@@ -866,6 +875,105 @@ fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
         tau_cli_term::CursorShape::Bar,
     );
     (term, handle, vt)
+}
+
+/// Ensures ANSI emission preserves user/assistant base styling through
+/// structural Markdown, including wrapping and the process-wide no-color mode.
+#[test]
+fn virtual_terminal_markdown_structure_inherits_transcript_colors() {
+    let theme = tau_themes::Theme::parse(
+        r##"{
+            styles: {
+                "user.prompt": { fg: "#f0f0f0", bg: "#101010" },
+                "agent.response": { fg: "#00d0d0", bg: "#101010" },
+                "markdown.heading": { bold: true },
+                "markdown.list.marker": { bold: true },
+            }
+        }"##,
+    )
+    .expect("valid VT Markdown theme");
+    let (_term, handle, vt) = setup(12, 8);
+    handle.print_output(
+        "markdown-user",
+        super::markdown_render::markdown_block(&theme, tau_themes::names::USER_PROMPT, "# User\n"),
+    );
+    handle.print_output(
+        "markdown-assistant",
+        super::markdown_render::markdown_block(
+            &theme,
+            tau_themes::names::AGENT_RESPONSE,
+            "12. assistant text wraps\n",
+        ),
+    );
+    sync(&handle);
+
+    let rows = vt.screen_text(12);
+    let user_row = rows
+        .iter()
+        .position(|row| row.contains("# User"))
+        .expect("user heading row") as u16;
+    let user_offset = rows[user_row as usize]
+        .find("# User")
+        .expect("user heading column");
+    let user_col = rows[user_row as usize][..user_offset].chars().count() as u16;
+    let assistant_row = rows
+        .iter()
+        .position(|row| row.contains("12."))
+        .expect("assistant list row") as u16;
+    let assistant_offset = rows[assistant_row as usize]
+        .find("12.")
+        .expect("assistant list column");
+    let assistant_col = rows[assistant_row as usize][..assistant_offset]
+        .chars()
+        .count() as u16;
+    let continuation_row = rows
+        .iter()
+        .position(|row| row.contains("t text wraps"))
+        .expect("wrapped assistant continuation") as u16;
+    let continuation_offset = rows[continuation_row as usize]
+        .find("t text wraps")
+        .expect("wrapped assistant continuation column");
+    let continuation_col = rows[continuation_row as usize][..continuation_offset]
+        .chars()
+        .count() as u16;
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    assert_eq!(
+        vt.cell_style(user_row, user_col),
+        if no_color {
+            (vt100::Color::Default, vt100::Color::Default, true)
+        } else {
+            (
+                vt100::Color::Rgb(0xf0, 0xf0, 0xf0),
+                vt100::Color::Rgb(0x10, 0x10, 0x10),
+                true,
+            )
+        },
+        "rows={rows:?}, user row={user_row}, col={user_col}"
+    );
+    assert_eq!(
+        vt.cell_style(assistant_row, assistant_col),
+        if no_color {
+            (vt100::Color::Default, vt100::Color::Default, true)
+        } else {
+            (
+                vt100::Color::Rgb(0x00, 0xd0, 0xd0),
+                vt100::Color::Rgb(0x10, 0x10, 0x10),
+                true,
+            )
+        }
+    );
+    assert_eq!(
+        vt.cell_style(continuation_row, continuation_col),
+        if no_color {
+            (vt100::Color::Default, vt100::Color::Default, false)
+        } else {
+            (
+                vt100::Color::Rgb(0x00, 0xd0, 0xd0),
+                vt100::Color::Rgb(0x10, 0x10, 0x10),
+                false,
+            )
+        }
+    );
 }
 
 fn sync(handle: &TermHandle) {

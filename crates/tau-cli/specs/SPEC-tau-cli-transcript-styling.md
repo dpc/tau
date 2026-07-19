@@ -20,6 +20,13 @@ Markdown-lite styling; escaped marker sequences get escape styling. This keeps
 live terminal wrapping, scrollback, and copy/paste behavior stable outside
 intentional table padding.
 
+Headings and list markers are structural emphasis: built-in themes make them
+bold without assigning a foreground, so they retain the surrounding user,
+assistant, or thinking foreground (and background). Strong and emphasis likewise
+compose attributes onto that surrounding style. Code, escapes, and
+strikethrough remain independent semantic styles and may intentionally use
+distinct colors.
+
 Live response and thinking styling updates incrementally as complete lines
 arrive and preserves parser context across chunks. An incomplete streamed line
 remains base-styled until a newline or final rendering supplies a complete parse.

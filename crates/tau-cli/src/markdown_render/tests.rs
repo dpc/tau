@@ -5,13 +5,14 @@ fn markdown_test_theme() -> tau_themes::Theme {
         r##"{
             styles: {
                 "shell.output": { },
-                "user.prompt": { },
+                "user.prompt": { fg: "white", bg: "#101010" },
+                "agent.response": { fg: "cyan", bg: "#101010" },
                 "prompt.marker.submitted": { fg: "red" },
                 "markdown.strong": { bold: true },
                 "markdown.emphasis": { italic: true },
                 "markdown.strikethrough": { strikethrough: true },
-                "markdown.heading": { underline: true },
-                "markdown.list.marker": { fg: "green" },
+                "markdown.heading": { bold: true, underline: true },
+                "markdown.list.marker": { bold: true },
                 "markdown.code": { bg: "#111111" },
                 "markdown.escape": { bg: "#222222" },
                 "progress.indicator": { fg: "cyan" },
@@ -70,7 +71,7 @@ fn final_render_applies_markdown_styles() {
         .iter()
         .find(|span| span.text == "-")
         .expect("expected styled markdown span");
-    assert_eq!(marker.style.fg, Some(tau_cli_term::Color::Green));
+    assert!(marker.style.bold);
 
     let strong = spans
         .iter()
@@ -142,7 +143,7 @@ fn nested_ordered_list_items_are_not_indented_code() {
             .iter()
             .find(|span| span.text == marker)
             .unwrap_or_else(|| panic!("missing marker span {marker}"));
-        assert_eq!(span.style.fg, Some(tau_cli_term::Color::Green));
+        assert_eq!(span.style.fg, None);
         assert_eq!(span.style.bg, None);
     }
 
@@ -151,6 +152,43 @@ fn nested_ordered_list_items_are_not_indented_code() {
         .find(|span| span.text.contains("Nested numbered item"))
         .expect("nested ordered item body");
     assert_eq!(nested_body.style.bg, None);
+}
+
+/// Ensures structural Markdown emphasis inherits custom user and assistant
+/// foregrounds/backgrounds while adjacent text proves modifiers do not leak.
+#[test]
+fn structural_emphasis_preserves_transcript_base_styles() {
+    let theme = markdown_test_theme();
+    for (base, expected_fg) in [
+        (names::USER_PROMPT, tau_cli_term::Color::White),
+        (names::AGENT_RESPONSE, tau_cli_term::Color::Cyan),
+    ] {
+        let block = markdown_block(&theme, base, "# Heading\n12. item\nplain");
+        let spans = block.content.spans();
+        for text in ["# Heading", "12."] {
+            let span = spans
+                .iter()
+                .find(|span| span.text == text)
+                .unwrap_or_else(|| panic!("missing structural span {text}"));
+            assert_eq!(span.style.fg, Some(expected_fg));
+            assert_eq!(
+                span.style.bg,
+                Some(tau_cli_term::Color::Rgb {
+                    r: 0x10,
+                    g: 0x10,
+                    b: 0x10,
+                })
+            );
+            assert!(span.style.bold);
+        }
+        let plain = spans
+            .iter()
+            .find(|span| span.text.contains(" item") && span.text.contains("plain"))
+            .expect("list body and following plain text");
+        assert_eq!(plain.style.fg, Some(expected_fg));
+        assert!(!plain.style.bold);
+        assert!(!plain.style.underline);
+    }
 }
 
 /// Ensures pipe tables remain Markdown tables while cells are padded for
@@ -473,7 +511,7 @@ fn live_stream_formats_complete_lines_before_blank_line() {
         .iter()
         .find(|span| span.text == "-")
         .expect("list marker span");
-    assert_eq!(marker.style.fg, Some(tau_cli_term::Color::Green));
+    assert_eq!(marker.style.fg, None);
     let bold = spans
         .iter()
         .find(|span| span.text == "*bold*")
@@ -606,7 +644,7 @@ fn prompt_marker_uses_submitted_marker_style() {
         .iter()
         .find(|span| span.text == "-")
         .expect("expected styled markdown span");
-    assert_eq!(list_marker.style.fg, Some(tau_cli_term::Color::Green));
+    assert_eq!(list_marker.style.fg, Some(tau_cli_term::Color::White));
 }
 
 /// Ensures the live cache carries fenced-code parser state across sealed

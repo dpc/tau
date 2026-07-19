@@ -18,8 +18,8 @@
     "markdown.strong":      { bold: true },
     "markdown.emphasis":    { bold: true, italic: true },
     "markdown.strikethrough": { fg: "dark_grey", strikethrough: true },
-    "markdown.heading":     { fg: "blue", bold: true },
-    "markdown.list.marker": { fg: "blue", bold: true },
+    "markdown.heading":     { bold: true },
+    "markdown.list.marker": { bold: true },
     "markdown.code":        { fg: "#005fff" },
     "markdown.escape":      { bg: "#f1e8f5" },
 

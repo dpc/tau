@@ -19,8 +19,8 @@
     "markdown.strong":      { bold: true },
     "markdown.emphasis":    { bold: true, italic: true },
     "markdown.strikethrough": { strikethrough: true },
-    "markdown.heading":     { fg: "cyan", bold: true },
-    "markdown.list.marker": { fg: "cyan", bold: true },
+    "markdown.heading":     { bold: true },
+    "markdown.list.marker": { bold: true },
     "markdown.code":        { fg: "cyan" },
 
     // -- Tool execution --
