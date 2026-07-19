@@ -53,6 +53,7 @@ enum WsFailureMode {
     Upgrade426,
     CloseWithoutResponse,
     ContextWindowExceeded,
+    SemanticThenClose,
 }
 
 fn spawn_ws_426_server() -> WsFailureServer {
@@ -65,6 +66,10 @@ fn spawn_ws_disconnect_server() -> WsFailureServer {
 
 fn spawn_ws_context_error_server() -> WsFailureServer {
     spawn_ws_failure_server(WsFailureMode::ContextWindowExceeded)
+}
+
+fn spawn_ws_semantic_close_server() -> WsFailureServer {
+    spawn_ws_failure_server(WsFailureMode::SemanticThenClose)
 }
 
 fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
@@ -82,7 +87,10 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 return;
             }
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-            if matches!(mode, WsFailureMode::ContextWindowExceeded) {
+            if matches!(
+                mode,
+                WsFailureMode::ContextWindowExceeded | WsFailureMode::SemanticThenClose
+            ) {
                 let Ok(mut socket) = tungstenite::accept(stream) else {
                     continue;
                 };
@@ -90,6 +98,18 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     .ws_upgrade_requests
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = socket.read();
+                if matches!(mode, WsFailureMode::SemanticThenClose) {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "response.output_text.delta",
+                            "delta": "tentative"
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    let _ = socket.close(None);
+                    continue;
+                }
                 let _ = socket.send(tungstenite::Message::Text(
                     serde_json::json!({
                         "type": "response.completed",
@@ -149,6 +169,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 WsFailureMode::Upgrade426 => {
                     let response = concat!(
                         "HTTP/1.1 426 Upgrade Required\r\n",
+                        "Retry-After: 999999\r\n",
                         "Content-Length: 21\r\n",
                         "Connection: close\r\n",
                         "\r\n",
@@ -158,6 +179,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 }
                 WsFailureMode::CloseWithoutResponse => {}
                 WsFailureMode::ContextWindowExceeded => unreachable!("handled above"),
+                WsFailureMode::SemanticThenClose => unreachable!("handled above"),
             }
             assert!(
                 request_index + 1 < MAX_REQUESTS,
@@ -203,9 +225,17 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut abort = crate::NeverAbort;
-    runtime
-        .prewarm(&config, session_id.as_str(), &request, &mut abort)
-        .expect("prewarm cached websocket");
+    assert!(matches!(
+        runtime.prewarm(
+            &ResolvedConfig {
+                inner: config.clone(),
+            },
+            session_id.as_str(),
+            &request,
+            &mut abort,
+        ),
+        PrewarmOutcome::Installed
+    ));
     let mut abort = NeverAbort;
 
     let error = match runtime.stream("ap-ws-context", &config, &request, &mut abort, &mut |_| {}) {
@@ -234,6 +264,7 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
 
 fn test_config(base_url: String) -> responses::ResponsesConfig {
     responses::ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: responses::ResponsesMode::Standard,
         base_url,
         api_key: "token".to_owned(),
@@ -480,21 +511,28 @@ fn lite_compatibility_is_scoped_to_audited_gpt_5_6_models() {
 #[test]
 fn websocket_capability_error_does_not_fallback_to_http_sse() {
     let server = spawn_ws_426_server();
-    let config = test_config(server.base_url());
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let session_id = tau_proto::SessionId::new("session-ws-426");
     let agent_id = tau_proto::AgentId::parse("agent-ws-426").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut abort = NeverAbort;
-    let mut on_update = |_: StreamUpdate<'_>| {};
-
-    let error = match runtime.stream("ap-ws-426", &config, &request, &mut abort, &mut on_update) {
-        Ok(_) => panic!("WS upgrade failure should surface"),
-        Err(error) => error,
+    let outcome = runtime.run_attempt("ap-ws-426", &config, &request, &mut abort, &mut |_| {});
+    let AttemptOutcome::Terminal { error, progress } = outcome else {
+        panic!("WS 426 must be terminal");
     };
-
-    assert!(matches!(error, common::LlmError::HttpStatus(426, _)));
+    assert_eq!(progress, SemanticProgress::None);
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert_eq!(
+        error.to_string(),
+        "Codex requires WebSocket; Tau has no HTTP/SSE fallback"
+    );
     assert_eq!(
         server
             .counts()
@@ -524,20 +562,29 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut abort = NeverAbort;
-    let mut on_update = |_: StreamUpdate<'_>| {};
-
-    let error = match runtime.stream("ap-ws-retry", &config, &request, &mut abort, &mut on_update) {
-        Ok(_) => panic!("retryable WS failure should surface after budget exhaustion"),
-        Err(error) => error,
-    };
-
-    assert!(
-        error.retry_after().is_some(),
-        "fake disconnect should remain a retryable WS error"
+    let mut dispatched = 0;
+    let outcome = runtime.run_attempt(
+        "ap-ws-retry",
+        &ResolvedConfig { inner: config },
+        &request,
+        &mut abort,
+        &mut |update| {
+            if matches!(update, StreamUpdate::Dispatched(_)) {
+                dispatched += 1;
+            }
+        },
     );
+    let AttemptOutcome::Retry { decision, progress } = outcome else {
+        panic!("retryable WS failure should surface after budget exhaustion");
+    };
     assert_eq!(
-        error.retry_decision().map(|decision| decision.class),
-        Some(tau_provider::retry_policy::RetryClass::Transport)
+        decision.class,
+        tau_provider::retry_policy::RetryClass::Transport
+    );
+    assert_eq!(progress, SemanticProgress::None);
+    assert_eq!(
+        dispatched, 0,
+        "a socket that dies before request enqueue has no dispatch origin"
     );
     assert_eq!(
         server
@@ -545,7 +592,7 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
             .ws_upgrade_requests
             .load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "exhausted zero-budget turn makes one WebSocket attempt"
+        "pre-dispatch connection failure returns to the outer scheduler"
     );
     assert_eq!(
         server
@@ -554,5 +601,46 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "retry exhaustion must not fall back to HTTP/SSE POST"
+    );
+}
+
+/// Semantic output followed by a dead socket must surface as parsed retry
+/// without spending the internal replay budget.
+#[test]
+fn run_attempt_does_not_replay_after_semantic_progress() {
+    let server = spawn_ws_semantic_close_server();
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::new("session-semantic-close");
+    let agent_id = tau_proto::AgentId::parse("agent-semantic-close").expect("agent id");
+    let context = tau_proto::PromptContext::default();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+    let mut abort = NeverAbort;
+    let mut dispatched = 0;
+    let outcome = runtime.run_attempt(
+        "ap-semantic-close",
+        &config,
+        &request,
+        &mut abort,
+        &mut |update| {
+            if matches!(update, StreamUpdate::Dispatched(_)) {
+                dispatched += 1;
+            }
+        },
+    );
+    let AttemptOutcome::Retry { progress, .. } = outcome else {
+        panic!("semantic close must return scheduler-owned retry");
+    };
+    assert_eq!(progress, SemanticProgress::Parsed);
+    assert_eq!(dispatched, 1);
+    assert_eq!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "semantic output prohibits a replacement connection"
     );
 }

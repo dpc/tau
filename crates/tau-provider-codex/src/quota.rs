@@ -243,6 +243,7 @@ pub fn parse_full_usage_json(body: &str) -> Result<FullQuotaSnapshot, UsageFetch
 }
 
 /// Parses every supported quota header family from one HTTP response.
+#[cfg(test)]
 pub fn parse_http_headers(headers: &reqwest::header::HeaderMap) -> RollingQuotaObservation {
     let mut raw_ids = BTreeSet::from(["codex".to_owned()]);
     for name in headers.keys() {
@@ -431,6 +432,7 @@ fn normalize_limit_id(raw: &str) -> Option<ProviderQuotaLimitId> {
     ProviderQuotaLimitId::parse(value).ok()
 }
 
+#[cfg(test)]
 fn header_f64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
     headers
         .get(name)?
@@ -441,6 +443,7 @@ fn header_f64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+#[cfg(test)]
 fn header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
     headers.get(name)?.to_str().ok()?.parse().ok()
 }

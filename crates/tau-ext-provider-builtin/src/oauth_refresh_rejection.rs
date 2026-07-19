@@ -5,8 +5,8 @@ use std::error::Error;
 use std::fmt;
 
 use tau_proto::ProviderName;
+use tau_provider_codex::CodexMode;
 use tau_provider_codex::oauth::OAuthError;
-use tau_provider_codex::responses::ResponsesMode;
 
 use crate::OpenAiAuth;
 
@@ -16,11 +16,11 @@ struct OAuthCredentialGeneration {
     /// Complete credential values loaded for the attempted refresh.
     auth: OpenAiAuth,
     /// Startup-selected Responses mode associated with the profile.
-    responses_mode: ResponsesMode,
+    responses_mode: CodexMode,
 }
 
 impl OAuthCredentialGeneration {
-    fn matches(&self, auth: &OpenAiAuth, responses_mode: ResponsesMode) -> bool {
+    fn matches(&self, auth: &OpenAiAuth, responses_mode: CodexMode) -> bool {
         self.auth == *auth && self.responses_mode == responses_mode
     }
 }
@@ -48,12 +48,7 @@ impl OAuthRefreshRejectionCache {
 
     /// Removes stale rejection state after an observed credential/profile
     /// change.
-    fn reconcile(
-        &mut self,
-        provider: &ProviderName,
-        auth: &OpenAiAuth,
-        responses_mode: ResponsesMode,
-    ) {
+    fn reconcile(&mut self, provider: &ProviderName, auth: &OpenAiAuth, responses_mode: CodexMode) {
         let changed = self
             .providers
             .get(provider)
@@ -68,7 +63,7 @@ impl OAuthRefreshRejectionCache {
         &mut self,
         provider: &ProviderName,
         auth: &OpenAiAuth,
-        responses_mode: ResponsesMode,
+        responses_mode: CodexMode,
     ) -> Option<OAuthError> {
         self.reconcile(provider, auth, responses_mode);
         self.providers
@@ -82,7 +77,7 @@ impl OAuthRefreshRejectionCache {
         &mut self,
         provider: &ProviderName,
         auth: &OpenAiAuth,
-        responses_mode: ResponsesMode,
+        responses_mode: CodexMode,
         error: &OAuthError,
     ) {
         if !error.is_permanent_refresh_rejection() {

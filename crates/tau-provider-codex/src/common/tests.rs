@@ -17,6 +17,17 @@ fn outbound_categories_map_to_retry_classes() {
     }
 }
 
+/// A conflict is transient at the generic HTTP boundary. WebSocket capability
+/// failures are classified separately from status 409.
+#[test]
+fn http_conflict_is_retryable_transport_failure() {
+    let decision = LlmError::HttpStatus(409, String::new())
+        .retry_decision()
+        .expect("HTTP 409 should remain retryable");
+
+    assert_eq!(decision.class, RetryClass::Transport);
+}
+
 #[test]
 fn into_output_items_drops_nameless_accumulator_artifacts() {
     // The streaming paths eagerly extend `tool_calls` from
@@ -80,6 +91,31 @@ fn response_bytes_received_counts_transport_bytes_before_semantic_parsing() {
     assert_eq!(state.non_visible_output_bytes(), 0);
 }
 
+/// A discarded no-semantic repair attempt still contributes to the logical
+/// prompt's cumulative transport-byte counter.
+#[test]
+fn response_bytes_received_carries_discarded_recovery_attempt() {
+    let mut state = StreamState::new();
+    state.carry_transport_response_bytes(41);
+    state.record_transport_response_bytes(17);
+    assert_eq!(state.response_bytes_received(), 58);
+}
+
+/// Quota and transport-only observations do not prohibit safe bounded repair,
+/// while any model output item does.
+#[test]
+fn semantic_progress_excludes_transport_and_includes_output_items() {
+    let mut state = StreamState::new();
+    state.record_transport_response_bytes(100);
+    assert!(!state.has_semantic_progress());
+    state
+        .output_items
+        .push(OutputItemAccumulator::UnknownProviderItem(
+            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+        ));
+    assert!(state.has_semantic_progress());
+}
+
 #[test]
 fn usage_limit_429_retries_after_reset_seconds() {
     let error = LlmError::HttpStatus(
@@ -98,6 +134,19 @@ fn usage_limit_429_retries_after_reset_seconds() {
         error.retry_after(),
         Some(std::time::Duration::from_secs(4371))
     );
+}
+
+/// Unrelated nested echo data cannot establish scheduler delay authority.
+#[test]
+fn nested_echo_reset_hint_is_ignored() {
+    let error = LlmError::HttpStatus(
+        503,
+        serde_json::json!({
+            "echo": { "resets_in_seconds": 315_360_000 }
+        })
+        .to_string(),
+    );
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
 #[test]

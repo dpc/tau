@@ -32,10 +32,369 @@ const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.3-codex",
 ];
 
-pub mod common;
+pub(crate) mod common;
 pub mod oauth;
-pub mod quota;
-pub mod responses;
+pub(crate) mod quota;
+pub(crate) mod responses;
+
+pub use common::{ProviderTokenCounts, StreamDeltaEmitter, StreamState};
+pub use quota::{
+    FullQuotaSnapshot, QuotaWindowObservation, RollingQuotaObservation, UsageFetchError,
+};
+
+/// Parses one synthetic WebSocket quota event for cross-crate tests.
+#[cfg(feature = "test-support")]
+pub fn parse_quota_ws_event(event: &str) -> Option<RollingQuotaObservation> {
+    quota::parse_ws_event(event)
+}
+
+/// Constructs an empty synthetic stream state for cross-crate compatibility
+/// tests.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_stream_state() -> StreamState {
+    StreamState::new()
+}
+
+/// Constructs an empty opaque debug capture for cross-crate tests.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_debug_capture() -> CodexDebugCapture {
+    CodexDebugCapture {
+        terminal_event: None,
+    }
+}
+
+/// Appends synthetic assistant text for cross-crate streaming tests.
+#[cfg(feature = "test-support")]
+pub fn test_append_message_delta(state: &mut StreamState, output_index: usize, delta: &str) {
+    state.append_message_delta_at(output_index, delta);
+}
+
+/// Appends synthetic custom-tool input for cross-crate streaming tests.
+#[cfg(feature = "test-support")]
+pub fn test_append_custom_tool_input(state: &mut StreamState, output_index: usize, input: &str) {
+    state
+        .tool_call_at_mut(output_index, tau_proto::ToolType::Custom)
+        .arguments_json
+        .push_str(input);
+}
+
+/// Startup-resolved ChatGPT credentials used by one backend configuration.
+///
+/// This type intentionally has no `Debug` implementation so bearer material
+/// cannot enter diagnostics through derived formatting.
+pub struct ResolvedCredentials {
+    /// OAuth bearer accepted by the Codex endpoint.
+    access_token: String,
+    /// Optional ChatGPT account selector paired with the bearer.
+    account_id: Option<String>,
+}
+
+impl ResolvedCredentials {
+    /// Creates one resolved credential generation.
+    #[must_use]
+    pub fn new(access_token: String, account_id: Option<String>) -> Self {
+        Self {
+            access_token,
+            account_id,
+        }
+    }
+}
+
+/// Startup-stable Responses mode selected by the owning profile.
+pub type CodexMode = responses::ResponsesMode;
+
+/// Fully resolved, non-serialized configuration for one Codex operation.
+///
+/// Credential-bearing fields remain private and this type deliberately has no
+/// `Debug` implementation.
+#[derive(Clone)]
+pub struct ResolvedConfig {
+    /// Private wire configuration shared by inference and control-plane calls.
+    inner: responses::ResponsesConfig,
+}
+
+/// Opaque identity for quota/account control-plane state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct QuotaProfileIdentity(u64);
+
+#[cfg(feature = "test-support")]
+impl QuotaProfileIdentity {
+    /// Constructs a deterministic synthetic identity for coordinator tests.
+    #[must_use]
+    pub fn from_test_value(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl From<u64> for QuotaProfileIdentity {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Opaque identity for mode-sensitive inference and prewarm state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InferenceProfileIdentity(u64);
+
+impl ResolvedConfig {
+    /// Returns the credential-free configured endpoint.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.inner.base_url
+    }
+
+    /// Returns the startup-stable Responses mode.
+    #[must_use]
+    pub fn mode(&self) -> CodexMode {
+        self.inner.mode
+    }
+
+    /// Returns the configured upstream model id.
+    #[must_use]
+    pub fn model_id(&self) -> &str {
+        &self.inner.model_id
+    }
+
+    /// Returns whether reasoning effort is supported.
+    #[must_use]
+    pub fn supports_reasoning_effort(&self) -> bool {
+        self.inner.supports_reasoning_effort
+    }
+
+    /// Returns whether reasoning summaries are supported.
+    #[must_use]
+    pub fn supports_reasoning_summary(&self) -> bool {
+        self.inner.supports_reasoning_summary
+    }
+
+    /// Returns whether verbosity is supported.
+    #[must_use]
+    pub fn supports_verbosity(&self) -> bool {
+        self.inner.supports_verbosity
+    }
+
+    /// Returns whether assistant-message phase is supported.
+    #[must_use]
+    pub fn supports_phase(&self) -> bool {
+        self.inner.supports_phase
+    }
+
+    /// Returns whether encrypted reasoning replay is supported.
+    #[must_use]
+    pub fn supports_encrypted_reasoning(&self) -> bool {
+        self.inner.supports_encrypted_reasoning
+    }
+
+    /// Returns whether inline compaction is supported.
+    #[must_use]
+    pub fn supports_compaction(&self) -> bool {
+        self.inner.supports_compaction
+    }
+
+    /// Returns whether prompt cache keys are supported.
+    #[must_use]
+    pub fn supports_prompt_cache_key(&self) -> bool {
+        self.inner.supports_prompt_cache_key
+    }
+
+    /// Returns the raw provider context window.
+    #[must_use]
+    pub fn raw_context_window(&self) -> u64 {
+        self.inner.raw_context_window
+    }
+
+    /// Returns whether a bearer credential is present.
+    #[must_use]
+    pub fn has_credential(&self) -> bool {
+        !self.inner.api_key.trim().is_empty()
+    }
+
+    /// Returns whether an account selector is present.
+    #[must_use]
+    pub fn has_account_id(&self) -> bool {
+        self.inner.account_id.is_some()
+    }
+
+    /// Compares resolved credentials without returning either secret value.
+    #[must_use]
+    pub fn credentials_match(&self, access_token: &str, account_id: Option<&str>) -> bool {
+        self.inner.api_key == access_token && self.inner.account_id.as_deref() == account_id
+    }
+
+    /// Returns an opaque process-local identity for endpoint and credential
+    /// generation comparisons.
+    #[must_use]
+    pub fn profile_identity(&self) -> QuotaProfileIdentity {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.inner.base_url.hash(&mut hasher);
+        self.inner.account_id.hash(&mut hasher);
+        self.inner.api_key.hash(&mut hasher);
+        QuotaProfileIdentity(hasher.finish())
+    }
+
+    /// Returns an opaque process-local identity for inference and prewarm
+    /// state, including the startup-stable Responses mode.
+    #[must_use]
+    pub fn inference_identity(&self) -> InferenceProfileIdentity {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.profile_identity().0.hash(&mut hasher);
+        self.inner.mode.is_lite_compatibility().hash(&mut hasher);
+        InferenceProfileIdentity(hasher.finish())
+    }
+
+    fn wire(&self) -> &responses::ResponsesConfig {
+        &self.inner
+    }
+}
+
+/// Borrowed semantic prompt passed to one finite Codex operation.
+pub type Prompt<'a> = common::PromptPayload<'a>;
+
+/// Maximum number of concurrently supervised best-effort prewarms.
+pub const MAX_CONCURRENT_PREWARMS: usize = responses::pool::DEFAULT_POOL_MAX;
+
+/// Whether a failed finite attempt parsed replay-unsafe model output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticProgress {
+    /// No model-semantic output was parsed; retry remains safe.
+    None,
+    /// Model-semantic output was parsed and any retry must first clear it.
+    Parsed,
+}
+
+/// Sanitized typed failure from one finite Codex operation.
+pub struct CodexError(common::LlmError);
+
+impl CodexError {
+    /// Returns the logical retry decision, when the outer scheduler should
+    /// retry.
+    #[must_use]
+    pub fn retry_decision(&self) -> Option<tau_provider::retry_policy::RetryDecision> {
+        self.0.retry_decision()
+    }
+
+    /// Returns the proven terminal provider category, when present.
+    #[must_use]
+    pub fn failure_kind(&self) -> Option<tau_proto::ProviderFailureKind> {
+        self.0.failure_kind()
+    }
+
+    /// Returns repetition evidence for the dedicated terminal projection.
+    #[must_use]
+    pub fn repetition(&self) -> Option<&tau_provider::StreamRepetition> {
+        match &self.0 {
+            common::LlmError::RepetitionDetected(repetition) => Some(repetition),
+            _ => None,
+        }
+    }
+
+    /// Wraps backend repetition evidence as a terminal Codex failure.
+    #[must_use]
+    #[cfg(feature = "test-support")]
+    pub fn from_repetition(repetition: tau_provider::StreamRepetition) -> Self {
+        Self(common::LlmError::RepetitionDetected(repetition))
+    }
+}
+
+impl std::fmt::Display for CodexError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            common::LlmError::Outbound(error) => error.fmt(formatter),
+            common::LlmError::HttpStatus(status, _) => {
+                write!(formatter, "provider request failed with HTTP {status}")
+            }
+            common::LlmError::HttpStatusRetryAfter(status, _, _) => {
+                write!(formatter, "provider request failed with HTTP {status}")
+            }
+            common::LlmError::StreamError { .. } => {
+                formatter.write_str("provider WebSocket stream failed")
+            }
+            common::LlmError::Canceled => formatter.write_str("request canceled"),
+            common::LlmError::ReloadableConfig(_) => {
+                formatter.write_str("provider configuration must be reloaded")
+            }
+            common::LlmError::InvalidResponse(_) => {
+                formatter.write_str("provider returned an invalid response")
+            }
+            common::LlmError::Io(_) => formatter.write_str("provider transport failed"),
+            common::LlmError::Json(_) => {
+                formatter.write_str("provider returned malformed structured data")
+            }
+            common::LlmError::Vcr(_) => formatter.write_str("provider replay failed"),
+            common::LlmError::RepetitionDetected(repetition) => repetition.fmt(formatter),
+            common::LlmError::WsUpgradeRequired => {
+                formatter.write_str("Codex requires WebSocket; Tau has no HTTP/SSE fallback")
+            }
+            common::LlmError::ProviderFailure(kind, _) => {
+                write!(formatter, "provider rejected the request ({kind:?})")
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for CodexError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CodexError(<redacted>)")
+    }
+}
+
+impl std::error::Error for CodexError {}
+
+/// Typed terminal from one finite Codex inference attempt.
+pub enum AttemptOutcome {
+    /// The provider completed a response.
+    Finished(Box<StreamDispatchResult>),
+    /// The logical scheduler may retry according to the typed decision.
+    Retry {
+        /// Provider-owned retry classification.
+        decision: tau_provider::retry_policy::RetryDecision,
+        /// Whether tentative semantic output must be cleared.
+        progress: SemanticProgress,
+    },
+    /// Trusted local cancellation ended the attempt.
+    Canceled {
+        /// Whether tentative semantic output must be cleared.
+        progress: SemanticProgress,
+    },
+    /// A proven terminal provider failure ended the attempt.
+    Terminal {
+        /// Sanitized typed backend error.
+        error: CodexError,
+        /// Whether tentative semantic output must be cleared.
+        progress: SemanticProgress,
+    },
+}
+
+/// Typed outcome of one finite best-effort prewarm operation.
+pub enum PrewarmOutcome {
+    /// A compatible response anchor was installed on the reserved socket.
+    Installed,
+    /// A real turn or another prewarm already owned the same socket key.
+    SkippedBusy,
+    /// The outer owner may retry according to the typed provider decision.
+    Retry(tau_provider::retry_policy::RetryDecision),
+    /// Trusted local cancellation ended the operation.
+    Canceled,
+    /// A proven terminal failure ended the operation.
+    Terminal(CodexError),
+}
+
+/// Typed outcome of one finite joined standalone-compaction operation.
+pub enum CompactOutcome {
+    /// Provider returned an accepted replacement window.
+    Finished(Vec<tau_proto::ContextItem>),
+    /// The outer scheduler may retry according to the typed decision.
+    Retry(tau_provider::retry_policy::RetryDecision),
+    /// Trusted local cancellation ended the joined operation.
+    Canceled,
+    /// A proven terminal failure ended the operation.
+    Terminal(CodexError),
+}
 
 #[cfg(test)]
 pub(crate) fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
@@ -104,11 +463,19 @@ pub struct CodexRuntime {
 /// Result of one ChatGPT/Codex streaming dispatch.
 pub struct StreamDispatchResult {
     /// Fully accumulated provider stream state.
-    pub state: common::StreamState,
+    pub state: StreamState,
     /// WebSocket transport fact retained for the stable protocol descriptor.
     pub transport: ProviderBackendTransport,
     /// WebSocket pool counters changed by this turn, when available.
     pub ws_pool_delta: Option<tau_proto::WsPoolDelta>,
+    /// Opaque raw terminal capture retained only for backend-owned debug
+    /// output.
+    pub debug_capture: CodexDebugCapture,
+}
+
+/// Opaque Codex debug capture that never exposes raw provider JSON.
+pub struct CodexDebugCapture {
+    terminal_event: Option<serde_json::Value>,
 }
 
 /// Semantically disjoint live updates from one ChatGPT dispatch.
@@ -116,9 +483,13 @@ pub enum StreamUpdate<'a> {
     /// A fresh WebSocket upgrade is about to start. This is WebSocket-only and
     /// may occur more than once when a logical turn replaces a failed socket.
     Connecting,
+    /// The first request is about to attempt transport enqueue. Emitted exactly
+    /// once per logical attempt, including a failed enqueue, and suppressed for
+    /// its sole transparent repair.
+    Dispatched(std::time::Instant),
     /// A response-state observation for progress sampling. It may repeat
     /// unchanged during quiet waits.
-    Response(&'a common::StreamState),
+    Response(&'a StreamState),
 }
 
 impl CodexRuntime {
@@ -157,11 +528,11 @@ impl CodexRuntime {
     /// Prompt cancellation and shutdown wake each wait; canceled turns return
     /// [`common::LlmError::Canceled`]. Fresh upgrades are independently bounded
     /// to 30 seconds.
-    pub fn stream(
+    fn stream(
         &self,
         agent_prompt_id: &str,
         config: &responses::ResponsesConfig,
-        request: &common::PromptPayload<'_>,
+        request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> Result<StreamDispatchResult, common::LlmError> {
@@ -181,7 +552,7 @@ impl CodexRuntime {
                 tracing::warn!(
                     target: LOG_TARGET,
                     session_id,
-                    "WS path failed with capability/limit error; surfacing error without HTTP fallback: {error}",
+                    "WS path failed with capability/limit error; surfacing without HTTP fallback",
                 );
                 return Err(error);
             }
@@ -190,7 +561,7 @@ impl CodexRuntime {
                 tracing::warn!(
                     target: LOG_TARGET,
                     session_id,
-                    "WS path failed; surfacing error without HTTP fallback: {error}",
+                    "WS path failed; surfacing without HTTP fallback",
                 );
                 return Err(error);
             }
@@ -200,11 +571,63 @@ impl CodexRuntime {
                 .stats()
                 .map(|after| compute_ws_pool_delta(before, after))
         });
+        let mut state = state;
+        let debug_capture = CodexDebugCapture {
+            terminal_event: state.provider_terminal_event.take(),
+        };
         Ok(StreamDispatchResult {
             state,
             transport: ProviderBackendTransport::Websocket,
             ws_pool_delta,
+            debug_capture,
         })
+    }
+
+    /// Executes one finite Codex inference attempt and returns a typed
+    /// scheduler outcome without writing harness events or sleeping for
+    /// logical retry.
+    pub fn run_attempt(
+        &self,
+        agent_prompt_id: &str,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
+        abort: &mut impl TurnAbort,
+        on_update: &mut impl FnMut(StreamUpdate<'_>),
+    ) -> AttemptOutcome {
+        let mut progress = SemanticProgress::None;
+        let result = self.stream(
+            agent_prompt_id,
+            config.wire(),
+            request,
+            abort,
+            &mut |update| {
+                if let StreamUpdate::Response(state) = update
+                    && state.has_semantic_progress()
+                {
+                    progress = SemanticProgress::Parsed;
+                }
+                on_update(update);
+            },
+        );
+        if let Ok(result) = &result
+            && result.state.has_semantic_progress()
+        {
+            progress = SemanticProgress::Parsed;
+        }
+        if abort.is_aborted() {
+            return AttemptOutcome::Canceled { progress };
+        }
+        match result {
+            Ok(result) => AttemptOutcome::Finished(Box::new(result)),
+            Err(common::LlmError::Canceled) => AttemptOutcome::Canceled { progress },
+            Err(error) => match error.retry_decision() {
+                Some(decision) => AttemptOutcome::Retry { decision, progress },
+                None => AttemptOutcome::Terminal {
+                    error: CodexError(error),
+                    progress,
+                },
+            },
+        }
     }
 
     /// Best-effort non-generating prewarm for a later ChatGPT prompt.
@@ -213,57 +636,165 @@ impl CodexRuntime {
     /// event loop. `abort` owns cancellation of connection, response wait, and
     /// socket installation. A fresh upgrade is bounded to 30 seconds and the
     /// response has a separate 30-second absolute bound. Success retains the
-    /// socket for the matching real prompt; failure leaves no reservation or
-    /// cached replacement behind. Socket publication unregisters its abort
-    /// callback and then rechecks [`TurnAbort::is_aborted`] before releasing
-    /// the same-key reservation, so custom abort implementations cannot
-    /// publish cancellation that was already authoritative at callback
-    /// retirement.
+    /// socket and response-id anchor only for a real prompt with the exact
+    /// non-input fingerprint and a lowered input extending the warmed prefix.
+    /// A mismatch consumes the anchor and sends full context. Failure leaves no
+    /// reservation or cached replacement behind. Socket publication unregisters
+    /// its abort callback and then rechecks [`TurnAbort::is_aborted`]
+    /// before releasing the same-key reservation, so custom abort
+    /// implementations cannot publish cancellation that was already
+    /// authoritative at callback retirement.
     pub fn prewarm(
         &self,
-        config: &responses::ResponsesConfig,
+        config: &ResolvedConfig,
         session_id: &str,
-        request: &common::PromptPayload<'_>,
+        request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
-    ) -> Result<(), common::LlmError> {
-        responses::pool::run_prewarm_through_shared_pool(
+    ) -> PrewarmOutcome {
+        match responses::pool::run_prewarm_through_shared_pool(
             &self.ws_pool,
-            config,
+            config.wire(),
             session_id,
             request,
             abort,
-        )
-        .map(|_| ())
+        ) {
+            Ok(Some(_)) => PrewarmOutcome::Installed,
+            Ok(None) => PrewarmOutcome::SkippedBusy,
+            Err(common::LlmError::Canceled) => PrewarmOutcome::Canceled,
+            Err(error) => match error.retry_decision() {
+                Some(decision) => PrewarmOutcome::Retry(decision),
+                None => PrewarmOutcome::Terminal(CodexError(error)),
+            },
+        }
     }
 
     /// Invalidates cached sockets and prevents currently reserved sockets from
     /// being reinstalled after a provider profile or session boundary.
-    pub fn invalidate_all_websockets(&self) -> Result<(), common::LlmError> {
+    pub fn invalidate_all_websockets(&self) -> Result<(), CodexError> {
         self.ws_pool
             .invalidate_all()
             .map_err(responses::pool::WsTurnError::into_llm_error)
+            .map_err(CodexError)
     }
 
-    /// Runs unary remote compaction and invalidates any pre-boundary WebSocket
-    /// chain only after the replacement window is accepted from upstream.
+    /// Invalidates only sockets and in-flight publications owned by one profile
+    /// namespace, preserving unrelated configured providers.
+    pub fn invalidate_profile_websockets(&self, provider: &ProviderName) -> Result<(), CodexError> {
+        self.ws_pool
+            .invalidate_profile(provider.as_str())
+            .map_err(responses::pool::WsTurnError::into_llm_error)
+            .map_err(CodexError)
+    }
+
+    /// Invalidates the matching WebSocket chain before dispatch, then runs one
+    /// joined unary remote compaction operation.
     pub fn compact(
         &self,
         agent_prompt_id: &str,
-        config: &responses::ResponsesConfig,
-        request: &common::PromptPayload<'_>,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
-    ) -> Result<Vec<tau_proto::ContextItem>, common::LlmError> {
-        let output = responses::responses_compact(
+    ) -> CompactOutcome {
+        if let Err(error) = self.ws_pool.invalidate(config.wire(), request) {
+            return if abort.is_aborted() {
+                CompactOutcome::Canceled
+            } else {
+                CompactOutcome::Terminal(CodexError(error.into_llm_error()))
+            };
+        }
+        if abort.is_aborted() {
+            return CompactOutcome::Canceled;
+        }
+        let compact_result = responses::responses_compact(
             agent_prompt_id,
-            config,
+            config.wire(),
             request,
             abort,
             std::sync::Arc::clone(&self.network),
-        )?;
-        self.ws_pool
-            .invalidate(config, request)
-            .map_err(|error| error.into_llm_error())?;
-        Ok(output)
+        );
+        if abort.is_aborted() {
+            return CompactOutcome::Canceled;
+        }
+        let output = match compact_result {
+            Ok(output) => output,
+            Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
+            Err(error) => {
+                return match error.retry_decision() {
+                    Some(decision) => CompactOutcome::Retry(decision),
+                    None => CompactOutcome::Terminal(CodexError(error)),
+                };
+            }
+        };
+        if abort.is_aborted() {
+            CompactOutcome::Canceled
+        } else {
+            CompactOutcome::Finished(output)
+        }
+    }
+
+    /// Fetches one typed full account-quota snapshot with this runtime's
+    /// immutable outbound policy.
+    pub fn fetch_usage(
+        &self,
+        config: &ResolvedConfig,
+    ) -> Result<FullQuotaSnapshot, UsageFetchError> {
+        quota::fetch_usage(
+            &config.inner.base_url,
+            &config.inner.api_key,
+            config.inner.account_id.as_deref(),
+            &self.network,
+        )
+    }
+}
+
+/// Writes one explicitly permitted Codex response debug record while keeping
+/// raw provider JSON inside the backend boundary.
+pub fn write_response_debug(
+    session_id: &str,
+    enabled: bool,
+    response: &tau_proto::ProviderResponseFinished,
+    capture: Option<&CodexDebugCapture>,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(dir) = responses::debug_provider_request_dir(session_id, enabled) else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(target: LOG_TARGET, "failed to create provider response debug directory: {error}");
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let transport = response
+        .backend
+        .as_ref()
+        .map(|backend| match backend.transport {
+            ProviderBackendTransport::HttpSse => "http-sse",
+            ProviderBackendTransport::Websocket => "websocket",
+        })
+        .unwrap_or("unknown");
+    let path = dir.join(format!(
+        "{ts}-{}-{transport}-response.json",
+        response.agent_prompt_id
+    ));
+    let metadata = serde_json::json!({
+        "session_id": session_id,
+        "agent_prompt_id": response.agent_prompt_id,
+        "backend": response.backend,
+        "provider_response_id": response.provider_response_id,
+        "usage": response.usage,
+        "provider_response_finished": response,
+        "provider_terminal_event": capture.and_then(|capture| capture.terminal_event.as_ref()),
+    });
+    if let Err(error) = serde_json::to_vec_pretty(&metadata)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(path, bytes))
+    {
+        tracing::warn!(target: LOG_TARGET, "failed to write provider response debug record: {error}");
     }
 }
 
@@ -276,6 +807,7 @@ fn is_ws_capability_or_limit_error(error: &responses::pool::WsTurnError) -> bool
 
 fn is_ws_capability_or_limit_llm_error(error: &common::LlmError) -> bool {
     match error {
+        common::LlmError::WsUpgradeRequired => true,
         common::LlmError::HttpStatus(426, _) => true,
         common::LlmError::HttpStatus(_, body) => {
             body.contains("websocket_connection_limit_reached")
@@ -305,7 +837,7 @@ pub fn models_for_provider(provider: &ProviderName) -> Vec<ProviderModelInfo> {
 #[must_use]
 pub fn models_for_provider_mode(
     provider: &ProviderName,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
 ) -> Vec<ProviderModelInfo> {
     CHATGPT_MODELS
         .iter()
@@ -315,7 +847,8 @@ pub fn models_for_provider_mode(
 
 /// Returns a Responses backend config for one ChatGPT/Codex model.
 #[must_use]
-pub fn config_for_model(
+#[cfg(test)]
+pub(crate) fn config_for_model(
     model: &ModelName,
     access_token: String,
     account_id: Option<String>,
@@ -330,28 +863,65 @@ pub fn config_for_model(
 
 /// Returns a Responses backend config for a startup-selected profile mode.
 #[must_use]
-pub fn config_for_model_mode(
+#[cfg(test)]
+pub(crate) fn config_for_model_mode(
     model: &ModelName,
     access_token: String,
     account_id: Option<String>,
     requested_mode: responses::ResponsesMode,
 ) -> responses::ResponsesConfig {
+    resolved_config_for_model(
+        model,
+        ResolvedCredentials::new(access_token, account_id),
+        requested_mode,
+    )
+    .inner
+}
+
+/// Resolves one model configuration from an explicit credential generation and
+/// startup-stable mode.
+#[must_use]
+pub fn resolved_config_for_model(
+    model: &ModelName,
+    credentials: ResolvedCredentials,
+    requested_mode: CodexMode,
+) -> ResolvedConfig {
+    resolved_config_for_provider_model(
+        &ProviderName::new("chatgpt"),
+        model,
+        credentials,
+        requested_mode,
+    )
+}
+
+/// Resolves one namespaced model configuration from an explicit credential
+/// generation and startup-stable mode.
+#[must_use]
+pub fn resolved_config_for_provider_model(
+    provider: &ProviderName,
+    model: &ModelName,
+    credentials: ResolvedCredentials,
+    requested_mode: CodexMode,
+) -> ResolvedConfig {
     let model_id = model.as_str();
     let mode = effective_mode(model_id, requested_mode);
-    responses::ResponsesConfig {
-        mode,
-        base_url: DEFAULT_BASE_URL.to_owned(),
-        api_key: access_token,
-        model_id: model_id.to_owned(),
-        raw_context_window: raw_context_window_for_model(model_id),
-        account_id,
-        supports_reasoning_effort: true,
-        supports_reasoning_summary: true,
-        supports_verbosity: model_id.starts_with("gpt-5"),
-        supports_phase: is_known_phase_capable_model_id(model_id),
-        supports_encrypted_reasoning: true,
-        supports_compaction: !is_gpt_5_6(model_id),
-        supports_prompt_cache_key: true,
+    ResolvedConfig {
+        inner: responses::ResponsesConfig {
+            profile_namespace: provider.as_str().to_owned(),
+            mode,
+            base_url: DEFAULT_BASE_URL.to_owned(),
+            api_key: credentials.access_token,
+            model_id: model_id.to_owned(),
+            raw_context_window: raw_context_window_for_model(model_id),
+            account_id: credentials.account_id,
+            supports_reasoning_effort: true,
+            supports_reasoning_summary: true,
+            supports_verbosity: model_id.starts_with("gpt-5"),
+            supports_phase: is_known_phase_capable_model_id(model_id),
+            supports_encrypted_reasoning: true,
+            supports_compaction: !is_gpt_5_6(model_id),
+            supports_prompt_cache_key: true,
+        },
     }
 }
 

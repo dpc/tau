@@ -35,7 +35,7 @@ fn stale_completion_cannot_remove_successor() {
 #[test]
 fn active_work_is_capped_at_pool_capacity() {
     let mut supervisor = PrewarmSupervisor::default();
-    for index in 0..tau_provider_codex::responses::pool::DEFAULT_POOL_MAX {
+    for index in 0..tau_provider_codex::MAX_CONCURRENT_PREWARMS {
         assert!(
             supervisor
                 .begin(PrewarmKey {

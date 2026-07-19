@@ -285,7 +285,7 @@ fn retry_banner_emits_status_not_message_delta() {
             &tau_proto::AgentId::parse("main").expect("agent id"),
             &tau_proto::PromptOriginator::User,
             &mut writer,
-            &common::LlmError::HttpStatus(500, "temporary".to_owned()),
+            "HTTP 500: temporary",
             Duration::from_secs(1),
             1,
         );
@@ -1363,19 +1363,25 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
     let PromptBackend::Responses(responses_config) = responses else {
         panic!("resolved ChatGPT profile must use Responses");
     };
-    for mutate in [
-        |config: &mut responses::ResponsesConfig| config.api_key.push_str("-rotated"),
-        |config: &mut responses::ResponsesConfig| config.base_url.push_str("/replacement"),
-        |config: &mut responses::ResponsesConfig| {
-            config.account_id = Some("replacement-account".to_owned());
-        },
+    for credentials in [
+        tau_provider_codex::ResolvedCredentials::new(
+            "rotated-token".to_owned(),
+            Some("account".to_owned()),
+        ),
+        tau_provider_codex::ResolvedCredentials::new(
+            "token".to_owned(),
+            Some("replacement-account".to_owned()),
+        ),
     ] {
-        let mut rotated = responses_config.clone();
-        mutate(&mut rotated);
+        let rotated = tau_provider_codex::resolved_config_for_model(
+            &tau_proto::ModelName::new(responses_config.model_id()),
+            credentials,
+            responses_config.mode(),
+        );
         assert_ne!(
             responses_profile_identity(&responses_config),
             responses_profile_identity(&rotated),
-            "Responses URL, key, and account are material profile identity"
+            "Responses key and account are material profile identity"
         );
     }
     assert_eq!(
@@ -1721,12 +1727,11 @@ fn resolves_chatgpt_to_codex_responses_backend() {
     )
     .expect("chatgpt backend");
 
-    assert_eq!(config.base_url, tau_provider_codex::DEFAULT_BASE_URL);
-    assert_eq!(config.api_key, "access");
-    assert_eq!(config.account_id.as_deref(), Some("account"));
-    assert!(config.supports_compaction);
-    assert!(config.supports_phase);
-    assert!(config.supports_encrypted_reasoning);
+    assert_eq!(config.base_url(), tau_provider_codex::DEFAULT_BASE_URL);
+    assert!(config.credentials_match("access", Some("account")));
+    assert!(config.supports_compaction());
+    assert!(config.supports_phase());
+    assert!(config.supports_encrypted_reasoning());
 }
 
 /// Assistant phase metadata remains limited to the supported Codex model
@@ -1753,8 +1758,8 @@ fn chatgpt_phase_metadata_is_model_specific() {
     )
     .expect("new codex backend");
 
-    assert!(!old.supports_phase);
-    assert!(new.supports_phase);
+    assert!(!old.supports_phase());
+    assert!(new.supports_phase());
 }
 
 /// Extra-high reasoning metadata remains limited to supported model families.
@@ -2159,8 +2164,8 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                     WorkerMessage::QuotaRolling {
                         model: model_id(CHATGPT_PROVIDER_NAME, "gpt-5.6-sol"),
                         profile_identity,
-                        observation: tau_provider_codex::quota::RollingQuotaObservation {
-                            windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+                        observation: tau_provider_codex::RollingQuotaObservation {
+                            windows: vec![tau_provider_codex::QuotaWindowObservation {
                                 limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                                     .expect("limit id"),
                                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
@@ -2540,8 +2545,8 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
             WorkerMessage::QuotaRolling {
                 model,
                 profile_identity,
-                observation: tau_provider_codex::quota::RollingQuotaObservation {
-                    windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+                observation: tau_provider_codex::RollingQuotaObservation {
+                    windows: vec![tau_provider_codex::QuotaWindowObservation {
                         limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                             .expect("limit id"),
                         window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
@@ -3101,17 +3106,16 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
         let attempt = executor_attempts.fetch_add(1, Ordering::SeqCst);
         match (attempt, &execution.job.backend) {
             (0, PromptBackend::Responses(config)) => {
-                assert_eq!(config.api_key, "old-token");
-                assert_eq!(config.mode, responses::ResponsesMode::LiteCompatibility);
+                assert!(config.credentials_match("old-token", Some("account")));
+                assert_eq!(config.mode(), CodexMode::LiteCompatibility);
                 *profiles_for_executor.lock().expect("mutable profiles") =
                     profiles_with_chatgpt_auth(fresh.clone());
             }
             (1, PromptBackend::Responses(config)) => {
-                assert_eq!(config.api_key, "fresh-token");
-                assert_eq!(config.account_id.as_deref(), Some("fresh-account"));
+                assert!(config.credentials_match("fresh-token", Some("fresh-account")));
                 assert_eq!(
-                    config.mode,
-                    responses::ResponsesMode::LiteCompatibility,
+                    config.mode(),
+                    CodexMode::LiteCompatibility,
                     "retry must retain the startup mode after a standard-mode disk edit"
                 );
                 *profiles_for_executor.lock().expect("mutable profiles") =
@@ -3122,8 +3126,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                     profiles_with_chatgpt_auth(fresh.clone());
             }
             (3, PromptBackend::Responses(config)) => {
-                assert_eq!(config.api_key, "fresh-token");
-                assert_eq!(config.account_id.as_deref(), Some("fresh-account"));
+                assert!(config.credentials_match("fresh-token", Some("fresh-account")));
                 let mut writer = execution.frame_writer();
                 writer
                     .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
@@ -3300,20 +3303,38 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
     runtime.join().expect("runtime join");
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let frames = decode_frames(&output.bytes());
-    assert!(frames.iter().any(|frame| matches!(
-        input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
-            if update.deltas.iter().any(|delta| matches!(
-                delta,
-                tau_proto::ProviderResponseTextDelta::Message { text, .. }
-                    if text == "attempt-one-tentative"
-            ))
-    )));
-    assert!(frames.iter().any(|frame| matches!(
-        input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
-            if update.status.as_ref().is_some_and(|status| status.clear_response)
-    )));
+    let tentative_position = frames
+        .iter()
+        .position(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.deltas.iter().any(|delta| matches!(
+                        delta,
+                        tau_proto::ProviderResponseTextDelta::Message { text, .. }
+                            if text == "attempt-one-tentative"
+                    ))
+            )
+        })
+        .expect("tentative update");
+    let clear_position = frames
+        .iter()
+        .position(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.status.as_ref().is_some_and(|status| status.clear_response)
+            )
+        })
+        .expect("partial clear");
+    let finish_position = frames
+        .iter()
+        .position(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
+        .expect("durable finish");
+    assert!(
+        tentative_position < clear_position && clear_position < finish_position,
+        "tentative output must be cleared before durable retry success"
+    );
     let finished = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
@@ -3374,7 +3395,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
         let id = execution.job.agent_prompt_id.to_string();
         match (id.as_str(), &execution.job.backend) {
             ("chatgpt-retry", PromptBackend::Responses(config)) => {
-                assert_eq!(config.api_key, "access");
+                assert!(config.credentials_match("access", Some("account")));
             }
             (
                 "generic-retry",

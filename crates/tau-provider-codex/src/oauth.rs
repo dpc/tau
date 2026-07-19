@@ -198,9 +198,17 @@ fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, 
     })
 }
 
-/// Decode URL-safe base64 without padding.
-pub fn base64_url_safe_no_pad_decode(input: &str) -> Option<Vec<u8>> {
+fn base64_url_safe_no_pad_decode(input: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(input).ok()
+}
+
+/// Returns the unverified JWT issued-at claim for credential-generation
+/// comparison only.
+pub fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
+    let payload = jwt.split('.').nth(1)?;
+    let payload = base64_url_safe_no_pad_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims.get("iat")?.as_u64().map(|seconds| seconds * 1000)
 }
 
 /// Decode JWT payload (no verification) to extract OpenAI account ID.

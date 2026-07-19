@@ -10,16 +10,17 @@ use tau_proto::{
     ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
     ToolDefinition,
 };
-use tau_provider::retry_policy::{
-    RetryClass, RetryDecision, classify_error_code, parse_json_error_code, parse_json_reset_hint,
-};
+use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
+    /// Provider instructions for this prompt.
     pub system_prompt: &'a str,
+    /// Ordered semantic transcript context.
     pub context: &'a PromptContext,
+    /// Effective client-executed tool definitions.
     pub tools: &'a [ToolDefinition],
     /// Per-prompt model knobs (effort / verbosity / thinking-summary).
     /// Each field is honored only when the backend's config reports
@@ -68,11 +69,7 @@ impl PromptPayload<'_> {
     /// `session-id` and `thread-id` headers, so callers should derive the value
     /// through this method rather than duplicating the hashing inputs.
     #[must_use]
-    pub fn prompt_cache_key(
-        &self,
-        base_url: &str,
-        mode: crate::responses::ResponsesMode,
-    ) -> String {
+    pub fn prompt_cache_key(&self, base_url: &str, mode: crate::CodexMode) -> String {
         prompt_cache_key_for(base_url, self.agent_id, mode)
     }
 }
@@ -83,8 +80,19 @@ pub enum LlmError {
     /// Shared outbound policy or route failure with a redacted projection.
     Outbound(tau_provider::OutboundError),
     HttpStatus(u16, String),
+    /// HTTP status preserving a trusted `Retry-After` header.
+    HttpStatusRetryAfter(u16, String, Duration),
     /// HTTP status preserving a trusted transport-level retry hint.
-    HttpStatusHinted(u16, String, Duration),
+    /// WebSocket error event preserving its canonical structured code
+    /// separately from untrusted display prose.
+    StreamError {
+        /// Bounded display detail.
+        body: String,
+        /// Canonical top-level or error-envelope code/type.
+        code: Option<String>,
+        /// Trusted reset hint parsed from structured response fields.
+        retry_after: Option<Duration>,
+    },
     /// Prompt cancellation observed from Tau's trusted local abort source.
     Canceled,
     /// Mutable URL, credential, or account configuration could not build a
@@ -96,6 +104,8 @@ pub enum LlmError {
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
     RepetitionDetected(tau_provider::StreamRepetition),
+    /// The provider route rejected Tau's required WebSocket transport.
+    WsUpgradeRequired,
     /// A canonical provider envelope proved that replaying the request is
     /// futile.
     ProviderFailure(ProviderFailureKind, String),
@@ -106,7 +116,8 @@ impl std::fmt::Display for LlmError {
         match self {
             Self::Outbound(error) => error.fmt(f),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
-            Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
+            Self::HttpStatusRetryAfter(code, body, _) => write!(f, "HTTP {code}: {body}"),
+            Self::StreamError { body, .. } => write!(f, "HTTP 0: {body}"),
             Self::Canceled => write!(f, "cancelled by harness"),
             Self::ReloadableConfig(error) => write!(f, "local request construction: {error}"),
             Self::InvalidResponse(error) => write!(f, "invalid provider response: {error}"),
@@ -114,6 +125,9 @@ impl std::fmt::Display for LlmError {
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Vcr(e) => write!(f, "VCR error: {e}"),
             Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
+            Self::WsUpgradeRequired => {
+                f.write_str("Codex requires WebSocket; Tau has no HTTP/SSE fallback")
+            }
             Self::ProviderFailure(_, detail) => write!(f, "{detail}"),
         }
     }
@@ -127,12 +141,14 @@ impl std::error::Error for LlmError {
             Self::Json(e) => Some(e),
             Self::Vcr(e) => Some(e),
             Self::RepetitionDetected(_)
+            | Self::WsUpgradeRequired
             | Self::ProviderFailure(_, _)
             | Self::Canceled
             | Self::InvalidResponse(_)
             | Self::ReloadableConfig(_)
             | Self::HttpStatus(_, _)
-            | Self::HttpStatusHinted(_, _, _) => None,
+            | Self::HttpStatusRetryAfter(_, _, _)
+            | Self::StreamError { .. } => None,
         }
     }
 }
@@ -150,14 +166,20 @@ impl LlmError {
             Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::Vcr(_)
             | Self::RepetitionDetected(_)
+            | Self::WsUpgradeRequired
             | Self::ProviderFailure(_, _)
             | Self::Canceled => None,
             Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
             Self::InvalidResponse(_) => None,
             Self::HttpStatus(code, body) => classify_http_status(*code, body, None),
-            Self::HttpStatusHinted(code, body, hint) => {
+            Self::HttpStatusRetryAfter(code, body, hint) => {
                 classify_http_status(*code, body, Some(*hint))
             }
+            Self::StreamError {
+                body,
+                code,
+                retry_after,
+            } => classify_provider_error(0, body, code.as_deref(), *retry_after),
         }
     }
 
@@ -169,6 +191,7 @@ impl LlmError {
     /// statuses other than 408/425/429 are treated as our bug or a
     /// deterministic request-level rejection — retrying just burns
     /// quota.
+    #[cfg(test)]
     pub fn retry_after(&self) -> Option<Duration> {
         self.retry_decision()
             .map(|decision| decision.retry_after.unwrap_or(Duration::ZERO))
@@ -178,10 +201,27 @@ impl LlmError {
     #[must_use]
     pub fn failure_kind(&self) -> Option<ProviderFailureKind> {
         match self {
+            Self::WsUpgradeRequired => Some(ProviderFailureKind::RequestRejected),
             Self::ProviderFailure(kind, _) => Some(*kind),
-            Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _) => {
+            Self::HttpStatus(status, body) | Self::HttpStatusRetryAfter(status, body, _) => {
                 http_failure_kind(*status, body)
             }
+            Self::StreamError { code, .. }
+                if code.as_deref() == Some("context_length_exceeded") =>
+            {
+                Some(ProviderFailureKind::ContextWindowExceeded)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl LlmError {
+    /// Returns the canonical structured WebSocket error code, when present.
+    #[must_use]
+    pub(crate) fn stream_error_code(&self) -> Option<&str> {
+        match self {
+            Self::StreamError { code, .. } => code.as_deref(),
             _ => None,
         }
     }
@@ -204,32 +244,66 @@ fn classify_http_status(
 ) -> Option<RetryDecision> {
     // Keep adapter classification independent from UI prose as required by
     // DECISION-tau-provider-codex-retry-observability.
-    let provider_code = parse_json_error_code(body).or_else(|| {
-        body.split("(type=")
-            .nth(1)
-            .and_then(|suffix| suffix.split(')').next())
-            .map(ToOwned::to_owned)
-    });
+    let provider_code = canonical_error_identifiers(body).into_iter().next();
     if http_failure_kind(code, body).is_some() {
         return None;
     }
+    classify_provider_error(code, body, provider_code.as_deref(), transport_hint)
+}
+
+fn classify_provider_error(
+    code: u16,
+    body: &str,
+    provider_code: Option<&str>,
+    transport_hint: Option<Duration>,
+) -> Option<RetryDecision> {
     let class = provider_code
-        .as_deref()
         .map(classify_error_code)
         .filter(|class| *class != RetryClass::Unknown)
         .unwrap_or_else(|| match code {
-            408 | 425 => RetryClass::Transport,
+            408 | 409 | 425 => RetryClass::Transport,
             429 => RetryClass::Throttle,
             500..=599 => RetryClass::Overload,
             401 | 403 => RetryClass::Auth,
             0 if is_provider_stream_idle_timeout_body(body) => RetryClass::Transport,
             _ => RetryClass::Unknown,
         });
-    let body_hint = parse_json_reset_hint(body, SystemTime::now());
+    let body_hint = canonical_json_reset_hint(body, SystemTime::now());
     Some(
         RetryDecision::new(class)
             .with_retry_after(transport_hint.into_iter().chain(body_hint).max()),
     )
+}
+
+fn canonical_json_reset_hint(body: &str, now: SystemTime) -> Option<Duration> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    canonical_reset_objects(&value)
+        .into_iter()
+        .flatten()
+        .find_map(|object| reset_hint_from_object(object, now))
+}
+
+fn canonical_reset_objects(value: &serde_json::Value) -> [Option<&serde_json::Value>; 3] {
+    [
+        Some(value),
+        value.get("error"),
+        value
+            .get("response")
+            .and_then(|response| response.get("error")),
+    ]
+}
+
+fn reset_hint_from_object(value: &serde_json::Value, now: SystemTime) -> Option<Duration> {
+    let object = value.as_object()?;
+    if let Some(seconds) = object
+        .get("resets_in_seconds")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return Some(Duration::from_secs(seconds));
+    }
+    let reset_at = object.get("resets_at")?.as_u64()?;
+    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(Duration::from_secs(reset_at.saturating_sub(now)))
 }
 
 fn http_failure_kind(status: u16, body: &str) -> Option<ProviderFailureKind> {
@@ -243,7 +317,7 @@ fn http_failure_kind(status: u16, body: &str) -> Option<ProviderFailureKind> {
     let known_transient = identifiers
         .iter()
         .any(|code| classify_error_code(code) != RetryClass::Unknown);
-    if !known_transient && matches!(status, 400 | 404 | 409 | 413 | 422) {
+    if !known_transient && matches!(status, 400 | 404 | 413 | 422) {
         Some(ProviderFailureKind::RequestRejected)
     } else {
         None
@@ -329,39 +403,48 @@ pub struct MessageAccumulator {
 pub struct StreamState {
     /// Concatenated visible assistant text, kept for backend validation and
     /// tests. The durable final output is assembled from `output_items`.
-    pub text: String,
-    pub output_items: Vec<OutputItemAccumulator>,
-    pub input_tokens: Option<u64>,
-    pub cached_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
+    pub(crate) text: String,
+    pub(crate) output_items: Vec<OutputItemAccumulator>,
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) cached_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
     /// Provider-supplied reasoning summary accumulated so far. `None`
     /// when the provider hasn't emitted any summary content (or when
     /// summaries weren't requested).
-    pub thinking: Option<String>,
+    pub(crate) thinking: Option<String>,
     /// Output item index the displayable reasoning summary belongs to.
     thinking_output_index: Option<usize>,
     /// Provider-supplied `response.id`, used by the harness to chain
     /// the next turn off this one via `previous_response_id`. Only
     /// populated by the Responses backend; the Chat Completions
     /// backend leaves this `None`.
-    pub response_id: Option<String>,
+    pub(crate) response_id: Option<String>,
     /// Raw terminal provider event for Responses streams (`response.completed`
     /// / `response.done`), retained for per-session debug captures. Other
     /// backends leave this empty.
-    pub provider_terminal_event: Option<serde_json::Value>,
+    pub(crate) provider_terminal_event: Option<serde_json::Value>,
     /// Cumulative raw provider response bytes received by the transport for
     /// this prompt before semantic parsing. Used for live progress when the
     /// provider has delivered bytes that have not yet formed parseable output.
     transport_response_bytes: u64,
     /// A stale `previous_response_id` was rejected and this successful stream
     /// came from the full-replay retry.
-    pub stale_chain_fallback: bool,
-    /// Synthesized item slot for plain assistant text content.
-    chat_message_item_index: Option<usize>,
+    pub(crate) stale_chain_fallback: bool,
     /// Bounded exact repetition guard for this provider generation.
     repetition_guard: StreamRepetitionGuard,
     /// Latest supported WebSocket account-quota observation for this turn.
-    pub quota_observation: Option<crate::quota::RollingQuotaObservation>,
+    pub(crate) quota_observation: Option<crate::quota::RollingQuotaObservation>,
+}
+
+/// Provider token counters accumulated by one completed response.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProviderTokenCounts {
+    /// Total prompt/input tokens.
+    pub input: Option<u64>,
+    /// Prompt tokens served from provider cache.
+    pub cached: Option<u64>,
+    /// Generated output tokens.
+    pub output: Option<u64>,
 }
 
 /// Tracks text already emitted to transient response update streams.
@@ -448,7 +531,7 @@ pub struct ToolCallAccumulator {
 }
 
 impl ToolCallAccumulator {
-    pub fn new(tool_type: tau_proto::ToolType) -> Self {
+    pub(crate) fn new(tool_type: tau_proto::ToolType) -> Self {
         Self {
             id: String::new(),
             name: String::new(),
@@ -516,7 +599,7 @@ impl Default for StreamState {
 
 impl StreamState {
     /// Construct an empty provider response accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             output_items: Vec::new(),
@@ -529,13 +612,57 @@ impl StreamState {
             provider_terminal_event: None,
             transport_response_bytes: 0,
             stale_chain_fallback: false,
-            chat_message_item_index: None,
             repetition_guard: StreamRepetitionGuard::new(),
             quota_observation: None,
         }
     }
 
-    pub fn check_message_delta(
+    /// Returns the latest normalized quota observation on this turn.
+    #[must_use]
+    pub fn quota_observation(&self) -> Option<&crate::quota::RollingQuotaObservation> {
+        self.quota_observation.as_ref()
+    }
+
+    /// Returns whether success followed canonical stale-chain recovery.
+    #[must_use]
+    pub fn stale_chain_fallback(&self) -> bool {
+        self.stale_chain_fallback
+    }
+
+    /// Returns input, cached-input, and output token counters.
+    #[must_use]
+    pub fn token_counts(&self) -> ProviderTokenCounts {
+        ProviderTokenCounts {
+            input: self.input_tokens,
+            cached: self.cached_tokens,
+            output: self.output_tokens,
+        }
+    }
+
+    /// Returns the provider response id for durable chain metadata.
+    #[must_use]
+    pub fn response_id(&self) -> Option<&str> {
+        self.response_id.as_deref()
+    }
+
+    /// Constructs synthetic terminal facts for compatibility snapshot tests.
+    #[must_use]
+    #[cfg(feature = "test-support")]
+    pub fn with_terminal_facts(
+        mut self,
+        input_tokens: u64,
+        cached_tokens: u64,
+        output_tokens: u64,
+        response_id: String,
+    ) -> Self {
+        self.input_tokens = Some(input_tokens);
+        self.cached_tokens = Some(cached_tokens);
+        self.output_tokens = Some(output_tokens);
+        self.response_id = Some(response_id);
+        self
+    }
+
+    pub(crate) fn check_message_delta(
         &mut self,
         output_index: usize,
         delta: &str,
@@ -549,7 +676,7 @@ impl StreamState {
         Ok(())
     }
 
-    pub fn check_message_snapshot(
+    pub(crate) fn check_message_snapshot(
         &mut self,
         output_index: usize,
         text: &str,
@@ -567,7 +694,7 @@ impl StreamState {
         }
     }
 
-    pub fn check_reasoning_delta(
+    pub(crate) fn check_reasoning_delta(
         &mut self,
         output_index: usize,
         delta: &str,
@@ -581,7 +708,7 @@ impl StreamState {
         Ok(())
     }
 
-    pub fn check_function_arguments_delta(
+    pub(crate) fn check_function_arguments_delta(
         &mut self,
         output_index: usize,
         delta: &str,
@@ -595,7 +722,7 @@ impl StreamState {
         Ok(())
     }
 
-    pub fn check_function_arguments_snapshot(
+    pub(crate) fn check_function_arguments_snapshot(
         &mut self,
         output_index: usize,
         text: &str,
@@ -613,7 +740,7 @@ impl StreamState {
         }
     }
 
-    pub fn check_custom_tool_input_delta(
+    pub(crate) fn check_custom_tool_input_delta(
         &mut self,
         output_index: usize,
         delta: &str,
@@ -627,7 +754,7 @@ impl StreamState {
         Ok(())
     }
 
-    pub fn check_custom_tool_input_snapshot(
+    pub(crate) fn check_custom_tool_input_snapshot(
         &mut self,
         output_index: usize,
         text: &str,
@@ -652,11 +779,11 @@ impl StreamState {
     }
 
     /// Reserves an output-item slot without committing a durable item yet.
-    pub fn reserve_output_item_at(&mut self, output_index: usize) {
+    pub(crate) fn reserve_output_item_at(&mut self, output_index: usize) {
         self.ensure_output_len(output_index);
     }
 
-    pub fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
+    pub(crate) fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
         self.ensure_output_len(output_index);
         if !matches!(
             self.output_items[output_index],
@@ -685,17 +812,17 @@ impl StreamState {
         }
     }
 
-    pub fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {
+    pub(crate) fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {
         self.message_at_mut(output_index).text.push_str(delta);
         self.refresh_text();
     }
 
-    pub fn set_message_text_at(&mut self, output_index: usize, text: &str) {
+    pub(crate) fn set_message_text_at(&mut self, output_index: usize, text: &str) {
         self.message_at_mut(output_index).text = text.to_owned();
         self.refresh_text();
     }
 
-    pub fn set_message_phase_at(
+    pub(crate) fn set_message_phase_at(
         &mut self,
         output_index: usize,
         phase: Option<tau_proto::MessagePhase>,
@@ -706,25 +833,15 @@ impl StreamState {
     }
 
     /// Stores the raw Responses assistant message item for one output index.
-    pub fn set_message_responses_raw_json_at(&mut self, output_index: usize, raw_json: &str) {
+    pub(crate) fn set_message_responses_raw_json_at(
+        &mut self,
+        output_index: usize,
+        raw_json: &str,
+    ) {
         self.message_at_mut(output_index).responses_raw_json = Some(raw_json.to_owned());
     }
 
-    pub fn append_chat_message_delta(&mut self, delta: &str) {
-        let output_index = match self.chat_message_item_index {
-            Some(output_index) => output_index,
-            None => {
-                let output_index = self.output_items.len();
-                self.output_items
-                    .push(OutputItemAccumulator::Message(MessageAccumulator::default()));
-                self.chat_message_item_index = Some(output_index);
-                output_index
-            }
-        };
-        self.append_message_delta_at(output_index, delta);
-    }
-
-    pub fn tool_call_at_mut(
+    pub(crate) fn tool_call_at_mut(
         &mut self,
         output_index: usize,
         tool_type: tau_proto::ToolType,
@@ -744,14 +861,14 @@ impl StreamState {
         call
     }
 
-    pub fn set_reasoning_item_json_at(&mut self, output_index: usize, item: &str) {
+    pub(crate) fn set_reasoning_item_json_at(&mut self, output_index: usize, item: &str) {
         if let Some(item) = opaque_item_from_json(item) {
             self.ensure_output_len(output_index);
             self.output_items[output_index] = OutputItemAccumulator::Reasoning(item);
         }
     }
 
-    pub fn start_compaction_item_at(&mut self, output_index: usize) {
+    pub(crate) fn start_compaction_item_at(&mut self, output_index: usize) {
         self.ensure_output_len(output_index);
         if !matches!(
             self.output_items[output_index],
@@ -761,7 +878,7 @@ impl StreamState {
         }
     }
 
-    pub fn set_compaction_item_json_at(&mut self, output_index: usize, item: &str) {
+    pub(crate) fn set_compaction_item_json_at(&mut self, output_index: usize, item: &str) {
         if let Some(item) = opaque_item_from_json(item) {
             self.ensure_output_len(output_index);
             self.output_items[output_index] = OutputItemAccumulator::Compaction(Some(item));
@@ -769,7 +886,7 @@ impl StreamState {
     }
 
     /// Stores an unrecognized provider output item at its provider index.
-    pub fn set_unknown_provider_item_json_at(&mut self, output_index: usize, item: &str) {
+    pub(crate) fn set_unknown_provider_item_json_at(&mut self, output_index: usize, item: &str) {
         if let Some(item) = opaque_item_from_json(item) {
             self.ensure_output_len(output_index);
             self.output_items[output_index] = OutputItemAccumulator::UnknownProviderItem(item);
@@ -778,7 +895,7 @@ impl StreamState {
 
     /// Appends displayable reasoning-summary text at the provider output index
     /// it belongs to.
-    pub fn append_reasoning_summary_delta_at(&mut self, output_index: usize, delta: &str) {
+    pub(crate) fn append_reasoning_summary_delta_at(&mut self, output_index: usize, delta: &str) {
         self.thinking_output_index.get_or_insert(output_index);
         self.thinking
             .get_or_insert_with(String::new)
@@ -787,7 +904,7 @@ impl StreamState {
 
     /// Starts a new reasoning-summary paragraph at the provider output index
     /// it belongs to.
-    pub fn start_reasoning_summary_part_at(&mut self, output_index: usize) {
+    pub(crate) fn start_reasoning_summary_part_at(&mut self, output_index: usize) {
         self.thinking_output_index.get_or_insert(output_index);
         if let Some(thinking) = self.thinking.as_mut()
             && !thinking.is_empty()
@@ -823,12 +940,39 @@ impl StreamState {
             .max(self.transport_response_bytes)
     }
 
+    /// Returns whether this attempt parsed any model-semantic output.
+    ///
+    /// Transport bytes, quota telemetry, response ids, and usage are
+    /// deliberately excluded: none of them make replay unsafe. Any material
+    /// provider output item or reasoning text does.
+    #[must_use]
+    pub fn has_semantic_progress(&self) -> bool {
+        self.thinking
+            .as_ref()
+            .is_some_and(|thinking| !thinking.is_empty())
+            || self.output_items.iter().any(|item| match item {
+                OutputItemAccumulator::Empty => false,
+                OutputItemAccumulator::Message(message) => !message.text.is_empty(),
+                OutputItemAccumulator::ToolCall(call) => {
+                    !call.id.is_empty() || !call.name.is_empty() || !call.arguments_json.is_empty()
+                }
+                OutputItemAccumulator::Reasoning(_)
+                | OutputItemAccumulator::Compaction(_)
+                | OutputItemAccumulator::UnknownProviderItem(_) => true,
+            })
+    }
+
     /// Adds raw bytes received from the provider transport before semantic
     /// parsing.
     pub(crate) fn record_transport_response_bytes(&mut self, bytes: usize) {
         self.transport_response_bytes = self
             .transport_response_bytes
             .saturating_add(bytes.try_into().unwrap_or(u64::MAX));
+    }
+
+    /// Carries bytes from a discarded transport-repair attempt into this state.
+    pub(crate) fn carry_transport_response_bytes(&mut self, bytes: u64) {
+        self.transport_response_bytes = self.transport_response_bytes.saturating_add(bytes);
     }
 
     fn refresh_text(&mut self) {

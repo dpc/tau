@@ -1166,11 +1166,10 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
     );
 }
 
-/// A `generate:false` prewarm warms the provider cache for the prompt-cache
-/// key/thread-id. It no longer acts as a synthetic `previous_response_id` chain
-/// anchor; the next real turn sends a full prompt and relies on cache hits.
+/// A successful `generate:false` prewarm anchors an exact compatible prefix on
+/// the same socket, so the real turn sends only its suffix.
 #[test]
-fn prewarm_warms_cache_without_chaining_next_turn() {
+fn prewarm_chains_exact_prefix_on_same_socket() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
@@ -1178,6 +1177,29 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
     let session_id = tau_proto::SessionId::new("session-prewarm");
     let prewarmed_messages = vec![user_msg("AGENTS.md context")];
     let real_messages = vec![user_msg("AGENTS.md context"), user_msg("actual request")];
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let prior = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    run_turn_through_pool(
+        &mut pool,
+        &config,
+        "session-prewarm",
+        "sp-prior",
+        &prior,
+        &mut |_| {},
+    )
+    .expect("prior real turn succeeds");
 
     let prewarm = PromptPayload {
         system_prompt: "sys",
@@ -1188,7 +1210,7 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &session_id,
-        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        agent_id: &agent_id,
         share_user_cache_key: false,
         debug_provider_requests: false,
     };
@@ -1211,23 +1233,108 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
 
     let s = server.lock_state();
     assert_eq!(s.upgrade_count, 1, "prewarm and turn must share one socket");
-    assert_eq!(s.requests.len(), 2, "expected prewarm plus real turn");
-    let warm = &s.requests[0];
-    let turn = &s.requests[1];
+    assert_eq!(
+        s.requests.len(),
+        3,
+        "expected prior, prewarm, and real turn"
+    );
+    let warm = &s.requests[1];
+    let turn = &s.requests[2];
     assert_eq!(
         warm.get("generate").and_then(serde_json::Value::as_bool),
         Some(false)
     );
-    assert!(
-        turn.get("previous_response_id").is_none(),
-        "prewarm is cache-only and must not become a synthetic chain anchor",
+    assert_eq!(
+        turn.get("previous_response_id"),
+        Some(&serde_json::Value::String("resp_0_2".to_owned())),
+        "compatible same-socket prewarm must supersede the older real-turn chain",
     );
     assert_eq!(
         turn.get("input")
             .and_then(serde_json::Value::as_array)
             .map(Vec::len),
+        Some(1),
+        "real turn should send only the suffix after the warmed prefix",
+    );
+}
+
+/// A prewarm anchor is valid only for the exact non-input request fingerprint.
+/// A changed instruction set must discard the anchor and replay full context.
+#[test]
+fn prewarm_fingerprint_divergence_discards_chain_anchor() {
+    let (addr, server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let mut pool = WsPool::new();
+    let session_id = tau_proto::SessionId::new("session-prewarm-divergence");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    let prefix = vec![user_msg("stable prefix")];
+    let prewarm = PromptPayload {
+        system_prompt: "old instructions",
+        context: context(&prefix),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    run_prewarm_through_pool(&mut pool, &config, session_id.as_str(), &prewarm)
+        .expect("prewarm succeeds");
+
+    let full = vec![user_msg("stable prefix"), user_msg("real suffix")];
+    let divergent = PromptPayload {
+        system_prompt: "new instructions",
+        context: context(&full),
+        ..prewarm
+    };
+    run_turn_through_pool(
+        &mut pool,
+        &config,
+        session_id.as_str(),
+        "sp-divergent",
+        &divergent,
+        &mut |_| {},
+    )
+    .expect("divergent turn succeeds with full replay");
+
+    {
+        let state = server.lock_state();
+        let turn = &state.requests[1];
+        assert!(turn.get("previous_response_id").is_none());
+        assert_eq!(
+            turn["input"].as_array().map(Vec::len),
+            Some(2),
+            "divergent fingerprint must send full input",
+        );
+    }
+    let compatible_after_mismatch = PromptPayload {
+        system_prompt: "old instructions",
+        context: context(&full),
+        ..prewarm
+    };
+    run_turn_through_pool(
+        &mut pool,
+        &config,
+        session_id.as_str(),
+        "sp-compatible-after-mismatch",
+        &compatible_after_mismatch,
+        &mut |_| {},
+    )
+    .expect("compatible turn after mismatch succeeds");
+    let state = server.lock_state();
+    let turn = &state.requests[2];
+    assert!(
+        turn.get("previous_response_id").is_none(),
+        "the divergent turn must consume the prewarm anchor"
+    );
+    assert_eq!(
+        turn["input"].as_array().map(Vec::len),
         Some(2),
-        "real turn should send the full prompt after cache-only prewarm",
+        "consumed anchor cannot be reused by a later compatible prompt",
     );
 }
 
@@ -1448,9 +1555,21 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     let mut connecting_count = 0;
+    let mut dispatched_count = 0;
+    let mut last_response_bytes = 0;
+    let mut response_bytes_monotonic = true;
     let mut on_update = |update: crate::StreamUpdate<'_>| {
         if matches!(update, crate::StreamUpdate::Connecting) {
             connecting_count += 1;
+        }
+        if matches!(update, crate::StreamUpdate::Dispatched(_)) {
+            dispatched_count += 1;
+            last_response_bytes = 0;
+        }
+        if let crate::StreamUpdate::Response(state) = update {
+            let current = state.response_bytes_received();
+            response_bytes_monotonic &= last_response_bytes <= current;
+            last_response_bytes = current;
         }
     };
 
@@ -1514,6 +1633,14 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     assert_eq!(
         connecting_count, 2,
         "initial and replacement fresh connections each report connecting"
+    );
+    assert_eq!(
+        dispatched_count, 2,
+        "two logical turns emit exactly two dispatch origins despite transparent repair"
+    );
+    assert!(
+        response_bytes_monotonic,
+        "transport bytes remain cumulative across the discarded cached attempt"
     );
     assert_eq!(
         s.requests.len(),
@@ -1632,6 +1759,53 @@ fn provider_stream_idle_timeout_is_not_silent_reconnect() {
         "stream error: provider stream idle timeout: transport=Websocket".to_owned(),
     );
     assert!(!is_recoverable_ws_error(&err));
+}
+
+/// The exact upstream connection-cap code takes precedence over the generic
+/// stream-error repair rule and must not consume a replacement connection.
+#[test]
+fn connection_limit_code_precedes_generic_stream_recovery() {
+    let error = LlmError::StreamError {
+        body: "stream error: capacity (type=websocket_connection_limit_reached)".to_owned(),
+        code: Some("websocket_connection_limit_reached".to_owned()),
+        retry_after: None,
+    };
+    assert!(is_recoverable_ws_error(&error));
+}
+
+/// Canonical stale-chain codes are distinguished from generic transport loss so
+/// a successful full replay records the approved stale-chain disposition.
+#[test]
+fn canonical_stale_chain_code_is_typed_before_recovery() {
+    let error = LlmError::StreamError {
+        body: "stream error: rejected (type=previous_response_not_found)".to_owned(),
+        code: Some("previous_response_not_found".to_owned()),
+        retry_after: None,
+    };
+    assert!(is_stale_chain_error(&error));
+    assert_eq!(recovery_decision(&error, false), RecoveryDecision::Repair);
+}
+
+/// Provider prose cannot impersonate a canonical recovery code.
+#[test]
+fn recovery_precedence_ignores_reserved_markers_in_prose() {
+    let error = LlmError::StreamError {
+        body: "stream error: echoed (type=previous_response_not_found) \
+               (type=transport_error)"
+            .to_owned(),
+        code: Some("transport_error".to_owned()),
+        retry_after: None,
+    };
+    assert!(!is_stale_chain_error(&error));
+}
+
+/// Once semantic output exists, even an otherwise repairable dead socket must
+/// surface to the extension so tentative output can be cleared before retry.
+#[test]
+fn semantic_progress_exhausts_internal_recovery_budget() {
+    let error = LlmError::HttpStatus(0, "stream error: ws closed".to_owned());
+    assert_eq!(recovery_decision(&error, true), RecoveryDecision::Surface);
+    assert_eq!(recovery_decision(&error, false), RecoveryDecision::Repair);
 }
 
 // -----------------------------------------------------------------
@@ -2069,6 +2243,7 @@ fn run_shared_turn_with_abort(
 
 fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
     ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: base_url.into(),
         api_key: "test".into(),

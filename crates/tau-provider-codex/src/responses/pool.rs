@@ -67,6 +67,8 @@ pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
 ///   a socket is never reused for a different cache bucket.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PoolKey {
+    /// Filename-derived provider namespace owning this socket.
+    pub profile_namespace: String,
     /// WS endpoint realm. Cross-realm reuse is impossible.
     pub base_url: String,
     /// Account realm for the socket's bearer and server-side state.
@@ -87,6 +89,7 @@ impl PoolKey {
     /// per-turn detail.
     pub fn for_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Self {
         Self {
+            profile_namespace: config.profile_namespace.clone(),
             base_url: config.base_url.clone(),
             account_id: config.account_id.clone(),
             thread_id: request.prompt_cache_key(&config.base_url, config.mode),
@@ -177,12 +180,6 @@ impl WsPool {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.conns.len()
-    }
-
-    /// Whether the pool currently has no cached connections.
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.conns.is_empty()
     }
 }
 
@@ -318,6 +315,29 @@ impl SharedWsPool {
         let mut inner = self.lock_inner()?;
         inner.pool.conns.clear();
         let busy = inner.busy.iter().cloned().collect::<Vec<_>>();
+        inner.invalidated_busy.extend(busy);
+        Ok(())
+    }
+
+    /// Invalidates cached and reserved sockets for one provider namespace.
+    pub(crate) fn invalidate_profile(&self, namespace: &str) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        let cached = inner
+            .pool
+            .conns
+            .iter()
+            .filter(|(key, _)| key.profile_namespace == namespace)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in cached {
+            inner.pool.conns.pop(&key);
+        }
+        let busy = inner
+            .busy
+            .iter()
+            .filter(|key| key.profile_namespace == namespace)
+            .cloned()
+            .collect::<Vec<_>>();
         inner.invalidated_busy.extend(busy);
         Ok(())
     }
@@ -561,7 +581,12 @@ enum CachedSharedTurn {
     // reservation is still held. The caller must immediately run the fresh
     // retry for the same key so no competing same-key worker can open a second
     // chain socket between the recoverable failure and replacement release.
-    RetryFresh,
+    RetryFresh {
+        /// Cumulative transport bytes retained across the discarded attempt.
+        response_bytes: u64,
+        /// Whether the provider explicitly rejected the connection-local chain.
+        stale_chain: bool,
+    },
 }
 
 struct SharedTurnContext<'a, 'request> {
@@ -699,6 +724,7 @@ pub fn run_turn_through_pool(
             request,
             recording_stream.as_mut(),
             &mut abort,
+            &mut |_| {},
             on_update,
         ) {
             Ok(turn) => {
@@ -727,7 +753,6 @@ pub fn run_turn_through_pool(
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     session_id,
-                    error = %err,
                     silent_reconnects = pool.stats.silent_reconnects,
                     "Codex WS connection lost mid-turn",
                 );
@@ -764,6 +789,7 @@ pub fn run_turn_through_pool(
         request,
         recording_stream.as_mut(),
         &mut abort,
+        &mut |_| {},
         on_update,
     ) {
         Ok(turn) => {
@@ -821,7 +847,20 @@ pub fn run_turn_through_shared_pool(
         };
         match turn_context.run_cached(conn, session_id, abort, on_update)? {
             CachedSharedTurn::Completed(state) => return Ok(*state),
-            CachedSharedTurn::RetryFresh => {}
+            CachedSharedTurn::RetryFresh {
+                response_bytes,
+                stale_chain,
+            } => {
+                return SharedTurnContext {
+                    pool,
+                    key,
+                    config,
+                    agent_prompt_id,
+                    request,
+                    record_config: record_config.as_ref(),
+                }
+                .run_fresh(response_bytes, stale_chain, false, abort, on_update);
+            }
         }
     }
 
@@ -833,7 +872,7 @@ pub fn run_turn_through_shared_pool(
         request,
         record_config: record_config.as_ref(),
     }
-    .run_fresh(abort, on_update)
+    .run_fresh(0, false, true, abort, on_update)
 }
 
 impl<'a, 'request> SharedTurnContext<'a, 'request> {
@@ -850,13 +889,21 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         }
 
         let mut stream = recording_stream(self.record_config);
+        let mut response_bytes = 0;
+        let mut semantic_progress = false;
+        let updates = std::cell::RefCell::new(on_update);
         match conn.run_turn(
             self.config,
             self.agent_prompt_id,
             self.request,
             stream.as_mut(),
             abort,
-            &mut |state| on_update(crate::StreamUpdate::Response(state)),
+            &mut |at| updates.borrow_mut()(crate::StreamUpdate::Dispatched(at)),
+            &mut |state| {
+                response_bytes = response_bytes.max(state.response_bytes_received());
+                semantic_progress |= state.has_semantic_progress();
+                updates.borrow_mut()(crate::StreamUpdate::Response(state));
+            },
         ) {
             Ok(turn) => self
                 .release_and_store_recording(conn, turn, stream)
@@ -870,17 +917,19 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 self.pool.abandon(&self.key)?;
                 Err(WsTurnError::Other(other))
             }
-            Err(err) if is_recoverable_ws_error(&err) => {
+            Err(err) if recovery_decision(&err, semantic_progress) == RecoveryDecision::Repair => {
                 let silent_reconnects = self.pool.bump_silent_reconnects()?;
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     session_id,
-                    error = %err,
                     silent_reconnects,
                     "Codex WS connection lost mid-turn",
                 );
                 drop(conn);
-                Ok(CachedSharedTurn::RetryFresh)
+                Ok(CachedSharedTurn::RetryFresh {
+                    response_bytes,
+                    stale_chain: is_stale_chain_error(&err),
+                })
             }
             Err(other) => {
                 drop(conn);
@@ -892,6 +941,9 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
 
     fn run_fresh(
         self,
+        carried_response_bytes: u64,
+        stale_chain: bool,
+        emit_dispatched: bool,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
     ) -> Result<crate::common::StreamState, WsTurnError> {
@@ -909,16 +961,47 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             },
         )?;
         self.pool.record_fresh_open()?;
+        conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);
+        let mut response_bytes = carried_response_bytes;
+        let mut semantic_progress = false;
+        let updates = std::cell::RefCell::new(on_update);
         match conn.run_turn(
             self.config,
             self.agent_prompt_id,
             self.request,
             stream.as_mut(),
             abort,
-            &mut |state| on_update(crate::StreamUpdate::Response(state)),
+            &mut |at| {
+                if emit_dispatched {
+                    updates.borrow_mut()(crate::StreamUpdate::Dispatched(at));
+                }
+            },
+            &mut |state| {
+                response_bytes = response_bytes.max(state.response_bytes_received());
+                semantic_progress |= state.has_semantic_progress();
+                updates.borrow_mut()(crate::StreamUpdate::Response(state));
+            },
         ) {
-            Ok(turn) => self.release_and_store_recording(conn, turn, stream),
+            Ok(mut turn) => {
+                turn.state.stale_chain_fallback = stale_chain;
+                self.release_and_store_recording(conn, turn, stream)
+            }
+            Err(err)
+                if self.record_config.is_none()
+                    && repair_budget_available(emit_dispatched)
+                    && recovery_decision(&err, semantic_progress) == RecoveryDecision::Repair =>
+            {
+                drop(conn);
+                self.pool.bump_silent_reconnects()?;
+                self.run_fresh(
+                    response_bytes,
+                    stale_chain || is_stale_chain_error(&err),
+                    false,
+                    abort,
+                    updates.into_inner(),
+                )
+            }
             Err(err) => {
                 drop(conn);
                 self.pool.abandon(&self.key)?;
@@ -948,6 +1031,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
     }
 }
 
+fn repair_budget_available(first_dispatch: bool) -> bool {
+    first_dispatch
+}
+
 /// Send a best-effort non-generating prewarm over the same pooled WS
 /// connection a later real turn for this prompt-cache thread will use. Unlike
 /// real turns, a failed cached socket is simply dropped and retried
@@ -963,7 +1050,7 @@ pub fn run_prewarm_through_pool(
 
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
         let mut abort = NeverAbort;
-        match conn.run_prewarm(config, request, &mut abort) {
+        match conn.run_prewarm(config, request, &mut abort, None) {
             Ok(state) => {
                 pool.release(key, conn);
                 return Ok(state);
@@ -973,7 +1060,6 @@ pub fn run_prewarm_through_pool(
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     session_id,
-                    error = %err,
                     "Codex WS connection lost during prewarm; reopening",
                 );
                 drop(conn);
@@ -993,7 +1079,7 @@ pub fn run_prewarm_through_pool(
         &mut abort,
     )?;
     pool.stats.upgrades += 1;
-    match conn.run_prewarm(config, request, &mut abort) {
+    match conn.run_prewarm(config, request, &mut abort, None) {
         Ok(state) => {
             pool.release(key, conn);
             Ok(state)
@@ -1019,7 +1105,7 @@ pub fn run_prewarm_through_shared_pool(
     session_id: &str,
     request: &crate::common::PromptPayload<'_>,
     abort: &mut impl TurnAbort,
-) -> Result<crate::common::StreamState, LlmError> {
+) -> Result<Option<crate::common::StreamState>, LlmError> {
     let key = PoolKey::for_request(config, request);
 
     let cached = if let TryCheckout::Reserved(cached) = pool
@@ -1033,7 +1119,7 @@ pub fn run_prewarm_through_shared_pool(
             session_id,
             "skipping prompt prewarm: websocket pool key is busy",
         );
-        return Ok(crate::common::StreamState::new());
+        return Ok(None);
     };
     let mut reservation = PrewarmReservation {
         pool,
@@ -1054,8 +1140,12 @@ pub fn run_prewarm_through_shared_pool(
         return Err(LlmError::Canceled);
     }
 
+    let repair_after_fresh = cached.is_none();
+    let mut deadline = None;
     if let Some(mut conn) = cached {
-        match conn.run_prewarm(config, request, abort) {
+        let attempt_deadline = std::time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT;
+        deadline = Some(attempt_deadline);
+        match conn.run_prewarm(config, request, abort, deadline) {
             Ok(state) => {
                 if abort.is_aborted() {
                     return Err(LlmError::Canceled);
@@ -1063,7 +1153,7 @@ pub fn run_prewarm_through_shared_pool(
                 reservation
                     .publish(conn, cancel_guard, abort)
                     .map_err(WsTurnError::into_llm_error)?;
-                return Ok(state);
+                return Ok(Some(state));
             }
             Err(err) if is_recoverable_ws_error(&err) => {
                 pool.bump_silent_reconnects()
@@ -1071,7 +1161,6 @@ pub fn run_prewarm_through_shared_pool(
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     session_id,
-                    error = %err,
                     "Codex WS connection lost during prewarm; reopening",
                 );
                 drop(conn);
@@ -1083,16 +1172,27 @@ pub fn run_prewarm_through_shared_pool(
         }
     }
 
+    if deadline.is_some_and(|deadline| deadline <= std::time::Instant::now()) {
+        return Err(LlmError::HttpStatus(
+            0,
+            "websocket prewarm response timeout".to_owned(),
+        ));
+    }
     let mut conn =
         match pool.connect_reserved_fresh(&key, config, abort, |config, thread_id, abort| {
-            WsConn::connect(config, thread_id, &pool.network, abort)
+            let timeout = deadline
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or(super::ws::CONNECT_TIMEOUT);
+            WsConn::connect_with_timeout(config, thread_id, &pool.network, abort, timeout)
         }) {
             Ok(conn) => conn,
             Err(error) => return Err(error.into_llm_error()),
         };
     pool.record_fresh_open()
         .map_err(WsTurnError::into_llm_error)?;
-    match conn.run_prewarm(config, request, abort) {
+    let deadline =
+        deadline.or_else(|| Some(std::time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT));
+    match conn.run_prewarm(config, request, abort, deadline) {
         Ok(state) => {
             if abort.is_aborted() {
                 return Err(LlmError::Canceled);
@@ -1100,7 +1200,37 @@ pub fn run_prewarm_through_shared_pool(
             reservation
                 .publish(conn, cancel_guard, abort)
                 .map_err(WsTurnError::into_llm_error)?;
-            Ok(state)
+            Ok(Some(state))
+        }
+        Err(err) if repair_after_fresh && is_recoverable_ws_error(&err) => {
+            drop(conn);
+            pool.bump_silent_reconnects()
+                .map_err(WsTurnError::into_llm_error)?;
+            let deadline = deadline.expect("fresh prewarm establishes response deadline");
+            if deadline <= std::time::Instant::now() {
+                return Err(LlmError::HttpStatus(
+                    0,
+                    "websocket prewarm response timeout".to_owned(),
+                ));
+            }
+            let mut replacement = pool
+                .connect_reserved_fresh(&key, config, abort, |config, thread_id, abort| {
+                    WsConn::connect_with_timeout(
+                        config,
+                        thread_id,
+                        &pool.network,
+                        abort,
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    )
+                })
+                .map_err(WsTurnError::into_llm_error)?;
+            pool.record_fresh_open()
+                .map_err(WsTurnError::into_llm_error)?;
+            let state = replacement.run_prewarm(config, request, abort, Some(deadline))?;
+            reservation
+                .publish(replacement, cancel_guard, abort)
+                .map_err(WsTurnError::into_llm_error)?;
+            Ok(Some(state))
         }
         Err(err) => {
             drop(conn);
@@ -1114,28 +1244,21 @@ pub fn run_prewarm_through_shared_pool(
 /// is to reopen and retry once silently rather than letting the outer
 /// retry loop burn a backoff on the same broken state.
 ///
-/// Every `run_turn` error path lands here as `LlmError::HttpStatus(0,
-/// "stream error: ...")` — and by construction every one of them
-/// indicates "this socket can't serve another turn":
+/// Local close/task/send failures use `HttpStatus(0, "stream error: ...")`.
+/// Structured provider error events use `StreamError` and preserve their
+/// canonical code separately from untrusted prose:
 ///
 /// - Transport-level closes: tungstenite raised `ConnectionClosed`,
 ///   `AlreadyClosed`, or an IO break; the server sent a close frame mid-stream;
 ///   keepalive ping or turn-send failed write-side.
 /// - Task-supervision failures: the per-conn reader or writer task exited or
 ///   got aborted — the socket they owned is gone.
-/// - Server-level stale-chain: an `error` event whose message says the
-///   `previous_response_id` we just sent doesn't exist on this socket. Same
-///   root cause as a transport close — the previous socket carrying that chain
-///   id is gone — just surfaced through the JSON event stream instead of a TCP
-///   close.
+/// - Server-level stale-chain and connection-limit codes retire the socket and
+///   may spend the same sole repair budget.
 ///
-/// The matcher is therefore deliberately broad: anything with the
-/// `"stream error:"` prefix from `run_turn` is recoverable. The
-/// alternative — a narrow allow-list — silently leaks any new
-/// failure mode (e.g. the previous `"ws writer task gone"`) to the
-/// outer retry loop, which burns a backoff sleep on the same dead
-/// socket. Other `LlmError` variants and non-stream-prefixed bodies
-/// fall through unchanged.
+/// Local `"stream error:"` failures remain deliberately broad so new
+/// dead-socket modes do not burn an outer backoff on a known-dead connection.
+/// Structured codes, rather than message text, own provider-event precedence.
 ///
 /// Carve-outs: account-level caps (usage_limit_reached, rate limit,
 /// quota) reach us with the same prefix because they ride the same
@@ -1144,20 +1267,59 @@ pub fn run_prewarm_through_shared_pool(
 /// request the same way. Local provider-stream idle watchdog failures
 /// also use the same prefix, but replaying them would keep a stuck turn
 /// in-flight for another idle window. Defer those to the outer
-/// classifier (`LlmError::retry_after`), which returns `None` and
-/// surfaces the error immediately.
+/// classifier as a typed Transport retry without extending this attempt by a
+/// second idle window.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
     if err.failure_kind().is_some() {
         return false;
     }
-    let LlmError::HttpStatus(0, body) = err else {
-        return false;
+    if let Some(code) = err.stream_error_code() {
+        return code == "websocket_connection_limit_reached"
+            || [
+                "previous_response_not_found",
+                "previous_response_id_not_found",
+                "invalid_previous_response_id",
+            ]
+            .contains(&code);
+    }
+    let body = match err {
+        LlmError::HttpStatus(0, body) => body,
+        _ => return false,
     };
     if !body.starts_with("stream error:") {
         return false;
     }
     !crate::common::is_account_limit_body(body)
         && !crate::common::is_provider_stream_idle_timeout_body(body)
+}
+
+fn is_stale_chain_error(error: &LlmError) -> bool {
+    let Some(code) = error.stream_error_code() else {
+        return false;
+    };
+    [
+        "previous_response_not_found",
+        "previous_response_id_not_found",
+        "invalid_previous_response_id",
+    ]
+    .contains(&code)
+}
+
+/// Closed decision for the sole in-attempt WebSocket repair budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryDecision {
+    /// Discard the dead cached socket and spend the one fresh-socket repair.
+    Repair,
+    /// Surface the outcome without replaying semantic work.
+    Surface,
+}
+
+fn recovery_decision(error: &LlmError, semantic_progress: bool) -> RecoveryDecision {
+    if !semantic_progress && is_recoverable_ws_error(error) {
+        RecoveryDecision::Repair
+    } else {
+        RecoveryDecision::Surface
+    }
 }
 
 #[cfg(test)]

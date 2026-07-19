@@ -327,6 +327,7 @@ fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
 #[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -364,6 +365,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 #[test]
 fn build_request_includes_service_tier_when_configured() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -406,6 +408,7 @@ fn build_request_includes_service_tier_when_configured() {
 #[test]
 fn build_request_maps_off_effort_to_openai_none() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_reasoning_effort: true,
         ..chain_test_config()
@@ -434,6 +437,7 @@ fn build_request_maps_off_effort_to_openai_none() {
 #[test]
 fn build_request_maps_max_effort_to_openai_max() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-sol".into(),
         supports_reasoning_effort: true,
@@ -455,6 +459,7 @@ fn build_request_maps_max_effort_to_openai_max() {
 #[test]
 fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -799,6 +804,7 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
 #[test]
 fn build_request_chain_turn_still_emits_prompt_cache_key() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -835,6 +841,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
 #[test]
 fn build_request_prompt_cache_key_ignores_originator() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -886,6 +893,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
 #[test]
 fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -923,6 +931,7 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
 #[test]
 fn build_request_extension_matches_user_wire_body_for_same_context() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_prompt_cache_key: true,
         ..chain_test_config()
@@ -995,6 +1004,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
 #[test]
 fn build_request_lite_chain_omits_owned_developer_prefix() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
@@ -1032,6 +1042,7 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
 #[test]
 fn build_compact_request_uses_lite_schema() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
@@ -1083,6 +1094,7 @@ fn build_compact_request_uses_lite_schema() {
 #[test]
 fn build_compact_request_uses_standard_schema() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-terra".to_owned(),
         supports_compaction: false,
@@ -1123,6 +1135,7 @@ fn build_compact_request_uses_standard_schema() {
 #[test]
 fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
         ..chain_test_config()
@@ -1286,6 +1299,7 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
                 .expect("write response");
         });
         let config = ResponsesConfig {
+            profile_namespace: "chatgpt".to_owned(),
             mode,
             base_url: format!("http://{address}"),
             model_id: "gpt-5.6-terra".to_owned(),
@@ -1352,6 +1366,7 @@ fn compact_http_request_cancellation_closes_active_socket() {
         closed_tx.send(()).expect("closed receiver");
     });
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         base_url: format!("http://{address}"),
         ..chain_test_config()
     };
@@ -1439,6 +1454,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
 #[test]
 fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-sol".into(),
         raw_context_window: 372_000,
@@ -1501,6 +1517,7 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
 #[test]
 fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-sol".into(),
         raw_context_window: 372_000,
@@ -1550,6 +1567,7 @@ fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
 #[test]
 fn ws_envelope_omits_responses_lite_metadata_in_standard_mode() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-luna".into(),
         ..chain_test_config()
@@ -1748,6 +1766,7 @@ fn provider_websocket_replay_rejects_stream_without_terminal_event() {
 #[test]
 fn ws_envelope_carries_responses_lite_request_metadata() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-luna".into(),
         ..chain_test_config()
@@ -1768,6 +1787,7 @@ fn ws_envelope_carries_responses_lite_request_metadata() {
 #[test]
 fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-luna".into(),
         ..chain_test_config()
@@ -1792,6 +1812,7 @@ fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
 #[test]
 fn build_request_sends_compaction_context_management_and_trigger_item() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_compaction: true,
         ..chain_test_config()
@@ -1823,6 +1844,7 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
 #[test]
 fn build_request_trims_full_replay_before_latest_compaction_item() {
     let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_compaction: true,
         ..chain_test_config()
@@ -1865,6 +1887,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
 
 fn chain_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
@@ -1883,6 +1906,7 @@ fn chain_test_config() -> ResponsesConfig {
 
 fn phase_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_phase: true,
         ..chain_test_config()
@@ -1891,6 +1915,7 @@ fn phase_test_config() -> ResponsesConfig {
 
 fn encrypted_reasoning_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         supports_encrypted_reasoning: true,
         ..chain_test_config()
@@ -3495,11 +3520,12 @@ fn apply_event_failed_returns_error() {
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
     match result {
-        Err(LlmError::HttpStatus(0, body)) => {
+        Err(LlmError::StreamError { body, code, .. }) => {
+            assert_eq!(code, None);
             assert!(body.contains("response failed"));
             assert!(body.contains("model overloaded"));
         }
-        other => panic!("expected HttpStatus(0, ...), got {other:?}"),
+        other => panic!("expected response failure, got {other:?}"),
     }
 }
 
@@ -3519,7 +3545,8 @@ fn apply_event_error_top_level_code_is_propagated() {
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
     match result {
-        Err(LlmError::HttpStatus(0, body)) => {
+        Err(LlmError::StreamError { body, code, .. }) => {
+            assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
             assert!(body.contains("Rate limit reached"));
             assert!(
                 body.contains("(type=rate_limit_exceeded)"),
@@ -3530,7 +3557,7 @@ fn apply_event_error_top_level_code_is_propagated() {
                 "is_account_limit_body must classify this body as a cap"
             );
         }
-        other => panic!("expected HttpStatus(0, ...), got {other:?}"),
+        other => panic!("expected typed stream error, got {other:?}"),
     }
 }
 
@@ -3550,14 +3577,15 @@ fn apply_event_error_nested_code_is_propagated() {
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
     match result {
-        Err(LlmError::HttpStatus(0, body)) => {
+        Err(LlmError::StreamError { body, code, .. }) => {
+            assert_eq!(code.as_deref(), Some("usage_limit_reached"));
             assert!(body.contains("usage limit has been reached"));
             assert!(
                 body.contains("(type=usage_limit_reached)"),
                 "missing (type=...) suffix in {body:?}",
             );
         }
-        other => panic!("expected HttpStatus(0, ...), got {other:?}"),
+        other => panic!("expected typed stream error, got {other:?}"),
     }
 }
 
@@ -3576,13 +3604,14 @@ fn apply_event_error_nested_type_fallback_is_propagated() {
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
     match result {
-        Err(LlmError::HttpStatus(0, body)) => {
+        Err(LlmError::StreamError { body, code, .. }) => {
+            assert_eq!(code.as_deref(), Some("quota_exceeded"));
             assert!(
                 body.contains("(type=quota_exceeded)"),
                 "missing (type=...) suffix in {body:?}",
             );
         }
-        other => panic!("expected HttpStatus(0, ...), got {other:?}"),
+        other => panic!("expected typed stream error, got {other:?}"),
     }
 }
 
@@ -3599,12 +3628,27 @@ fn apply_event_error_without_code_omits_suffix() {
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
     match result {
-        Err(LlmError::HttpStatus(0, body)) => {
+        Err(LlmError::StreamError { body, code, .. }) => {
+            assert_eq!(code, None);
             assert!(body.contains("something broke"));
             assert!(!body.contains("(type="), "unexpected suffix in {body:?}");
         }
-        other => panic!("expected HttpStatus(0, ...), got {other:?}"),
+        other => panic!("expected typed stream error, got {other:?}"),
     }
+}
+
+/// Reset metadata outside canonical error envelopes cannot park required work.
+#[test]
+fn stream_error_ignores_nested_echo_reset_hint() {
+    let mut state = crate::common::StreamState::new();
+    let event = serde_json::json!({
+        "type": "error",
+        "code": "overloaded_error",
+        "message": "busy",
+        "echo": { "resets_in_seconds": 315_360_000 }
+    });
+    let error = apply_event(&mut state, &event, &mut |_| {}).expect_err("stream error");
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
 #[test]

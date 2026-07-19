@@ -66,24 +66,24 @@ fn compatibility_route_snapshot(
         Some(PromptBackend::Responses(config)) => serde_json::json!({
             "requested": requested,
             "backend": "responses",
-            "model": config.model_id,
-            "mode": match config.mode {
-                responses::ResponsesMode::Standard => "standard",
-                responses::ResponsesMode::LiteCompatibility => "lite_compatibility",
+            "model": config.model_id(),
+            "mode": match config.mode() {
+                CodexMode::Standard => "standard",
+                CodexMode::LiteCompatibility => "lite_compatibility",
             },
-            "base_url": config.base_url,
+            "base_url": config.base_url(),
             "surface": "chatgpt",
-            "credential_present": !config.api_key.trim().is_empty(),
-            "raw_context_window": config.raw_context_window,
-            "account_id_present": config.account_id.is_some(),
-            "supports_reasoning_effort": config.supports_reasoning_effort,
-            "supports_reasoning_summary": config.supports_reasoning_summary,
-            "supports_verbosity": config.supports_verbosity,
-            "supports_phase": config.supports_phase,
-            "supports_encrypted_reasoning": config.supports_encrypted_reasoning,
+            "credential_present": config.has_credential(),
+            "raw_context_window": config.raw_context_window(),
+            "account_id_present": config.has_account_id(),
+            "supports_reasoning_effort": config.supports_reasoning_effort(),
+            "supports_reasoning_summary": config.supports_reasoning_summary(),
+            "supports_verbosity": config.supports_verbosity(),
+            "supports_phase": config.supports_phase(),
+            "supports_encrypted_reasoning": config.supports_encrypted_reasoning(),
             "supports_websocket": true,
-            "supports_compaction": config.supports_compaction,
-            "supports_prompt_cache_key": config.supports_prompt_cache_key,
+            "supports_compaction": config.supports_compaction(),
+            "supports_prompt_cache_key": config.supports_prompt_cache_key(),
         }),
         Some(PromptBackend::ChatCompletions { provider, model }) => serde_json::json!({
             "requested": requested,
@@ -113,7 +113,7 @@ fn responses_event_snapshot() -> Vec<Event> {
     prompt.agent_prompt_id = "compat-prompt".into();
     prompt.agent_id = tau_proto::AgentId::parse("compat-agent").expect("agent id");
     prompt.session_id = "compat-session".into();
-    let request = common::PromptPayload {
+    let request = CodexPrompt {
         system_prompt: "",
         context: &prompt.context,
         tools: &prompt.tools,
@@ -126,12 +126,9 @@ fn responses_event_snapshot() -> Vec<Event> {
         share_user_cache_key: prompt.share_user_cache_key,
         debug_provider_requests: false,
     };
-    let mut state = common::StreamState::new();
-    state.append_message_delta_at(0, "compatibility text");
-    state.input_tokens = Some(10);
-    state.cached_tokens = Some(4);
-    state.output_tokens = Some(2);
-    state.response_id = Some("resp-compat".to_owned());
+    let mut state = tau_provider_codex::test_stream_state();
+    tau_provider_codex::test_append_message_delta(&mut state, 0, "compatibility text");
+    let state = state.with_terminal_facts(10, 4, 2, "resp-compat".to_owned());
     let backend = ProviderBackend {
         kind: ProviderBackendKind::Responses,
         base_url: tau_provider_codex::DEFAULT_BASE_URL.to_owned(),
@@ -146,7 +143,7 @@ fn responses_event_snapshot() -> Vec<Event> {
             &prompt.agent_id,
             &prompt.originator,
             &state,
-            &mut common::StreamDeltaEmitter::default(),
+            &mut CodexStreamDeltaEmitter::default(),
             ProviderResponseStats {
                 previous: tau_proto::ProviderResponseStatsSample::default(),
                 current: tau_proto::ProviderResponseStatsSample {
@@ -164,6 +161,7 @@ fn responses_event_snapshot() -> Vec<Event> {
             &request,
             &backend,
             state,
+            tau_provider_codex::test_debug_capture(),
             Some(tau_proto::WsPoolDelta {
                 upgrades: 1,
                 silent_reconnects: 0,

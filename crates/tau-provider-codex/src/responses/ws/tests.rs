@@ -58,6 +58,8 @@ fn test_ws_conn() -> (
             opened_at: Instant::now(),
             bearer: "test-token".to_owned(),
             cached_response_id: None,
+            prewarm_baseline: None,
+            carried_response_bytes: 0,
         },
         inbound_tx,
         _outbound_rx,
@@ -66,6 +68,7 @@ fn test_ws_conn() -> (
 
 fn test_responses_config() -> ResponsesConfig {
     ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api_key: "test-token".to_owned(),
@@ -616,6 +619,7 @@ fn localhost_ws_round_trip_lowers_and_parses_production_frames() {
             None,
             &mut abort,
             &mut |_| {},
+            &mut |_| {},
         )
         .expect("complete localhost WebSocket turn");
     server.wait_for_request();
@@ -700,6 +704,7 @@ fn localhost_ws_silent_turn_returns_typed_cancellation() {
                 None,
                 &mut abort,
                 &mut |_| {},
+                &mut |_| {},
             );
             result_tx
                 .send(result)
@@ -756,6 +761,7 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
             absolute: None,
         },
         &mut |_| {},
+        &mut |_| {},
     );
     server.wait_for_request();
     let Err(LlmError::HttpStatus(0, body)) = result else {
@@ -801,6 +807,7 @@ fn ws_turn_abort_waker_returns_typed_cancellation_promptly() {
                 &request,
                 None,
                 &mut abort,
+                &mut |_| {},
                 &mut |_| {},
             );
             result_tx.send(result).expect("result receiver");
@@ -854,6 +861,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
             absolute: None,
         },
         &mut |_| {},
+        &mut |_| {},
     );
 
     let Err(LlmError::HttpStatus(0, body)) = result else {
@@ -896,6 +904,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
             absolute: Some(Duration::ZERO),
         },
         &mut |_| {},
+        &mut |_| {},
     );
 
     assert!(matches!(
@@ -903,6 +912,38 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
         Err(LlmError::HttpStatus(0, body))
             if body == "websocket prewarm response timeout"
     ));
+}
+
+/// Rejected provider data frames still contribute to cumulative transport bytes
+/// before the socket is retired.
+#[test]
+fn malformed_text_frame_counts_bytes_before_protocol_error() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let malformed = "{not-json";
+    inbound_tx
+        .send(InboundEvent::Error {
+            detail: "malformed JSON text frame".to_owned(),
+            response_bytes: malformed.len(),
+        })
+        .expect("queue malformed frame");
+    let mut observed_bytes = 0;
+    let error = match conn.run_turn(
+        &config,
+        "ap-malformed",
+        &request,
+        None,
+        &mut NeverAbort,
+        &mut |_| {},
+        &mut |state| observed_bytes = state.response_bytes_received(),
+    ) {
+        Ok(_) => panic!("malformed frame must retire socket"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, LlmError::HttpStatus(0, _)));
+    assert_eq!(observed_bytes, malformed.len() as u64);
 }
 
 /// Quota parsing is mode-independent: standard and Lite WebSocket turns both
@@ -937,6 +978,7 @@ fn ws_turn_surfaces_nameless_default_quota_in_both_modes() {
             &request,
             None,
             &mut abort,
+            &mut |_| {},
             &mut |state| {
                 if let Some(observation) = state.quota_observation.as_ref() {
                     observed_limit = observation

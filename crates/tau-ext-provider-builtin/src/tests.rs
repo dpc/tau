@@ -95,51 +95,6 @@ impl TurnAbort for RecordingRetrySleeper {
     }
 }
 
-#[derive(Default)]
-struct TransportCounts {
-    http_post_requests: std::sync::atomic::AtomicUsize,
-}
-
-fn spawn_ws_426_server() -> (String, Arc<TransportCounts>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
-    listener
-        .set_nonblocking(true)
-        .expect("set fake provider nonblocking");
-    let addr = listener.local_addr().expect("fake provider addr");
-    let counts = Arc::new(TransportCounts::default());
-    let thread_counts = Arc::clone(&counts);
-    std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            let (mut stream, _) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                Err(_) => break,
-            };
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
-            let mut request = [0_u8; 1024];
-            let read = std::io::Read::read(&mut stream, &mut request).unwrap_or(0);
-            if request[..read].starts_with(b"POST ") {
-                thread_counts
-                    .http_post_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            let response = concat!(
-                "HTTP/1.1 426 Upgrade Required\r\n",
-                "Content-Length: 21\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "upgrade unavailable\n"
-            );
-            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
-        }
-    });
-    (format!("http://{addr}/backend-api"), counts)
-}
-
 fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
     models.iter().map(|model| model.id.to_string()).collect()
 }
@@ -197,73 +152,6 @@ fn synthetic_provider_error_is_not_output_item() {
     assert!(finished.output_items.is_empty());
     assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
     assert_eq!(finished.error.as_deref(), Some("no model specified"));
-}
-
-#[test]
-fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
-    // Regression for tau-agent-y8vc: when a WebSocket-capable ChatGPT/Codex
-    // prompt fails before a stream is established, the final provider error
-    // metadata should describe the attempted WebSocket transport and must not
-    // be produced by an HTTP/SSE fallback POST.
-    let (base_url, counts) = spawn_ws_426_server();
-    let config = tau_provider_codex::responses::ResponsesConfig {
-        mode: responses::ResponsesMode::Standard,
-        base_url: base_url.clone(),
-        api_key: "token".to_owned(),
-        model_id: "gpt-5.3-codex".to_owned(),
-        raw_context_window: 258_400,
-        account_id: Some("account".to_owned()),
-        supports_reasoning_effort: false,
-        supports_reasoning_summary: false,
-        supports_verbosity: false,
-        supports_phase: true,
-        supports_encrypted_reasoning: false,
-        supports_compaction: true,
-        supports_prompt_cache_key: false,
-    };
-    let mut prompt = minimal_prompt();
-    prompt.model = "chatgpt/gpt-5.3-codex".parse().expect("model id");
-    let mut retry = RecordingRetrySleeper;
-    let runtime = CodexRuntime::new(Arc::new(test_network_policy()));
-    let mut bytes = Vec::new();
-    let mut writer = PeerOutputWriter::new(&mut bytes);
-
-    let outcome = handle_prompt(
-        "ap-ws-terminal",
-        &config,
-        &prompt,
-        &mut writer,
-        &mut retry,
-        ChatGptPromptExecutionContext {
-            debug_provider_requests: false,
-            runtime: &runtime,
-        },
-        &mut |_| {},
-    )
-    .expect("prompt handler should classify provider error");
-    assert!(
-        outcome.is_some(),
-        "ambiguous WebSocket failures keep the logical prompt pending"
-    );
-
-    assert_eq!(
-        counts
-            .http_post_requests
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "terminal WS error must not be produced by HTTP/SSE fallback"
-    );
-    assert!(
-        decode_frames(&bytes).iter().all(|frame| !matches!(
-            frame,
-            tau_proto::HarnessInputMessage::Emit(emit)
-                if matches!(
-                    emit.event.as_ref(),
-                    tau_proto::Event::ProviderResponseFinished(_)
-                )
-        )),
-        "retryable attempts must not close the logical prompt"
-    );
 }
 
 #[test]
@@ -349,7 +237,7 @@ fn chatgpt_profile_responses_lite_compatibility_serde_contract() {
 /// explicitly confirms the compatibility prompt.
 #[test]
 fn chatgpt_setup_defaults_responses_lite_compatibility_to_no() {
-    assert!(!DEFAULT_RESPONSES_LITE_COMPATIBILITY);
+    assert!(!std::hint::black_box(DEFAULT_RESPONSES_LITE_COMPATIBILITY));
 }
 
 /// OAuth refresh replaces only credentials, so serializing and reloading the
@@ -538,7 +426,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
         let error = refresh_chatgpt_credentials_in(
             &auth_file,
             &provider,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
             |_| {
                 attempts += 1;
@@ -574,7 +462,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
     let error = refresh_chatgpt_credentials_in(
         &auth_file,
         &provider,
-        responses::ResponsesMode::Standard,
+        CodexMode::Standard,
         &mut cache,
         |_| {
             attempts += 1;
@@ -595,7 +483,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
     let error = refresh_chatgpt_credentials_in(
         &auth_file,
         &provider,
-        responses::ResponsesMode::LiteCompatibility,
+        CodexMode::LiteCompatibility,
         &mut cache,
         |_| {
             attempts += 1;
@@ -633,7 +521,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
         &model,
         &provider,
         &mut loaded_fresh,
-        responses::ResponsesMode::Standard,
+        CodexMode::Standard,
         &mut cache,
         |provider, mode, cache| {
             refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
@@ -643,7 +531,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
         },
     )
     .expect("valid replacement resolves");
-    assert_eq!(config.api_key, "fresh-access");
+    assert!(config.credentials_match("fresh-access", Some("fresh-account")));
     assert_eq!(attempts, 3);
     assert!(!cache.contains(&provider));
 }
@@ -719,7 +607,7 @@ fn permanent_rejection_survives_unlock_failure() {
                 unlock_error: Some(std::io::Error::other("simulated unlock failure")),
             },
             &provider,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
         )
         .expect_err("endpoint rejection plus unlock failure");
@@ -738,11 +626,7 @@ fn permanent_rejection_survives_unlock_failure() {
         }
         assert!(
             cache
-                .rejection(
-                    &provider,
-                    &authoritative,
-                    responses::ResponsesMode::Standard
-                )
+                .rejection(&provider, &authoritative, CodexMode::Standard)
                 .is_some()
         );
         assert!(failure.to_string().contains("lock release also failed"));
@@ -771,7 +655,7 @@ fn permanent_rejection_survives_unlock_failure() {
                 &model,
                 &provider,
                 &mut stale_outer,
-                responses::ResponsesMode::Standard,
+                CodexMode::Standard,
                 &mut cache,
                 |_, _, _| Err(pending_failure.take().expect("one injected unlock failure")),
             )
@@ -788,7 +672,7 @@ fn permanent_rejection_survives_unlock_failure() {
         let repeated = refresh_chatgpt_credentials_in(
             &auth_file,
             &provider,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
             |_| {
                 subsequent_attempts += 1;
@@ -826,12 +710,7 @@ fn suppressed_generation_survives_unlock_failure() {
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
     let mut cache = OAuthRefreshRejectionCache::default();
-    cache.record_if_permanent(
-        &provider,
-        &locked_expired,
-        responses::ResponsesMode::Standard,
-        &rejection,
-    );
+    cache.record_if_permanent(&provider, &locked_expired, CodexMode::Standard, &rejection);
     let mut stale_valid = OpenAiAuth {
         access_token: "stale-valid".to_owned(),
         refresh_token: "stale-refresh".to_owned(),
@@ -854,7 +733,7 @@ fn suppressed_generation_survives_unlock_failure() {
             &model,
             &provider,
             &mut stale_valid,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
             |provider, mode, cache| {
                 let error = cache
@@ -907,12 +786,7 @@ fn authoritative_credentials_survive_unlock_failure() {
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
     let mut cache = OAuthRefreshRejectionCache::default();
-    cache.record_if_permanent(
-        &provider,
-        &rejected,
-        responses::ResponsesMode::Standard,
-        &rejection,
-    );
+    cache.record_if_permanent(&provider, &rejected, CodexMode::Standard, &rejection);
     let secret = "authoritative-current-secret";
     let authoritative = OpenAiAuth {
         access_token: secret.to_owned(),
@@ -941,7 +815,7 @@ fn authoritative_credentials_survive_unlock_failure() {
             &model,
             &provider,
             &mut stale_valid,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
             |provider, mode, cache| {
                 finish_chatgpt_refresh_attempt(
@@ -958,7 +832,7 @@ fn authoritative_credentials_survive_unlock_failure() {
     })
     .expect("authoritative valid credentials remain available");
 
-    assert_eq!(resolved.api_key, secret);
+    assert!(resolved.credentials_match(secret, Some(secret)));
     assert_eq!(stale_valid, authoritative);
     assert!(!cache.contains(&provider));
     let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
@@ -1006,7 +880,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         &model,
         &provider,
         &mut stale_valid,
-        responses::ResponsesMode::Standard,
+        CodexMode::Standard,
         &mut cache,
         |provider, mode, cache| {
             refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
@@ -1040,7 +914,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         &model,
         &provider,
         &mut stale_expired,
-        responses::ResponsesMode::Standard,
+        CodexMode::Standard,
         &mut cache,
         |provider, mode, cache| {
             refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
@@ -1050,7 +924,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         },
     )
     .expect("authoritative still-valid bearer may fall back");
-    assert_eq!(config.api_key, "locked-valid");
+    assert!(config.credentials_match("locked-valid", Some("locked-account-2")));
     assert_eq!(stale_expired, locked_valid);
     assert_eq!(attempts, 2);
 
@@ -1059,7 +933,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         &model,
         &provider,
         &mut same_generation,
-        responses::ResponsesMode::Standard,
+        CodexMode::Standard,
         &mut cache,
         |provider, mode, cache| {
             refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
@@ -1069,7 +943,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
         },
     )
     .expect("cached rejection retains valid fallback");
-    assert_eq!(cached.api_key, "locked-valid");
+    assert!(cached.credentials_match("locked-valid", Some("locked-account-2")));
     assert_eq!(attempts, 2);
 }
 
@@ -1101,7 +975,7 @@ fn refresh_failure_falls_back_only_to_still_valid_access_token() {
             &model,
             &provider,
             &mut auth,
-            responses::ResponsesMode::Standard,
+            CodexMode::Standard,
             &mut cache,
             |_, _, _| {
                 Err(RefreshCredentialsError::OAuth {
@@ -1511,15 +1385,12 @@ fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
 #[test]
 fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
     let prompt = minimal_prompt();
-    let mut state = common::StreamState::new();
-    state
-        .tool_call_at_mut(0, tau_proto::ToolType::Custom)
-        .arguments_json
-        .push_str("raw custom input");
+    let mut state = tau_provider_codex::test_stream_state();
+    tau_provider_codex::test_append_custom_tool_input(&mut state, 0, "raw custom input");
     let mut bytes = Vec::new();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
-        let mut delta_emitter = common::StreamDeltaEmitter::default();
+        let mut delta_emitter = CodexStreamDeltaEmitter::default();
         emit_chatgpt_stream_update(
             prompt.agent_prompt_id.as_str(),
             &prompt.agent_id,
@@ -1596,7 +1467,7 @@ fn chatgpt_connecting_update_is_sanitized() {
 #[test]
 fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
     let prompt = minimal_prompt();
-    let mut state = common::StreamState::new();
+    let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
     let start = std::time::Instant::now();
     {
@@ -1607,13 +1478,10 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
-        state.append_message_delta_at(0, "hel");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "hel");
         emitter.emit_at(&target, &state, &mut writer, start, false);
-        state.append_message_delta_at(0, "lo");
-        state
-            .tool_call_at_mut(1, tau_proto::ToolType::Custom)
-            .arguments_json
-            .push_str("raw custom input");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "lo");
+        tau_provider_codex::test_append_custom_tool_input(&mut state, 1, "raw custom input");
         emitter.emit_at(
             &target,
             &state,
@@ -1690,7 +1558,7 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
 #[test]
 fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
     let prompt = minimal_prompt();
-    let state = common::StreamState::new();
+    let state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
     let start = std::time::Instant::now();
     {
@@ -1770,7 +1638,7 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
 #[test]
 fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly() {
     let prompt = minimal_prompt();
-    let mut state = common::StreamState::new();
+    let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
     let start = std::time::Instant::now();
     {
@@ -1788,7 +1656,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
             start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
             false,
         );
-        state.append_message_delta_at(0, "hi");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "hi");
         emitter.emit_at(
             &target,
             &state,
@@ -1798,7 +1666,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
                 + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
             false,
         );
-        state.append_message_delta_at(0, "!");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "!");
         emitter.emit_at(
             &target,
             &state,
@@ -1869,7 +1737,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
 #[test]
 fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
     let prompt = minimal_prompt();
-    let mut state = common::StreamState::new();
+    let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
     let start = std::time::Instant::now();
     {
@@ -1880,10 +1748,7 @@ fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
-        state
-            .tool_call_at_mut(1, tau_proto::ToolType::Custom)
-            .arguments_json
-            .push_str("raw custom input");
+        tau_provider_codex::test_append_custom_tool_input(&mut state, 1, "raw custom input");
         emitter.emit_at(&target, &state, &mut writer, start, false);
     }
 
@@ -1916,7 +1781,7 @@ fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
 #[test]
 fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
     let prompt = minimal_prompt();
-    let mut state = common::StreamState::new();
+    let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
     let start = std::time::Instant::now();
     {
@@ -1927,9 +1792,9 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
-        state.append_message_delta_at(0, "hel");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "hel");
         emitter.emit_at(&target, &state, &mut writer, start, false);
-        state.append_message_delta_at(0, "lo");
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "lo");
         emitter.emit_at(
             &target,
             &state,
@@ -2035,7 +1900,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
             "ap-test",
             &prompt,
             &backend,
-            tau_provider_codex::common::LlmError::RepetitionDetected(repetition),
+            tau_provider_codex::CodexError::from_repetition(repetition),
             None,
             false,
             &mut writer,
@@ -2070,8 +1935,8 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     let (epoch, fetch_sequence) = quota
         .begin_fetch(&provider)
         .expect("valid quota test value");
-    let rolling = tau_provider_codex::quota::RollingQuotaObservation {
-        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+    let rolling = tau_provider_codex::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                 .expect("valid quota test value"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
@@ -2090,8 +1955,8 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
         quota.merge_rolling(model, 7, rolling, 2_000_000_000_000),
         Some(Event::ProviderQuotaPatch(_))
     ));
-    let full = tau_provider_codex::quota::FullQuotaSnapshot {
-        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+    let full = tau_provider_codex::FullQuotaSnapshot {
+        windows: vec![tau_provider_codex::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
                 .expect("valid quota test value"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
@@ -2122,16 +1987,15 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     let mut quota = QuotaCoordinator::default();
     quota.ensure_profile(provider.clone(), 7);
     let (epoch, fetch_sequence) = quota.begin_fetch(&provider).expect("quota fetch");
-    let window =
-        |limit_id: &str, used_basis_points| tau_provider_codex::quota::QuotaWindowObservation {
-            limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
-            window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
-            used_basis_points,
-            window_seconds: Some(604_800),
-            reset_at_unix_seconds: Some(2_100_000_000),
-            remaining_seconds: Some(500_000),
-        };
-    let full = tau_provider_codex::quota::FullQuotaSnapshot {
+    let window = |limit_id: &str, used_basis_points| tau_provider_codex::QuotaWindowObservation {
+        limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
+        window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
+        used_basis_points,
+        window_seconds: Some(604_800),
+        reset_at_unix_seconds: Some(2_100_000_000),
+        remaining_seconds: Some(500_000),
+    };
+    let full = tau_provider_codex::FullQuotaSnapshot {
         windows: vec![window("codex", 4_400), window("codex_bengalfox", 0)],
     };
     let Event::ProviderQuotaReplace(replaced) = quota
@@ -2143,7 +2007,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     assert_eq!(replaced.windows.len(), 2);
     assert!(replaced.route_bindings.is_empty());
 
-    let observation = tau_provider_codex::quota::parse_ws_event(
+    let observation = tau_provider_codex::parse_quota_ws_event(
         r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":45,"window_minutes":10080,"reset_at":2100000000}}}"#,
     )
     .expect("official nameless turn event");
@@ -2181,7 +2045,7 @@ fn quota_profile_rotation_rejects_old_fetch_completion() {
                 provider,
                 old_epoch,
                 sequence,
-                tau_provider_codex::quota::FullQuotaSnapshot::default(),
+                tau_provider_codex::FullQuotaSnapshot::default(),
                 1,
             )
             .is_none()
@@ -2197,8 +2061,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
     let mut quota = QuotaCoordinator::default();
     quota.ensure_profile(provider.clone(), 7);
     for index in 0..tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
-        let observation = tau_provider_codex::quota::RollingQuotaObservation {
-            windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+        let observation = tau_provider_codex::RollingQuotaObservation {
+            windows: vec![tau_provider_codex::QuotaWindowObservation {
                 limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("pool_{index}"))
                     .expect("pool id"),
                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
@@ -2217,8 +2081,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
         );
     }
     let sequence = quota.profiles[&provider].sequence;
-    let overflow = tau_provider_codex::quota::RollingQuotaObservation {
-        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+    let overflow = tau_provider_codex::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("overflow").expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
             used_basis_points: 100,
@@ -2249,8 +2113,8 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
     let model = ModelId::from("chatgpt/gpt-5.6-sol");
     let mut quota = QuotaCoordinator::default();
     quota.ensure_profile(provider.clone(), 7);
-    let rolling = |prefix: &str, index: usize| tau_provider_codex::quota::RollingQuotaObservation {
-        windows: vec![tau_provider_codex::quota::QuotaWindowObservation {
+    let rolling = |prefix: &str, index: usize| tau_provider_codex::RollingQuotaObservation {
+        windows: vec![tau_provider_codex::QuotaWindowObservation {
             limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("{prefix}_{index}"))
                 .expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
@@ -2270,9 +2134,9 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
         quota.merge_rolling(model.clone(), 7, rolling("new", index), 2_000_000_000_001);
     }
     let sequence = quota.profiles[&provider].sequence;
-    let full = tau_provider_codex::quota::FullQuotaSnapshot {
+    let full = tau_provider_codex::FullQuotaSnapshot {
         windows: (0..32)
-            .map(|index| tau_provider_codex::quota::QuotaWindowObservation {
+            .map(|index| tau_provider_codex::QuotaWindowObservation {
                 limit_id: tau_proto::ProviderQuotaLimitId::parse(format!("full_{index}"))
                     .expect("pool id"),
                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),

@@ -60,7 +60,11 @@ use tau_proto::{
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider::storage::{AuthFile, AuthFileLockResult, ProviderStore};
 use tau_provider_codex::{
-    CodexRuntime, StreamUpdate, TurnAbort, TurnAbortWaker, common, responses,
+    AttemptOutcome as CodexAttemptOutcome, CodexError, CodexMode, CodexRuntime, CompactOutcome,
+    InferenceProfileIdentity, PrewarmOutcome, Prompt as CodexPrompt, QuotaProfileIdentity,
+    ResolvedConfig, SemanticProgress as CodexSemanticProgress,
+    StreamDeltaEmitter as CodexStreamDeltaEmitter, StreamState as CodexStreamState, StreamUpdate,
+    TurnAbort, TurnAbortWaker,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -102,11 +106,11 @@ pub struct ChatGptProfile {
 }
 
 impl ChatGptProfile {
-    fn responses_mode(&self) -> responses::ResponsesMode {
+    fn responses_mode(&self) -> CodexMode {
         if self.responses_lite_compatibility {
-            responses::ResponsesMode::LiteCompatibility
+            CodexMode::LiteCompatibility
         } else {
-            responses::ResponsesMode::Standard
+            CodexMode::Standard
         }
     }
 
@@ -122,7 +126,7 @@ pub struct BuiltinProviderProfiles {
 }
 
 impl BuiltinProviderProfiles {
-    fn startup_responses_modes(&self) -> BTreeMap<ProviderName, responses::ResponsesMode> {
+    fn startup_responses_modes(&self) -> BTreeMap<ProviderName, CodexMode> {
         self.providers
             .iter()
             .filter_map(|(provider, profile)| match profile {
@@ -135,10 +139,7 @@ impl BuiltinProviderProfiles {
             .collect()
     }
 
-    fn apply_startup_responses_modes(
-        &mut self,
-        startup_modes: &BTreeMap<ProviderName, responses::ResponsesMode>,
-    ) {
+    fn apply_startup_responses_modes(&mut self, startup_modes: &BTreeMap<ProviderName, CodexMode>) {
         for (provider, profile) in &mut self.providers {
             let BuiltinProviderProfile::Chatgpt(profile) = profile else {
                 continue;
@@ -220,7 +221,7 @@ struct QuotaWindowRecord {
 }
 
 struct QuotaProfileState {
-    identity: u64,
+    identity: QuotaProfileIdentity,
     epoch: tau_proto::ProviderQuotaEpoch,
     sequence: u64,
     windows: BTreeMap<tau_proto::ProviderQuotaWindowKey, QuotaWindowRecord>,
@@ -255,7 +256,12 @@ impl QuotaCoordinator {
             .is_some_and(|current| &current.epoch == epoch)
     }
 
-    fn ensure_profile(&mut self, provider: ProviderName, identity: u64) -> Option<Event> {
+    fn ensure_profile(
+        &mut self,
+        provider: ProviderName,
+        identity: impl Into<QuotaProfileIdentity>,
+    ) -> Option<Event> {
+        let identity = identity.into();
         if self
             .profiles
             .get(&provider)
@@ -403,7 +409,7 @@ impl QuotaCoordinator {
         provider: ProviderName,
         epoch: tau_proto::ProviderQuotaEpoch,
         fetch_start_sequence: u64,
-        snapshot: tau_provider_codex::quota::FullQuotaSnapshot,
+        snapshot: tau_provider_codex::FullQuotaSnapshot,
         observed_at_unix_ms: u64,
     ) -> Option<Event> {
         let current = self.profiles.get_mut(&provider)?;
@@ -462,10 +468,11 @@ impl QuotaCoordinator {
     fn merge_rolling(
         &mut self,
         model: ModelId,
-        profile_identity: u64,
-        observation: tau_provider_codex::quota::RollingQuotaObservation,
+        profile_identity: impl Into<QuotaProfileIdentity>,
+        observation: tau_provider_codex::RollingQuotaObservation,
         observed_at_unix_ms: u64,
     ) -> Option<Event> {
+        let profile_identity = profile_identity.into();
         let provider = model.provider.clone();
         let current = self.profiles.get_mut(&provider)?;
         if current.identity != profile_identity {
@@ -544,28 +551,21 @@ impl QuotaCoordinator {
     }
 }
 
-fn quota_profile_identity(config: &responses::ResponsesConfig) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    config.base_url.hash(&mut hasher);
-    config.account_id.hash(&mut hasher);
-    config.api_key.hash(&mut hasher);
-    hasher.finish()
+fn quota_profile_identity(config: &ResolvedConfig) -> QuotaProfileIdentity {
+    config.profile_identity()
 }
 
-fn responses_profile_identity(config: &responses::ResponsesConfig) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "responses".hash(&mut hasher);
-    config.base_url.hash(&mut hasher);
-    config.account_id.hash(&mut hasher);
-    config.api_key.hash(&mut hasher);
-    hasher.finish()
+fn responses_profile_identity(config: &ResolvedConfig) -> InferenceProfileIdentity {
+    config.inference_identity()
 }
 
 fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match backend {
         PromptBackend::Unavailable => return None,
-        PromptBackend::Responses(config) => return Some(responses_profile_identity(config)),
+        PromptBackend::Responses(config) => {
+            responses_profile_identity(config).hash(&mut hasher);
+        }
         PromptBackend::ChatCompletions { provider, .. } => {
             "chat_completions".hash(&mut hasher);
             provider.base_url.hash(&mut hasher);
@@ -576,7 +576,7 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
 }
 
 fn full_quota_window(
-    observation: tau_provider_codex::quota::QuotaWindowObservation,
+    observation: tau_provider_codex::QuotaWindowObservation,
     observed_at_unix_ms: u64,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let window_seconds = observation.window_seconds?;
@@ -612,7 +612,7 @@ fn full_quota_window(
 
 fn merge_sparse_quota_window(
     previous: Option<&tau_proto::ProviderQuotaWindow>,
-    sparse: tau_provider_codex::quota::QuotaWindowObservation,
+    sparse: tau_provider_codex::QuotaWindowObservation,
     observed_at_unix_ms: u64,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let duration_changed = previous.is_some_and(|previous| {
@@ -1330,7 +1330,7 @@ struct ProviderRuntime<F> {
     /// Reloads provider profiles for prompt-time auth/model resolution.
     load_prompt_profiles: F,
     /// Per-profile Responses mode captured at process startup.
-    startup_responses_modes: BTreeMap<ProviderName, responses::ResponsesMode>,
+    startup_responses_modes: BTreeMap<ProviderName, CodexMode>,
     /// Maximum number of prompt workers that may run at once.
     prompt_concurrency_limit: usize,
     /// Starts provider backend execution for one prompt job.
@@ -1360,7 +1360,7 @@ struct ProviderRuntime<F> {
     /// namespace.
     provider_profile_identities: BTreeMap<ProviderName, Option<u64>>,
     /// Last Responses identity used to supervise prewarm transport state.
-    prewarm_profile_identities: BTreeMap<ProviderName, u64>,
+    prewarm_profile_identities: BTreeMap<ProviderName, InferenceProfileIdentity>,
     /// Cooperative cancellation state shared with prompt workers.
     cancellation: Arc<CancellationState>,
     /// Prompt jobs accepted while all worker slots were occupied.
@@ -1428,7 +1428,7 @@ where
     fn ensure_quota_profile(
         &mut self,
         provider: &ProviderName,
-        config: &responses::ResponsesConfig,
+        config: &ResolvedConfig,
         handle: &ClientHandle,
     ) -> ClientResult<bool> {
         self.reconcile_prewarm_profile(provider, config);
@@ -1442,7 +1442,7 @@ where
     fn start_quota_fetch_if_due(
         &mut self,
         provider: &ProviderName,
-        config: &responses::ResponsesConfig,
+        config: &ResolvedConfig,
     ) -> bool {
         let Some((profile_epoch, fetch_start_sequence)) = self.quota.begin_fetch(provider) else {
             return false;
@@ -1453,17 +1453,10 @@ where
         };
         let tx = self.worker_tx.clone();
         let provider = provider.clone();
-        let base_url = config.base_url.clone();
-        let access_token = config.api_key.clone();
-        let account_id = config.account_id.clone();
-        let network = self.codex_runtime.network_arc();
+        let runtime = Arc::clone(&self.codex_runtime);
+        let config = config.clone();
         thread::spawn(move || {
-            let result = tau_provider_codex::quota::fetch_usage(
-                &base_url,
-                &access_token,
-                account_id.as_deref(),
-                &network,
-            );
+            let result = runtime.fetch_usage(&config);
             let _ = send_worker_message(
                 &tx,
                 &waker,
@@ -1604,7 +1597,10 @@ where
             }
             return Ok(());
         };
-        self.reconcile_provider_profile(&model.provider, Some(responses_profile_identity(&config)));
+        self.reconcile_provider_profile(
+            &model.provider,
+            backend_profile_identity(&PromptBackend::Responses(config.clone())),
+        );
         self.reconcile_prewarm_profile(&model.provider, &config);
         let key = PrewarmKey {
             provider: model.provider,
@@ -1659,8 +1655,8 @@ where
                     self.retry_clock.now(),
                 );
             }
-            self.cancel_all_prewarms();
-            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
+            self.prewarm_supervisor.cancel_provider(provider);
+            if let Err(error) = self.codex_runtime.invalidate_profile_websockets(provider) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile change: {error}",
@@ -1669,19 +1665,15 @@ where
         }
     }
 
-    fn reconcile_prewarm_profile(
-        &mut self,
-        provider: &ProviderName,
-        config: &responses::ResponsesConfig,
-    ) {
-        let identity = quota_profile_identity(config);
+    fn reconcile_prewarm_profile(&mut self, provider: &ProviderName, config: &ResolvedConfig) {
+        let identity = responses_profile_identity(config);
         let changed = self
             .prewarm_profile_identities
             .insert(provider.clone(), identity)
             .is_some_and(|previous| previous != identity);
         if changed {
-            self.cancel_all_prewarms();
-            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
+            self.prewarm_supervisor.cancel_provider(provider);
+            if let Err(error) = self.codex_runtime.invalidate_profile_websockets(provider) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile change: {error}",
@@ -1692,8 +1684,8 @@ where
 
     fn clear_prewarm_profile(&mut self, provider: &ProviderName) {
         if self.prewarm_profile_identities.remove(provider).is_some() {
-            self.cancel_all_prewarms();
-            if let Err(error) = self.codex_runtime.invalidate_all_websockets() {
+            self.prewarm_supervisor.cancel_provider(provider);
+            if let Err(error) = self.codex_runtime.invalidate_profile_websockets(provider) {
                 tracing::debug!(
                     target: LOG_TARGET,
                     "failed to invalidate websocket pool after profile removal: {error}",
@@ -2362,7 +2354,7 @@ struct PrewarmExecution {
     /// Shared ChatGPT runtime and connection pool.
     runtime: Arc<CodexRuntime>,
     /// Resolved immutable backend configuration.
-    config: responses::ResponsesConfig,
+    config: ResolvedConfig,
     /// Owned prefix request received from the harness.
     request: tau_proto::AgentPromptPrewarmRequested,
     /// Whether this durable session permits provider request captures.
@@ -3038,7 +3030,7 @@ fn send_scheduler_actions(
 enum PromptBackend {
     /// Mutable provider profile/model state was unavailable at this attempt.
     Unavailable,
-    Responses(responses::ResponsesConfig),
+    Responses(ResolvedConfig),
     ChatCompletions {
         provider: ChatCompletionsProvider,
         model: ChatCompletionsModel,
@@ -3126,9 +3118,9 @@ enum WorkerMessage {
         /// Exact model whose in-band route established applicability.
         model: ModelId,
         /// Secret-free hash of the profile used by this prompt.
-        profile_identity: u64,
+        profile_identity: QuotaProfileIdentity,
         /// Provider-normalized sparse rolling observation.
-        observation: tau_provider_codex::quota::RollingQuotaObservation,
+        observation: tau_provider_codex::RollingQuotaObservation,
         /// Original wall-clock observation time.
         observed_at_unix_ms: u64,
     },
@@ -3143,10 +3135,7 @@ enum WorkerMessage {
         /// Wall-clock completion time sampled by the acquisition worker.
         observed_at_unix_ms: u64,
         /// Sanitized full-fetch result.
-        result: Result<
-            tau_provider_codex::quota::FullQuotaSnapshot,
-            tau_provider_codex::quota::UsageFetchError,
-        >,
+        result: Result<tau_provider_codex::FullQuotaSnapshot, tau_provider_codex::UsageFetchError>,
     },
     /// Coarse full-refresh wake for a still-current profile epoch.
     QuotaRefreshDue {
@@ -3461,7 +3450,7 @@ fn production_prompt_executor() -> PromptExecutor {
         let quota_tx = execution.output_tx.clone();
         let quota_waker = execution.output_waker.clone();
         let mut last_quota = None;
-        let mut on_quota = |observation: &tau_provider_codex::quota::RollingQuotaObservation| {
+        let mut on_quota = |observation: &tau_provider_codex::RollingQuotaObservation| {
             if last_quota.as_ref() == Some(observation) {
                 return;
             }
@@ -3853,7 +3842,7 @@ fn resolve_responses_backend(
     profiles: &mut BuiltinProviderProfiles,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Option<responses::ResponsesConfig> {
+) -> Option<ResolvedConfig> {
     let Some(profile) = profiles.providers.get_mut(&model.provider) else {
         refresh_rejections.clear(&model.provider);
         return None;
@@ -3881,10 +3870,10 @@ fn resolve_chatgpt_backend(
     model: &ModelId,
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Option<responses::ResponsesConfig> {
+) -> Option<ResolvedConfig> {
     resolve_chatgpt_backend_with_refresh(
         model,
         provider_name,
@@ -3901,14 +3890,14 @@ fn resolve_chatgpt_backend_with_refresh(
     model: &ModelId,
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     refresh: impl FnOnce(
         &ProviderName,
-        responses::ResponsesMode,
+        CodexMode,
         &mut OAuthRefreshRejectionCache,
     ) -> Result<OpenAiAuth, RefreshCredentialsError>,
-) -> Option<responses::ResponsesConfig> {
+) -> Option<ResolvedConfig> {
     let refresh_due =
         oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
             && !auth_store.refresh_token.trim().is_empty();
@@ -3967,17 +3956,20 @@ fn resolve_chatgpt_backend_with_refresh(
         return None;
     }
 
-    Some(tau_provider_codex::config_for_model_mode(
+    Some(tau_provider_codex::resolved_config_for_provider_model(
+        &model.provider,
         &model.model,
-        auth_store.access_token.clone(),
-        auth_store.account_id.clone(),
+        tau_provider_codex::ResolvedCredentials::new(
+            auth_store.access_token.clone(),
+            auth_store.account_id.clone(),
+        ),
         mode,
     ))
 }
 
 fn refresh_chatgpt_credentials_locked(
     provider_name: &ProviderName,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
@@ -3995,7 +3987,7 @@ fn refresh_chatgpt_credentials_locked(
 fn refresh_chatgpt_credentials_in(
     auth_file: &AuthFile<BuiltinProviderProfile>,
     provider_name: &ProviderName,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     refresh: impl FnOnce(
         &str,
@@ -4052,7 +4044,7 @@ fn refresh_chatgpt_credentials_in(
 fn finish_chatgpt_refresh_attempt(
     lock_result: AuthFileLockResult<LockedRefreshOutcome>,
     provider_name: &ProviderName,
-    mode: responses::ResponsesMode,
+    mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
     let (outcome, unlock_error) = match lock_result {
@@ -4140,10 +4132,7 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 }
 
 fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
-    let payload = jwt.split('.').nth(1)?;
-    let payload = tau_provider_codex::oauth::base64_url_safe_no_pad_decode(payload)?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    claims.get("iat")?.as_u64().map(|secs| secs * 1000)
+    tau_provider_codex::oauth::jwt_issued_at_ms(jwt)
 }
 
 #[cfg(test)]
@@ -4152,7 +4141,7 @@ fn emit_retry_banner<W: Write>(
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
-    error: &common::LlmError,
+    error: &str,
     delay: Duration,
     attempt: usize,
 ) {
@@ -4180,16 +4169,12 @@ fn emit_retry_banner<W: Write>(
     let _ = writer.flush();
 }
 
-fn is_canceled_by_harness(error: &common::LlmError) -> bool {
-    matches!(error, common::LlmError::Canceled)
-}
-
 fn resolve_prewarm_backend(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Option<(ModelId, responses::ResponsesConfig)> {
+) -> Option<(ModelId, ResolvedConfig)> {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
             target: LOG_TARGET,
@@ -4213,13 +4198,13 @@ fn resolve_prewarm_backend(
 
 fn handle_resolved_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
-    config: &responses::ResponsesConfig,
+    config: &ResolvedConfig,
     codex_runtime: &CodexRuntime,
     debug_provider_requests: bool,
     abort: &mut impl TurnAbort,
 ) {
     let session_id_str = prewarm.session_id.as_str();
-    let request = common::PromptPayload {
+    let request = CodexPrompt {
         system_prompt: &prewarm.system_prompt,
         context: &prewarm.context,
         tools: &prewarm.tools,
@@ -4234,10 +4219,26 @@ fn handle_resolved_prewarm(
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
     match codex_runtime.prewarm(config, session_id_str, &request, abort) {
-        Ok(()) => {
+        PrewarmOutcome::Installed => {
             tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
         }
-        Err(error) => tracing::debug!(
+        PrewarmOutcome::SkippedBusy => tracing::debug!(
+            target: LOG_TARGET,
+            session_id = session_id_str,
+            "skipped prompt prewarm: websocket key is busy",
+        ),
+        PrewarmOutcome::Retry(decision) => tracing::debug!(
+            target: LOG_TARGET,
+            session_id = session_id_str,
+            retry_class = ?decision.class,
+            "prompt prewarm ended with retryable provider failure",
+        ),
+        PrewarmOutcome::Canceled => tracing::debug!(
+            target: LOG_TARGET,
+            session_id = session_id_str,
+            "prompt prewarm canceled",
+        ),
+        PrewarmOutcome::Terminal(error) => tracing::debug!(
             target: LOG_TARGET,
             session_id = session_id_str,
             "prompt prewarm failed: {error}",
@@ -4252,7 +4253,7 @@ fn handle_prompt_backend<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
-    on_quota: &mut impl FnMut(&tau_provider_codex::quota::RollingQuotaObservation),
+    on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -4379,19 +4380,85 @@ struct ChatGptPromptExecutionContext<'a> {
     runtime: &'a CodexRuntime,
 }
 
-fn handle_prompt<R, W: Write>(
+fn handle_compact_prompt<R, W: Write>(
     agent_prompt_id: &str,
-    config: &responses::ResponsesConfig,
+    config: &ResolvedConfig,
     prompt: &tau_proto::AgentPromptCreated,
+    request: &CodexPrompt<'_>,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
-    on_quota: &mut impl FnMut(&tau_provider_codex::quota::RollingQuotaObservation),
 ) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
     R: TurnAbort,
 {
-    let request = common::PromptPayload {
+    // This deliberately has no inline fallback; see
+    // `DECISION-tau-ext-provider-builtin-standalone-compaction`.
+    match execution
+        .runtime
+        .compact(agent_prompt_id, config, request, retry_ctx)
+    {
+        CompactOutcome::Finished(output_items) => {
+            writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                ProviderResponseFinished {
+                    agent_prompt_id: agent_prompt_id.into(),
+                    agent_id: prompt.agent_id.clone(),
+                    output_items,
+                    stop_reason: ProviderStopReason::EndTurn,
+                    error: None,
+                    failure_kind: None,
+                    context_limit_telemetry: None,
+                    recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                    originator: prompt.originator.clone(),
+                    usage: None,
+                    compaction_original_input_tokens: None,
+                    compaction_compacted_input_tokens: None,
+                    backend: Some(backend_descriptor(
+                        config,
+                        ProviderBackendTransport::HttpSse,
+                        false,
+                    )),
+                    provider_response_id: None,
+                    ws_pool_delta: None,
+                },
+            )))?;
+            writer.flush()?;
+            Ok(None)
+        }
+        CompactOutcome::Retry(decision) => Ok(Some(decision)),
+        CompactOutcome::Canceled => {
+            finish_canceled(agent_prompt_id, prompt, writer)?;
+            Ok(None)
+        }
+        CompactOutcome::Terminal(error) => {
+            let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
+            finish_error(
+                agent_prompt_id,
+                prompt,
+                &backend,
+                error,
+                None,
+                execution.debug_provider_requests,
+                writer,
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+fn handle_prompt<R, W: Write>(
+    agent_prompt_id: &str,
+    config: &ResolvedConfig,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    retry_ctx: &mut R,
+    execution: ChatGptPromptExecutionContext<'_>,
+    on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
+) -> Result<Option<RetryDecision>, Box<dyn Error>>
+where
+    R: TurnAbort,
+{
+    let request = CodexPrompt {
         system_prompt: &prompt.system_prompt,
         context: &prompt.context,
         tools: &prompt.tools,
@@ -4406,56 +4473,15 @@ where
     };
 
     if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
-        // This deliberately has no inline fallback; see
-        // `DECISION-tau-ext-provider-builtin-standalone-compaction`.
-        match execution
-            .runtime
-            .compact(agent_prompt_id, config, &request, retry_ctx)
-        {
-            Ok(output_items) => {
-                writer.write_message(&HarnessInputMessage::emit(
-                    Event::ProviderResponseFinished(ProviderResponseFinished {
-                        agent_prompt_id: agent_prompt_id.into(),
-                        agent_id: prompt.agent_id.clone(),
-                        output_items,
-                        stop_reason: ProviderStopReason::EndTurn,
-                        error: None,
-                        failure_kind: None,
-                        context_limit_telemetry: None,
-                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                        originator: prompt.originator.clone(),
-                        usage: None,
-                        compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
-                        backend: Some(backend_descriptor(
-                            config,
-                            ProviderBackendTransport::HttpSse,
-                            false,
-                        )),
-                        provider_response_id: None,
-                        ws_pool_delta: None,
-                    }),
-                ))?;
-                writer.flush()?;
-                return Ok(None);
-            }
-            Err(error) if error.retry_decision().is_some() => {
-                return Ok(error.retry_decision());
-            }
-            Err(error) => {
-                let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
-                finish_error(
-                    agent_prompt_id,
-                    prompt,
-                    &backend,
-                    error,
-                    None,
-                    execution.debug_provider_requests,
-                    writer,
-                )?;
-                return Ok(None);
-            }
-        }
+        return handle_compact_prompt(
+            agent_prompt_id,
+            config,
+            prompt,
+            &request,
+            writer,
+            retry_ctx,
+            execution,
+        );
     }
 
     let originator = prompt.originator.clone();
@@ -4466,8 +4492,11 @@ where
         StreamUpdate::Connecting => {
             emit_chatgpt_connecting_update(agent_prompt_id, &prompt.agent_id, &originator, writer);
         }
+        StreamUpdate::Dispatched(at) => {
+            response_update_emitter.mark_dispatched(at);
+        }
         StreamUpdate::Response(state) => {
-            if let Some(observation) = state.quota_observation.as_ref() {
+            if let Some(observation) = state.quota_observation() {
                 on_quota(observation);
             }
             response_update_emitter.emit_if_due(
@@ -4479,15 +4508,11 @@ where
             );
         }
     };
-    let result =
+    let outcome =
         execution
             .runtime
-            .stream(agent_prompt_id, config, &request, retry_ctx, &mut on_update);
-    if TurnAbort::is_aborted(retry_ctx) {
-        finish_canceled(agent_prompt_id, prompt, writer)?;
-        return Ok(None);
-    }
-    if let Ok(dispatch) = &result {
+            .run_attempt(agent_prompt_id, config, &request, retry_ctx, &mut on_update);
+    if let CodexAttemptOutcome::Finished(dispatch) = &outcome {
         response_update_emitter.emit_terminal_flush(
             agent_prompt_id,
             &prompt.agent_id,
@@ -4496,11 +4521,14 @@ where
             writer,
         );
     }
-    match result {
-        Ok(dispatch) => {
+    match outcome {
+        CodexAttemptOutcome::Finished(dispatch) => {
             ws_pool_delta = dispatch.ws_pool_delta;
-            let backend =
-                backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
+            let backend = backend_descriptor(
+                config,
+                transport_taken,
+                dispatch.state.stale_chain_fallback(),
+            );
             finish_stream(
                 prompt.session_id.as_str(),
                 agent_prompt_id,
@@ -4508,18 +4536,33 @@ where
                 &request,
                 &backend,
                 dispatch.state,
+                dispatch.debug_capture,
                 ws_pool_delta,
                 execution.debug_provider_requests,
                 writer,
             )?
         }
-        Err(error) if is_canceled_by_harness(&error) => {
+        CodexAttemptOutcome::Canceled { progress } => {
+            if progress == CodexSemanticProgress::Parsed {
+                emit_chat_completions_partial_clear(
+                    &agent_prompt_id.into(),
+                    prompt,
+                    "request canceled; discarding partial provider output",
+                    writer,
+                )?;
+            }
             finish_canceled(agent_prompt_id, prompt, writer)?
         }
-        Err(error @ common::LlmError::RepetitionDetected(_)) => {
-            let common::LlmError::RepetitionDetected(repetition) = &error else {
-                unreachable!()
-            };
+        CodexAttemptOutcome::Terminal { error, progress } if error.repetition().is_some() => {
+            if progress == CodexSemanticProgress::Parsed {
+                emit_chat_completions_partial_clear(
+                    &agent_prompt_id.into(),
+                    prompt,
+                    "provider stream ended with an error; discarding partial output",
+                    writer,
+                )?;
+            }
+            let repetition = error.repetition().expect("guarded repetition");
             emit_repetition_detected_update(
                 agent_prompt_id,
                 &prompt.agent_id,
@@ -4538,10 +4581,26 @@ where
                 writer,
             )?
         }
-        Err(error) if error.retry_decision().is_some() => {
-            return Ok(error.retry_decision());
+        CodexAttemptOutcome::Retry { decision, progress } => {
+            if progress == CodexSemanticProgress::Parsed {
+                emit_chat_completions_partial_clear(
+                    &agent_prompt_id.into(),
+                    prompt,
+                    "provider stream interrupted after partial output; preparing retry",
+                    writer,
+                )?;
+            }
+            return Ok(Some(decision));
         }
-        Err(error) => {
+        CodexAttemptOutcome::Terminal { error, progress } => {
+            if progress == CodexSemanticProgress::Parsed {
+                emit_chat_completions_partial_clear(
+                    &agent_prompt_id.into(),
+                    prompt,
+                    "provider stream ended with an error; discarding partial output",
+                    writer,
+                )?;
+            }
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
                 agent_prompt_id,
@@ -4585,7 +4644,7 @@ fn emit_chatgpt_connecting_update<W: Write>(
 /// Samples ChatGPT streaming progress according to
 /// `SPEC-provider-response-streaming`.
 struct RateLimitedResponseUpdateEmitter {
-    delta_emitter: common::StreamDeltaEmitter,
+    delta_emitter: CodexStreamDeltaEmitter,
     started_at: Instant,
     last_update_emitted_at: Option<Instant>,
     last_stats_sample: tau_proto::ProviderResponseStatsSample,
@@ -4605,11 +4664,18 @@ impl RateLimitedResponseUpdateEmitter {
 
     fn new_at(started_at: Instant) -> Self {
         Self {
-            delta_emitter: common::StreamDeltaEmitter::default(),
+            delta_emitter: CodexStreamDeltaEmitter::default(),
             started_at,
             last_update_emitted_at: None,
             last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
             emitted_non_empty_sample: false,
+        }
+    }
+
+    /// Aligns public elapsed time to the backend's typed dispatch boundary.
+    fn mark_dispatched(&mut self, dispatched_at: Instant) {
+        if self.last_update_emitted_at.is_none() {
+            self.started_at = dispatched_at;
         }
     }
 
@@ -4618,7 +4684,7 @@ impl RateLimitedResponseUpdateEmitter {
         agent_prompt_id: &str,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
-        state: &common::StreamState,
+        state: &CodexStreamState,
         writer: &mut PeerOutputWriter<W>,
     ) {
         let target = ResponseUpdateTarget {
@@ -4634,7 +4700,7 @@ impl RateLimitedResponseUpdateEmitter {
         agent_prompt_id: &str,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
-        state: &common::StreamState,
+        state: &CodexStreamState,
         writer: &mut PeerOutputWriter<W>,
     ) {
         let target = ResponseUpdateTarget {
@@ -4648,7 +4714,7 @@ impl RateLimitedResponseUpdateEmitter {
     fn emit_at<W: Write>(
         &mut self,
         target: &ResponseUpdateTarget<'_>,
-        state: &common::StreamState,
+        state: &CodexStreamState,
         writer: &mut PeerOutputWriter<W>,
         now: Instant,
         terminal_flush: bool,
@@ -4684,11 +4750,7 @@ impl RateLimitedResponseUpdateEmitter {
         }
     }
 
-    fn response_stats_at(
-        &self,
-        state: &common::StreamState,
-        now: Instant,
-    ) -> ProviderResponseStats {
+    fn response_stats_at(&self, state: &CodexStreamState, now: Instant) -> ProviderResponseStats {
         let current = tau_proto::ProviderResponseStatsSample {
             response_bytes_received: state.response_bytes_received(),
             elapsed_micros: now
@@ -4707,8 +4769,8 @@ fn emit_chatgpt_stream_update<W: Write>(
     agent_prompt_id: &str,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
-    state: &common::StreamState,
-    delta_emitter: &mut common::StreamDeltaEmitter,
+    state: &CodexStreamState,
+    delta_emitter: &mut CodexStreamDeltaEmitter,
     response_stats: ProviderResponseStats,
     writer: &mut PeerOutputWriter<W>,
 ) -> bool {
@@ -4745,13 +4807,13 @@ fn emit_chatgpt_stream_update<W: Write>(
 }
 
 fn backend_descriptor(
-    config: &responses::ResponsesConfig,
+    config: &ResolvedConfig,
     transport: ProviderBackendTransport,
     stale_chain_fallback: bool,
 ) -> ProviderBackend {
     ProviderBackend {
         kind: ProviderBackendKind::Responses,
-        base_url: config.base_url.clone(),
+        base_url: config.base_url().to_owned(),
         transport,
         stale_chain_fallback,
     }
@@ -4761,63 +4823,14 @@ fn maybe_debug_write_provider_response(
     session_id: &str,
     response: &ProviderResponseFinished,
     debug_provider_requests: bool,
-    provider_terminal_event: Option<&serde_json::Value>,
+    capture: Option<&tau_provider_codex::CodexDebugCapture>,
 ) {
-    if !debug_provider_requests {
-        return;
-    }
-    let Some(backend) = response.backend.as_ref() else {
-        return;
-    };
-    if !matches!(backend.kind, ProviderBackendKind::Responses) {
-        return;
-    }
-    let Some(dir) = responses::debug_provider_request_dir(session_id, debug_provider_requests)
-    else {
-        return;
-    };
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            target: LOG_TARGET,
-            session_id,
-            agent_prompt_id = %response.agent_prompt_id,
-            "failed to create provider response debug dir: {error}",
-        );
-        return;
-    }
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    let transport_label = match backend.transport {
-        ProviderBackendTransport::HttpSse => "http-sse",
-        ProviderBackendTransport::Websocket => "websocket",
-    };
-    let path = dir.join(format!(
-        "{ts}-{}-{transport_label}-response.json",
-        response.agent_prompt_id
-    ));
-    let metadata = serde_json::json!({
-        "session_id": session_id,
-        "agent_prompt_id": response.agent_prompt_id,
-        "transport": transport_label,
-        "backend": backend,
-        "provider_response_id": response.provider_response_id,
-        "usage": response.usage,
-        "provider_response_finished": response,
-        "provider_terminal_event": provider_terminal_event,
-    });
-    if let Err(error) = serde_json::to_vec_pretty(&metadata)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(path, bytes))
-    {
-        tracing::warn!(
-            target: LOG_TARGET,
-            session_id,
-            agent_prompt_id = %response.agent_prompt_id,
-            "failed to write provider response debug log: {error}",
-        );
-    }
+    tau_provider_codex::write_response_debug(
+        session_id,
+        debug_provider_requests,
+        response,
+        capture,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4825,16 +4838,18 @@ fn finish_stream<W: Write>(
     session_id: &str,
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
-    request: &common::PromptPayload<'_>,
+    request: &CodexPrompt<'_>,
     backend: &ProviderBackend,
-    mut state: common::StreamState,
+    state: CodexStreamState,
+    debug_capture: tau_provider_codex::CodexDebugCapture,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
-    let input_tokens = state.input_tokens;
-    let cached_tokens = state.cached_tokens;
-    let output_tokens = state.output_tokens;
+    let token_counts = state.token_counts();
+    let input_tokens = token_counts.input;
+    let cached_tokens = token_counts.cached;
+    let output_tokens = token_counts.output;
     tracing::debug!(
         target: LOG_TARGET,
         agent_prompt_id,
@@ -4843,9 +4858,8 @@ fn finish_stream<W: Write>(
         output_tokens,
         "provider response token usage"
     );
-    let provider_terminal_event = state.provider_terminal_event.take();
     let usage = state.usage();
-    let provider_response_id = state.response_id.clone();
+    let provider_response_id = state.response_id().map(str::to_owned);
     let output_items = state.into_output_items();
     let finished = ProviderResponseFinished {
         agent_prompt_id: agent_prompt_id.into(),
@@ -4868,7 +4882,7 @@ fn finish_stream<W: Write>(
         session_id,
         &finished,
         debug_provider_requests,
-        provider_terminal_event.as_ref(),
+        Some(&debug_capture),
     );
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
     if let Some(diagnostic) = diagnostic {
@@ -4885,7 +4899,7 @@ fn finish_stream<W: Write>(
 
 fn cache_miss_diagnostic(
     prompt: &tau_proto::AgentPromptCreated,
-    request: &common::PromptPayload<'_>,
+    request: &CodexPrompt<'_>,
     response: &ProviderResponseFinished,
 ) -> Option<ProviderCacheMissDiagnostic> {
     let previous_input_tokens = request.context.blocks.iter().rev().find_map(|block| {
@@ -4925,7 +4939,7 @@ fn finish_error<W: Write>(
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
-    error: common::LlmError,
+    error: CodexError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
@@ -4934,9 +4948,10 @@ fn finish_error<W: Write>(
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),
-        stop_reason: match &error {
-            common::LlmError::RepetitionDetected(_) => ProviderStopReason::RepetitionDetected,
-            _ => ProviderStopReason::Error,
+        stop_reason: if error.repetition().is_some() {
+            ProviderStopReason::RepetitionDetected
+        } else {
+            ProviderStopReason::Error
         },
         error: Some(bounded_provider_error(&format!("LLM error: {error}"))),
         failure_kind: error.failure_kind(),

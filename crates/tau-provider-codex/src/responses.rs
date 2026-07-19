@@ -213,6 +213,8 @@ pub(super) fn record_provider_raw_event_after(
 /// Config for the ChatGPT/Codex Responses API.
 #[derive(Clone, Debug)]
 pub struct ResponsesConfig {
+    /// Filename-derived provider namespace owning this connection generation.
+    pub profile_namespace: String,
     /// Startup-stable Responses protocol contract for this profile/model route.
     pub mode: ResponsesMode,
     /// Base URL for the selected surface, without the final Responses path.
@@ -555,6 +557,16 @@ fn compact_http_request(
                     if let Some(error) = network.proxy_response_error(&url, code) {
                         return Err(LlmError::Outbound(error));
                     }
+                    let retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            tau_provider::retry_policy::parse_retry_after(
+                                value,
+                                std::time::SystemTime::now(),
+                            )
+                        });
                     let body = read_compact_body(
                         response,
                         MAX_COMPACT_ERROR_BODY_BYTES,
@@ -563,7 +575,10 @@ fn compact_http_request(
                     )
                     .await
                     .unwrap_or_default();
-                    return Err(LlmError::HttpStatus(code, body));
+                    return Err(match retry_after {
+                        Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
+                        None => LlmError::HttpStatus(code, body),
+                    });
                 }
                 read_compact_body(response, MAX_COMPACT_SUCCESS_BODY_BYTES, network, &url).await
             } => result,
@@ -806,6 +821,7 @@ fn provider_backend_transport_label(
 /// should call the raw JSON event helper with the original event text so
 /// opaque provider items and assistant message items can preserve provider
 /// envelope/content metadata.
+#[cfg(test)]
 pub fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
@@ -1327,7 +1343,12 @@ fn response_incomplete_error(event: &serde_json::Value) -> LlmError {
         .get("response")
         .and_then(|r| r["incomplete_details"]["reason"].as_str())
         .unwrap_or("unknown reason");
-    LlmError::HttpStatus(0, format!("response incomplete: {reason}"))
+    let reason = bounded_remote_text(reason, 64);
+    LlmError::StreamError {
+        body: format!("response incomplete: {reason}"),
+        code: None,
+        retry_after: None,
+    }
 }
 
 fn response_failed_error(event: &serde_json::Value) -> LlmError {
@@ -1343,17 +1364,23 @@ fn response_failed_error(event: &serde_json::Value) -> LlmError {
         })
         .unwrap_or("unknown error");
     let code = error.and_then(|error| error["code"].as_str().or_else(|| error["type"].as_str()));
-    let body = code.map_or_else(
+    let detail = bounded_remote_text(detail, 512);
+    let code = code.map(|code| bounded_remote_text(code, 64));
+    let body = code.as_deref().map_or_else(
         || format!("response failed: {detail}"),
         |code| format!("response failed: {detail} (type={code})"),
     );
-    if code == Some("context_length_exceeded") {
+    if code.as_deref() == Some("context_length_exceeded") {
         return LlmError::ProviderFailure(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         );
     }
-    LlmError::HttpStatus(0, body)
+    LlmError::StreamError {
+        body,
+        code,
+        retry_after: None,
+    }
 }
 
 fn stream_error_event(event: &serde_json::Value) -> LlmError {
@@ -1375,24 +1402,55 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         .as_str()
         .or_else(|| event["code"].as_str())
         .or_else(|| event["error"]["type"].as_str());
-    let body = match error_code {
+    let detail = bounded_remote_text(detail, 512);
+    let error_code = error_code.map(|code| bounded_remote_text(code, 64));
+    let body = match error_code.as_deref() {
         Some(code) => format!("stream error: {detail} (type={code})"),
         None => format!("stream error: {detail}"),
     };
-    if error_code == Some("context_length_exceeded") {
+    if error_code.as_deref() == Some("context_length_exceeded") {
         return LlmError::ProviderFailure(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         );
     }
-    let reset_hint = tau_provider::retry_policy::parse_json_reset_hint(
-        &event.to_string(),
-        std::time::SystemTime::now(),
-    );
-    match reset_hint {
-        Some(delay) => LlmError::HttpStatusHinted(0, body, delay),
-        None => LlmError::HttpStatus(0, body),
+    let reset_hint = canonical_event_reset_hint(event, std::time::SystemTime::now());
+    LlmError::StreamError {
+        body,
+        code: error_code,
+        retry_after: reset_hint,
     }
+}
+
+fn canonical_event_reset_hint(
+    event: &serde_json::Value,
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    [
+        Some(event),
+        event.get("error"),
+        event
+            .get("response")
+            .and_then(|response| response.get("error")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| {
+        let object = value.as_object()?;
+        if let Some(seconds) = object
+            .get("resets_in_seconds")
+            .and_then(serde_json::Value::as_u64)
+        {
+            return Some(std::time::Duration::from_secs(seconds));
+        }
+        let reset_at = object.get("resets_at")?.as_u64()?;
+        let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(std::time::Duration::from_secs(reset_at.saturating_sub(now)))
+    })
+}
+
+fn bounded_remote_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 // ---------------------------------------------------------------------------

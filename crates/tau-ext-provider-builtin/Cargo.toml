@@ -35,5 +35,6 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tau-core.workspace = true
+tau-provider-codex = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 tracing-subscriber.workspace = true

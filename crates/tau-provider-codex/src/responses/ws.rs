@@ -80,12 +80,12 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
 const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
 /// Absolute bound for a best-effort cache prewarm after its request is sent.
-const PREWARM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const PREWARM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time allowed for DNS, TCP, TLS, and the WebSocket HTTP upgrade.
 ///
 /// Provider-frame idle time is governed separately after the upgrade succeeds.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Provider event timing bounds for one WebSocket envelope.
 struct EnvelopeTimeouts {
@@ -132,9 +132,14 @@ enum InboundEvent {
     /// Server sent a `Close` frame (or the stream ended cleanly
     /// without one). The string is the close-frame reason for
     /// logging.
-    Closed(String),
+    Closed,
     /// Transport / protocol error mid-stream.
-    Error(String),
+    Error {
+        /// Fixed local protocol/transport diagnostic.
+        detail: String,
+        /// Raw provider frame bytes rejected before semantic parsing.
+        response_bytes: usize,
+    },
     /// Harness cancellation state changed; the sync turn loop should re-check
     /// its abort source immediately.
     AbortWake,
@@ -173,6 +178,20 @@ pub struct WsConn {
     /// `previous_response_id` if request building finds it in the prompt
     /// context.
     cached_response_id: Option<String>,
+    /// Successful cache-only response that may anchor one compatible real turn.
+    prewarm_baseline: Option<Box<PrewarmBaseline>>,
+    /// Bytes retained from the one discarded transport-repair attempt.
+    carried_response_bytes: u64,
+}
+
+/// Exact request shape and lowered input accepted by one cache-only response.
+struct PrewarmBaseline {
+    /// Provider response id valid only on this live socket.
+    response_id: String,
+    /// Canonical non-input request fields, excluding the prewarm-only flag.
+    fingerprint: serde_json::Value,
+    /// Exact lowered input prefix represented by `response_id`.
+    input_prefix: Vec<serde_json::Value>,
 }
 
 pub(super) struct WsTurnResult {
@@ -217,7 +236,7 @@ impl WsConn {
         Self::connect_with_timeout(config, thread_id, network, abort, CONNECT_TIMEOUT)
     }
 
-    fn connect_with_timeout(
+    pub(super) fn connect_with_timeout(
         config: &ResponsesConfig,
         thread_id: &str,
         network: &tau_provider::OutboundNetworkPolicy,
@@ -267,6 +286,8 @@ impl WsConn {
             opened_at: Instant::now(),
             bearer,
             cached_response_id: None,
+            prewarm_baseline: None,
+            carried_response_bytes: 0,
         })
     }
 
@@ -275,9 +296,15 @@ impl WsConn {
     /// accumulated [`StreamState`]; leaves the socket open for the
     /// next turn.
     ///
-    /// Mid-stream WS close or IO error surfaces as a retryable
-    /// `LlmError` (code 0, body prefixed with `"stream error:"`) so
-    /// the provider's outer retry loop reopens on the next attempt.
+    /// A cached-socket close before semantic output may spend the logical
+    /// attempt's sole fresh-socket repair. Parsed model output prohibits
+    /// replay; the typed attempt surfaces it so the extension clears
+    /// tentative output. Transport bytes from a discarded repair remain
+    /// cumulative.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transport lifecycle callbacks remain separate typed boundaries"
+    )]
     pub(super) fn run_turn(
         &mut self,
         config: &ResponsesConfig,
@@ -285,10 +312,21 @@ impl WsConn {
         request: &PromptPayload<'_>,
         recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<WsTurnResult, LlmError> {
-        let cached_response_id = self.cached_response_id.as_deref();
-        let envelope = build_ws_envelope(config, request, cached_response_id, None);
+        let mut envelope =
+            build_ws_envelope(config, request, self.cached_response_id.as_deref(), None);
+        if self.cached_response_id.is_none()
+            && let Some(baseline) = self.prewarm_baseline.take()
+        {
+            let full = build_ws_envelope(config, request, None, None);
+            if prewarm_compatible(&baseline, &full) {
+                envelope = full;
+                envelope.body.previous_response_id = Some(baseline.response_id);
+                envelope.body.input.drain(..baseline.input_prefix.len());
+            }
+        }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
         super::maybe_debug_write_provider_request(
             agent_prompt_id,
@@ -302,6 +340,7 @@ impl WsConn {
             envelope,
             recording_stream,
             abort,
+            on_dispatched,
             on_update,
         )?;
         self.cached_response_id = state.response_id.clone();
@@ -322,19 +361,40 @@ impl WsConn {
         config: &ResponsesConfig,
         request: &PromptPayload<'_>,
         abort: &mut impl TurnAbort,
+        deadline: Option<Instant>,
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
-        self.run_envelope_with_timeouts(
+        let baseline_shape = prewarm_shape(&envelope);
+        let response_timeout = deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(PREWARM_RESPONSE_TIMEOUT);
+        if response_timeout.is_zero() {
+            return Err(LlmError::HttpStatus(
+                0,
+                "websocket prewarm response timeout".to_owned(),
+            ));
+        }
+        let state = self.run_envelope_with_timeouts(
             "<prewarm>",
             envelope,
             None,
             abort,
             EnvelopeTimeouts {
-                idle: PREWARM_RESPONSE_TIMEOUT,
-                absolute: Some(PREWARM_RESPONSE_TIMEOUT),
+                idle: response_timeout,
+                absolute: Some(response_timeout),
             },
             &mut |_| {},
-        )
+            &mut |_| {},
+        )?;
+        self.cached_response_id = None;
+        self.prewarm_baseline = state.response_id.clone().map(|response_id| {
+            Box::new(PrewarmBaseline {
+                response_id,
+                fingerprint: baseline_shape.0,
+                input_prefix: baseline_shape.1,
+            })
+        });
+        Ok(state)
     }
 
     fn run_envelope(
@@ -343,6 +403,7 @@ impl WsConn {
         envelope: super::WsResponseCreate,
         recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
         self.run_envelope_with_timeouts(
@@ -354,10 +415,15 @@ impl WsConn {
                 idle: TURN_EVENT_TIMEOUT,
                 absolute: None,
             },
+            on_dispatched,
             on_update,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transport lifecycle callbacks remain separate typed boundaries"
+    )]
     fn run_envelope_with_timeouts(
         &mut self,
         agent_prompt_id: &str,
@@ -365,17 +431,20 @@ impl WsConn {
         mut recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
         timeouts: EnvelopeTimeouts,
+        on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
         if abort.is_aborted() {
             return Err(LlmError::Canceled);
         }
         let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
+        on_dispatched(Instant::now());
         self.outbound_tx
             .send(WsCommand::SendText(text))
             .map_err(|_| LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()))?;
 
         let mut state = StreamState::new();
+        state.carry_transport_response_bytes(std::mem::take(&mut self.carried_response_bytes));
         let turn_started_at = Instant::now();
         let mut last_event_at = Instant::now();
         let _abort_waker = {
@@ -447,19 +516,52 @@ impl WsConn {
                         return Ok(state);
                     }
                 }
-                InboundEvent::Closed(reason) => {
+                InboundEvent::Closed => {
                     return Err(LlmError::HttpStatus(
                         0,
-                        format!("stream error: ws closed mid-stream ({reason})"),
+                        "stream error: ws closed mid-stream".to_owned(),
                     ));
                 }
-                InboundEvent::Error(msg) => {
-                    return Err(LlmError::HttpStatus(0, format!("stream error: {msg}")));
+                InboundEvent::Error {
+                    detail,
+                    response_bytes,
+                } => {
+                    state.record_transport_response_bytes(response_bytes);
+                    on_update(&state);
+                    return Err(LlmError::HttpStatus(0, format!("stream error: {detail}")));
                 }
                 InboundEvent::AbortWake => continue,
             }
         }
     }
+
+    /// Carries transport bytes into the immediately following repair attempt.
+    pub(super) fn carry_response_bytes(&mut self, bytes: u64) {
+        self.carried_response_bytes = bytes;
+    }
+}
+
+fn prewarm_shape(
+    envelope: &super::WsResponseCreate,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let mut value = serde_json::to_value(envelope).expect("Responses envelope serializes");
+    let object = value
+        .as_object_mut()
+        .expect("Responses envelope serializes as an object");
+    let input = object
+        .remove("input")
+        .and_then(|input| input.as_array().cloned())
+        .unwrap_or_default();
+    object.remove("generate");
+    object.remove("previous_response_id");
+    (value, input)
+}
+
+fn prewarm_compatible(baseline: &PrewarmBaseline, envelope: &super::WsResponseCreate) -> bool {
+    let (fingerprint, input) = prewarm_shape(envelope);
+    fingerprint == baseline.fingerprint
+        && input.len() >= baseline.input_prefix.len()
+        && input[..baseline.input_prefix.len()] == baseline.input_prefix
 }
 
 async fn connect_with_policy(
@@ -732,25 +834,34 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<serde_json::Value>(text.as_ref()) {
                     Ok(_) => (InboundEvent::Event { text }, false),
-                    // Unparseable provider frames are skipped consistently.
-                    Err(_) => continue,
+                    Err(_) => {
+                        let response_bytes = text.len();
+                        (
+                            InboundEvent::Error {
+                                detail: "malformed JSON text frame".to_owned(),
+                                response_bytes,
+                            },
+                            true,
+                        )
+                    }
                 }
             }
-            Ok(Message::Close(frame)) => {
-                let reason = frame
-                    .as_ref()
-                    .map(|f| format!("code={} reason={}", f.code, f.reason))
-                    .unwrap_or_else(|| "no close frame".to_owned());
+            Ok(Message::Close(_)) => {
                 tracing::info!(
                     target: crate::LOG_TARGET,
-                    %reason,
-                    "ws server sent close frame — connection will be reopened on next turn",
+                    "ws server closed connection; it will be reopened on the next turn",
                 );
-                (InboundEvent::Closed(reason), true)
+                (InboundEvent::Closed, true)
             }
-            Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
-                // Codex never sends binary. Ping/Pong are protocol
-                // control frames — tungstenite surfaces them after
+            Ok(Message::Binary(bytes)) => (
+                InboundEvent::Error {
+                    detail: "unexpected binary frame".to_owned(),
+                    response_bytes: bytes.len(),
+                },
+                true,
+            ),
+            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
+                // Ping/Pong are protocol control frames — tungstenite surfaces them after
                 // auto-handling, no caller action needed.
                 continue;
             }
@@ -760,7 +871,13 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                     error = %e,
                     "ws read failed — connection will be reopened on next turn",
                 );
-                (InboundEvent::Error(format!("{e}")), true)
+                (
+                    InboundEvent::Error {
+                        detail: format!("{e}"),
+                        response_bytes: 0,
+                    },
+                    true,
+                )
             }
         };
         if tx.send(event).is_err() {
@@ -775,7 +892,7 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
     // Stream ended without a close frame (clean EOF). Surface it as
     // a `Closed` so the next `run_turn` call returns a retryable
     // error rather than hanging on `blocking_recv`.
-    let _ = tx.send(InboundEvent::Closed("stream ended".to_owned()));
+    let _ = tx.send(InboundEvent::Closed);
 }
 
 /// Writer task. Drains outbound commands and emits periodic client
@@ -803,7 +920,10 @@ async fn write_loop(
             cmd = rx.recv() => match cmd {
                 Some(WsCommand::SendText(text)) => {
                     if let Err(e) = sink.send(Message::Text(text.into())).await {
-                        let _ = inbound_tx.send(InboundEvent::Error(format!("ws send failed: {e}")));
+                        let _ = inbound_tx.send(InboundEvent::Error {
+                            detail: format!("ws send failed: {e}"),
+                            response_bytes: 0,
+                        });
                         return;
                     }
                 }
@@ -838,7 +958,10 @@ async fn write_loop(
                             error = %e,
                             "ws keepalive ping failed — writer task exiting, next turn will reopen",
                         );
-                        let _ = inbound_tx.send(InboundEvent::Error(format!("ws keepalive failed: {e}")));
+                        let _ = inbound_tx.send(InboundEvent::Error {
+                            detail: format!("ws keepalive failed: {e}"),
+                            response_bytes: 0,
+                        });
                         return;
                     }
                 }
@@ -878,13 +1001,26 @@ fn set_header(
 fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
     if let tungstenite::Error::Http(response) = &e {
         let code = response.status().as_u16();
+        if code == 426 {
+            return LlmError::WsUpgradeRequired;
+        }
         let body = response
             .body()
             .as_ref()
             .and_then(|b| std::str::from_utf8(b).ok())
             .map(str::to_owned)
             .unwrap_or_default();
-        return LlmError::HttpStatus(code, body);
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                tau_provider::retry_policy::parse_retry_after(value, std::time::SystemTime::now())
+            });
+        return match retry_after {
+            Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
+            None => LlmError::HttpStatus(code, body),
+        };
     }
     if let tungstenite::Error::Io(error) = &e
         && let Some(outbound) = error
