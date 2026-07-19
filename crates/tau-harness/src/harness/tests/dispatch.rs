@@ -20316,13 +20316,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .ensure_agent_id_for_agent(&sender_cid)
             .expect("sender id"),
     );
-    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut target, &[("engineer", true)]);
     let message_id: tau_proto::AgentMessageId = "two-harness-message".into();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "two-harness-request".to_owned(),
@@ -20445,11 +20439,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     let _runtime = crate::runtime_dir::override_test_runtime_dir(td.path());
     std::fs::create_dir_all(crate::runtime_dir::harnesses_dir()).expect("harnesses dir");
     let mut target = echo_harness(td.path().join("target-state")).expect("target harness");
-    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut target, &[("engineer", false)]);
     let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
     let target_listener =
         std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
@@ -20701,24 +20691,26 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
     h.shutdown().expect("shutdown");
 }
 
-/// Bare peer routing is point-to-one, prefers an idle eligible endpoint over a
-/// busy one, and returns only the resolved canonical recipient.
+/// Bare routing applies established idle-first fairness across receiver roles
+/// from different configured groups.
 #[test]
 fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    let reviewer_role = h.available_roles["engineer"].clone();
+    h.available_roles
+        .insert("cross-group-reviewer".to_owned(), reviewer_role);
+    configure_inter_session_receivers(
+        &mut h,
+        &[("engineer", false), ("cross-group-reviewer", false)],
+    );
     let busy = ensure_test_user_agent(&mut h);
     let busy_id = h.ensure_agent_id_for_agent(&busy).expect("busy id");
     h.agents
         .get_mut(&busy)
         .expect("busy agent")
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    let idle = h.create_durable_user_agent("s1".into(), "engineer");
+    let idle = h.create_durable_user_agent("s1".into(), "cross-group-reviewer");
     let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "bare-select".to_owned(),
@@ -20752,11 +20744,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
 fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     h.create_durable_user_agent("s1".into(), "engineer");
     h.provider_model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
@@ -20773,7 +20761,10 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
-    assert_eq!(result.error.as_deref(), Some("peer route unavailable"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("target session is unavailable for inter-session messaging")
+    );
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
@@ -20784,13 +20775,7 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
 fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
@@ -20825,6 +20810,88 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     assert_eq!(durable_agent_message_received_events(&h).len(), 1);
 }
 
+/// Multiple usable auto-start grants choose the first configured role without
+/// warning or hash-map iteration.
+#[test]
+fn bare_peer_auto_start_uses_first_configured_candidate() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let role = h.available_roles["engineer"].clone();
+    h.available_roles
+        .insert("preferred-receiver".to_owned(), role.clone());
+    h.available_roles
+        .insert("fallback-receiver".to_owned(), role);
+    configure_inter_session_receivers(
+        &mut h,
+        &[("preferred-receiver", true), ("fallback-receiver", true)],
+    );
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "ordered-auto-start".to_owned(),
+            message_id: "ordered-auto-start-message".into(),
+            capability: "test-only".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "choose deterministically".to_owned(),
+        },
+    );
+
+    assert_eq!(result.error, None);
+    let recipient = result.recipient_id.expect("auto-started recipient");
+    let cid = h
+        .agent_routes
+        .get(recipient.as_str())
+        .expect("recipient route");
+    assert_eq!(h.agents[cid].role.as_deref(), Some("preferred-receiver"));
+}
+
+/// Auto-start walks past a role pruned from runtime availability and a receiver
+/// whose explicitly configured model is unavailable, then selects the next
+/// usable grant.
+#[test]
+fn bare_peer_auto_start_skips_unavailable_role_model() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let mut unavailable = h.available_roles["engineer"].clone();
+    unavailable.model = Some("missing/model".parse().expect("model id"));
+    h.available_roles
+        .insert("unavailable-receiver".to_owned(), unavailable);
+    configure_inter_session_receivers(
+        &mut h,
+        &[
+            ("required-skill-pruned-receiver", true),
+            ("unavailable-receiver", true),
+            ("engineer", true),
+        ],
+    );
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "skip-unavailable-auto-start".to_owned(),
+            message_id: "skip-unavailable-auto-start-message".into(),
+            capability: "test-only".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "fall back".to_owned(),
+        },
+    );
+
+    assert_eq!(result.error, None);
+    let recipient = result.recipient_id.expect("fallback recipient");
+    let cid = h
+        .agent_routes
+        .get(recipient.as_str())
+        .expect("recipient route");
+    assert_eq!(h.agents[cid].role.as_deref(), Some("engineer"));
+}
+
 /// The explicit durable peer-purpose marker survives a cold resume before any
 /// provider response and preserves ordinary tool-capable loaded-agent
 /// lifecycle.
@@ -20843,13 +20910,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             })),
         )
         .expect("register metadata interceptor");
-        h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-            name: "engineer".to_owned(),
-            roles: vec!["engineer".to_owned()],
-            peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-                auto_start_role: Some("engineer".to_owned()),
-            }),
-        });
+        configure_inter_session_receivers(&mut h, &[("engineer", true)]);
         let result = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "restore-peer".to_owned(),
@@ -20917,13 +20978,7 @@ fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
 fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let _tool = connect_test_tool(&mut h, "peer-tool-owner");
     h.registry
         .register("peer-tool-owner", shared_test_tool_spec("peer_test_tool"));
@@ -20998,13 +21053,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
 fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let target_session = h.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("single-flight-{suffix}"),
@@ -21045,13 +21094,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
 fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let cid = h.create_durable_user_agent("s1".into(), "engineer");
     for index in 0..32 {
         h.agents
@@ -21092,11 +21135,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
 fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let pending_id = h
         .enqueue_internal_start_agent_request_without_draining(StartAgentRequest {
             query_id: "pending-peer-endpoint".to_owned(),
@@ -21147,11 +21186,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
 fn peer_input_rate_limit_bounds_live_burst() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let cid = h.create_durable_user_agent("s1".into(), "engineer");
     let recipient =
         crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("public agent id"));

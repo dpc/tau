@@ -80,7 +80,6 @@ transaction; an ambiguous retry may duplicate prompt, agent, model work, or spen
 
 Peer-session discovery uses a metadata-schema-versioned `peer_entrypoint` hint
 only to select bounded probe candidates. A live target RPC confirms the active
-session and effective entrypoint before a session is returned. Discovery never
-exposes socket paths, pids, full project roots, agent ids, prompts, tasks,
-models, tools, or provider state. The authority split is confirmed by
-[DECISION-peer-entrypoints](DECISION-peer-entrypoints.md).
+session and effective receiver capability before a session is returned.
+Discovery never exposes socket paths, pids, full project roots, agent ids,
+prompts, tasks, models, tools, or provider state.

@@ -1945,8 +1945,8 @@ pub struct Harness {
     disabled_role_reasons: HashMap<String, DisabledRoleReason>,
     /// Ordered role navigation groups for the currently available roles.
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Effective role group authorized for peer discovery and bare routing.
-    pub(crate) peer_entrypoint: Option<tau_config::settings::RoleGroup>,
+    /// Receiver-capable roles in deterministic configured order.
+    pub(crate) inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
     /// Monotonic event-loop-owned peer selection clock.
     pub(crate) peer_route_clock: u64,
     /// Most recent peer-route selection clock by concrete agent id.
@@ -2344,8 +2344,8 @@ struct HarnessBaseParts {
     available_roles: HashMap<String, tau_config::settings::AgentRole>,
     /// Role groups available for navigation and UI display.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Effective role group authorized for peer discovery and bare routing.
-    peer_entrypoint: Option<tau_config::settings::RoleGroup>,
+    /// Receiver-capable roles in deterministic configured order.
+    inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
     /// Reusable prompt templates loaded from effective harness settings.
     custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Runtime role overrides loaded from settings.
@@ -2389,8 +2389,8 @@ struct StartupRoles {
     selected_role: String,
     /// Role groups visible to clients.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Effective peer entrypoint group.
-    peer_entrypoint: Option<tau_config::settings::RoleGroup>,
+    /// Receiver-capable roles in deterministic configured order.
+    inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
     /// Warning emitted when the configured default role was unavailable.
     missing_default_role: Option<MissingDefaultRole>,
     /// Model selected for the startup role before provider metadata arrives.
@@ -2621,7 +2621,7 @@ impl Harness {
             available_roles: parts.available_roles,
             disabled_role_reasons: HashMap::new(),
             available_role_groups: parts.available_role_groups,
-            peer_entrypoint: parts.peer_entrypoint,
+            inter_session_receivers: parts.inter_session_receivers,
             peer_route_clock: 0,
             peer_last_routed: HashMap::new(),
             custom_prompts: parts.custom_prompts,
@@ -2767,7 +2767,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            peer_entrypoint,
+            inter_session_receivers,
             missing_default_role,
         } = load_roles(&harness_settings);
         let custom_prompts = harness_settings
@@ -2807,7 +2807,7 @@ impl Harness {
             current_session_start_reason: launch.reason,
             available_roles,
             available_role_groups,
-            peer_entrypoint,
+            inter_session_receivers,
             custom_prompts,
             role_overrides,
             tool_policy: harness_settings.tool_policy.clone(),
@@ -3177,7 +3177,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
-            peer_entrypoint,
+            inter_session_receivers,
             missing_default_role,
         } = load_roles(harness_settings);
         if available_roles.is_empty() {
@@ -3192,7 +3192,7 @@ impl Harness {
             role_overrides,
             selected_role,
             available_role_groups,
-            peer_entrypoint,
+            inter_session_receivers,
             missing_default_role,
             selected_model,
         })
@@ -3226,7 +3226,7 @@ impl Harness {
             current_session_start_reason: parts.launch.reason,
             available_roles: parts.roles.available_roles,
             available_role_groups: parts.roles.available_role_groups,
-            peer_entrypoint: parts.roles.peer_entrypoint,
+            inter_session_receivers: parts.roles.inter_session_receivers,
             custom_prompts,
             role_overrides: parts.roles.role_overrides,
             tool_policy: parts.harness_settings.tool_policy.clone(),
@@ -3263,9 +3263,9 @@ impl Harness {
         self.runtime_harness_path = Some(path);
     }
 
-    /// Return whether this harness advertises an effective peer entrypoint.
+    /// Return whether this harness accepts bare inter-session messages.
     pub(crate) fn has_peer_entrypoint(&self) -> bool {
-        self.peer_entrypoint.is_some()
+        !self.inter_session_receivers.is_empty()
     }
 
     fn accept_initial_client(

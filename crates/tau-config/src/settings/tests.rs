@@ -689,6 +689,23 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             }
         }
     });
+    for pointer in [
+        "/agents/roleGroups/engineer",
+        "/agents/roleGroups/engineer/roles/engineer",
+    ] {
+        let map = value
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("role map");
+        map.insert(
+            "interSessionReceiver".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+        map.insert(
+            "interSessionAutoStart".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+    }
 
     normalize_harness_config_value(&mut value, "test").expect("normalize");
 
@@ -709,6 +726,8 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         .expect("group");
     for key in [
         "enable",
+        "inter_session_receiver",
+        "inter_session_auto_start",
         "thinking_summary",
         "service_tier",
         "prompt_fragments",
@@ -749,6 +768,14 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "agents.roleGroups.engineer.enabled",
             "agents.role_groups.engineer.enable",
+        ),
+        (
+            "agents.roleGroups.engineer.interSessionReceiver",
+            "agents.role_groups.engineer.inter_session_receiver",
+        ),
+        (
+            "agents.roleGroups.engineer.interSessionAutoStart",
+            "agents.role_groups.engineer.inter_session_auto_start",
         ),
         (
             "agents.roleGroups.engineer.thinkingSummary",
@@ -797,6 +824,14 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "agents.roleGroups.engineer.roles.engineer.enabled",
             "agents.role_groups.engineer.roles.engineer.enable",
+        ),
+        (
+            "agents.roleGroups.engineer.roles.engineer.interSessionReceiver",
+            "agents.role_groups.engineer.roles.engineer.inter_session_receiver",
+        ),
+        (
+            "agents.roleGroups.engineer.roles.engineer.interSessionAutoStart",
+            "agents.role_groups.engineer.roles.engineer.inter_session_auto_start",
         ),
         (
             "agents.roleGroups.engineer.roles.engineer.thinkingSummary",
@@ -2797,10 +2832,10 @@ fn harness_role_groups_reject_duplicate_role_names() {
     assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
-/// Peer entrypoint policy is group-owned and preserves the three-way
-/// absent/null/value layering contract for both the group and auto-start grant.
+/// Inter-session capabilities inherit as ordinary role fields and retain the
+/// scalar absent/null/value layering contract.
 #[test]
-fn peer_entrypoint_layering_can_clear_auto_start_and_routing_independently() {
+fn inter_session_capabilities_inherit_and_override_per_role() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
@@ -2808,67 +2843,56 @@ fn peer_entrypoint_layering_can_clear_auto_start_and_routing_independently() {
 agents:
   role_groups:
     manager:
-      peer_entrypoint:
-        auto_start_role: micro-manager
+      inter_session_receiver: true
+      inter_session_auto_start: true
+      roles:
+        project-manager: {}
+        micro-manager:
+          inter_session_auto_start: false
 "#,
     )
     .expect("write base");
     let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("load entrypoint policy");
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load receiver policy");
     assert_eq!(
-        settings
-            .role_groups
-            .iter()
-            .find(|group| group.name == "manager")
-            .and_then(|group| group.peer_entrypoint.as_ref())
-            .and_then(|entrypoint| entrypoint.auto_start_role.as_deref()),
-        Some("micro-manager")
+        settings.roles["micro-manager"].inter_session_receiver,
+        Some(true)
+    );
+    assert_eq!(
+        settings.roles["micro-manager"].inter_session_auto_start,
+        Some(false)
+    );
+    assert_eq!(
+        settings.roles["project-manager"].inter_session_auto_start,
+        Some(true)
     );
 
     std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
     std::fs::write(
-        td.path().join("harness.d/10-clear-auto.yaml"),
-        "agents: { role_groups: { manager: { peer_entrypoint: { auto_start_role: null } } } }",
+        td.path().join("harness.d/10-clear.yaml"),
+        "agents: { role_groups: { manager: { inter_session_receiver: null, inter_session_auto_start: null } } }",
     )
-    .expect("write clear auto");
+    .expect("write clear");
     let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear only auto-start");
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear inherited fields");
     assert_eq!(
-        settings
-            .role_groups
-            .iter()
-            .find(|group| group.name == "manager")
-            .and_then(|group| group.peer_entrypoint.as_ref())
-            .and_then(|entrypoint| entrypoint.auto_start_role.as_ref()),
+        settings.roles["project-manager"].inter_session_receiver,
         None
     );
-    assert!(
-        settings
-            .role_groups
-            .iter()
-            .find(|group| group.name == "manager")
-            .is_some_and(|group| group.peer_entrypoint.is_some())
+    assert_eq!(
+        settings.roles["project-manager"].inter_session_auto_start,
+        None
     );
-
-    std::fs::write(
-        td.path().join("harness.d/20-clear-routing.yaml"),
-        "agents: { role_groups: { manager: { peer_entrypoint: null } } }",
-    )
-    .expect("write clear entrypoint");
-    let settings =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear routing authority");
-    assert!(
-        settings
-            .role_groups
-            .iter()
-            .find(|group| group.name == "manager")
-            .is_some_and(|group| group.peer_entrypoint.is_none())
+    assert_eq!(settings.roles["micro-manager"].inter_session_receiver, None);
+    assert_eq!(
+        settings.roles["micro-manager"].inter_session_auto_start, None,
+        "later group defaults apply to every existing member"
     );
 }
 
-/// At most one effective group may advertise the point-to-one peer boundary.
+/// Receiver and auto-start capabilities may be enabled across multiple groups.
 #[test]
-fn peer_entrypoint_rejects_multiple_effective_groups() {
+fn inter_session_capabilities_allow_multiple_groups() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
@@ -2876,25 +2900,34 @@ fn peer_entrypoint_rejects_multiple_effective_groups() {
 agents:
   role_groups:
     engineer:
-      peer_entrypoint: {}
+      inter_session_receiver: true
+      inter_session_auto_start: true
     manager:
-      peer_entrypoint: {}
+      inter_session_receiver: true
+      inter_session_auto_start: true
+      roles:
+        project-manager: {}
 "#,
     )
     .expect("write");
-    let error =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("multiple entrypoints");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("multiple receiver groups");
     assert!(
-        error
-            .to_string()
-            .contains("multiple role_groups configure peer_entrypoint")
+        settings.roles["engineer"]
+            .inter_session_auto_start
+            .unwrap_or(false)
+    );
+    assert!(
+        settings.roles["project-manager"]
+            .inter_session_auto_start
+            .unwrap_or(false)
     );
 }
 
-/// Spending authority must name an enabled member of the same effective group;
-/// Tau never infers a first role.
+/// Auto-start spending authority without receiver authority is rejected after
+/// role inheritance, while disabled incoherent roles are irrelevant.
 #[test]
-fn peer_entrypoint_rejects_unavailable_or_outside_auto_start_role() {
+fn inter_session_auto_start_requires_receiver_on_enabled_roles() {
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
         td.path().join("harness.yaml"),
@@ -2902,17 +2935,101 @@ fn peer_entrypoint_rejects_unavailable_or_outside_auto_start_role() {
 agents:
   role_groups:
     manager:
-      peer_entrypoint:
-        auto_start_role: engineer
+      roles:
+        project-manager:
+          inter_session_auto_start: true
 "#,
     )
     .expect("write");
     let error =
-        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("outside group role");
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("incoherent role");
+    assert!(error.to_string().contains(
+        "role `project-manager` enables `inter_session_auto_start` without `inter_session_receiver`"
+    ));
+
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents: { role_groups: { manager: { roles: { project-manager: { enable: false, inter_session_auto_start: true } } } } }",
+    )
+    .expect("disable incoherent role");
+    load_harness_settings_in(&dirs_with_config(td.path())).expect("disabled role is removed first");
+}
+
+/// Removed peer-entrypoint keys fail explicitly instead of being silently
+/// ignored or mixed with role capabilities.
+#[test]
+fn inter_session_configuration_rejects_removed_peer_entrypoint_schema() {
+    for yaml in [
+        "agents: { role_groups: { manager: { peer_entrypoint: {} } } }",
+        "agents: { role_groups: { manager: { peerEntryPoint: { autoStartRole: project-manager } } } }",
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(td.path().join("harness.yaml"), yaml).expect("write removed schema");
+
+        let error =
+            load_harness_settings_in(&dirs_with_config(td.path())).expect_err("reject old schema");
+
+        assert!(
+            error.to_string().contains("unknown field"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+/// Canonical and camel-case spellings cannot both set the same receiver
+/// capability in one source layer.
+#[test]
+fn inter_session_configuration_rejects_alias_conflicts() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    manager:
+      interSessionReceiver: true
+      inter_session_receiver: false
+"#,
+    )
+    .expect("write conflict");
+
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("reject alias conflict");
+
     assert!(
-        error
-            .to_string()
-            .contains("auto_start_role `engineer` is not an enabled role in group `manager`")
+        error.to_string().contains("interSessionReceiver")
+            && error.to_string().contains("inter_session_receiver"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Dotted CLI overrides use the same alias normalization, group inheritance,
+/// and per-role override behavior as file layers.
+#[test]
+fn inter_session_configuration_layers_cli_aliases() {
+    let td = TempDir::new().expect("tempdir");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("agents.roleGroups.manager.interSessionReceiver=true")
+            .expect("receiver override"),
+        HarnessConfigCliOverride::from_str("agents.roleGroups.manager.interSessionAutoStart=true")
+            .expect("auto-start override"),
+        HarnessConfigCliOverride::from_str(
+            "agents.roleGroups.manager.roles.micro-manager.interSessionAutoStart=false",
+        )
+        .expect("role override"),
+    ];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
+            .expect("load aliases");
+
+    assert_eq!(
+        settings.roles["micro-manager"].inter_session_receiver,
+        Some(true)
+    );
+    assert_eq!(
+        settings.roles["micro-manager"].inter_session_auto_start,
+        Some(false)
     );
 }
 

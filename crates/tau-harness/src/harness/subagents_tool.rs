@@ -91,6 +91,7 @@ const MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE: usize = 60;
 const PEER_AUTO_START_QUERY_PREFIX: &str = "peer-auto-start-";
 /// Durable non-inheritable metadata key identifying peer-created endpoints.
 pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint_endpoint";
+const INTER_SESSION_UNAVAILABLE: &str = "target session is unavailable for inter-session messaging";
 
 static PEER_IO_ADMISSION: LazyLock<Mutex<PeerIoAdmission>> =
     LazyLock::new(|| Mutex::new(PeerIoAdmission::default()));
@@ -1346,10 +1347,10 @@ impl Harness {
         let tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id) = &request.recipient
         else {
             return self
-                .peer_entrypoint
-                .as_ref()
+                .inter_session_receivers
+                .first()
                 .map(|_| ())
-                .ok_or_else(|| "peer route unavailable".to_owned());
+                .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned());
         };
         match self.agent_message_recipient_status(recipient_id.as_str()) {
             AgentMessageRecipientStatus::Live => {}
@@ -1380,11 +1381,13 @@ impl Harness {
     }
 
     fn select_peer_entrypoint_recipient(&self) -> Result<AgentId, String> {
-        let Some(group) = &self.peer_entrypoint else {
-            return Err("peer route unavailable".to_owned());
-        };
+        if self.inter_session_receivers.is_empty() {
+            return Err(INTER_SESSION_UNAVAILABLE.to_owned());
+        }
         let role_available = |role: &str| {
-            group.roles.iter().any(|member| member == role)
+            self.inter_session_receivers
+                .iter()
+                .any(|receiver| receiver.role == role)
                 && self.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_model_info,
@@ -1431,10 +1434,11 @@ impl Harness {
             .into_iter()
             .next()
             .map(|(_, _, id)| crate::parse_agent_id(&id))
-            .ok_or_else(|| "peer route unavailable".to_owned())
+            .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())
     }
 
-    /// Select an existing endpoint or create the explicitly authorized role.
+    /// Resolve a bare session message to an existing endpoint or start the
+    /// first available authorized role.
     ///
     /// The event loop serializes this operation. A newly created endpoint is
     /// inserted before the next request is handled, which provides live
@@ -1449,11 +1453,23 @@ impl Harness {
             return Ok((recipient_id, false, admitted_at));
         }
         let role = self
-            .peer_entrypoint
-            .as_ref()
-            .and_then(|group| group.peer_entrypoint.as_ref())
-            .and_then(|entrypoint| entrypoint.auto_start_role.clone())
-            .ok_or_else(|| "peer route unavailable".to_owned())?;
+            .inter_session_receivers
+            .iter()
+            .filter(|receiver| receiver.auto_start)
+            .find_map(|receiver| {
+                self.available_roles
+                    .contains_key(&receiver.role)
+                    .then(|| {
+                        crate::model::model_for_role(
+                            &self.provider_model_info,
+                            &self.available_roles,
+                            &receiver.role,
+                        )
+                    })
+                    .flatten()
+                    .map(|_| receiver.role.clone())
+            })
+            .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())?;
         // Resolve role, model, required skills, and the ordinary endpoint shape
         // before spending. `prepare_start_agent_request` mints identity but does
         // not create an agent or dispatch model work.
@@ -1468,7 +1484,7 @@ impl Harness {
         };
         let pending = self
             .prepare_start_agent_request(HARNESS_CONNECTION_ID, query)?
-            .ok_or_else(|| "peer route unavailable".to_owned())?;
+            .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())?;
         let recipient_id = crate::parse_agent_id(&pending.agent_id);
         let admitted_at = self.admit_peer_input(&recipient_id, message_bytes)?;
         if let Err(error) = self.start_peer_agent_request(pending) {
@@ -1476,7 +1492,7 @@ impl Harness {
             if let Some(cid) = self.agent_routes.get(recipient_id.as_str()).cloned() {
                 self.remove_agent(&cid);
             }
-            return Err(format!("peer route unavailable: {error}"));
+            return Err(format!("{INTER_SESSION_UNAVAILABLE}: {error}"));
         }
         self.uncommitted_peer_auto_starts
             .insert(recipient_id.clone());
@@ -1552,14 +1568,16 @@ impl Harness {
         }
     }
 
-    /// Revalidate one concrete endpoint against current entrypoint role,
+    /// Revalidate one concrete endpoint against current receiver-role,
     /// provider/model, skill, and termination authority.
     pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
-        let Some(group) = &self.peer_entrypoint else {
+        if self.inter_session_receivers.is_empty() {
             return false;
-        };
+        }
         let role_available = |role: &str| {
-            group.roles.iter().any(|member| member == role)
+            self.inter_session_receivers
+                .iter()
+                .any(|receiver| receiver.role == role)
                 && self.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_model_info,

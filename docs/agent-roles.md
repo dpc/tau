@@ -65,29 +65,43 @@ for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", pri
 
 Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 
-At most one effective group may opt into same-UID peer rendezvous with
-`peer_entrypoint: {}`. The independent `auto_start_role` field is the only grant
-that permits a future bare peer message to start a model-backed endpoint, and it
-must explicitly name an enabled role in that group:
+Roles opt into bare inter-session messages with ordinary inherited capabilities.
+`inter_session_receiver` allows a role's agents to receive them, while
+`inter_session_auto_start` also allows Tau to start that role when no live
+receiver exists:
 
 ```yaml
 agents:
   role_groups:
-    external:
-      peer_entrypoint:
-        auto_start_role: external
+    manager:
+      inter_session_receiver: true
+      inter_session_auto_start: true
       roles:
-        external: {}
+        project-manager:
+          order: 0
+        micro-manager:
+          order: 10
+          inter_session_auto_start: false
+    engineer:
+      roles:
+        engineer:
+          inter_session_receiver: true
+          inter_session_auto_start: true
 ```
 
-Higher-precedence `peer_entrypoint: null` removes routing/discovery authority;
-`auto_start_role: null` removes only auto-start authority. Group ordering never
-selects a spending role.
+Group values are defaults and role values override them with normal role
+layering; `null` clears an inherited value. Camel-case
+`interSessionReceiver`/`interSessionAutoStart` aliases are also accepted.
+Auto-start requires receiver capability. Multiple groups and multiple
+auto-start roles are valid.
 
-When no eligible endpoint exists, peer routing may start only `auto_start_role`.
-The new endpoint uses that role's normal model, skill, prompt, and tool policy and
-does not inherit the remote sender's parent, cwd, transcript, or watches. Busy
-eligible endpoints are reused instead of creating more agents.
+Live routing keeps idle/least-recently-routed fairness across all eligible
+receiver roles. If none is live, Tau walks roles in configured group order and
+then within-group `order`/name order, skipping disabled or currently unavailable
+roles and models. The new endpoint uses that role's normal model, skill, prompt,
+and tool policy and does not inherit the remote sender's parent, cwd, transcript,
+or watches. Busy eligible receivers are reused instead of creating more agents.
+The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 
 ```json5
 {
@@ -218,7 +232,8 @@ enable_tool_groups:
   - agent_discovery
 ```
 
-`session_list` returns only bounded, basename-redacted live sessions that confirm
-an entrypoint. `agent_list` returns a bounded current-session-only snapshot of
-agent id, creation role/group, `pending|idle|running`, and self status. Neither
-tool grants messaging, watching, starting, or compaction authority.
+`session_list` returns only bounded, basename-redacted live sessions available
+for inter-session messaging. `agent_list` returns a bounded
+current-session-only snapshot of agent id, creation role/group,
+`pending|idle|running`, and self status. Neither tool grants messaging, watching,
+starting, or compaction authority.

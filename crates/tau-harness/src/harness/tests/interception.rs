@@ -336,11 +336,7 @@ fn peer_receive_target_disappearance_before_commit_fails() {
 fn local_peer_sent_projection_waits_for_receive_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let cid = ensure_test_user_agent(&mut h);
     let _interceptor = connect_test_tool(&mut h, "local-peer-interceptor");
     h.handle_extension_event(
@@ -393,13 +389,7 @@ fn local_peer_oversized_message_rejects_before_auto_start() {
     let sender = ensure_test_user_agent(&mut h);
     let peer_role = h.available_roles["engineer"].clone();
     h.available_roles.insert("peer".to_owned(), peer_role);
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "peer".to_owned(),
-        roles: vec!["peer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("peer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("peer", true)]);
     let agents_before = h.agents.len();
 
     let error = h
@@ -426,13 +416,7 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     let sender = ensure_test_user_agent(&mut h);
     let peer_role = h.available_roles["engineer"].clone();
     h.available_roles.insert("peer".to_owned(), peer_role);
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "peer".to_owned(),
-        roles: vec!["peer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("peer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("peer", true)]);
     let _interceptor = connect_test_tool(&mut h, "local-auto-start-interceptor");
     h.handle_extension_event(
         "local-auto-start-interceptor",
@@ -499,13 +483,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
     let sender = ensure_test_user_agent(&mut h);
     let peer_role = h.available_roles["engineer"].clone();
     h.available_roles.insert("peer".to_owned(), peer_role);
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "peer".to_owned(),
-        roles: vec!["peer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("peer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("peer", true)]);
     let _interceptor = connect_test_tool(&mut h, "coalesce-interceptor");
     h.handle_extension_event(
         "coalesce-interceptor",
@@ -574,13 +552,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
 fn peer_auto_start_authentication_failure_precedes_spend() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auth-before-spend".to_owned(),
         message_id: "auth-before-spend-message".into(),
@@ -616,13 +588,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
 fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
-            auto_start_role: Some("engineer".to_owned()),
-        }),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let target_session = h.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("stale-auth-{suffix}"),
@@ -667,11 +633,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
 fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "local-rollover-call".into();
     h.tool_agents.insert(call_id.clone(), cid.clone());
@@ -720,11 +682,7 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
 fn peer_receive_bare_authority_revocation_before_commit_fails() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     ensure_test_user_agent(&mut h);
     let _interceptor = connect_test_tool(&mut h, "bare-revoke-interceptor");
     h.handle_extension_event(
@@ -757,7 +715,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     );
     assert!(result.is_none());
 
-    h.peer_entrypoint = None;
+    h.inter_session_receivers.clear();
     h.handle_extension_event(
         "bare-revoke-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -776,11 +734,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
 fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
+    configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     ensure_test_user_agent(&mut h);
     h.create_durable_user_agent("s1".into(), "engineer");
     let _interceptor = connect_test_tool(&mut h, "bare-reselect-interceptor");

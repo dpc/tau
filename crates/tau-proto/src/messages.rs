@@ -419,8 +419,8 @@ pub struct PeerSessionProbe {
 pub struct PeerSessionProbeResult {
     /// Correlation id copied from the request.
     pub request_id: String,
-    /// True only when this live harness is on the requested session and
-    /// currently has an effective peer entrypoint.
+    /// True only when this live harness is on the requested session and accepts
+    /// bare inter-session messages.
     pub available: bool,
 }
 

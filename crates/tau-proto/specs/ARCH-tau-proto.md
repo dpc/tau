@@ -70,5 +70,5 @@ so route authority cannot be substituted during callback authentication. A
 successful response carries the concrete resolved agent id and started flag.
 
 `peer_session_probe` is a separate narrow RPC that returns only whether the live
-harness is currently bound to a claimed session and advertises an effective
-peer entrypoint. It does not enumerate agents or expose entrypoint policy.
+harness is currently bound to a claimed session and accepts bare inter-session
+messages. It does not enumerate agents or expose receiving policy.

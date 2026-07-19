@@ -68,9 +68,9 @@ internal `agent.prompt_submitted`. External user messages use immutable
 `message.delivered` facts; extensions may not forge prompt transcript facts.
 
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
-RPC, not `Emit`. The sender-side built-in `message` tool parses
-bare `&<session-id>`, explicit `&<session-id>/@<agent-id>`, and legacy exact
-`<session-id>/<agent-id>` addresses, treats the current session as local, mints a
+RPC, not `Emit`. The sender-side built-in `message` tool parses bare
+`&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and
+`<session-id>/<agent-id>`, treats the current session as local, mints a
 per-message bearer capability bound to sender identity, recipient, message body,
 and message/watch-response kind, and performs runtime-dir lookup plus socket
 round-trip on a helper thread. Completion returns to the event loop as a
@@ -84,9 +84,9 @@ validation occurs on the event loop before publishing the harness-owned inbound
 success only after that exact projection commits. Generic peer-authored
 `agent.message_sent`/`agent.message_received` emits remain rejected.
 Bare route capabilities are authenticated before the target selects one
-configured entrypoint endpoint; exact capabilities preserve known-address
-delivery to non-entrypoint agents. Authenticated peer bodies remain escaped
-agent content in a typed peer-message prompt envelope, never harness
+configured inter-session receiver; exact capabilities preserve known-address
+delivery to agents without receiver capability. Authenticated peer bodies remain
+escaped agent content in a typed peer-message prompt envelope, never harness
 instructions.
 Runtime-dir discovery verifies matching candidates by connecting to their
 sockets. A failed probe is not enough to unlink discovery files while the

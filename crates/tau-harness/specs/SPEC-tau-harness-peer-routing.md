@@ -1,13 +1,15 @@
 # SPEC-tau-harness-peer-routing: Best-effort typed peer routing
 
-The harness-owned `message` tool accepts bare `&<session-id>`, typed exact
-`&<session-id>/@<agent-id>`, and legacy exact `<session-id>/<agent-id>`
-addresses. Bare and exact authority are distinct protocol values. Bare routing
-selects exactly one eligible loaded or pending entrypoint agent, preferring idle
-over running and least-recently-routed then agent id. Busy eligible agents are
-reused. If none exists, only a separately configured `auto_start_role` can create
-an endpoint; absence or unavailability of that grant fails without spawn. The
-result reports the resolved recipient and whether this delivery started it.
+The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agent
+forms `&<session-id>/@<agent-id>` and `<session-id>/<agent-id>`. A bare address
+sends to the session, whose harness selects exactly one eligible loaded or
+pending receiving agent. Bare and exact authority are distinct protocol values.
+Session selection prefers idle over running and
+least-recently-routed then agent id; busy eligible agents are reused. If none
+exists, roles with effective `inter_session_auto_start` are checked in
+deterministic configured role order, skipping unavailable roles and models.
+Absence or unavailability of a grant fails without spawn. The result reports the
+resolved recipient and whether this delivery started it.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
 that the claimed sender harness owns a matching live pending request and binds
@@ -66,5 +68,4 @@ are revalidated. Authority loss reselects once; a second loss fails. Exact route
 never redirect.
 
 Policy and trust are governed by
-[DECISION-peer-entrypoints](../../../specs/DECISION-peer-entrypoints.md) and
 [DECISION-tau-harness-cross-harness-messaging](DECISION-tau-harness-cross-harness-messaging.md).

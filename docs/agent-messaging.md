@@ -24,8 +24,8 @@ the publishing extension. Opaque reply and reaction references may identify
 extension-local runtime state, but they are not generic harness capabilities and
 replay does not recreate that private authority.
 
-These external message facts are separate from the harness-owned peer-agent
-message events documented below.
+These external message facts are separate from the harness-owned inter-session
+and agent-to-agent message events documented below.
 
 The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `/set show-messages`. When shown fully, a message renders as:
 
@@ -89,26 +89,27 @@ message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-c
 
 The UI may display, summarize, or hide agent-to-agent messages depending on `/set show-messages`. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
 
-## Send to an agent in another active session
+## Send a message to another active session
 
-Use `&<session-id>` to route to exactly one agent through that session's
-configured peer entrypoint:
+Use `&<session-id>` to send a message to another session:
 
 ```text
 message({"recipient_id":"&01JZ...","message":"Please compare this with your session."})
 ```
 
-Tau chooses one eligible entrypoint agent, preferring idle over running and
-least-recently routed then agent id. A busy eligible agent is reused; bare
-routing is never enumeration or broadcast. Success returns the resolved
-canonical `session/agent` address and whether it was started.
-If no eligible endpoint exists, the target may create only its separately
-configured `auto_start_role`; otherwise routing fails. Busy endpoints are reused,
-and concurrent live sends coalesce onto one newly created endpoint.
+The target session chooses one eligible receiving agent, preferring idle over
+running and least-recently routed then agent id. A busy eligible agent is reused;
+sending to a session is never enumeration or broadcast. Success returns the
+resolved canonical `session/agent` address and whether it was started. If no
+eligible agent exists, the target walks roles with
+`inter_session_auto_start` in deterministic configured order, skipping disabled
+or unavailable roles/models. Otherwise sending to the session fails. Multiple
+receiving roles may span role groups; concurrent live sends coalesce onto one
+newly created endpoint.
 
-Use `&<session-id>/@<agent-id>` for a typed exact address. The existing
-`<session-id>/<agent-id>` spelling remains accepted for compatibility and keeps
-known-address behavior even when the target agent is not in an entrypoint group.
+Use `&<session-id>/@<agent-id>` or `<session-id>/<agent-id>` to send to a
+specific agent in another session. This known-address behavior works even when
+the target role is not an inter-session receiver.
 
 Use `<session-id>/<agent_id>` as `recipient_id` to address an agent owned by
 another running harness daemon:
@@ -126,20 +127,21 @@ sender transcript records `agent.message_sent` with recipient
 `agent.message_received` with `sender_session_id`. UI and prompt rendering show
 external addresses as `session/agent`.
 
-Peer delivery is best-effort at-least-once. During normal live operation Tau
+Inter-session delivery is best-effort at-least-once. During normal live operation Tau
 reports success only after the exact receive projection commits. If the target
 crashes or the connection is lost after that commit but before acknowledgement,
 a retry can deliver a duplicate prompt; Tau does not provide distributed
 exactly-once deduplication across sessions.
-The same crash ambiguity can duplicate an auto-started agent, model work, or spend.
-Before creation, each endpoint is limited to 32 queued peer inputs, 256 KiB of
-queued peer body, 60 accepted inputs per rolling minute, and 64 KiB per message.
+The same crash ambiguity can duplicate an auto-started agent, model work, or
+spend. Before creation, each receiving agent is limited to 32 queued
+inter-session inputs, 256 KiB of queued inter-session message body, 60 accepted
+inputs per rolling minute, and 64 KiB per message.
 
 Roles that explicitly enable the `session_discovery` tool group can use
-`session_list({query?, limit?})` to find live sessions whose target harness
-advertises a configured peer entrypoint. The snapshot is bounded and racy and
-contains only session id, project basename, and current-session status. It does
-not enumerate remote agents. The independent `agent_discovery` group enables
+`session_list({query?, limit?})` to find live sessions available for
+inter-session messaging. The snapshot is bounded and racy and contains only
+session id, project basename, and current-session status. It does not enumerate
+remote agents. The independent `agent_discovery` group enables
 `agent_list({query?, role?, group?, state?, limit?})`, which lists only redacted
 loaded/pending agents in the caller's current session.
 
@@ -147,9 +149,9 @@ External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection.
 
-Inbound peer text is authenticated agent content, not a harness instruction. It
-is XML-escaped inside a distinct `tau_peer_message` prompt envelope carrying
-harness-authored sender session and agent identity.
+Inbound inter-session text is authenticated agent content, not a harness
+instruction. It is XML-escaped inside a distinct `tau_peer_message` prompt
+envelope carrying harness-authored sender session and agent identity.
 
 ## Watch another agent's responses
 

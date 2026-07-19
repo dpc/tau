@@ -26,10 +26,19 @@ pub(crate) struct LoadedRoles {
     pub selected_role: String,
     /// Effective role groups used for UI navigation.
     pub role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Effective role group authorized as the peer-routing entrypoint.
-    pub peer_entrypoint: Option<tau_config::settings::RoleGroup>,
+    /// Receiver-capable roles in deterministic configured order.
+    pub inter_session_receivers: Vec<InterSessionReceiverRole>,
     /// Missing configured default role warning to surface after startup.
     pub missing_default_role: Option<MissingDefaultRole>,
+}
+
+/// One receiver-capable role used by bare inter-session routing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InterSessionReceiverRole {
+    /// Effective configured role name.
+    pub role: String,
+    /// Whether routing may start this role when no live receiver exists.
+    pub auto_start: bool,
 }
 
 /// Load configured roles and the startup role.
@@ -39,11 +48,19 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
     let roles = harness_settings.roles.clone();
     let role_overrides = HashMap::new();
     let role_groups = role_groups_for_roles(&roles, &harness_settings.role_groups);
-    let peer_entrypoint = harness_settings
-        .role_groups
+    let inter_session_receivers = role_groups
         .iter()
-        .find(|group| group.peer_entrypoint.is_some())
-        .cloned();
+        .flat_map(|group| &group.roles)
+        .filter_map(|role_name| {
+            let role = roles.get(role_name)?;
+            role.inter_session_receiver
+                .unwrap_or(false)
+                .then(|| InterSessionReceiverRole {
+                    role: role_name.clone(),
+                    auto_start: role.inter_session_auto_start.unwrap_or(false),
+                })
+        })
+        .collect();
     let (selected_role, missing_default_role) =
         select_startup_role(harness_settings, &roles, &role_groups);
     LoadedRoles {
@@ -51,7 +68,7 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
         role_overrides,
         selected_role,
         role_groups,
-        peer_entrypoint,
+        inter_session_receivers,
         missing_default_role,
     }
 }

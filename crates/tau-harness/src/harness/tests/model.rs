@@ -195,7 +195,6 @@ fn role_groups_sort_roles_by_order_then_name() {
             "alpha-peer".to_owned(),
             "engineer-junior".to_owned(),
         ],
-        peer_entrypoint: None,
     }];
 
     let groups = crate::model::role_groups_for_roles(&roles, &configured_groups);
@@ -211,6 +210,39 @@ fn role_groups_sort_roles_by_order_then_name() {
             "advisor",
             "alpha-unordered",
         ]
+    );
+}
+
+/// Inter-session receiver candidates follow configured group-major navigation
+/// order rather than the role hash map's iteration order.
+#[test]
+fn inter_session_receivers_preserve_configured_role_order_across_groups() {
+    let mut settings = tau_config::settings::HarnessSettings::built_in();
+    let engineer = settings.roles.get_mut("engineer").expect("engineer role");
+    engineer.inter_session_receiver = Some(true);
+    engineer.inter_session_auto_start = Some(true);
+    let manager = settings
+        .roles
+        .get_mut("micro-manager")
+        .expect("micro-manager role");
+    manager.inter_session_receiver = Some(true);
+    manager.inter_session_auto_start = Some(true);
+
+    let loaded = load_roles(&settings);
+
+    assert_eq!(
+        loaded
+            .inter_session_receivers
+            .iter()
+            .map(|receiver| receiver.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["engineer", "micro-manager"]
+    );
+    assert!(
+        loaded
+            .inter_session_receivers
+            .iter()
+            .all(|receiver| receiver.auto_start)
     );
 }
 
@@ -968,7 +1000,7 @@ fn load_roles_ignores_stale_harness_state() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        peer_entrypoint: _,
+        inter_session_receivers: _,
     } = load_roles(&harness_settings);
     assert!(role_overrides.is_empty());
     assert_eq!(selected_role, "engineer");
@@ -1098,7 +1130,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        peer_entrypoint: _,
+        inter_session_receivers: _,
     } = load_roles(&harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
@@ -1160,7 +1192,7 @@ fn role_missing_fields_use_model_defaults() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-        peer_entrypoint: _,
+        inter_session_receivers: _,
     } = load_roles(&harness_settings);
     let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(

@@ -3,7 +3,7 @@
 `session_list({ query?, limit? })` is disabled by default in the
 `session_discovery` tool group. It scans bounded runtime candidates and metadata
 bytes with bounded probe concurrency and deadlines, then returns only live
-active sessions whose target harness confirms an effective peer entrypoint.
+active sessions whose target harness accepts bare inter-session messages.
 The scan visits at most 128 directory entries before any filename filtering,
 reads at most 16 KiB from each accepted metadata candidate, and uses at most
 eight process-wide probe slots. Each probe is limited to 250 ms and all scan,
@@ -30,6 +30,3 @@ literal id-query matching are deterministic but snapshots remain racy.
 
 Possessing either discovery tool does not grant messaging, watching, starting,
 or compaction authority. Sending always revalidates its selected destination.
-
-The policy and trust model are confirmed by
-[DECISION-peer-entrypoints](../../../specs/DECISION-peer-entrypoints.md).

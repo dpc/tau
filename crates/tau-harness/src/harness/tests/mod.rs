@@ -42,8 +42,9 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSou
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{
-    clamp_effort, efforts_for_model, load_roles, role_infos, select_model_for_role,
-    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
+    InterSessionReceiverRole, clamp_effort, efforts_for_model, load_roles, role_infos,
+    select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
+    verbosities_for_model,
 };
 use crate::turn::{PromptSubmission, TurnState};
 
@@ -76,6 +77,18 @@ enum TestMessage {
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
     PeerSessionProbeResult(tau_proto::PeerSessionProbeResult),
+}
+
+/// Configure deterministic receiver authority directly for focused harness
+/// tests that do not load user role configuration.
+fn configure_inter_session_receivers(harness: &mut Harness, receivers: &[(&str, bool)]) {
+    harness.inter_session_receivers = receivers
+        .iter()
+        .map(|(role, auto_start)| InterSessionReceiverRole {
+            role: (*role).to_owned(),
+            auto_start: *auto_start,
+        })
+        .collect();
 }
 
 impl TestProtocolItem {
