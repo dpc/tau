@@ -195,12 +195,38 @@ fn build_system_prompt_encourages_parallel_tool_calls() {
     assert!(prompt.contains("shell tool docs"));
 }
 
+/// Verifies that prompt assembly preserves one complete, correctly headed
+/// copy of the built-in harness guidance.
+fn assert_single_unwrapped_tau_harness_section(prompt: &str) {
+    const HARNESS_SECTION: &str = r#"## Tau harness
+
+Tau is the software you are running in: a bridge between you and the outside world.
+
+Tau may occasionally send you internal asynchronous messages. These will always be prefixed with the `[tau-internal]` marker and are NOT an error. Examples: a tool call was moved to run in the background, a message was received from another agent, or a tool output was deduplicated because it matched one you already received.
+
+Tau automatically moves long-running tool calls into the background. Rely on this behavior instead of using `nohup` or manual shell backgrounding; use the `wait` and `cancel` tools to manage background tasks.
+
+Tau comes with a set of `self-knowledge` skills describing it. Search for them and read relevant ones whenever you need to know more about Tau."#;
+
+    assert_eq!(prompt.matches(HARNESS_SECTION).count(), 1);
+    let identity = prompt.find("## Your identity").expect("identity section");
+    let harness = prompt.find("## Tau harness").expect("harness section");
+    let tools = prompt
+        .find("## Tool calling")
+        .expect("tool calling section");
+    assert!(identity < harness);
+    assert!(harness < tools);
+    assert!(!prompt.contains("### Tau harness"));
+    assert!(!prompt.contains("## Your mission"));
+}
+
+/// The built-in harness instructions remain present exactly once, use a
+/// top-level section heading, and do not retain the old fragment wrapper.
 #[test]
-fn build_system_prompt_explains_tau_internal_marker() {
+fn build_system_prompt_renders_single_unwrapped_tau_harness_section() {
     let skills = std::collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
-    assert!(prompt.contains("[tau-internal]"));
-    assert!(prompt.contains("### Tau harness"));
+    assert_single_unwrapped_tau_harness_section(&prompt);
 }
 
 /// Role prompts are configuration templates. They should be rendered just
@@ -787,6 +813,7 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
         }),
         RolePromptTemplateContext::for_role("engineer"),
     );
+    assert_single_unwrapped_tau_harness_section(&prompt);
 
     let skills = prompt
         .find("Skills provide specialized instructions")
@@ -800,13 +827,30 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
     let extra = prompt
         .find("ROLE EXTRA")
         .expect("role extra prompt should be rendered");
+    let harness = prompt
+        .find("## Tau harness")
+        .expect("Tau harness section should be rendered");
+    let tool_calling = prompt
+        .find("## Tool calling")
+        .expect("tool calling section should be rendered");
     let early = prompt
         .find("TOOL EARLY")
         .expect("earlier-priority tool prompt should be rendered");
     let late = prompt
         .find("TOOL LATE")
         .expect("later-priority tool prompt should be rendered");
+    for fragment_content in [
+        "ROLE PROMPT",
+        "ROLE EXTRA",
+        "TOOL EARLY",
+        "TOOL LATE",
+        "Current working directory: /tmp/work",
+    ] {
+        assert_eq!(prompt.matches(fragment_content).count(), 1);
+    }
     assert!(role < extra);
+    assert!(extra < harness);
+    assert!(harness < tool_calling);
     assert!(extra < skills);
     assert!(skills < early);
     assert!(early < late);
