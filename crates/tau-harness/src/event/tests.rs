@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 use super::*;
 
 #[test]
@@ -40,6 +42,7 @@ fn extension_reader_waits_for_initialized_ack() {
         HarnessEvent::Disconnected { .. }
         | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_)
+        | HarnessEvent::SupervisedWriterCleanupComplete { .. }
         | HarnessEvent::Command(_) => panic!("unexpected harness event"),
     }
 }
@@ -99,23 +102,135 @@ fn writer_failure_still_reaps_supervised_child() {
         .spawn()
         .expect("spawn child");
     let pid = child.id();
-    let tx = spawn_writer_thread(FailingWriter, WriterShutdown::KillChild(child), None);
+    let (harness_tx, harness_rx) = mpsc::channel();
+    let (tx, mut writer) = spawn_supervised_writer_thread(
+        "failing-writer".into(),
+        FailingWriter,
+        child,
+        None,
+        harness_tx,
+    );
 
     tx.send(WriterCommand::Message(
         tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
     ))
     .expect("queue output");
     drop(tx);
+    assert!(matches!(
+        harness_rx.recv_timeout(Duration::from_secs(5)),
+        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
+            if connection_id.as_str() == "failing-writer"
+    ));
+    writer.join().expect("join failing writer");
+    assert!(!process_exists(pid));
+}
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if !process_exists(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+/// A child that consumes stdin and exits on EOF should complete before the
+/// watchdog signals it.
+#[test]
+fn graceful_supervised_writer_cleanup_cancels_watchdog() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let marker = tempdir.path().join("graceful");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("cat >/dev/null; printf graceful > \"$1\"")
+        .arg("sh")
+        .arg(&marker)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let stdin = child.stdin.take().expect("child stdin");
+    let (harness_tx, harness_rx) = mpsc::channel();
+    let (writer_tx, mut writer) =
+        spawn_supervised_writer_thread("graceful-writer".into(), stdin, child, None, harness_tx);
 
-    panic!("supervised child was not reaped after writer failure");
+    drop(writer_tx);
+    let watchdog = writer.start_shutdown_watchdog();
+    writer.join().expect("join writer");
+    watchdog.join().expect("join watchdog");
+
+    assert!(!writer.watchdog_fired());
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("graceful marker"),
+        "graceful"
+    );
+    assert!(matches!(
+        harness_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
+            if connection_id.as_str() == "graceful-writer"
+    ));
+}
+
+/// Reaching child wait after the outer deadline must not start a second grace
+/// period.
+#[test]
+fn expired_cleanup_deadline_is_carried_into_child_wait() {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let pid = child.id();
+    let stdin = child.stdin.take().expect("child stdin");
+    let (harness_tx, harness_rx) = mpsc::channel();
+    let (writer_tx, mut writer) =
+        spawn_supervised_writer_thread("expired-writer".into(), stdin, child, None, harness_tx);
+    writer.arm_cleanup_deadline(Instant::now());
+    let started = Instant::now();
+
+    drop(writer_tx);
+    assert!(matches!(
+        harness_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
+            if connection_id.as_str() == "expired-writer"
+    ));
+    writer.join().expect("join expired writer");
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!process_exists(pid));
+}
+
+/// A shutdown watcher must preserve an earlier runtime deadline rather than
+/// granting a blocked writer a fresh grace period.
+#[test]
+fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let pid = child.id();
+    let stdin = child.stdin.take().expect("child stdin");
+    let (harness_tx, harness_rx) = mpsc::channel();
+    let (writer_tx, mut writer) =
+        spawn_supervised_writer_thread("prearmed-writer".into(), stdin, child, None, harness_tx);
+    writer.arm_cleanup_deadline(Instant::now() + Duration::from_millis(200));
+    writer_tx
+        .send(WriterCommand::Message(HarnessOutputMessage::deliver(
+            tau_proto::Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+                message: "x".repeat(2 * 1024 * 1024),
+                level: tau_proto::NoticeLevel::Info,
+                always_show: false,
+            }),
+        )))
+        .expect("queue blocking frame");
+    let started = Instant::now();
+
+    let watchdog = writer.start_shutdown_watchdog();
+    drop(writer_tx);
+    assert!(matches!(
+        harness_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::SupervisedWriterCleanupComplete { connection_id })
+            if connection_id.as_str() == "prearmed-writer"
+    ));
+    writer.join().expect("join prearmed writer");
+    watchdog.join().expect("join prearmed watchdog");
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!process_exists(pid));
 }
 
 /// The writer thread should count only output frames it successfully encodes
@@ -125,11 +240,7 @@ fn writer_failure_still_reaps_supervised_child() {
 fn writer_records_protocol_io_after_successful_flush() {
     let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
     let meter = tau_client::ProtocolIoMeter::default();
-    let tx = spawn_writer_thread(
-        writer_stream,
-        WriterShutdown::CloseStream,
-        Some(meter.clone()),
-    );
+    let tx = spawn_writer_thread(writer_stream, Some(meter.clone()));
     tx.send(WriterCommand::Message(
         tau_proto::HarnessOutputMessage::deliver(tau_proto::Event::TermBell(
             tau_proto::TermBell {},

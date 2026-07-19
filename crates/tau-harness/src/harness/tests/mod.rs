@@ -1545,6 +1545,9 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
                 h.handle_disconnect(&connection_id);
             }
             HarnessEvent::NewClient(_) => {}
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
+                .handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
+                .expect("supervised cleanup"),
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }
@@ -1577,6 +1580,9 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
                 h.handle_disconnect(&connection_id);
             }
             HarnessEvent::NewClient(_) => {}
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
+                .handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
+                .expect("supervised cleanup"),
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }

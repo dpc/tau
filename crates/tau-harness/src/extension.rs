@@ -15,8 +15,8 @@ use tau_proto::ClientKind;
 
 use crate::error::{ExtensionSpawnError, HarnessError};
 use crate::event::{
-    HarnessEvent, WriterCommand, WriterShutdown, spawn_reader_thread_after_initialized,
-    spawn_writer_thread,
+    HarnessEvent, SupervisedWriterHandle, WriterCommand, spawn_reader_thread_after_initialized,
+    spawn_supervised_writer_thread, spawn_writer_thread,
 };
 use crate::prompt::chrono_free_date;
 use crate::settings::ExtensionConfig;
@@ -83,6 +83,8 @@ pub(crate) struct ExtensionConnectCommand {
     pub(crate) writer_tx: Sender<WriterCommand>,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
+    /// Retained writer ownership for supervised child cleanup.
+    pub(crate) supervised_writer: Option<SupervisedWriterHandle>,
     /// Previous connection id to replace when this is a supervised respawn.
     pub(crate) replaces: Option<tau_proto::ConnectionId>,
 }
@@ -112,6 +114,8 @@ pub(crate) struct SupervisedSpawn {
     pub(crate) child_pid: u32,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
+    /// Retained writer ownership for child cleanup and joining.
+    pub(crate) writer: SupervisedWriterHandle,
     /// Protocol frame byte/count counters shared by this extension connection.
     pub(crate) protocol_io: ProtocolIoMeter,
 }
@@ -140,11 +144,7 @@ where
 
     let connection_id = next_extension_connection_id();
     let protocol_io = ProtocolIoMeter::default();
-    let writer_tx = spawn_writer_thread(
-        harness_write,
-        WriterShutdown::CloseStream,
-        Some(protocol_io.clone()),
-    );
+    let writer_tx = spawn_writer_thread(harness_write, Some(protocol_io.clone()));
 
     let (initialized_tx, initialized_rx) = mpsc::channel();
     spawn_reader_thread_after_initialized(
@@ -250,10 +250,12 @@ pub(crate) fn spawn_supervised(
 
     let connection_id = next_extension_connection_id();
     let protocol_io = ProtocolIoMeter::default();
-    let writer_tx = spawn_writer_thread(
+    let (writer_tx, writer) = spawn_supervised_writer_thread(
+        connection_id.clone(),
         stdin,
-        WriterShutdown::KillChild(child),
+        child,
         Some(protocol_io.clone()),
+        tx.clone(),
     );
 
     let (initialized_tx, initialized_rx) = mpsc::channel();
@@ -269,6 +271,7 @@ pub(crate) fn spawn_supervised(
         writer_tx,
         child_pid,
         initialized_ack: initialized_tx,
+        writer,
         protocol_io,
     })
 }

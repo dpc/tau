@@ -3,13 +3,18 @@ use std::io::ErrorKind;
 
 use super::*;
 use crate::agent::PendingPrompt;
-use crate::extension::{ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process};
-use crate::harness::{
-    PendingTool, PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
-    extension_disconnected_tool_call_error_message, prompt_snapshot_tool_error_message,
-    tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
-    unavailable_tool_error_message, validate_protocol_version,
+use crate::event::SUPERVISED_CLEANUP_GRACE;
+use crate::extension::{
+    ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process, spawn_supervised,
 };
+use crate::harness::{
+    EXTENSION_RESTART_DELAY, MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES,
+    PendingTool, PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
+    extension_disconnected_tool_call_error_message, extension_restart_disabled_notice,
+    prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
+    tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
+};
+use crate::settings::ExtensionConfig;
 
 fn context_text(item: &ContextItem) -> Option<&str> {
     match item {
@@ -63,6 +68,114 @@ fn event_log_contains_source_event(
         }
     }
     false
+}
+
+fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
+    ExtensionConfig {
+        tool_prefix: None,
+        name: name.to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script.to_owned()],
+        role: None,
+        require: true,
+        cwd: None,
+        config: serde_json::json!({}),
+        secrets: BTreeMap::new(),
+    }
+}
+
+fn connect_supervised_test_process(
+    h: &mut Harness,
+    config: ExtensionConfig,
+    kind: tau_proto::ClientKind,
+) -> (tau_proto::ConnectionId, u32) {
+    let spawned = spawn_supervised(&config, kind.clone(), None, &h.tx)
+        .expect("spawn supervised test process");
+    let connection_id = spawned.connection_id.clone();
+    let child_pid = spawned.child_pid;
+    h.connect_extension(ExtensionConnectCommand {
+        entry: ExtensionEntry {
+            tool_prefix: config.tool_prefix.clone(),
+            name: config.name.clone(),
+            instance_id: 700.into(),
+            connection_id: connection_id.clone(),
+            kind,
+            require: config.require,
+            respawn_allowed: true,
+            pid: Some(child_pid),
+            in_process_thread: None,
+            supervised_config: Some(config),
+            secrets: BTreeMap::new(),
+            restart_attempt: 0,
+            state: ExtensionState::Spawning,
+            protocol_io: spawned.protocol_io,
+        },
+        origin: ConnectionOrigin::Supervised,
+        writer_tx: spawned.writer_tx,
+        initialized_ack: spawned.initialized_ack,
+        supervised_writer: Some(spawned.writer),
+        replaces: None,
+    })
+    .expect("connect supervised test process");
+    (connection_id, child_pid)
+}
+
+fn drive_crashed_extension_cleanup(
+    h: &mut Harness,
+    extension_name: &str,
+    now: Instant,
+) -> tau_proto::ConnectionId {
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= Duration::from_secs(3) {
+            panic!("timed out waiting for crashed extension cleanup");
+        }
+        if let Some((connection_id, entry)) = h
+            .extensions
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.name == extension_name)
+            && entry.state == ExtensionState::Disconnected
+            && !h.extensions.supervised_writers.contains_key(connection_id)
+            && (entry.kind == tau_proto::ClientKind::Provider
+                || !entry.respawn_allowed
+                || h.extensions.restart_deadlines.contains_key(connection_id))
+        {
+            return connection_id.clone();
+        }
+
+        let event =
+            h.rx.recv_timeout(Duration::from_secs(1))
+                .expect("extension lifecycle event");
+        match event {
+            HarnessEvent::FromConnection {
+                connection_id,
+                message,
+            } => h
+                .handle_extension_message(&connection_id, *message)
+                .expect("extension message"),
+            HarnessEvent::Disconnected { connection_id }
+            | HarnessEvent::ReadFailed { connection_id, .. } => {
+                h.handle_disconnect_at(&connection_id, now)
+            }
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
+                .handle_supervised_writer_cleanup_complete_at(&connection_id, now)
+                .expect("supervised writer cleanup"),
+            HarnessEvent::Command(command) => {
+                h.handle_harness_command(command).expect("harness command");
+            }
+            HarnessEvent::NewClient(_) => {}
+        }
+    }
+}
+
+fn process_is_signalable(pid: u32) -> bool {
+    // SAFETY: signal 0 checks process existence/permission without delivering
+    // a signal.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, 0) == 0
+    }
 }
 
 fn prompt_context_contains(prompt: &AgentPromptCreated, needle: &str) -> bool {
@@ -4505,6 +4618,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         origin: ConnectionOrigin::Supervised,
         writer_tx: spawned.writer_tx,
         initialized_ack: spawned.initialized_ack,
+        supervised_writer: None,
         replaces: None,
     })
     .expect("queue connect command");
@@ -4520,7 +4634,10 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         HarnessEvent::FromConnection { .. }
         | HarnessEvent::Disconnected { .. }
         | HarnessEvent::ReadFailed { .. }
-        | HarnessEvent::NewClient(_) => panic!("reader forwarded before connect command"),
+        | HarnessEvent::NewClient(_)
+        | HarnessEvent::SupervisedWriterCleanupComplete { .. } => {
+            panic!("reader forwarded before connect command")
+        }
     }
 
     assert!(h.bus.connection(&conn_id).is_some());
@@ -4546,7 +4663,10 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         HarnessEvent::Command(_)
         | HarnessEvent::Disconnected { .. }
         | HarnessEvent::ReadFailed { .. }
-        | HarnessEvent::NewClient(_) => panic!("unexpected harness event after connect ack"),
+        | HarnessEvent::NewClient(_)
+        | HarnessEvent::SupervisedWriterCleanupComplete { .. } => {
+            panic!("unexpected harness event after connect ack")
+        }
     }
 
     h.shutdown().expect("shutdown");
@@ -5471,6 +5591,316 @@ fn provider_disconnect_terminates_event_loop() {
     ));
 
     h.shutdown().expect("shutdown");
+}
+
+/// Restart-disable diagnostics retain their actionable suffix while bounding
+/// maximum valid and defensive overlong UTF-8 names.
+#[test]
+fn restart_disabled_notice_is_bounded_and_utf8_safe() {
+    for name in [
+        "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES),
+        "é".repeat(MAX_EXTENSION_RESTART_NOTICE_BYTES),
+    ] {
+        let notice = extension_restart_disabled_notice(&name);
+        assert!(notice.len() <= MAX_EXTENSION_RESTART_NOTICE_BYTES);
+        assert!(
+            notice
+                .ends_with("automatic restart attempts; it remains disconnected for this session")
+        );
+        assert!(notice.contains(&MAX_EXTENSION_RESTART_ATTEMPTS.to_string()));
+        if name.len() == tau_proto::EXTENSION_NAME_MAX_BYTES {
+            assert!(notice.contains(&name));
+        } else {
+            assert!(notice.contains('…'));
+        }
+    }
+}
+
+/// A crashing tool receives three delayed replacements for the whole session,
+/// and the final crash emits one mandatory disable notice.
+#[test]
+fn crashing_supervised_tool_uses_fake_clock_and_stops_after_three_restarts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let extension_name = "x".repeat(tau_proto::EXTENSION_NAME_MAX_BYTES);
+    connect_supervised_test_process(
+        &mut h,
+        supervised_test_config(&extension_name, "exit 1"),
+        tau_proto::ClientKind::Tool,
+    );
+    let mut now = Instant::now();
+
+    for expected_attempt in 0..=MAX_EXTENSION_RESTART_ATTEMPTS {
+        let connection_id = drive_crashed_extension_cleanup(&mut h, &extension_name, now);
+        let entry = &h.extensions.entries[&connection_id];
+        assert_eq!(entry.restart_attempt, expected_attempt);
+        if expected_attempt == MAX_EXTENSION_RESTART_ATTEMPTS {
+            assert!(!entry.respawn_allowed);
+            assert!(!h.extensions.restart_deadlines.contains_key(&connection_id));
+            break;
+        }
+
+        let restart_at = h.extensions.restart_deadlines[&connection_id];
+        assert_eq!(restart_at, now + EXTENSION_RESTART_DELAY);
+        h.process_runtime_deadlines_at(restart_at - Duration::from_nanos(1));
+        assert_eq!(
+            h.extensions.entries[&connection_id].restart_attempt,
+            expected_attempt
+        );
+        h.process_runtime_deadlines_at(restart_at);
+        now = restart_at;
+    }
+
+    let restart_events = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::ExtensionRestarting(_)))
+        .count();
+    assert_eq!(restart_events, MAX_EXTENSION_RESTART_ATTEMPTS as usize);
+    let disable_notices = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::HarnessNotice(notice)
+                if notice.message.contains("automatic restart attempts") =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(disable_notices.len(), 1);
+    assert!(disable_notices[0].always_show);
+    assert_eq!(disable_notices[0].level, tau_proto::NoticeLevel::Warning);
+    assert!(disable_notices[0].message.len() <= MAX_EXTENSION_RESTART_NOTICE_BYTES);
+    h.shutdown().expect("shutdown");
+}
+
+/// Session rollover resets only budget exhaustion; a peer disabled by
+/// configuration policy remains disabled.
+#[test]
+fn session_restart_budget_reset_preserves_permanent_disablement() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    for connection_id in ["budget-disabled", "permanently-disabled"] {
+        let _sink = connect_handshaking_tool(&mut h, connection_id);
+        let entry = h
+            .extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension");
+        entry.state = ExtensionState::Disconnected;
+        entry.respawn_allowed = false;
+        entry.restart_attempt = MAX_EXTENSION_RESTART_ATTEMPTS;
+        entry.supervised_config = Some(supervised_test_config(connection_id, "exit 1"));
+    }
+    h.extensions
+        .restart_budget_disabled
+        .insert("budget-disabled".into());
+    let rollover_at = Instant::now();
+
+    h.reset_extension_restart_budgets_at(rollover_at);
+
+    let budget_disabled = &h.extensions.entries["budget-disabled"];
+    assert!(budget_disabled.respawn_allowed);
+    assert_eq!(budget_disabled.restart_attempt, 0);
+    assert_eq!(
+        h.extensions.restart_deadlines["budget-disabled"],
+        rollover_at + EXTENSION_RESTART_DELAY
+    );
+    let permanently_disabled = &h.extensions.entries["permanently-disabled"];
+    assert!(!permanently_disabled.respawn_allowed);
+    assert_eq!(permanently_disabled.restart_attempt, 0);
+    assert!(
+        !h.extensions
+            .restart_deadlines
+            .contains_key("permanently-disabled")
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A late event-loop wake still spaces failed spawn attempts from the actual
+/// processing time instead of draining overdue retry cohorts back-to-back.
+#[test]
+fn failed_spawn_retry_delay_anchors_to_late_fake_clock_now() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let connection_id = "missing-restart-command";
+    let _sink = connect_handshaking_tool(&mut h, connection_id);
+    let mut config = supervised_test_config(connection_id, "exit 1");
+    config.command = td.path().join("missing-extension").display().to_string();
+    let entry = h
+        .extensions
+        .entries
+        .get_mut(connection_id)
+        .expect("extension");
+    entry.state = ExtensionState::Disconnected;
+    entry.supervised_config = Some(config);
+    let scheduled_at = Instant::now();
+    h.schedule_extension_restart_at(connection_id, scheduled_at);
+    let first_deadline = h.extensions.restart_deadlines[connection_id];
+    let late_now = first_deadline + Duration::from_secs(10);
+
+    h.process_runtime_deadlines_at(late_now);
+
+    assert_eq!(h.extensions.entries[connection_id].restart_attempt, 1);
+    assert_eq!(
+        h.extensions.restart_deadlines[connection_id],
+        late_now + EXTENSION_RESTART_DELAY
+    );
+    h.process_runtime_deadlines_at(late_now + EXTENSION_RESTART_DELAY);
+    assert_eq!(h.extensions.entries[connection_id].restart_attempt, 2);
+    h.shutdown().expect("shutdown");
+}
+
+/// Supervised providers preserve fatal/non-respawn policy even though their
+/// writer cleanup uses the same retained ownership path.
+#[test]
+fn crashing_supervised_provider_never_schedules_restart() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    connect_supervised_test_process(
+        &mut h,
+        supervised_test_config("crash-provider", "exit 1"),
+        tau_proto::ClientKind::Provider,
+    );
+
+    let connection_id = drive_crashed_extension_cleanup(&mut h, "crash-provider", Instant::now());
+    let entry = &h.extensions.entries[&connection_id];
+    assert_eq!(entry.restart_attempt, 0);
+    assert!(!h.extensions.restart_deadlines.contains_key(&connection_id));
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::ExtensionRestarting(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Runtime replacement is gated on writer completion: the cleanup watchdog
+/// first kills and reaps a non-reading child, then the one-second restart
+/// deadline becomes eligible.
+#[test]
+fn nonreading_child_is_reaped_before_delayed_replacement() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let (connection_id, child_pid) = connect_supervised_test_process(
+        &mut h,
+        supervised_test_config("blocked-runtime-tool", "exec sleep 30"),
+        tau_proto::ClientKind::Tool,
+    );
+    h.bus
+        .send_to(
+            &connection_id,
+            None,
+            HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+                message: "x".repeat(2 * 1024 * 1024),
+                level: tau_proto::NoticeLevel::Info,
+                always_show: false,
+            })),
+        )
+        .expect("queue blocking frame");
+    let disconnected_at = Instant::now();
+
+    h.handle_disconnect_at(&connection_id, disconnected_at);
+
+    assert!(h.extensions.supervised_writers.contains_key(&connection_id));
+    assert!(!h.extensions.restart_deadlines.contains_key(&connection_id));
+    let cleanup_at = disconnected_at + SUPERVISED_CLEANUP_GRACE;
+    h.process_runtime_deadlines_at(cleanup_at);
+    loop {
+        match h
+            .rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleanup-complete event")
+        {
+            HarnessEvent::SupervisedWriterCleanupComplete {
+                connection_id: completed,
+            } if completed == connection_id => {
+                h.handle_supervised_writer_cleanup_complete_at(&completed, cleanup_at)
+                    .expect("join cleaned writer");
+                break;
+            }
+            HarnessEvent::Disconnected { .. } => {}
+            _ => panic!("unexpected event while waiting for cleanup completion"),
+        }
+    }
+
+    assert!(!process_is_signalable(child_pid));
+    let restart_at = h.extensions.restart_deadlines[&connection_id];
+    assert_eq!(restart_at, cleanup_at + EXTENSION_RESTART_DELAY);
+    h.process_runtime_deadlines_at(restart_at - Duration::from_nanos(1));
+    assert_eq!(h.extensions.entries[&connection_id].restart_attempt, 0);
+    h.process_runtime_deadlines_at(restart_at);
+    let replacement_id = h
+        .extension_connection_id("blocked-runtime-tool")
+        .expect("replacement connection")
+        .to_owned();
+    assert_ne!(replacement_id, connection_id.as_str());
+    assert_eq!(
+        h.extensions.entries[replacement_id.as_str()].restart_attempt,
+        1
+    );
+    assert!(!process_is_signalable(child_pid));
+    h.shutdown().expect("shutdown");
+}
+
+/// Shutdown arms all retained cleanup watchdogs before joining writers, so a
+/// child that never reads stdin cannot leave its child or transport thread.
+#[test]
+fn shutdown_reaps_nonreading_supervised_children_and_joins_writers() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let mut children = Vec::new();
+    for index in 0..3 {
+        let name = format!("nonreading-tool-{index}");
+        let (connection_id, child_pid) = connect_supervised_test_process(
+            &mut h,
+            supervised_test_config(&name, "exec sleep 30"),
+            tau_proto::ClientKind::Tool,
+        );
+        h.bus
+            .send_to(
+                &connection_id,
+                None,
+                HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+                    kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+                    message: "x".repeat(2 * 1024 * 1024),
+                    level: tau_proto::NoticeLevel::Info,
+                    always_show: false,
+                })),
+            )
+            .expect("queue large frame");
+        children.push((connection_id, child_pid));
+    }
+
+    let started = Instant::now();
+    h.shutdown().expect("shutdown");
+
+    // Three serialized two-second grace windows exceed this broad bound;
+    // parallel watchdog arming completes in one window.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    for (_, child_pid) in &children {
+        assert!(!process_is_signalable(*child_pid));
+    }
+    assert!(h.extensions.supervised_writers.is_empty());
+    let expected = children
+        .into_iter()
+        .map(|(connection_id, _)| connection_id)
+        .collect::<HashSet<_>>();
+    let mut readers_finished = HashSet::new();
+    let reader_deadline = Instant::now() + Duration::from_secs(2);
+    while readers_finished.len() < expected.len() && Instant::now() < reader_deadline {
+        let remaining = reader_deadline.saturating_duration_since(Instant::now());
+        let Ok(event) = h.rx.recv_timeout(remaining) else {
+            break;
+        };
+        if let HarnessEvent::Disconnected { connection_id } = event
+            && expected.contains(&connection_id)
+        {
+            readers_finished.insert(connection_id);
+        }
+    }
+    assert_eq!(readers_finished, expected);
 }
 
 #[test]

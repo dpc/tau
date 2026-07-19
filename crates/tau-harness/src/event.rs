@@ -5,8 +5,9 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use tau_client::ProtocolIoMeter;
 use tau_core::{ConnectionSendError, ConnectionSink};
@@ -16,7 +17,8 @@ use tau_proto::{
 
 use crate::extension::ExtensionConnectCommand;
 
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// Grace period before a blocked supervised writer is forcefully unblocked.
+pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
@@ -112,6 +114,10 @@ pub(crate) enum HarnessEvent {
     },
     /// Socket listener accepted a new client.
     NewClient(UnixStream),
+    /// A supervised writer finished and reaped its owned direct child.
+    SupervisedWriterCleanupComplete {
+        connection_id: tau_proto::ConnectionId,
+    },
     /// Internal state transition requested by harness helpers.
     Command(HarnessCommand),
 }
@@ -202,22 +208,226 @@ fn spawn_reader_thread_inner(
     });
 }
 
-/// What the writer thread should do when its channel closes.
-pub(crate) enum WriterShutdown {
-    /// Just close the stream (socket clients, in-process peers).
+/// Cleanup ownership selected when a writer thread is spawned.
+enum WriterShutdown {
+    /// Close only the transport stream.
     CloseStream,
-    /// Supervised child: send disconnect, close stdin, wait/signal.
-    KillChild(Child),
+    /// Close child stdin, reap the child, and report completion.
+    Supervised {
+        /// Direct child owned exclusively by the writer until it is reaped.
+        child: Child,
+        /// Harness notification and outer blocked-write watchdog state.
+        completion: SupervisedWriterCompletion,
+    },
+}
+
+/// Join and watchdog state retained by the harness for a supervised writer.
+pub(crate) struct SupervisedWriterHandle {
+    /// Recorded direct-child PID, valid until the writer-owned child is reaped.
+    child_pid: u32,
+    /// Writer thread that owns the child and its final wait/reap path.
+    writer_thread: Option<JoinHandle<()>>,
+    /// Shared two-phase watchdog transition synchronized with child reaping.
+    watchdog: Arc<WriterWatchdog>,
+}
+
+impl SupervisedWriterHandle {
+    /// Signal the recorded direct child if the writer has not reached its
+    /// ordinary child-reaping path.
+    pub(crate) fn fire_watchdog(&self) {
+        self.watchdog.fire(self.child_pid);
+    }
+
+    /// Record the absolute disconnect-to-kill deadline used by both cleanup
+    /// phases.
+    pub(crate) fn arm_cleanup_deadline(&self, deadline: Instant) {
+        self.watchdog.arm_deadline(deadline);
+    }
+
+    /// Start a deadline watcher used while the central event loop is no longer
+    /// running during harness shutdown.
+    pub(crate) fn start_shutdown_watchdog(&self) -> JoinHandle<()> {
+        let watchdog = Arc::clone(&self.watchdog);
+        let child_pid = self.child_pid;
+        let deadline = watchdog.arm_deadline(Instant::now() + SUPERVISED_CLEANUP_GRACE);
+        thread::spawn(move || {
+            watchdog.wait_and_fire(child_pid, deadline);
+        })
+    }
+
+    /// Join the writer after cleanup completion or during coordinated shutdown.
+    pub(crate) fn join(&mut self) -> thread::Result<()> {
+        self.writer_thread.take().map_or(Ok(()), JoinHandle::join)
+    }
+
+    #[cfg(test)]
+    /// Whether the outer blocked-write watchdog signaled the child.
+    pub(crate) fn watchdog_fired(&self) -> bool {
+        self.watchdog
+            .state
+            .lock()
+            .expect("writer watchdog state")
+            .phase
+            == WriterWatchdogPhase::Fired
+    }
+}
+
+impl Drop for SupervisedWriterHandle {
+    fn drop(&mut self) {
+        if self.writer_thread.is_none() {
+            return;
+        }
+        let watchdog = self.start_shutdown_watchdog();
+        let _ = self.join();
+        let _ = watchdog.join();
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+/// Exclusive relationship between the outer watchdog and writer reap path.
+enum WriterWatchdogPhase {
+    /// The writer may still be blocked before its child wait/reap path.
+    Pending,
+    /// The writer reached its child wait/reap path before the outer deadline.
+    Canceled,
+    /// The outer deadline signaled the still-unreaped direct child.
+    Fired,
+}
+
+/// State protected by the watchdog transition mutex.
+struct WriterWatchdogState {
+    /// Exclusive signaling/cancellation phase.
+    phase: WriterWatchdogPhase,
+    /// Absolute disconnect-to-kill deadline, once the harness arms cleanup.
+    deadline: Option<Instant>,
+}
+
+/// Synchronizes the outer blocked-write watchdog with writer-owned child reap.
+struct WriterWatchdog {
+    /// Current exclusive transition state.
+    state: Mutex<WriterWatchdogState>,
+    /// Wakes shutdown watchdog threads when normal cleanup wins.
+    changed: Condvar,
+}
+
+impl WriterWatchdog {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(WriterWatchdogState {
+                phase: WriterWatchdogPhase::Pending,
+                deadline: None,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn arm_deadline(&self, deadline: Instant) -> Instant {
+        let mut state = self.state.lock().expect("writer watchdog state");
+        if state.phase == WriterWatchdogPhase::Pending {
+            state.deadline.get_or_insert(deadline);
+        }
+        state.deadline.unwrap_or(deadline)
+    }
+
+    fn cancel_and_deadline(&self, fallback: Instant) -> Instant {
+        let mut state = self.state.lock().expect("writer watchdog state");
+        if state.phase == WriterWatchdogPhase::Pending {
+            state.phase = WriterWatchdogPhase::Canceled;
+            self.changed.notify_all();
+        }
+        state.deadline.unwrap_or(fallback)
+    }
+
+    fn fire(&self, child_pid: u32) {
+        let mut state = self.state.lock().expect("writer watchdog state");
+        if state.phase != WriterWatchdogPhase::Pending {
+            return;
+        }
+        // SAFETY: the writer owns the unreaped direct Child until it cancels
+        // this watchdog under the same mutex immediately before entering its
+        // wait/reap path. Winning this mutex therefore proves this PID cannot
+        // have been reaped and reused.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+        }
+        state.phase = WriterWatchdogPhase::Fired;
+        self.changed.notify_all();
+    }
+
+    fn wait_and_fire(&self, child_pid: u32, deadline: Instant) {
+        let state = self.state.lock().expect("writer watchdog state");
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(
+                state,
+                deadline.saturating_duration_since(Instant::now()),
+                |state| state.phase == WriterWatchdogPhase::Pending,
+            )
+            .expect("writer watchdog wait");
+        if state.phase == WriterWatchdogPhase::Pending {
+            drop(state);
+            self.fire(child_pid);
+        }
+    }
+}
+
+/// Completion data moved into exactly one supervised writer thread.
+struct SupervisedWriterCompletion {
+    /// Connection whose cleanup ownership is completing.
+    connection_id: tau_proto::ConnectionId,
+    /// Central harness event sender used after the child has been reaped.
+    harness_tx: Sender<HarnessEvent>,
+    /// Outer watchdog canceled before the writer enters child wait/reap.
+    watchdog: Arc<WriterWatchdog>,
 }
 
 /// Writer thread — one per connection, drains channel and writes to stream.
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
-    shutdown: WriterShutdown,
     protocol_io: Option<ProtocolIoMeter>,
 ) -> Sender<WriterCommand> {
+    let (tx, _) = spawn_writer_thread_inner(writer, WriterShutdown::CloseStream, protocol_io);
+    tx
+}
+
+/// Spawn a supervised writer whose join handle remains owned by the harness.
+pub(crate) fn spawn_supervised_writer_thread(
+    connection_id: tau_proto::ConnectionId,
+    writer: impl Write + Send + 'static,
+    child: Child,
+    protocol_io: Option<ProtocolIoMeter>,
+    harness_tx: Sender<HarnessEvent>,
+) -> (Sender<WriterCommand>, SupervisedWriterHandle) {
+    let child_pid = child.id();
+    let watchdog = Arc::new(WriterWatchdog::new());
+    let completion = SupervisedWriterCompletion {
+        connection_id,
+        harness_tx,
+        watchdog: Arc::clone(&watchdog),
+    };
+    let (tx, writer_thread) = spawn_writer_thread_inner(
+        writer,
+        WriterShutdown::Supervised { child, completion },
+        protocol_io,
+    );
+    (
+        tx,
+        SupervisedWriterHandle {
+            child_pid,
+            writer_thread: Some(writer_thread),
+            watchdog,
+        },
+    )
+}
+
+fn spawn_writer_thread_inner(
+    writer: impl Write + Send + 'static,
+    shutdown: WriterShutdown,
+    protocol_io: Option<ProtocolIoMeter>,
+) -> (Sender<WriterCommand>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<WriterCommand>();
-    thread::spawn(move || {
+    let writer_thread = thread::spawn(move || {
         let mut w = HarnessOutputWriter::new(BufWriter::new(writer));
         // Drain output messages until the channel closes. Write failures still
         // fall through to the shutdown sequence so supervised children are
@@ -246,7 +456,7 @@ pub(crate) fn spawn_writer_thread(
             WriterShutdown::CloseStream => {
                 // Drop the writer → closes the stream.
             }
-            WriterShutdown::KillChild(child) => {
+            WriterShutdown::Supervised { child, completion } => {
                 if can_write_disconnect {
                     // Best-effort disconnect message.
                     let disconnect = HarnessOutputMessage::Disconnect(Disconnect {
@@ -261,37 +471,67 @@ pub(crate) fn spawn_writer_thread(
                 }
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);
-
-                wait_with_grace(child, SHUTDOWN_GRACE);
+                // The outer watchdog exists only to unblock a writer stuck
+                // before this point. Cancel it under the same mutex that guards
+                // signaling; the writer now exclusively owns the bounded child
+                // wait/reap phase below.
+                let deadline = completion
+                    .watchdog
+                    .cancel_and_deadline(Instant::now() + SUPERVISED_CLEANUP_GRACE);
+                wait_until_deadline(child, deadline);
+                let _ = completion
+                    .harness_tx
+                    .send(HarnessEvent::SupervisedWriterCleanupComplete {
+                        connection_id: completion.connection_id,
+                    });
             }
         }
     });
-    tx
+    (tx, writer_thread)
 }
 
-/// Block until `child` exits, or escalate to `SIGKILL` after `grace`.
+/// Block until `child` exits, or escalate to `SIGKILL` at `deadline`.
 ///
-/// The wait happens on a helper thread so the caller can time it out via a
-/// channel rather than polling `try_wait`. On timeout we signal the child
-/// by PID; the helper thread's `wait()` then reaps it.
-fn wait_with_grace(mut child: Child, grace: Duration) {
+/// A helper observes direct-child exit with `waitid(WNOWAIT)` so it never
+/// reaps. The writer retains the [`Child`] and performs both forced termination
+/// and the only reap, preventing PID reuse between the deadline and signal.
+fn wait_until_deadline(mut child: Child, deadline: Instant) {
     let pid = child.id();
-    let (done_tx, done_rx) = mpsc::channel::<()>();
-    let waiter = thread::spawn(move || {
-        let _ = child.wait();
-        let _ = done_tx.send(());
+    let (done_tx, done_rx) = mpsc::channel::<io::Result<()>>();
+    let observer = thread::spawn(move || {
+        let observation = loop {
+            let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: `status` points to writable siginfo storage. `WNOWAIT`
+            // observes this direct child's exit without reaping it, so the
+            // writer's owned `Child` remains authoritative until
+            // `child.wait()` below.
+            #[allow(unsafe_code)]
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    status.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                break Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                break Err(error);
+            }
+        };
+        let _ = done_tx.send(observation);
     });
-    if done_rx.recv_timeout(grace).is_err() {
-        // SAFETY: signaling a process by PID. The PID cannot be recycled until
-        // the helper thread's `wait()` reaps the child, which has not happened
-        // yet (we just timed out waiting for it).
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-        let _ = done_rx.recv();
+    if !matches!(
+        done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        Ok(Ok(()))
+    ) {
+        let _ = child.kill();
     }
-    let _ = waiter.join();
+    let _ = child.wait();
+    let _ = observer.join();
 }
 
 #[cfg(test)]

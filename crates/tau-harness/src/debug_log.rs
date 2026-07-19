@@ -89,7 +89,9 @@ impl DebugEventLog {
                     "recorded_at_micros": recorded_at,
                 })
             }
-            HarnessEvent::Command(_) => return,
+            HarnessEvent::SupervisedWriterCleanupComplete { .. } | HarnessEvent::Command(_) => {
+                return;
+            }
         };
         self.write_entry(&entry);
     }

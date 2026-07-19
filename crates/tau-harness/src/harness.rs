@@ -68,8 +68,8 @@ use crate::dirs::policy_store_path_from;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::{
-    ChannelSink, HarnessCommand, HarnessEvent, WriterCommand, WriterShutdown, spawn_reader_thread,
-    spawn_writer_thread,
+    ChannelSink, HarnessCommand, HarnessEvent, SUPERVISED_CLEANUP_GRACE, WriterCommand,
+    spawn_reader_thread, spawn_writer_thread,
 };
 use crate::event_log::EventLog;
 #[cfg(any(test, feature = "echo-agent"))]
@@ -129,6 +129,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_EXTENSION_ACTIVATION_MESSAGES: usize = 1_024;
 const MAX_EXTENSION_ACTIVATION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EXTENSION_CONFIG_ERROR_BYTES: usize = 4 * 1024;
+const MAX_EXTENSION_RESTART_NOTICE_BYTES: usize = 256;
+const EXTENSION_RESTART_DELAY: Duration = Duration::from_secs(1);
+const MAX_EXTENSION_RESTART_ATTEMPTS: u32 = 3;
 const MAX_SESSION_AGENT_LIST_ENTRIES: usize = 4_096;
 const MAX_SESSION_AGENT_LIST_FIRST_RECORD_BYTES: u64 = 256 * 1024;
 const MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES: u64 = 4 * 1024 * 1024;
@@ -156,6 +159,26 @@ fn bounded_extension_config_error(mut message: String) -> String {
     message.truncate(end);
     message.push_str("… [truncated]");
     message
+}
+
+fn extension_restart_disabled_notice(name: &str) -> String {
+    let prefix = "extension `";
+    let suffix = format!(
+        "` disabled after {MAX_EXTENSION_RESTART_ATTEMPTS} automatic restart attempts; it remains disconnected for this session"
+    );
+    let ellipsis = "…";
+    let name_budget = MAX_EXTENSION_RESTART_NOTICE_BYTES
+        .saturating_sub(prefix.len() + suffix.len() + ellipsis.len());
+    let mut end = name.len().min(name_budget);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bounded_name = if end < name.len() {
+        format!("{}{}", &name[..end], ellipsis)
+    } else {
+        name.to_owned()
+    };
+    format!("{prefix}{bounded_name}{suffix}")
 }
 
 fn session_dir_status_from_reason(
@@ -2788,6 +2811,7 @@ impl Harness {
             origin: ConnectionOrigin::Supervised,
             writer_tx: provider_spawn.writer_tx,
             initialized_ack: provider_spawn.initialized_ack,
+            supervised_writer: None,
             replaces: None,
         });
 
@@ -2815,6 +2839,7 @@ impl Harness {
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: tool_spawn.writer_tx,
                 initialized_ack: tool_spawn.initialized_ack,
+                supervised_writer: None,
                 replaces: None,
             });
         }
@@ -3419,6 +3444,7 @@ impl Harness {
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: spawned.writer_tx,
                 initialized_ack: spawned.initialized_ack,
+                supervised_writer: Some(spawned.writer),
                 replaces: None,
             });
         }
@@ -3431,15 +3457,8 @@ impl Harness {
     fn wait_for_initial_ui_subscribe(&mut self) -> Result<(), HarnessError> {
         let started_at = Instant::now();
         loop {
-            let remaining = STARTUP_TIMEOUT
-                .checked_sub(started_at.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return Err(HarnessError::StartupTimeout);
-            }
             let harness_evt = self
-                .rx
-                .recv_timeout(remaining)
+                .recv_startup_event(started_at)
                 .map_err(|_| HarnessError::StartupTimeout)?;
             self.log_event(&harness_evt);
             match harness_evt {
@@ -3467,7 +3486,44 @@ impl Harness {
                 HarnessEvent::NewClient(stream) => {
                     self.accept_client(stream)?;
                 }
+                HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                    self.handle_supervised_writer_cleanup_complete_at(
+                        &connection_id,
+                        Instant::now(),
+                    )?;
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+            }
+        }
+    }
+
+    fn recv_startup_event(
+        &mut self,
+        started_at: Instant,
+    ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
+        loop {
+            self.process_runtime_deadlines();
+            let remaining = STARTUP_TIMEOUT.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            let wait = self
+                .next_runtime_deadline()
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(remaining)
+                })
+                .unwrap_or(remaining);
+            match self.rx.recv_timeout(wait) {
+                Ok(event) => return Ok(event),
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if started_at.elapsed() < STARTUP_TIMEOUT
+                        && self.next_runtime_deadline().is_some() =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -3609,7 +3665,7 @@ impl Harness {
 
     fn handle_harness_command(&mut self, command: HarnessCommand) -> Result<(), HarnessError> {
         match command {
-            HarnessCommand::ConnectExtension(command) => self.connect_extension(*command),
+            HarnessCommand::ConnectExtension(command) => self.connect_extension(*command)?,
             HarnessCommand::ExternalMessageToolCompleted(command) => {
                 self.pending_external_message_auth
                     .remove(&command.auth_message_id);
@@ -3729,12 +3785,13 @@ impl Harness {
         Ok(())
     }
 
-    fn connect_extension(&mut self, command: ExtensionConnectCommand) {
+    fn connect_extension(&mut self, command: ExtensionConnectCommand) -> Result<(), HarnessError> {
         let ExtensionConnectCommand {
             entry,
             origin,
             writer_tx,
             initialized_ack,
+            supervised_writer,
             replaces,
         } = command;
         let connection_id = entry.connection_id.clone();
@@ -3753,6 +3810,13 @@ impl Harness {
         debug_assert_eq!(connected_id, connection_id);
 
         if let Some(replaced) = replaces {
+            assert!(
+                !self.extensions.supervised_writers.contains_key(&replaced)
+                    && !self.extensions.cleanup_deadlines.contains_key(&replaced)
+                    && !self.extensions.restart_deadlines.contains_key(&replaced)
+                    && !self.extensions.restart_budget_disabled.contains(&replaced),
+                "replacement must follow complete cleanup and consume its deadline"
+            );
             self.extensions.entries.remove(&replaced);
             self.extensions.activation_staging.remove(&replaced);
             self.extensions.ready_received.remove(&replaced);
@@ -3767,12 +3831,18 @@ impl Harness {
         self.extensions
             .activation_staging
             .insert(connection_id.clone(), ExtensionActivationStage::default());
+        if let Some(supervised_writer) = supervised_writer {
+            self.extensions
+                .supervised_writers
+                .insert(connection_id.clone(), supervised_writer);
+        }
         self.extensions.entries.insert(connection_id, entry);
         if 0 < self.extensions.pending_connects {
             self.extensions.pending_connects -= 1;
         }
         self.emit_extension_starting(&name);
         let _ = initialized_ack.send(());
+        Ok(())
     }
 
     /// Agent id that owns a given in-flight prompt, if any.
@@ -5875,15 +5945,8 @@ impl Harness {
         }
         let started_at = Instant::now();
         while !self.turn_state.is_idle() {
-            let remaining = STARTUP_TIMEOUT
-                .checked_sub(started_at.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return Err(HarnessError::StartupTimeout);
-            }
             let harness_evt = self
-                .rx
-                .recv_timeout(remaining)
+                .recv_startup_event(started_at)
                 .map_err(|_| HarnessError::StartupTimeout)?;
             self.log_event(&harness_evt);
             match harness_evt {
@@ -5904,6 +5967,12 @@ impl Harness {
                     self.handle_startup_read_failure(&connection_id, error)?;
                 }
                 HarnessEvent::NewClient(_) => {}
+                HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                    self.handle_supervised_writer_cleanup_complete_at(
+                        &connection_id,
+                        Instant::now(),
+                    )?;
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
             if STARTUP_TIMEOUT <= started_at.elapsed() {
@@ -5942,13 +6011,7 @@ impl Harness {
         }
         let started_at = Instant::now();
         while self.extensions.pending_connects != 0 || !self.extensions_all_ready() {
-            let remaining = STARTUP_TIMEOUT
-                .checked_sub(started_at.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return self.handle_extensions_startup_timeout();
-            }
-            let harness_evt = match self.rx.recv_timeout(remaining) {
+            let harness_evt = match self.recv_startup_event(started_at) {
                 Ok(event) => event,
                 Err(_) => return self.handle_extensions_startup_timeout(),
             };
@@ -5976,6 +6039,12 @@ impl Harness {
                     self.handle_startup_read_failure(&connection_id, error)?;
                 }
                 HarnessEvent::NewClient(_) => {}
+                HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                    self.handle_supervised_writer_cleanup_complete_at(
+                        &connection_id,
+                        Instant::now(),
+                    )?;
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
             if STARTUP_TIMEOUT <= started_at.elapsed() {
@@ -6126,19 +6195,17 @@ impl Harness {
             // ordering when the event loop wakes after several classes are due.
             let background = self.tool_turn.next_background_deadline();
             let input = self.next_input_wait_deadline();
-            let next = match (input, background) {
-                (Some(input), Some(background)) => Some(input.min(background)),
-                (Some(input), None) => Some(input),
-                (None, Some(background)) => Some(background),
-                (None, None) => None,
-            };
+            let extension = self.next_extension_deadline();
+            let next = [input, background, extension].into_iter().flatten().min();
             let Some(deadline) = next.filter(|deadline| *deadline <= now) else {
                 break;
             };
             if input == Some(deadline) {
                 self.process_input_wait_deadlines(deadline);
-            } else {
+            } else if background == Some(deadline) {
                 self.process_background_deadlines_at(deadline);
+            } else {
+                self.process_extension_deadlines_at(deadline, now);
             }
         }
     }
@@ -6147,10 +6214,60 @@ impl Harness {
         [
             self.tool_turn.next_background_deadline(),
             self.next_input_wait_deadline(),
+            self.next_extension_deadline(),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn next_extension_deadline(&self) -> Option<Instant> {
+        self.extensions
+            .cleanup_deadlines
+            .values()
+            .chain(self.extensions.restart_deadlines.values())
+            .copied()
+            .min()
+    }
+
+    fn process_extension_deadlines_at(&mut self, deadline: Instant, now: Instant) {
+        let cleanup = self
+            .extensions
+            .order
+            .iter()
+            .filter(|connection_id| {
+                self.extensions.cleanup_deadlines.get(*connection_id) == Some(&deadline)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for connection_id in cleanup {
+            self.extensions.cleanup_deadlines.remove(&connection_id);
+            if let Some(writer) = self.extensions.supervised_writers.get(&connection_id) {
+                writer.fire_watchdog();
+            }
+        }
+
+        let restarts = self
+            .extensions
+            .order
+            .iter()
+            .filter(|connection_id| {
+                self.extensions.restart_deadlines.get(*connection_id) == Some(&deadline)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for connection_id in restarts {
+            self.extensions.restart_deadlines.remove(&connection_id);
+            if let Err(error) = self.try_respawn_supervised_extension(&connection_id) {
+                tracing::warn!(
+                    target: "tau_harness::startup",
+                    extension_connection_id = %connection_id,
+                    error = %error,
+                    "automatic extension restart failed"
+                );
+                self.schedule_extension_restart_at(&connection_id, now.max(Instant::now()));
+            }
+        }
     }
 
     fn handle_runtime_event(
@@ -6190,6 +6307,9 @@ impl Harness {
             HarnessEvent::NewClient(stream) => {
                 self.accept_client(stream)?;
                 *ever_attached = true;
+            }
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                self.handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())?;
             }
             HarnessEvent::Command(command) => self.handle_harness_command(command)?,
         }
@@ -6280,7 +6400,7 @@ impl Harness {
         R: io::Read + Send + 'static,
         W: io::Write + Send + 'static,
     {
-        let writer_tx = spawn_writer_thread(write, WriterShutdown::CloseStream, None);
+        let writer_tx = spawn_writer_thread(write, None);
         let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
@@ -10787,10 +10907,22 @@ impl Harness {
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
+        self.handle_disconnect_at(connection_id, Instant::now());
+    }
+
+    /// Stop routing immediately and begin supervised cleanup against `now`.
+    fn handle_disconnect_at(&mut self, connection_id: &str, now: Instant) {
         let meta = self.bus.connection(connection_id).cloned();
         let is_extension = meta.as_ref().is_some_and(|meta| {
             meta.origin == ConnectionOrigin::Supervised || meta.origin == ConnectionOrigin::InMemory
         });
+        let disconnected_meta = self.bus.disconnect(connection_id);
+        if meta
+            .as_ref()
+            .is_some_and(|meta| meta.origin == ConnectionOrigin::Supervised)
+        {
+            self.begin_supervised_cleanup_at(connection_id, now);
+        }
         if is_extension {
             // Mark the extension non-blocking before any cleanup can advance
             // session init or prompt dispatch.
@@ -10907,16 +11039,131 @@ impl Harness {
             self.maybe_complete_session_init_for_disconnect(connection_id);
             self.try_advance_queue();
         }
-        let Some(meta) = self.bus.disconnect(connection_id).or(meta) else {
+        let Some(meta) = disconnected_meta.or(meta) else {
             return;
         };
         if is_extension {
             self.emit_extension_exited(&meta.name);
         }
         if meta.origin == ConnectionOrigin::Supervised
-            && let Err(error) = self.try_respawn_supervised_extension(connection_id)
+            && !self
+                .extensions
+                .supervised_writers
+                .contains_key(connection_id)
         {
-            self.emit_info(&error.to_string());
+            self.schedule_extension_restart_at(connection_id, now);
+        }
+    }
+
+    /// Arm one absolute disconnect-to-kill deadline for a retained writer.
+    fn begin_supervised_cleanup_at(&mut self, connection_id: &str, now: Instant) {
+        let connection_id = tau_proto::ConnectionId::from(connection_id);
+        if let Some(writer) = self.extensions.supervised_writers.get(&connection_id) {
+            let deadline = now + SUPERVISED_CLEANUP_GRACE;
+            writer.arm_cleanup_deadline(deadline);
+            self.extensions
+                .cleanup_deadlines
+                .entry(connection_id)
+                .or_insert(deadline);
+        }
+    }
+
+    /// Join a reaped writer and make its disconnected tool eligible for delay.
+    fn handle_supervised_writer_cleanup_complete_at(
+        &mut self,
+        connection_id: &str,
+        now: Instant,
+    ) -> Result<(), HarnessError> {
+        let connection_id = tau_proto::ConnectionId::from(connection_id);
+        self.extensions.cleanup_deadlines.remove(&connection_id);
+        let Some(mut writer) = self.extensions.supervised_writers.remove(&connection_id) else {
+            return Ok(());
+        };
+        let name = self
+            .extensions
+            .entries
+            .get(&connection_id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| connection_id.to_string());
+        writer.join().map_err(|_| HarnessError::ThreadJoin(name))?;
+        if self
+            .extensions
+            .entries
+            .get(&connection_id)
+            .is_some_and(|entry| entry.state == ExtensionState::Disconnected)
+        {
+            self.schedule_extension_restart_at(&connection_id, now);
+        }
+        Ok(())
+    }
+
+    /// Schedule one session-budgeted tool replacement, or disable it at cap.
+    fn schedule_extension_restart_at(&mut self, connection_id: &str, now: Instant) {
+        let connection_id = tau_proto::ConnectionId::from(connection_id);
+        let Some(entry) = self.extensions.entries.get_mut(&connection_id) else {
+            return;
+        };
+        if entry.kind == ClientKind::Provider
+            || entry.supervised_config.is_none()
+            || !entry.respawn_allowed
+            || entry.state != ExtensionState::Disconnected
+        {
+            return;
+        }
+        if MAX_EXTENSION_RESTART_ATTEMPTS <= entry.restart_attempt {
+            entry.respawn_allowed = false;
+            self.extensions.restart_deadlines.remove(&connection_id);
+            self.extensions
+                .restart_budget_disabled
+                .insert(connection_id);
+            let message = extension_restart_disabled_notice(&entry.name);
+            self.emit_info_important(&message);
+            return;
+        }
+        self.extensions
+            .restart_deadlines
+            .entry(connection_id)
+            .or_insert(now + EXTENSION_RESTART_DELAY);
+    }
+
+    /// Reset only session-scoped restart budget at a logical session rollover.
+    ///
+    /// Permanently disabled optional/configuration peers remain disabled. A
+    /// tool disabled specifically by the prior session's budget becomes
+    /// eligible again after the ordinary one-second delay.
+    fn reset_extension_restart_budgets_at(&mut self, now: Instant) {
+        self.extensions.restart_deadlines.clear();
+        for entry in self.extensions.entries.values_mut() {
+            entry.restart_attempt = 0;
+        }
+        for connection_id in std::mem::take(&mut self.extensions.restart_budget_disabled) {
+            if let Some(entry) = self.extensions.entries.get_mut(&connection_id) {
+                entry.respawn_allowed = true;
+            }
+        }
+        let restartable = self
+            .extensions
+            .order
+            .iter()
+            .filter(|connection_id| {
+                self.extensions
+                    .entries
+                    .get(*connection_id)
+                    .is_some_and(|entry| {
+                        entry.state == ExtensionState::Disconnected
+                            && entry.kind == ClientKind::Tool
+                            && entry.respawn_allowed
+                            && entry.supervised_config.is_some()
+                    })
+                    && !self
+                        .extensions
+                        .supervised_writers
+                        .contains_key(*connection_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for connection_id in restartable {
+            self.schedule_extension_restart_at(&connection_id, now);
         }
     }
 
@@ -11363,7 +11610,7 @@ impl Harness {
         );
 
         let old_key = tau_proto::ConnectionId::from(connection_id);
-        self.queue_extension_connect(ExtensionConnectCommand {
+        self.connect_extension(ExtensionConnectCommand {
             entry: ExtensionEntry {
                 name,
                 instance_id,
@@ -11383,6 +11630,7 @@ impl Harness {
             origin: ConnectionOrigin::Supervised,
             writer_tx: spawned.writer_tx,
             initialized_ack: spawned.initialized_ack,
+            supervised_writer: Some(spawned.writer),
             replaces: Some(old_key),
         })?;
         Ok(())
@@ -14695,6 +14943,7 @@ impl Harness {
         self.current_session_id = new_session_id.clone();
         self.current_session_generation = self.current_session_generation.saturating_add(1);
         self.current_session_start_reason = reason;
+        self.reset_extension_restart_budgets_at(Instant::now());
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();
         }
@@ -20861,6 +21110,12 @@ impl Harness {
                     }
                 }
                 HarnessEvent::NewClient(_) => {}
+                HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
+                    self.handle_supervised_writer_cleanup_complete_at(
+                        &connection_id,
+                        Instant::now(),
+                    )?;
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
         }
@@ -20971,12 +21226,19 @@ impl Harness {
     // Shutdown
     // -----------------------------------------------------------------------
 
+    /// Close every extension queue, arm all supervised watchdogs, then join
+    /// all.
+    ///
+    /// Cleanup watchdogs start before any join so direct children share one
+    /// grace window. Shutdown still joins every writer, watchdog, and
+    /// in-process extension after one fails, returning the first observed
+    /// error.
     pub(crate) fn shutdown(&mut self) -> Result<(), HarnessError> {
-        // Disconnect all extensions from the bus.  Dropping the
-        // ChannelSink closes the writer channel, which triggers each
-        // writer thread's shutdown sequence (send disconnect, close
-        // stdin, wait/kill child). Walk extension spawn order so shutdown
-        // honours spawn order.
+        self.extensions.restart_deadlines.clear();
+        self.extensions.cleanup_deadlines.clear();
+
+        // Close every queue before waiting on any one child. This lets graceful
+        // cleanup proceed concurrently across all supervised extensions.
         let connected_at_shutdown = self
             .extensions
             .order
@@ -20984,24 +21246,65 @@ impl Harness {
             .filter_map(|id| self.bus.disconnect(id).map(|_| id.clone()))
             .collect::<HashSet<_>>();
 
-        // Join in-process extension threads.
         let order = self.extensions.order.clone();
+        let mut watchdogs = Vec::new();
+        for id in &order {
+            if let Some(writer) = self.extensions.supervised_writers.get(id) {
+                watchdogs.push((id.clone(), writer.start_shutdown_watchdog()));
+            }
+        }
+
+        let mut first_error = None;
+        for id in &order {
+            if let Some(mut writer) = self.extensions.supervised_writers.remove(id)
+                && writer.join().is_err()
+                && first_error.is_none()
+            {
+                let name = self
+                    .extensions
+                    .entries
+                    .get(id)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                first_error = Some(HarnessError::ThreadJoin(name));
+            }
+        }
+        for (id, watchdog) in watchdogs {
+            if watchdog.join().is_err() && first_error.is_none() {
+                let name = self
+                    .extensions
+                    .entries
+                    .get(&id)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                first_error = Some(HarnessError::ThreadJoin(name));
+            }
+        }
+
+        // Supervised watchdogs are armed before joining in-process peers, so one
+        // slow peer cannot serialize child cleanup deadlines.
         for id in &order {
             let Some(entry) = self.extensions.entries.get_mut(id) else {
                 continue;
             };
             let name = entry.name.clone();
             if let Some(handle) = entry.in_process_thread.take() {
-                let result = handle
-                    .join()
-                    .map_err(|_| HarnessError::ThreadJoin(name.clone()))?;
-                result.map_err(HarnessError::Participant)?;
+                match handle.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if first_error.is_none() => {
+                        first_error = Some(HarnessError::Participant(error));
+                    }
+                    Err(_) if first_error.is_none() => {
+                        first_error = Some(HarnessError::ThreadJoin(name.clone()));
+                    }
+                    Ok(Err(_)) | Err(_) => {}
+                }
             }
             if connected_at_shutdown.contains(id) {
                 self.emit_extension_exited(&name);
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     #[cfg(test)]

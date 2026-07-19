@@ -6,9 +6,11 @@
 //! of [`Harness`](super::Harness).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegister};
 
+use crate::event::SupervisedWriterHandle;
 use crate::extension::ExtensionEntry;
 
 /// Event payload staged while an extension is still handshaking.
@@ -85,6 +87,15 @@ pub(crate) struct ExtensionRuntimeState {
     /// Supervises restart and shutdown. Lookups by connection id (the hot
     /// per-event path — every `Hello`, `Ready`, `Disconnected`) are O(1).
     pub(crate) entries: HashMap<tau_proto::ConnectionId, ExtensionEntry>,
+    /// Join/watchdog ownership for each supervised extension writer.
+    pub(super) supervised_writers: HashMap<tau_proto::ConnectionId, SupervisedWriterHandle>,
+    /// Absolute watchdog deadlines for disconnected supervised writers.
+    pub(super) cleanup_deadlines: HashMap<tau_proto::ConnectionId, Instant>,
+    /// Absolute delayed-restart deadlines for disconnected tool extensions.
+    pub(super) restart_deadlines: HashMap<tau_proto::ConnectionId, Instant>,
+    /// Connections disabled only because the current session exhausted restart
+    /// budget.
+    pub(super) restart_budget_disabled: HashSet<tau_proto::ConnectionId>,
     /// Extension-originated state announced during handshake and withheld until
     /// the extension sends `Ready`. Activation happens in the main harness loop
     /// so prompt assembly, routing, and subscribers see the full batch at once.
