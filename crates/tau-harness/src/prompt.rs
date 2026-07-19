@@ -790,11 +790,16 @@ fn value_type_rank(value: &serde_json::Value) -> u8 {
 pub(crate) fn render_agents_context_message<'a>(
     files: impl IntoIterator<Item = &'a DiscoveredAgentsFile>,
 ) -> String {
+    let mut files = files.into_iter().peekable();
     let mut text = String::from(
         "# AGENTS.md instructions\n\n\
 The following instructions were loaded from AGENTS.md files.\n\
 More specific files usually override broader ones.\n\n",
     );
+
+    if files.peek().is_some() {
+        text.push_str("# agents.md files\n\n");
+    }
 
     for file in files {
         text.push_str(&format!(

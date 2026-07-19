@@ -101,10 +101,17 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
     assert_eq!(prompt_pair.0.model, prompt_pair.1.model);
     assert_eq!(prompt_pair.0.originator, prompt_pair.1.originator);
     assert_eq!(prompt_pair.0.ctx_id, prompt_pair.1.ctx_id);
-    let identity_section = format!("## Agent identity\n\nYour agent id is `{agent_id}`.");
+    let identity_section = format!("# Agent identity\n\nYour agent id is `{agent_id}`.");
     assert_eq!(prompt.agent_id.as_str(), agent_id);
     assert!(prompt.system_prompt.trim_end().ends_with(&identity_section));
-    assert_eq!(prompt.system_prompt.matches(&identity_section).count(), 1);
+    assert_eq!(
+        prompt
+            .system_prompt
+            .lines()
+            .filter(|line| *line == "# Agent identity")
+            .count(),
+        1
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -143,7 +150,7 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
         format!("Custom identity placement: {agent_id}\n\nRole={selected_role}")
     );
     assert_eq!(prompt.system_prompt.matches(agent_id).count(), 1);
-    assert!(!prompt.system_prompt.contains("## Agent identity"));
+    assert!(!prompt.system_prompt.contains("# Agent identity"));
 
     h.shutdown().expect("shutdown");
 }
@@ -22936,6 +22943,7 @@ fn rendered_prompt_without_agents_md_uses_system_wrapper_only() {
     assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
     assert!(!prompt.contains("source=\"AGENTS.md\""));
     assert!(!prompt.contains("AGENTS_FILE"));
+    assert!(!prompt.contains("# agents.md files"));
 }
 
 /// Ensures full prompt rendering uses only harness-owned discovered AGENTS.md
@@ -22956,6 +22964,14 @@ fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
 
     assert_eq!(result.error, None);
     assert!(prompt.contains("<message role=\"user\" synthetic=\"true\" source=\"AGENTS.md\">"));
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# agents.md files")
+            .count(),
+        1
+    );
+    assert!(prompt.contains("# agents.md files\n\n<AGENTS_FILE"));
     assert!(prompt.contains("<AGENTS_FILE path="));
     assert!(prompt.contains("seeded AGENTS instructions"));
 }

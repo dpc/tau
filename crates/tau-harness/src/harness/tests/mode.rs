@@ -719,8 +719,27 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 
     let prompt = get_daemon_rendered_system_prompt(&sock, "engineer").expect("render prompt");
     assert!(!prompt.contains("## Your mission"));
-    assert!(prompt.contains("## Tau harness"));
-    assert!(prompt.contains("## Agent identity"));
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Your identity")
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Tau harness")
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Agent identity")
+            .count(),
+        1
+    );
     assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
 
     server.join().expect("join").expect("daemon clean exit");

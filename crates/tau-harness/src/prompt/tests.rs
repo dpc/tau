@@ -121,6 +121,14 @@ fn render_effective_prompt_wraps_system_and_agents_context() {
 
     assert!(prompt.starts_with("<message role=\"system\">\nSystem instructions\n</message>\n"));
     assert!(prompt.contains("<message role=\"user\" synthetic=\"true\" source=\"AGENTS.md\">"));
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# agents.md files")
+            .count(),
+        1
+    );
+    assert!(prompt.contains("# agents.md files\n\n<AGENTS_FILE"));
     assert!(
         prompt.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">\nRead the docs.\n</AGENTS_FILE>")
     );
@@ -134,6 +142,18 @@ fn render_effective_prompt_can_omit_agents_context() {
         prompt,
         "<message role=\"system\">\nSystem instructions\n</message>\n"
     );
+    assert!(!prompt.contains("# agents.md files"));
+}
+
+/// An empty discovered-file iterator must not manufacture an empty files
+/// section, even when the lower-level context renderer is called directly.
+#[test]
+fn render_agents_context_omits_files_heading_for_empty_iterator() {
+    let files: [DiscoveredAgentsFile; 0] = [];
+    let context = render_agents_context_message(files.iter());
+
+    assert!(!context.contains("# agents.md files"));
+    assert!(!context.contains("<AGENTS_FILE"));
 }
 fn cwd_prompt_fragment() -> tau_proto::PromptFragment {
     tau_proto::PromptFragment::new(
@@ -143,11 +163,40 @@ fn cwd_prompt_fragment() -> tau_proto::PromptFragment {
     )
 }
 
+fn exact_line_index(text: &str, expected: &str) -> usize {
+    text.lines()
+        .position(|line| line == expected)
+        .unwrap_or_else(|| panic!("missing exact line: {expected}"))
+}
+
 #[test]
 fn build_system_prompt_without_fragments_does_not_render_cwd_prose() {
     let skills = std::collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
-    assert!(prompt.contains("## Your identity"));
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Your identity")
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Tau harness")
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Agent identity")
+            .count(),
+        0
+    );
+    assert!(
+        exact_line_index(&prompt, "# Your identity") < exact_line_index(&prompt, "# Tau harness")
+    );
     assert!(!prompt.contains("Current working directory: /tmp/work"));
 }
 
@@ -198,7 +247,7 @@ fn build_system_prompt_encourages_parallel_tool_calls() {
 /// Verifies that prompt assembly preserves one complete, correctly headed
 /// copy of the built-in harness guidance.
 fn assert_single_unwrapped_tau_harness_section(prompt: &str) {
-    const HARNESS_SECTION: &str = r#"## Tau harness
+    const HARNESS_SECTION: &str = r#"# Tau harness
 
 Tau is the software you are running in: a bridge between you and the outside world.
 
@@ -209,14 +258,12 @@ Tau automatically moves long-running tool calls into the background. Rely on thi
 Tau comes with a set of `self-knowledge` skills describing it. Search for them and read relevant ones whenever you need to know more about Tau."#;
 
     assert_eq!(prompt.matches(HARNESS_SECTION).count(), 1);
-    let identity = prompt.find("## Your identity").expect("identity section");
-    let harness = prompt.find("## Tau harness").expect("harness section");
-    let tools = prompt
-        .find("## Tool calling")
-        .expect("tool calling section");
+    let identity = exact_line_index(prompt, "# Your identity");
+    let harness = exact_line_index(prompt, "# Tau harness");
+    let tools = exact_line_index(prompt, "## Tool calling");
     assert!(identity < harness);
     assert!(harness < tools);
-    assert!(!prompt.contains("### Tau harness"));
+    assert!(!prompt.contains("## Tau harness"));
     assert!(!prompt.contains("## Your mission"));
 }
 
@@ -491,13 +538,19 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
         }),
         RolePromptTemplateContext::for_agent("engineer", &agent_id),
     );
-    let identity_section = format!("## Agent identity\n\nYour agent id is `{agent_id}`.");
+    let identity_section = format!("# Agent identity\n\nYour agent id is `{agent_id}`.");
 
     assert!(prompt.contains("You are Tau, an autonomous coding agent."));
     assert!(prompt.contains("- test-skill: test skill description (file: <builtin>/SKILL.md)"));
     assert!(prompt.contains("FRAGMENT /tmp/work"));
     assert!(prompt.trim_end().ends_with(&identity_section));
-    assert_eq!(prompt.matches(&identity_section).count(), 1);
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "# Agent identity")
+            .count(),
+        1
+    );
 }
 
 /// Both built-in role templates must classify external-message policy after
@@ -827,12 +880,10 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
     let extra = prompt
         .find("ROLE EXTRA")
         .expect("role extra prompt should be rendered");
-    let harness = prompt
-        .find("## Tau harness")
-        .expect("Tau harness section should be rendered");
+    let harness = prompt.find("# Tau harness").expect("Tau harness section");
     let tool_calling = prompt
         .find("## Tool calling")
-        .expect("tool calling section should be rendered");
+        .expect("tool calling section");
     let early = prompt
         .find("TOOL EARLY")
         .expect("earlier-priority tool prompt should be rendered");
