@@ -10,6 +10,11 @@ documented in
 [`tau-provider-codex/SECURITY.md`](crates/tau-provider-codex/SECURITY.md)
 and
 [`tau-ext-provider-builtin/SECURITY.md`](crates/tau-ext-provider-builtin/SECURITY.md).
+The same component records cover the split provider trust boundary: generic
+OpenAI-compatible Chat Completions uses HTTP/SSE, private ChatGPT/Codex inference
+is WebSocket-only, and all built-in provider egress shares the immutable policy
+documented in
+[`tau-provider/SECURITY.md`](crates/tau-provider/SECURITY.md).
 
 Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
 sandbox or per-sender ACL. Callback correlation prevents accidental sender/route

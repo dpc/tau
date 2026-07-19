@@ -14,7 +14,8 @@ pub const MAX_USAGE_BODY_BYTES: u64 = 256 * 1024;
 /// Timeout for the best-effort account-usage request.
 pub const USAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One provider-normalized sparse or complete quota-window observation.
+/// One provider-normalized quota-window observation from either a full
+/// `/wham/usage` snapshot or an in-band WebSocket event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaWindowObservation {
     /// Stable normalized pool id.
@@ -31,7 +32,7 @@ pub struct QuotaWindowObservation {
     pub remaining_seconds: Option<i64>,
 }
 
-/// One supported rolling quota observation from HTTP headers or WebSocket.
+/// One supported rolling quota observation from an in-band WebSocket event.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RollingQuotaObservation {
     /// Complete list of pool/window fragments present in this observation.
@@ -242,67 +243,6 @@ pub fn parse_full_usage_json(body: &str) -> Result<FullQuotaSnapshot, UsageFetch
     Ok(FullQuotaSnapshot { windows })
 }
 
-/// Parses every supported quota header family from one HTTP response.
-#[cfg(test)]
-pub fn parse_http_headers(headers: &reqwest::header::HeaderMap) -> RollingQuotaObservation {
-    let mut raw_ids = BTreeSet::from(["codex".to_owned()]);
-    for name in headers.keys() {
-        let name = name.as_str().to_ascii_lowercase();
-        if let Some(prefix) = name
-            .strip_suffix("-primary-used-percent")
-            .or_else(|| name.strip_suffix("-secondary-used-percent"))
-            && let Some(raw_id) = prefix.strip_prefix("x-")
-        {
-            raw_ids.insert(raw_id.replace('-', "_"));
-        }
-    }
-    let mut windows = Vec::new();
-    for raw_id in raw_ids {
-        let Some(limit_id) = normalize_limit_id(&raw_id) else {
-            continue;
-        };
-        let header_id = limit_id.as_str().replace('_', "-");
-        for window_id in ["primary", "secondary"] {
-            let prefix = format!("x-{header_id}-{window_id}");
-            let Some(used_percent) = header_f64(headers, &format!("{prefix}-used-percent")) else {
-                continue;
-            };
-            let window_minutes = header_i64(headers, &format!("{prefix}-window-minutes"));
-            let reset_at = header_i64(headers, &format!("{prefix}-reset-at"));
-            if used_percent == 0.0
-                && window_minutes.is_none_or(|minutes| minutes == 0)
-                && reset_at.is_none_or(|reset| reset == 0)
-            {
-                continue;
-            }
-            let raw = RawWindow {
-                used_percent,
-                limit_window_seconds: window_minutes.and_then(|minutes| minutes.checked_mul(60)),
-                reset_after_seconds: None,
-                reset_at,
-            };
-            if let Some(window) = normalize_window(&limit_id, window_id, raw, false) {
-                windows.push(window);
-            }
-        }
-    }
-    let active_limit_id = headers
-        .get("x-codex-active-limit")
-        .and_then(|value| value.to_str().ok())
-        .and_then(normalize_limit_id);
-    if windows.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
-        return RollingQuotaObservation::default();
-    }
-    let binding_provenance = active_limit_id
-        .as_ref()
-        .map(|_| tau_proto::ProviderQuotaBindingProvenance::ActiveLimitHeader);
-    RollingQuotaObservation {
-        windows,
-        active_limit_id,
-        binding_provenance,
-    }
-}
-
 #[derive(Deserialize)]
 struct WsQuotaEvent {
     #[serde(rename = "type")]
@@ -430,22 +370,6 @@ fn normalize_limit_id(raw: &str) -> Option<ProviderQuotaLimitId> {
         }
     }
     ProviderQuotaLimitId::parse(value).ok()
-}
-
-#[cfg(test)]
-fn header_f64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
-    headers
-        .get(name)?
-        .to_str()
-        .ok()?
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
-}
-
-#[cfg(test)]
-fn header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
-    headers.get(name)?.to_str().ok()?.parse().ok()
 }
 
 #[cfg(test)]

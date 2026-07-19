@@ -18,6 +18,13 @@ ownership/counting, and unrelated providers or generations. Configured
 credential, endpoint, or backend-family identity rotation invalidates only the
 old provider profile cooldown.
 
+The extension owns serialized Chat Completions/OpenRouter profiles, model
+publication, public response sampling, harness event writes, and logical retry.
+Both wire backends receive only finite-attempt inputs and return typed outcomes;
+they cannot write protocol frames. Codex resolved credentials/configuration are
+opaque non-`Debug` values, and backend dispatch/byte/semantic-progress facts
+contain no bearer, account, prompt, or provider-body data.
+
 Codex OAuth response parsing, byte caps, and credential-safe error formatting
 are governed by [`tau-provider-codex/SECURITY.md`](../tau-provider-codex/SECURITY.md). This
 extension logs only the typed error's default safe projection and never its

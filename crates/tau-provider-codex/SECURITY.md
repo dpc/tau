@@ -50,6 +50,19 @@ Best-effort prewarm runs as provider-supervised work rather than on the event
 loop. It has at most a 30-second upgrade plus a 30-second absolute response
 wait, observes cancel/shutdown/profile invalidation through the transport abort
 waker, and cannot reinstall a socket after cancellation or invalidation.
+
+Inference can spend at most one immediate WebSocket repair before semantic
+assistant, reasoning, tool, or opaque output. Exact stale-chain and
+connection-limit codes are trusted only from canonical typed envelopes; provider
+prose cannot trigger repair. Received-byte accounting is cumulative across the
+repair, while tentative semantic output causes the error to surface without an
+automatic replay. The extension clears that transient output before scheduling
+later required work.
+
+Prewarm response ids are usable only with the same socket, opaque
+profile/mode/cache identity, exact lowered-request fingerprint, and prefix
+continuation. Cancellation and invalidation generations are rechecked at socket
+publication so stale work cannot reinstall credential-bearing transport state.
 # Provider VCR boundary
 
 Raw provider captures are private sensitive test artifacts and may contain

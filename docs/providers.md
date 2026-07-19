@@ -224,9 +224,28 @@ No separate enable flag is needed for registered profiles.
 
 The built-in provider extension currently covers three profile kinds:
 
-- `chatgpt/*` for the ChatGPT / Codex Responses backend
-- user-named OpenAI-compatible Chat Completions profiles with explicit model lists
-- user-named OpenRouter profiles with explicit or fetched model lists
+- `chatgpt` for the ChatGPT / Codex Responses backend
+- `chat_completions` for user-named OpenAI-compatible profiles with explicit
+  model lists
+- `openrouter` for user-named profiles with explicit or fetched model lists
+
+These are deliberately two backend contracts, not one generic OpenAI client.
+`tau-provider-chat-completions` implements the OpenAI-compatible
+`POST /chat/completions` HTTP/SSE surface used by local servers such as llama.cpp,
+remote compatible endpoints, and OpenRouter. It supports optional bearer auth,
+Function tools, streamed tool-call arguments, semantic transcript replay,
+reasoning/usage compatibility controls, and non-conflicting `extra_body` fields.
+The extension owns its serialized profiles, model publication, OpenRouter
+discovery, public stream sampling, retry scheduling, and provider events; the
+backend performs one finite typed attempt.
+
+`tau-provider-codex` implements the private ChatGPT OAuth/Codex Responses
+contract. Ordinary inference is WebSocket-only: it has no HTTP/SSE selector or
+fallback. HTTPS remains in that backend for OAuth, `/wham/usage`, and unary
+`/codex/responses/compact`. It supports Standard Responses by default and
+explicit Lite compatibility, Function and Custom tools, response-id chaining,
+prompt caching, pool/prewarm reuse, opaque replay items, and provider-owned
+reasoning state. It is not a public API-key OpenAI Responses client.
 
 GPT-5.6 ChatGPT profiles use standard Responses by default. The legacy Lite
 contract is available only as an explicit profile compatibility setting:
@@ -306,6 +325,10 @@ Best-effort prefix prewarm is capped and supervised outside the provider event
 loop. Matching prompt work, cancellation, shutdown, and mutable-profile rotation
 wake it. The upgrade and prewarm response each have a 30-second bound, and a
 canceled or invalidated worker cannot reinstall its socket.
+Only the same socket and exact profile/mode/cache identity may use a successful
+prewarm response id. The real request must retain the warmed lowered input as an
+exact prefix; a changed fingerprint, divergent prefix, stale generation, or
+invalidation discards the anchor and sends full context.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
 Standard mode publishes and requests parallel direct tool calls; Lite
@@ -320,6 +343,15 @@ an absolute turn-duration cap. If upstream goes quiet, Tau
 aborts the attempt and schedules the still-required logical prompt with transport, prompt id,
 elapsed/idle timing, configured idle timeout, whether partial output had already
 arrived, and read-source details where available.
+
+One finite Codex attempt may spend one immediate WS repair for an exact
+stale-chain/connection-limit failure or dead socket, but only before semantic
+model output. The first request-send time is reported once and received bytes
+remain cumulative across that repair. After assistant, reasoning, tool, or opaque
+output begins, Tau never silently replays and splices the turn: it clears
+tentative output and returns the typed result to the extension-owned logical
+retry policy. Canonical provider status/codes, not provider prose, authorize
+repair and retry classification.
 
 ## Summary
 

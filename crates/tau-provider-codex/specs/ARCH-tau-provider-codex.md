@@ -45,6 +45,13 @@ fallback. Capability, connection-limit, and retryable WebSocket failures surface
 to the outer logical-prompt scheduler rather than replaying the prompt over HTTP.
 HTTPS remains supported for OAuth, quota acquisition, and unary compaction.
 
+The extension supplies opaque resolved credentials and startup-stable mode/model
+configuration to one `CodexRuntime`. Public backend outcomes are finite and
+typed: dispatch timing, cumulative transport bytes, semantic progress, success,
+cancellation, repetition, retryable failure, or terminal failure. The backend
+does not expose its request, pool, quota parser, or mutable stream internals and
+does not write harness events or sleep for logical retry.
+
 All HTTP control-plane operations and the HTTP/1.1 WebSocket upgrade use the
 startup-injected shared reqwest/rustls policy. WSS uses CONNECT through the
 selected proxy before target TLS; plain WS uses proxy absolute-form. Both paths
@@ -60,6 +67,23 @@ Best-effort WebSocket prewarm uses the same shared pool and cooperative abort
 seam from a provider-supervised worker, never the provider event loop. It skips
 an already-reserved same-key socket. Profile and session invalidation is shared
 with normal transport pool ownership.
+
+One finite inference attempt has one immediate repair budget. A cached dead
+socket, exact stale-chain code, or exact connection-limit code may consume that
+budget only before semantic model output. Canonical provider codes take
+precedence over generic status or prose. Every retry path preserves cumulative
+received-byte accounting and reports the first request-send instant exactly
+once. After semantic progress, an error is surfaced and tentative output is
+cleared above the backend rather than replayed and spliced.
+
+A successful `generate:false` prewarm is chain-eligible only on its exact socket,
+profile/mode/cache identity, and lowered request fingerprint. The next request
+must preserve the warmed input as an exact prefix, with only a suffix appended.
+Mismatch, invalidation, cancellation, stale generation, or another owner drops
+the anchor and sends full context. An initial fresh upgrade has its own 30-second
+connection bound. After the first prewarm request is sent, its response wait and
+any immediate repair connection/response share one absolute 30-second response
+deadline. Failed work cannot publish a socket or response id.
 
 ## GPT-5.6 Responses modes
 

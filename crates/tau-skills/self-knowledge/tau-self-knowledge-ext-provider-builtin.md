@@ -46,6 +46,15 @@ Supported profile kinds:
 - `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional API key, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
 - `openrouter` — OpenRouter profile with API key and either explicit models or models fetched from OpenRouter.
 
+The profile kinds route to two deliberately separate wire backends.
+`chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
+`/chat/completions` adapter, including Function tools and semantic transcript
+replay; this is the supported route for local servers such as llama.cpp.
+`chatgpt` uses the private ChatGPT OAuth/Codex Responses adapter. Its ordinary
+inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only for
+OAuth, quota acquisition, and unary standalone compaction. It is not a public
+API-key OpenAI Responses provider.
+
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
@@ -113,6 +122,19 @@ provider event loop. Matching real work, cancellation, shutdown, or profile
 rotation wakes it. Its connection and non-generating response phases are each
 bounded to 30 seconds, and stale canceled/invalidated sockets cannot return to
 the pool.
+
+A prewarm response id is eligible only on its exact socket and
+profile/mode/cache identity when the real lowered input retains the warmed input
+as an exact prefix. Fingerprint or prefix divergence, cancellation, invalidation,
+or a stale ownership generation discards the anchor and sends full context.
+
+One finite Codex inference attempt has one immediate WS repair budget. An exact
+stale-chain/connection-limit code or dead socket may consume it only before
+semantic output. Dispatch is reported at the first request send and transport
+bytes remain cumulative across the repair. Once assistant, reasoning, tool, or
+opaque output begins, Tau does not replay and splice the turn; transient output
+is cleared before extension-owned logical retry. Canonical provider codes, never
+arbitrary prose, authorize these classifications.
 
 After setup, ChatGPT/Codex inference is WebSocket-only with a separate default
 five-minute idle watchdog. The timer resets on each provider frame and is not an

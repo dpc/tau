@@ -9,6 +9,10 @@ parsing, and typed error mapping. They bind only loopback, use synthetic
 credentials, bound connections and frames, synchronize explicitly rather than with
 sleeps, and join workers at teardown. Prewarm coverage includes silent peers,
 duplicate admission, cancellation cleanup, invalidation races, and socket reuse.
+It also proves exact first-send dispatch, cumulative bytes across the sole
+pre-semantic repair, canonical stale/connection-limit precedence, no replay after
+semantic progress, strict same-socket prefix/fingerprint chain eligibility, and
+stale-generation publication rejection.
 
 Changes to a default route or protocol surface maintain a capability matrix for
 direct function and custom calls, parallel generation, programmatic/code mode,

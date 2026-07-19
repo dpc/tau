@@ -99,47 +99,6 @@ fn malformed_and_colliding_additional_pools_fail_closed() {
     assert_eq!(snapshot.windows[0].used_basis_points, 0);
 }
 
-/// HTTP quota headers enumerate sparse account pools but bind a model only when
-/// the server supplies the explicit active-limit header.
-#[test]
-fn http_headers_parse_default_additional_and_active_limit() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "x-codex-secondary-used-percent",
-        "42.5".parse().expect("valid quota test value"),
-    );
-    headers.insert(
-        "x-codex-secondary-window-minutes",
-        "10080".parse().expect("valid quota test value"),
-    );
-    headers.insert(
-        "x-codex-fast-primary-used-percent",
-        "7".parse().expect("valid quota test value"),
-    );
-    headers.insert(
-        "x-codex-active-limit",
-        "codex-fast".parse().expect("valid quota test value"),
-    );
-    let observation = parse_http_headers(&headers);
-    assert_eq!(observation.windows.len(), 2);
-    assert_eq!(
-        observation
-            .active_limit_id
-            .expect("valid quota test value")
-            .as_str(),
-        "codex_fast"
-    );
-}
-
-/// Empty default HTTP header families are no-ops rather than zero-use updates
-/// that could erase a good account snapshot.
-#[test]
-fn empty_http_headers_do_not_create_a_window_or_binding() {
-    let observation = parse_http_headers(&reqwest::header::HeaderMap::new());
-    assert!(observation.windows.is_empty());
-    assert!(observation.active_limit_id.is_none());
-}
-
 /// WebSocket and Lite-compatible `codex.rate_limits` events create the same
 /// normalized sparse record and explicit route binding.
 #[test]
@@ -293,21 +252,6 @@ fn oversized_full_snapshot_is_rejected_atomically() {
         .join(",");
     let body = format!(r#"{{"additional_rate_limits":[{additional}]}}"#);
     assert!(parse_full_usage_json(&body).is_err());
-}
-
-/// Secondary-only additional header families are discovered and normalized;
-/// enumeration alone still supplies no applicability binding.
-#[test]
-fn http_discovers_secondary_only_additional_pool() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "x-codex-fast-secondary-used-percent",
-        "7".parse().expect("header value"),
-    );
-    let observation = parse_http_headers(&headers);
-    assert_eq!(observation.windows.len(), 1);
-    assert_eq!(observation.windows[0].limit_id.as_str(), "codex_fast");
-    assert!(observation.active_limit_id.is_none());
 }
 
 /// Non-finite and materially out-of-range percentages never cross the provider

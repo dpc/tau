@@ -42,6 +42,12 @@ prompt, prewarm, retry, and quota resolution share that captured value. Mutable
 credential reload and OAuth refresh preserve it; an on-disk mode edit takes
 effect after restart. Different namespaces may select different modes.
 
+The extension resolves credentials and configuration into the Codex backend's
+opaque narrow facade. `CodexRuntime` owns only finite inference, prewarm, compact,
+quota, and invalidation operations. The extension owns public response sampling,
+tentative-output clearing, event ordering, logical retry, mutable-profile reload,
+and supervised prewarm lifecycle; neither backend serializes harness frames.
+
 This ownership implements
 [DECISION-tau-ext-provider-builtin-profile-ownership](DECISION-tau-ext-provider-builtin-profile-ownership.md)
 and the selected surface is constrained by

@@ -171,6 +171,28 @@ resolver, user OAuth URL override, or common scenario language merely to join
 these layers; the deterministic fake provider does not cover upstream ChatGPT
 transport contracts.
 
+Provider-split acceptance is intentionally layered. Compatibility fixtures in
+`tau-ext-provider-builtin` freeze all three serialized profile kinds, durable old
+session replay, model/routing publication, and successful event ordering. The
+Chat Completions crate owns HTTP/SSE request, cancellation, typed-error, Function
+tool, raw-argument, semantic-replay, and transport-byte tests; the extension owns
+OpenRouter discovery, capability/default/explicit-false publication, sampling,
+events, and scheduler integration. The Codex crate owns Standard/Lite goldens,
+WS-only negotiation and no-fallback, typed finite outcomes, exact dispatch,
+cumulative bytes, one-budget semantic-safe recovery, strict prewarm
+prefix/fingerprint chaining, invalidation generations, compact cancellation, and
+quota/OAuth parsing. `tau-provider` owns the currently documented shared outbound
+route/proxy/TLS/redaction matrix.
+
+Final compatibility checks should combine those focused package suites with the
+network-denied curated VCR and deterministic fake-provider lanes, then run exact
+`selfci check --candidate <commit>`. The fake-provider lane proves the generic
+harness/extension lifecycle but does not replace either backend wire suite.
+Nested HTTPS/WSS through an HTTPS proxy and the expanded failure-phase/TLS matrix
+remain outside this acceptance claim and are tracked separately; reqwest's public
+API also cannot expose a hidden CONNECT rejection status, so tests must not claim
+exact authentication classification for that case.
+
 ## OAuth response safety
 
 Codex OAuth protocol regressions live in `tau-provider-codex`: bounded response

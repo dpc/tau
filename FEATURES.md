@@ -139,6 +139,14 @@ model-aware values are filtered or clamped to the model's supported surface. The
 UI also surfaces per-turn statistics, cache information, retry state, and
 conservative quota-pacing status when the provider supplies enough data.
 
+The generic compatibility route is HTTP/SSE Chat Completions and is suitable for
+local servers such as llama.cpp as well as remote compatible services. The
+ChatGPT OAuth/Codex route is a separate private Responses backend whose inference
+is WebSocket-only; it never falls back to HTTP/SSE, though OAuth, quota, and
+standalone compaction remain HTTPS operations. All of these routes share one
+startup-snapshotted proxy, `NO_PROXY`, platform-TLS, and optional additive-CA
+policy.
+
 See [Providers](docs/providers.md), [Agent roles](docs/agent-roles.md), and the
 [provider streaming specification](specs/SPEC-provider-response-streaming.md).
 
