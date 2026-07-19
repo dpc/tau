@@ -2781,6 +2781,22 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .text
             .contains("Trust the `<instructions>`")
     );
+    assert_eq!(
+        engineer.prompt_fragments[0]
+            .text
+            .lines()
+            .filter(|line| *line == "## Best practices")
+            .count(),
+        1
+    );
+    assert_eq!(
+        engineer.prompt_fragments[0]
+            .text
+            .lines()
+            .filter(|line| *line == "### Best practices")
+            .count(),
+        0
+    );
     assert!(!s.roles.contains_key("assistant"));
     let engineer_senior = &s.roles["engineer-senior"];
     assert_eq!(engineer_senior.effort, Some(tau_proto::Effort::High));

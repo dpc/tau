@@ -740,6 +740,20 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
             .count(),
         1
     );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "## Best practices")
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .lines()
+            .filter(|line| *line == "### Best practices")
+            .count(),
+        0
+    );
     assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
 
     server.join().expect("join").expect("daemon clean exit");
