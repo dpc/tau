@@ -21,7 +21,8 @@ identity text.
 
 Message blocks are current-state projections rather than event-time name
 snapshots. A later authoritative display-name update re-renders visible
-historical blocks; hidden transcript snapshots re-render when selected.
+historical blocks; hidden transcript snapshots, including the all-agent
+no-selection overview, re-render when selected.
 Each block retains its originating session as presentation provenance, so a
 same-spelled agent in a subsequently resumed session can never relabel older
 history. Replay therefore produces the same presentation after that session's
@@ -49,7 +50,10 @@ current-session daemon memory projected into each UI by agent stats. `active` is
 always eligible, `active-auto` is eligible only while stats report a running
 runtime, and `suspended` is ineligible. Delegated agents default to
 `active-auto`; ordinary agents default to `active`. Selection and presentation
-remain UI-local. Modes do not affect loading, addressability, or delivery.
+remain UI-local. Keyboard previous/next navigation forms a ring containing the
+no-selection overview followed by the active agents in stable known-agent order;
+suspended agents are skipped. Modes do not affect loading, addressability, or
+delivery.
 
 Execution state (`running` or `waiting`) describes the outer agent turn from
 activating input until the final response or termination returns control. It

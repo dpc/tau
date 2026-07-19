@@ -42,7 +42,10 @@ prompting a hidden agent does not change its mode.
 The public `tau agent list <session-id>` command reads a directed harness roster
 and emits stable headerless TSV; it does not infer membership or navigation from
 renderer state. The C-b picker uses the same current non-suspended rule, while
-C-j/C-k retain their narrower effective-active cycling rule.
+C-j/C-k cycle through the no-selection all-agent overview and agents admitted by
+the narrower effective-active rule. Suspended agents and idle `active-auto`
+agents remain outside that ring. The overview remains the input target for
+starting a new agent.
 
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because

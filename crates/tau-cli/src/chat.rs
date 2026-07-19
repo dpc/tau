@@ -1469,7 +1469,7 @@ impl InputRoutingState {
         Ok(Some(arg.to_owned()))
     }
 
-    fn next_active_agent(&self, delta: isize) -> Option<String> {
+    fn next_agent_cycle_selection(&self, delta: isize) -> Option<String> {
         let current = self.selected_agent_id();
         let known = self.known_agents();
         let active = self
@@ -1477,7 +1477,7 @@ impl InputRoutingState {
             .lock()
             .map(|navigation| navigation.active_agents())
             .unwrap_or_default();
-        next_active_agent(current.as_deref(), &known, &active, delta)
+        next_agent_cycle_selection(current.as_deref(), &known, &active, delta)
     }
 
     fn role_cycling_enabled(&self) -> bool {
@@ -2816,16 +2816,18 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn switch_agent_by_delta(&mut self, delta: isize) {
-        let current = self.selected_agent_id();
-        let Some(next) = self.ctx.routing.next_active_agent(delta) else {
-            self.output
-                .system_info("agent-switch: no active agents available yet");
-            return;
-        };
-        if current.as_deref() == Some(next.as_str()) {
-            return;
+        match dispatch_agent_cycle(&self.ctx.routing, &self.ctx.renderer_tx, delta) {
+            AgentCycleAction::KeepSelection => {}
+            AgentCycleAction::Select(_) => {
+                self.pending_new_agent_options.clear();
+                self.dismiss_completion_menu();
+                self.retarget_current_draft();
+            }
+            AgentCycleAction::ClearSelection => {
+                self.dismiss_completion_menu();
+                self.retarget_current_draft();
+            }
         }
-        self.switch_to_agent(next);
     }
 
     fn pick_agent(&mut self) {
@@ -3005,7 +3007,7 @@ pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String
         .is_none()
 }
 
-pub(crate) fn next_active_agent(
+pub(crate) fn next_agent_cycle_selection(
     current: Option<&str>,
     known_agents: &[String],
     active_agent_ids: &std::collections::HashSet<String>,
@@ -3015,25 +3017,68 @@ pub(crate) fn next_active_agent(
         .iter()
         .filter(|agent| active_agent_ids.contains(*agent))
         .collect::<Vec<_>>();
-    if active_agents.is_empty() {
-        return None;
-    }
-    let len = active_agents.len() as isize;
-    let index = current
+    let cycle_len = active_agents.len() as isize + 1;
+    let current_index = current
         .and_then(|current| {
             active_agents
                 .iter()
                 .position(|agent| agent.as_str() == current)
         })
-        .map(|index| (index as isize + delta).rem_euclid(len) as usize)
-        .unwrap_or_else(|| {
-            if delta < 0 {
-                active_agents.len() - 1
-            } else {
-                0
-            }
-        });
-    Some(active_agents[index].to_string())
+        .map_or(0, |index| index as isize + 1);
+    let next_index = (current_index + delta).rem_euclid(cycle_len) as usize;
+    next_index
+        .checked_sub(1)
+        .map(|index| active_agents[index].to_string())
+}
+
+/// Input-loop action required to move from one selection to the next cycle
+/// selection.
+#[derive(Debug, Eq, PartialEq)]
+enum AgentCycleAction {
+    /// Keep the current input target unchanged.
+    KeepSelection,
+    /// Select the named active agent.
+    Select(String),
+    /// Clear the input target and show the all-agent overview.
+    ClearSelection,
+}
+
+/// Translate a computed cycle selection into the input-loop operation that
+/// publishes the corresponding renderer command.
+fn agent_cycle_action(current: Option<&str>, next: Option<String>) -> AgentCycleAction {
+    if current == next.as_deref() {
+        AgentCycleAction::KeepSelection
+    } else if let Some(next) = next {
+        AgentCycleAction::Select(next)
+    } else {
+        AgentCycleAction::ClearSelection
+    }
+}
+
+/// Update the input target and publish the renderer half of one previous/next
+/// navigation action.
+fn dispatch_agent_cycle(
+    routing: &InputRoutingState,
+    renderer_tx: &mpsc::Sender<RendererCmd>,
+    delta: isize,
+) -> AgentCycleAction {
+    let current = routing.selected_agent_id();
+    let next = routing.next_agent_cycle_selection(delta);
+    let action = agent_cycle_action(current.as_deref(), next);
+    match &action {
+        AgentCycleAction::KeepSelection => {}
+        AgentCycleAction::Select(agent_id) => {
+            routing.set_selected_agent(Some(agent_id.clone()));
+            let _ = renderer_tx.send(RendererCmd::SwitchAgent {
+                agent_id: agent_id.clone(),
+            });
+        }
+        AgentCycleAction::ClearSelection => {
+            routing.set_selected_agent(None);
+            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent);
+        }
+    }
+    action
 }
 
 fn prepare_dynamic_action_invocation(

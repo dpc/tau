@@ -42,6 +42,15 @@ keeps its session-wide scope, counts unique recursively effective watch targets,
 excludes the selected agent, and retains active-prompt fallback for agents
 outside every watch edge.
 
+## All-agent overview
+
+The no-agent-selected screen is both the start-new-agent input target and an
+overview of messages between all agents. It deduplicates sender and recipient
+projections of the same message and follows `/set show-messages`. Ctrl-K/Ctrl-J
+include the overview when cycling among active agents. Submitting a prompt there
+still starts a new agent. The overview is local to that CLI: attachment catch-up
+includes currently loaded agents, not messages whose endpoints already unloaded.
+
 ## Slash commands
 
 Type `/` as the first non-whitespace character in the prompt to open slash/action completion. Built-in commands include session and agent management, model/role switching, `/name <display name>` to rename the currently selected agent, `/skill <name> [args]` for explicit user-invocable skill injection, `/theme <name>` to switch only the current CLI UI's theme for this run, `/set`, `/tree`, `/fast`, `/detach`, and `/quit`. Extension-provided actions can add dynamic slash commands and argument completions at runtime. `/skill:<name> [args]` is accepted as a Pi-compatible alias; arguments are appended after the skill body without placeholder substitution.

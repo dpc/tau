@@ -151,6 +151,13 @@ The CLI caches harness-owned navigation classification only from complete
 `agent.stats_updated` snapshots. Selected transcript, drafts, editor state, and
 presentation remain local to each UI.
 
+The local previous/next cycle includes the no-selection overview alongside the
+active agents. That overview remains the start-new-agent input target and owns a
+deduplicated presentation of inter-agent messages without changing their durable
+sender/recipient projections or prompt routing. It is renderer-local: attachment
+catch-up is limited to projections replayed for currently loaded agents, not a
+new durable session-wide message index.
+
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
 parent-before-child TSV ordering, and escaping. The C-b action invokes `fzf`

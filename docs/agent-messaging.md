@@ -55,6 +55,21 @@ User-recipient messages are human-visible broadcasts: they always render fully i
 - `all-summary`: one-line no-content indication for agent-to-agent messages
 - `all-full`: full content of all messages
 
+The CLI's no-agent-selected screen is also an all-agent message overview. It
+shows one entry per agent-to-agent message according to the current
+`show-messages` mode, deduplicating the sender and recipient projections by
+originating session and `message_id`. Ctrl-K/Ctrl-J cycle through that overview
+and the active agents. Submitting a prompt from the overview still starts a new
+agent. Ordinary `Message` events and watched response/prompt notifications are
+overview content. Structured watched-turn/provider status stays in the watcher
+transcript, while messages to `user` retain current-visible broadcast routing
+without an additional overview copy.
+
+The overview contains messages observed by that CLI and catch-up projections
+replayed for agents that are loaded when it attaches. It is not a durable
+session-wide message index, so a new CLI does not recover earlier messages after
+both endpoints have unloaded.
+
 ## Send to the user
 
 Use the special recipient id `user`:

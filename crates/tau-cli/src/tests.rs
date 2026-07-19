@@ -19,7 +19,7 @@ use tau_proto::{
 use super::agent_navigation::AgentNavigationState;
 use super::chat::{
     DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_local_slash_command,
-    leading_slash_action, next_active_agent, queue_prompt_draft_snapshot,
+    leading_slash_action, next_agent_cycle_selection, queue_prompt_draft_snapshot,
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
@@ -1553,38 +1553,57 @@ fn role_cycling_only_enabled_without_selected_agent() {
     assert!(role_cycling_enabled(&current_agent_state));
 }
 
+/// Ctrl-K/Ctrl-J cycle through active agents and the overview while skipping
+/// suspended agents that would refuse user prompts.
 #[test]
 fn agent_switching_cycles_active_agents_and_skips_suspended() {
-    // Ctrl-K/Ctrl-J should only target active agents. Suspended agents remain
-    // known for completion/resume, but switching to them would leave the prompt
-    // pointed at an agent that immediately refuses user prompts.
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()];
     let active_agents = HashSet::from(["alpha".to_owned(), "charlie".to_owned()]);
 
     assert_eq!(
-        next_active_agent(Some("alpha"), &known_agents, &active_agents, 1).as_deref(),
+        next_agent_cycle_selection(Some("alpha"), &known_agents, &active_agents, 1).as_deref(),
         Some("charlie")
     );
     assert_eq!(
-        next_active_agent(Some("alpha"), &known_agents, &active_agents, -1).as_deref(),
-        Some("charlie")
+        next_agent_cycle_selection(Some("alpha"), &known_agents, &active_agents, -1),
+        None
+    );
+    assert_eq!(
+        next_agent_cycle_selection(Some("charlie"), &known_agents, &active_agents, 1),
+        None
     );
 }
 
+/// Cycling from the overview enters the active-agent ring from the edge
+/// implied by the shortcut direction.
 #[test]
 fn agent_switching_without_selection_starts_at_edge_for_direction() {
-    // When the user is at the no-agent prompt, the first switch should enter
-    // the active-agent ring from the side implied by the shortcut direction.
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned()];
     let active_agents = HashSet::from(["alpha".to_owned(), "bravo".to_owned()]);
 
     assert_eq!(
-        next_active_agent(None, &known_agents, &active_agents, 1).as_deref(),
+        next_agent_cycle_selection(None, &known_agents, &active_agents, 1).as_deref(),
         Some("alpha")
     );
     assert_eq!(
-        next_active_agent(None, &known_agents, &active_agents, -1).as_deref(),
+        next_agent_cycle_selection(None, &known_agents, &active_agents, -1).as_deref(),
         Some("bravo")
+    );
+}
+
+/// The overview remains the sole cycle state when no agents are active.
+#[test]
+fn agent_switching_without_active_agents_stays_on_overview() {
+    let known_agents = vec!["suspended".to_owned()];
+    let active_agents = HashSet::new();
+
+    assert_eq!(
+        next_agent_cycle_selection(None, &known_agents, &active_agents, 1),
+        None
+    );
+    assert_eq!(
+        next_agent_cycle_selection(None, &known_agents, &active_agents, -1),
+        None
     );
 }
 
@@ -3882,13 +3901,11 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     );
 }
 
+/// `/new` leaves the old agent running while the terminal shows the all-agent
+/// overview. Its messages must appear there without selecting the sender, while
+/// also remaining available in the sender's own transcript.
 #[test]
-fn old_agent_message_does_not_leak_into_new_agent_screen() {
-    // Regression: `/new` leaves the old agent running while the terminal shows
-    // an empty new-agent creation screen. Agent-to-agent messages emitted by the
-    // old agent during that window must update the old hidden transcript instead
-    // of making a message block suddenly appear in the empty screen while the
-    // user is typing the first prompt for the new agent.
+fn old_agent_message_updates_overview_without_selecting_sender() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3920,8 +3937,8 @@ fn old_agent_message_does_not_leak_into_new_agent_screen() {
         "hidden old-agent message",
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "Message from old-agent to other-agent"));
-    assert!(!vt.screen_contains(80, "hidden old-agent message"));
+    assert!(vt.screen_contains(80, "Message from old-agent to other-agent"));
+    assert!(vt.screen_contains(80, "hidden old-agent message"));
     assert_eq!(
         *renderer
             .current_agent_state()
@@ -4336,6 +4353,170 @@ fn agent_messages_render_all_recipients_as_history() {
     assert!(!vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
 }
 
+/// The no-agent screen aggregates one entry per semantic inter-agent message,
+/// while sender and recipient transcripts retain their own projections.
+/// Starting a new agent from the overview must not adopt that aggregate
+/// history.
+#[test]
+fn no_agent_overview_deduplicates_agent_message_projections() {
+    let (_term, handle, vt) = setup(96, 20);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("sender-agent".to_owned());
+
+    renderer.handle(&agent_message(
+        "sender-agent",
+        "recipient-agent",
+        "overview semantic body",
+    ));
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-sender-agent-recipient-agent".into(),
+            sender_id: agent_id("sender-agent"),
+            sender_session_id: None,
+            recipient_id: agent_id("recipient-agent"),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "overview semantic body".to_owned(),
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(96, "overview semantic body"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert_eq!(
+        visible_lines(&vt, 96)
+            .iter()
+            .filter(|line| line.contains("overview semantic body"))
+            .count(),
+        1
+    );
+    renderer.handle(&agent_message(
+        "sender-agent",
+        "third-agent",
+        "live overview body",
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(96, "live overview body"));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.switch_agent("recipient-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(96, "overview semantic body"));
+
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "start fresh from overview".to_owned(),
+        agent_id: agent_id("fresh-agent"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(96, "start fresh from overview"));
+    assert!(!vt.screen_contains(96, "overview semantic body"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(96, "overview semantic body"));
+}
+
+/// Structured watch status belongs only to the watcher transcript when no agent
+/// is selected, while user-recipient messages retain current-visible broadcast
+/// routing without being copied into the overview.
+#[test]
+fn no_agent_overview_excludes_structured_watch_status() {
+    let (_term, handle, vt) = setup(100, 20);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "watch-turn".into(),
+            sender_id: agent_id("watched-agent"),
+            sender_session_id: None,
+            recipient_id: agent_id("watcher-agent"),
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: "s1".into(),
+                subscription_id: "sub-1".to_owned(),
+                state: tau_proto::AgentRuntimeState::Running,
+                initial: false,
+                turn_generation: 1,
+            }),
+            watch_provider_status: None,
+            message: "watch turn compatibility body".to_owned(),
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "watched-agent · turn started"));
+    assert!(!vt.screen_contains(100, "watch turn compatibility body"));
+
+    let provider_status_body = "watched provider is blocked";
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "watch-provider".into(),
+            sender_id: agent_id("watched-agent"),
+            sender_session_id: None,
+            recipient_id: agent_id("watcher-agent"),
+            kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+            watch_turn_state: None,
+            watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
+                session_id: "s1".into(),
+                subscription_id: "sub-1".to_owned(),
+                turn_generation: 1,
+                agent_prompt_id: "prompt-1".into(),
+                state: tau_proto::AgentWatchProviderState::Blocked {
+                    category: tau_proto::AgentWatchProviderCategory::Account,
+                },
+                initial: false,
+            }),
+            message: provider_status_body.to_owned(),
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, provider_status_body));
+
+    renderer.switch_agent("watcher-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(100, "watched-agent · turn started"));
+    assert!(vt.screen_contains(100, provider_status_body));
+
+    renderer.handle(&agent_message(
+        "watched-agent",
+        "user",
+        "selected user broadcast",
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "selected user broadcast"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "selected user broadcast"));
+
+    renderer.handle(&agent_message(
+        "watched-agent",
+        "user",
+        "overview user broadcast",
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "overview user broadcast"));
+}
+
 #[test]
 fn external_agent_messages_render_session_agent_labels() {
     let (_term, handle, vt) = setup(96, 8);
@@ -4385,6 +4566,7 @@ fn watched_turn_transition_renders_as_compact_status() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    renderer.switch_agent("manager".to_owned());
 
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {

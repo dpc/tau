@@ -114,6 +114,16 @@ pub(crate) struct EventRenderer {
     /// Whether the visible snapshot contains a message fact owned by the global
     /// no-agent view rather than an agent transcript.
     contains_global_message_fact: bool,
+    /// Whether the visible snapshot contains an inter-agent message copied into
+    /// the all-agent overview.
+    contains_overview_message: bool,
+    /// Originating session and message ids already projected into the all-agent
+    /// overview.
+    ///
+    /// Local agent delivery emits sender and recipient projections with the
+    /// same id. The overview presents that semantic message once while each
+    /// agent transcript keeps its own projection.
+    overview_message_ids: HashSet<(Option<tau_proto::SessionId>, tau_proto::AgentMessageId)>,
     /// Agent ids known to the UI for `/agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Session-scoped authoritative display names keyed by local agent id.
@@ -429,6 +439,8 @@ struct AgentUiState {
     preserve_on_fresh_agent_switch: bool,
     /// Whether this snapshot contains globally owned message-fact output.
     contains_global_message_fact: bool,
+    /// Whether this snapshot contains all-agent overview message output.
+    contains_overview_message: bool,
     cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
 }
@@ -1344,6 +1356,8 @@ impl EventRenderer {
             agents_ui_state: HashMap::new(),
             preserve_on_fresh_agent_switch: false,
             contains_global_message_fact: false,
+            contains_overview_message: false,
+            overview_message_ids: HashSet::new(),
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             agent_navigation: Arc::new(Mutex::new(AgentNavigation::default())),
@@ -1639,6 +1653,7 @@ impl EventRenderer {
         // previous transcript and the no-agent output must remain available.
         self.displayed_agent_id.is_none()
             && (self.contains_global_message_fact
+                || self.contains_overview_message
                 || (self.awaiting_new_agent_selection
                     && (self.preserve_on_fresh_agent_switch || self.has_pending_no_agent_owner())))
     }
@@ -2069,6 +2084,7 @@ impl EventRenderer {
                 &mut self.preserve_on_fresh_agent_switch,
             ),
             contains_global_message_fact: std::mem::take(&mut self.contains_global_message_fact),
+            contains_overview_message: std::mem::take(&mut self.contains_overview_message),
             cumulative_agent_latency: std::mem::take(&mut self.cumulative_agent_latency),
             agent_activity: std::mem::take(&mut self.agent_activity),
         }
@@ -2123,6 +2139,7 @@ impl EventRenderer {
         self.prompt_tool_summary_active = state.prompt_tool_summary_active;
         self.preserve_on_fresh_agent_switch = state.preserve_on_fresh_agent_switch;
         self.contains_global_message_fact = state.contains_global_message_fact;
+        self.contains_overview_message = state.contains_overview_message;
         self.cumulative_agent_latency = state.cumulative_agent_latency;
         self.agent_activity = state.agent_activity;
     }
@@ -2840,6 +2857,7 @@ impl EventRenderer {
     fn clear_for_new_session(&mut self) {
         self.agents_ui_state.clear();
         self.no_agent_ui_state = AgentUiState::default();
+        self.overview_message_ids.clear();
         self.query_agents.clear();
         self.prompt_agents.clear();
         self.tool_agents.clear();
@@ -2888,6 +2906,7 @@ impl EventRenderer {
         self.prompt_tool_summary_active = false;
         self.preserve_on_fresh_agent_switch = false;
         self.contains_global_message_fact = false;
+        self.contains_overview_message = false;
         // Model selection and effort are harness-global, not
         // session-scoped. `/session new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessRoleSelected for the
@@ -3528,6 +3547,8 @@ impl EventRenderer {
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.learn_agent_metadata(event);
+        let inter_agent_message = Self::is_inter_agent_message(event);
+        self.project_agent_message_to_overview(event);
         if let Some(owner) = self.extension_lifecycle_owner(event) {
             self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
             self.update_agent_in_progress();
@@ -3565,13 +3586,15 @@ impl EventRenderer {
             if matches!(
                 event,
                 Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
-            ) && self.agent_message_visible_on_empty_screen(event, &target_agent_id)
+            ) && !inter_agent_message
+                && self.agent_message_visible_on_empty_screen(event, &target_agent_id)
             {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
                 self.update_agent_in_progress();
                 return;
             }
-            if !Self::event_originator_is_extension(event)
+            if !inter_agent_message
+                && !Self::event_originator_is_extension(event)
                 && !Self::event_has_explicit_ui_target(event)
                 && !self.agents_ui_state.contains_key(&target_agent_id)
             {
@@ -3640,6 +3663,72 @@ impl EventRenderer {
         self.displayed_agent_id = Some(visible_agent_id);
         self.publish_editor_conversation_context();
         self.update_agent_in_progress();
+    }
+
+    /// Copy one semantic inter-agent message into the no-agent overview.
+    ///
+    /// Sender and recipient projections retain their existing transcript
+    /// routing. The overview deduplicates those projections by originating
+    /// session and message id.
+    fn project_agent_message_to_overview(&mut self, event: &Event) {
+        let Some(message_id) = Self::overview_agent_message_id(event) else {
+            return;
+        };
+        if !self
+            .overview_message_ids
+            .insert((self.current_session_id.clone(), message_id.clone()))
+        {
+            return;
+        }
+        if self.displayed_agent_id.is_none() {
+            self.contains_overview_message = true;
+            self.handle_agent_message_event(event);
+            return;
+        }
+
+        self.update_hidden_no_agent_state(|this| {
+            this.contains_overview_message = true;
+            this.handle_agent_message_event(event);
+        });
+    }
+
+    /// Return the stable id for a genuine message between agent endpoints.
+    fn overview_agent_message_id(event: &Event) -> Option<&tau_proto::AgentMessageId> {
+        match event {
+            Event::AgentMessageSent(message)
+                if matches!(
+                    message.kind,
+                    tau_proto::AgentMessageKind::Message
+                        | tau_proto::AgentMessageKind::WatchResponse
+                        | tau_proto::AgentMessageKind::WatchPrompt
+                ) && !matches!(message.recipient, tau_proto::AgentMessageRecipient::User) =>
+            {
+                Some(&message.message_id)
+            }
+            Event::AgentMessageReceived(message)
+                if matches!(
+                    message.kind,
+                    tau_proto::AgentMessageKind::Message
+                        | tau_proto::AgentMessageKind::WatchResponse
+                        | tau_proto::AgentMessageKind::WatchPrompt
+                ) =>
+            {
+                Some(&message.message_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Return whether an event is an agent-to-agent projection that must route
+    /// to its owning agent transcript instead of the no-agent fallback.
+    fn is_inter_agent_message(event: &Event) -> bool {
+        match event {
+            Event::AgentMessageSent(message) => {
+                !matches!(message.recipient, tau_proto::AgentMessageRecipient::User)
+            }
+            Event::AgentMessageReceived(_) => true,
+            _ => false,
+        }
     }
 
     fn extension_lifecycle_owner(&self, event: &Event) -> Option<UiSnapshotOwner> {
@@ -3745,6 +3834,16 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         is_global_message_fact: bool,
     ) {
+        self.update_hidden_no_agent_state(|this| {
+            this.contains_global_message_fact |= is_global_message_fact;
+            this.handle_recorded_at_for_visible_agent(event, recorded_at);
+        });
+    }
+
+    /// Temporarily restore and update the hidden no-agent snapshot without
+    /// publishing its editor context or disturbing the visible agent
+    /// transcript.
+    fn update_hidden_no_agent_state(&mut self, update: impl FnOnce(&mut Self)) {
         let handle = self.handle.clone();
         let visible_agent_id = self.displayed_agent_id.clone();
         handle.with_output_transaction(|| {
@@ -3760,8 +3859,7 @@ impl EventRenderer {
                 self.with_editor_context_publish_suppressed(|this| {
                     this.restore_hidden_agent_state(no_agent_state);
                     this.displayed_agent_id = None;
-                    this.contains_global_message_fact |= is_global_message_fact;
-                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    update(this);
                     this.no_agent_ui_state = this.take_visible_agent_state();
                     let visible_state = visible_agent_id
                         .as_ref()

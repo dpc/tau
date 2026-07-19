@@ -27,8 +27,8 @@ sample `config/cli.yaml`.
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
 | `C-b` | `agent-pick` | Pick a current non-suspended agent with optional `fzf`. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
-| `C-k` | `agent-previous` | Switch to the previous active agent. |
-| `C-j` | `agent-next` | Switch to the next active agent. |
+| `C-k` | `agent-previous` | Cycle to the previous active agent or overview. |
+| `C-j` | `agent-next` | Cycle to the next active agent or overview. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
 | `Tab` | `cycle-role` | Cycle roles within the current role group. |
@@ -102,8 +102,8 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
 - `fast-toggle` — toggle fast mode without editing the prompt draft.
 - `cycle-role` — cycle roles within the current role group.
 - `cycle-role-group` — cycle to the first role in the next role group.
-- `agent-previous` — switch to the previous active agent.
-- `agent-next` — switch to the next active agent.
+- `agent-previous` — cycle to the previous active agent or all-agent overview.
+- `agent-next` — cycle to the next active agent or all-agent overview.
 - `agent-pick` — invoke `fzf` directly over a bounded current-session agent
   snapshot and switch only after revalidating the selected live,
   non-suspended id. Cancel, failure, and stale selections preserve the current

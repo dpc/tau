@@ -281,6 +281,51 @@ fn agent_switch_accepts_explicit_suspended_agent_id() {
     }
 }
 
+/// Previous/next application navigation updates the input target and publishes
+/// the matching renderer command at both sides of the overview boundary.
+#[test]
+fn agent_cycle_dispatches_overview_and_agent_transitions() {
+    let known = Arc::new(Mutex::new(vec!["alpha".to_owned(), "bravo".to_owned()]));
+    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+        "alpha".to_owned(),
+        "bravo".to_owned(),
+    ])));
+    let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let routing = routing_state(known, live, suspended);
+    let (renderer_tx, renderer_rx) = mpsc::channel();
+
+    routing.set_selected_agent(Some("bravo".to_owned()));
+    assert_eq!(
+        dispatch_agent_cycle(&routing, &renderer_tx, 1),
+        AgentCycleAction::ClearSelection
+    );
+    assert_eq!(routing.selected_agent_id(), None);
+    assert!(matches!(
+        renderer_rx.try_recv().expect("overview renderer command"),
+        RendererCmd::ClearSelectedAgent
+    ));
+
+    assert_eq!(
+        dispatch_agent_cycle(&routing, &renderer_tx, 1),
+        AgentCycleAction::Select("alpha".to_owned())
+    );
+    assert_eq!(routing.selected_agent_id().as_deref(), Some("alpha"));
+    assert!(matches!(
+        renderer_rx.try_recv().expect("agent renderer command"),
+        RendererCmd::SwitchAgent { agent_id } if agent_id == "alpha"
+    ));
+
+    routing.set_selected_agent(None);
+    assert_eq!(
+        dispatch_agent_cycle(&routing, &renderer_tx, -1),
+        AgentCycleAction::Select("bravo".to_owned())
+    );
+    assert!(matches!(
+        renderer_rx.try_recv().expect("reverse renderer command"),
+        RendererCmd::SwitchAgent { agent_id } if agent_id == "bravo"
+    ));
+}
+
 #[test]
 fn agent_completer_uses_display_names_as_descriptions() {
     // `/agent ... <agent_id>` keeps ids as values but shows the durable
