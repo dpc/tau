@@ -9172,6 +9172,52 @@ fn render_tool_use_state_keeps_range_separate_from_args() {
     assert_eq!(rendered.args, "feed/main");
     assert_eq!(rendered.range.as_deref(), Some("2026-05-29..2026-05-30"));
 }
+
+/// Workdir get/set labels remain accessible, prefix-safe, and compact in plain
+/// and styled output.
+#[test]
+fn workdir_result_modes_render_consistently() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    let long_path = format!("/{}", "segment/".repeat(10));
+    let display = ToolUseState {
+        mode: "set".into(),
+        args: long_path,
+        status: ToolUseStatus::Success,
+        status_text: "ok".into(),
+        ..Default::default()
+    };
+    let rendered = render_tool_use_state("project_a__workdir", &display);
+    let theme = cli_test_theme();
+    let block = render_tool_block(&theme, &rendered);
+    let spans = block.content.spans();
+    let plain = spans
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+
+    assert_eq!(
+        plain,
+        "project_a__workdir set /segment/segment/seg┄ent/segment/segment/ ok"
+    );
+    let mode_span = spans
+        .iter()
+        .find(|span| span.text == "set")
+        .expect("structural set mode");
+    assert_eq!(
+        mode_span.style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
+    );
+    assert_ne!(
+        mode_span.style,
+        spans
+            .iter()
+            .find(|span| span.text.contains("/segment"))
+            .expect("compacted path")
+            .style
+    );
+}
+
 #[test]
 fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
     let theme = cli_test_theme();

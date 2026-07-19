@@ -1,12 +1,68 @@
 //! `workdir` tool: inspect or update the extension instance's remembered
 //! directory.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use tau_proto::CborValue;
+use tau_proto::{CborValue, ToolUseState, ToolUseStatus};
 
 use crate::argument::argument_text;
-use crate::display::{ToolFailure, ToolOutput, ok_display};
+use crate::display::{ToolFailure, ToolOutput};
+
+/// Availability classification for persisted workdir metadata.
+#[derive(Clone, Copy)]
+enum WorkdirStatus {
+    Available,
+    Missing,
+    Inaccessible,
+    NotDirectory,
+    Invalid,
+}
+
+impl WorkdirStatus {
+    /// Preserve the established semantic result vocabulary.
+    fn semantic_status(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Invalid => "invalid",
+            Self::Missing | Self::Inaccessible | Self::NotDirectory => "unavailable",
+        }
+    }
+
+    /// Return UI text only for a state that needs explicit attention.
+    fn display_suffix(self) -> Option<&'static str> {
+        match self {
+            Self::Available => None,
+            Self::Missing => Some("missing"),
+            Self::Inaccessible => Some("inaccessible"),
+            Self::NotDirectory => Some("not-directory"),
+            Self::Invalid => Some("invalid"),
+        }
+    }
+}
+
+/// User-visible operation performed by a successful workdir call.
+enum WorkdirOperation {
+    Get,
+    Set,
+}
+
+impl WorkdirOperation {
+    /// Build an accessible path-only label whose mode distinguishes get/set.
+    fn display(self, path: String) -> ToolUseState {
+        let mode = match self {
+            Self::Get => "get",
+            Self::Set => "set",
+        };
+        ToolUseState {
+            args: path,
+            mode: mode.to_owned(),
+            status: ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }
+    }
+}
 
 /// Parsed target directory for a `workdir` setter call.
 pub(crate) fn target_dir(
@@ -51,20 +107,15 @@ pub(crate) fn output(path: &Path) -> ToolOutput {
     ToolOutput {
         result: CborValue::Text(text.clone()),
         provider_content: Vec::new(),
-        display: ok_display(text),
+        display: WorkdirOperation::Set.display(path.display().to_string()),
     }
 }
 
 /// Build the current `workdir` read result, including whether it remains
 /// usable.
 pub(crate) fn status_output(path: Option<&Path>) -> ToolOutput {
-    let status = if path.is_none() {
-        "invalid"
-    } else if path.is_some_and(Path::is_dir) {
-        "available"
-    } else {
-        "unavailable"
-    };
+    let workdir_status = workdir_status(path);
+    let status = workdir_status.semantic_status();
     let mut entries = Vec::new();
     if let Some(path) = path {
         entries.push((
@@ -77,11 +128,37 @@ pub(crate) fn status_output(path: Option<&Path>) -> ToolOutput {
         CborValue::Text(status.to_owned()),
     ));
     let result = CborValue::Map(entries);
-    let display_path =
-        path.map_or_else(|| "<invalid>".to_owned(), |path| path.display().to_string());
+    let display_path = path.map_or_else(
+        || "<invalid> (invalid)".to_owned(),
+        |path| {
+            let path = path.display();
+            match workdir_status.display_suffix() {
+                Some(status) => format!("{path} ({status})"),
+                None => path.to_string(),
+            }
+        },
+    );
     ToolOutput {
         result,
         provider_content: Vec::new(),
-        display: ok_display(format!("{display_path} ({status})")),
+        display: WorkdirOperation::Get.display(display_path),
     }
 }
+
+/// Classify remembered workdir state for both the semantic result and compact
+/// UI.
+fn workdir_status(path: Option<&Path>) -> WorkdirStatus {
+    let Some(path) = path else {
+        return WorkdirStatus::Invalid;
+    };
+    match path.metadata() {
+        Ok(metadata) if metadata.is_dir() => WorkdirStatus::Available,
+        Ok(_) => WorkdirStatus::NotDirectory,
+        Err(error) if error.kind() == ErrorKind::NotFound => WorkdirStatus::Missing,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => WorkdirStatus::Inaccessible,
+        Err(_) => WorkdirStatus::Inaccessible,
+    }
+}
+
+#[cfg(test)]
+mod tests;
