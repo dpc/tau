@@ -14662,6 +14662,147 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.shutdown().expect("shutdown");
 }
 
+struct ReentrantDelegateCompletionPrompt {
+    target_agent_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl crate::InternalToolHandler for ReentrantDelegateCompletionPrompt {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+
+    fn handles(&self, _internal_tool_name: &ToolName) -> bool {
+        false
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::StartAgentResult(result) = event else {
+            return Ok(());
+        };
+        if result.query_id != "q-reentrant" {
+            return Ok(());
+        }
+        let agent_id = self
+            .target_agent_id
+            .lock()
+            .expect("target agent id")
+            .clone()
+            .expect("target agent configured");
+        host.dispatch_test_background_completion(
+            &agent_id,
+            "[tau-internal] Tool call `canceled-shell` is complete.".to_owned(),
+        )
+    }
+}
+
+/// Publishing an internal delegate's terminal result can synchronously dispatch
+/// a canceled-tool completion prompt before the delegate detaches. Detachment
+/// must preserve that replacement turn, block overlap, and treat its stale
+/// extension originator as ordinary post-delegation work.
+#[test]
+fn detached_delegate_preserves_reentrant_tool_completion_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let target_agent_id = std::sync::Arc::new(std::sync::Mutex::new(None));
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(
+        ReentrantDelegateCompletionPrompt {
+            target_agent_id: target_agent_id.clone(),
+        },
+    )]);
+
+    let mut query = ext_query("q-reentrant");
+    query.tool_call_id = Some("delegate-call".into());
+    let side_agent_id = h
+        .enqueue_internal_start_agent_request_without_draining(query)
+        .expect("enqueue query");
+    h.drain_pending_start_agent_requests()
+        .expect("dispatch query");
+    let side_cid = ext_query_cid(&h, "q-reentrant").expect("side conversation");
+    assert_eq!(
+        h.agents[&side_cid].agent_id.as_deref(),
+        Some(side_agent_id.as_str())
+    );
+    *target_agent_id.lock().expect("target agent id") = Some(side_agent_id.clone());
+    let side_spid = h
+        .prompt_agents
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
+        .expect("side prompt id");
+    let mut terminal =
+        provider_text_response(&side_spid, crate::parse_agent_id(&side_agent_id), "done");
+    terminal.originator = tau_proto::PromptOriginator::Extension {
+        name: HARNESS_CONNECTION_ID.into(),
+        query_id: "q-reentrant".to_owned(),
+    };
+    h.handle_provider_response_finished(terminal)
+        .expect("side finished");
+    assert!(h.agents[&side_cid].originator.is_user());
+    let replacement_spid = h.agents[&side_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("reentrant completion prompt remains owned");
+    assert!(matches!(
+        h.agents[&side_cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    assert!(h.dispatch_blocked_for(&side_cid));
+    assert!(matches!(
+        h.submit_prompt_to_agent("s1".into(), &side_agent_id, "overlap".to_owned())
+            .expect("queue overlapping prompt"),
+        PromptSubmission::Queued
+    ));
+    assert_eq!(
+        h.agents[&side_cid].in_flight_prompt.as_ref(),
+        Some(&replacement_spid)
+    );
+    h.agents
+        .get_mut(&side_cid)
+        .expect("side conversation")
+        .pending_prompts
+        .clear();
+
+    let mut late_response =
+        provider_text_response(&replacement_spid, crate::parse_agent_id(&side_agent_id), "");
+    late_response.originator = tau_proto::PromptOriginator::Extension {
+        name: HARNESS_CONNECTION_ID.into(),
+        query_id: "q-reentrant".to_owned(),
+    };
+    h.handle_provider_response_finished(late_response)
+        .expect("late completion response");
+
+    assert!(
+        h.agent_routes.contains_key(&side_agent_id),
+        "a stale extension originator must not tear down the detached delegate"
+    );
+    assert!(matches!(
+        h.agents[&side_cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    let result_count = event_log_count(&h, |event| {
+        matches!(
+            event,
+            Event::StartAgentResult(result) if result.query_id == "q-reentrant"
+        )
+    });
+    assert_eq!(
+        result_count, 1,
+        "the detached delegate must produce only one StartAgentResult"
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
+                && notice.message.contains("had no source connection")
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn delegated_agent_user_interaction_prevents_auto_suspend() {
     // If a UI targets a running delegated agent before its delegated reply is

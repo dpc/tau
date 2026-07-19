@@ -378,6 +378,25 @@ impl<'a> InternalToolHost<'a> {
         Some((cid, call, pending.name))
     }
 
+    /// Dispatch a hidden activating background-completion prompt synchronously.
+    #[cfg(test)]
+    pub(crate) fn dispatch_test_background_completion(
+        &mut self,
+        agent_id: &str,
+        text: String,
+    ) -> Result<(), HarnessError> {
+        let cid = self
+            .harness
+            .agent_routes
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| HarnessError::Participant(format!("unknown test agent `{agent_id}`")))?;
+        self.harness.dispatch_prompt_for_agent(
+            &cid,
+            crate::agent::PendingPrompt::activating_background_completion(text),
+        )
+    }
+
     /// Ensure the harness tracks an internal tool call before it completes.
     pub fn ensure_internal_tool_tracking(
         &mut self,

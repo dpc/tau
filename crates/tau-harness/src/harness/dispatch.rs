@@ -354,6 +354,7 @@ impl Harness {
         match self.agents.get(agent_id) {
             Some(conv) => {
                 conv.terminating
+                    || conv.in_flight_prompt.is_some()
                     || !matches!(
                         conv.activation_dispatch,
                         crate::agent::ActivationDispatchState::None

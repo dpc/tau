@@ -19475,8 +19475,19 @@ impl Harness {
         {
             return false;
         }
+        let Some(active_originator) = self.agents.get(cid).map(|agent| &agent.originator) else {
+            return false;
+        };
+        // A tool completion can synchronously dispatch another prompt while the
+        // delegate's terminal StartAgentResult is being published. The prompt
+        // retains the old extension originator, but the delegate is detached
+        // before its response arrives. Do not treat that stale response as a
+        // second completion of the already-finished start request.
+        if active_originator != &side.response.originator {
+            return false;
+        }
         let Some((name, query_id)) = Self::finished_response_side_originator(
-            &side.response.originator,
+            active_originator,
             side.requested_tool_calls,
             side.is_non_tool_ext_query,
         ) else {
@@ -19508,7 +19519,7 @@ impl Harness {
             error,
         };
         self.deliver_finished_side_conversation_result(cid, &name, &query_id, result);
-        self.complete_finished_side_conversation(cid);
+        self.complete_finished_side_conversation(cid, Some(&side.response.agent_prompt_id));
         true
     }
 
@@ -19644,19 +19655,33 @@ impl Harness {
                 error: Some("provider failure: compaction".to_owned()),
             },
         );
-        self.complete_finished_side_conversation(cid);
+        self.complete_finished_side_conversation(cid, None);
         true
     }
 
-    fn complete_finished_side_conversation(&mut self, cid: &AgentId) {
+    fn complete_finished_side_conversation(
+        &mut self,
+        cid: &AgentId,
+        completed_prompt_id: Option<&AgentPromptId>,
+    ) {
         let keep_tool_backed_conversation = self
             .agents
             .get(cid)
             .is_some_and(|conv| conv.parent_tool_call_id.is_some());
+        let replacement_prompt_in_flight = keep_tool_backed_conversation
+            && self
+                .agents
+                .get(cid)
+                .and_then(|conv| conv.in_flight_prompt.as_ref())
+                .is_some_and(|prompt_id| Some(prompt_id) != completed_prompt_id);
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
-        // while starting. Active descendants keep their own copied state.
-        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        // while starting. Active descendants keep their own copied state. Result
+        // delivery can synchronously dispatch a replacement prompt, so do not
+        // overwrite that prompt's running state while detaching the old request.
+        if !replacement_prompt_in_flight {
+            self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        }
         self.release_start_agent_request(cid);
         if keep_tool_backed_conversation {
             self.detach_completed_tool_backed_start_agent(cid);
