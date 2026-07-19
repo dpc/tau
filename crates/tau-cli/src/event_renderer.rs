@@ -1220,7 +1220,9 @@ pub(crate) enum WatchedAgentActivity<'a> {
 ///
 /// This intentionally reuses [`tau_proto::ToolUseState`] counter formatting so
 /// rows keep the compact generic layout, an explicit `@agent_id` chip, and no
-/// in-progress status suffix.
+/// in-progress status suffix. Both direct `running` and transitive `watching`
+/// labels use the historical `watching.name` style so watched-agent activity
+/// remains visually distinct from actual tool calls.
 pub(crate) fn watched_agent_tool_display(
     label: &str,
     agent_id: &str,
@@ -1272,9 +1274,7 @@ pub(crate) fn watched_agent_tool_display(
         WatchedAgentActivity::Watching { witness } => ("watching", Some(witness)),
     };
     let mut rendered = render_tool_use_state(name, &display);
-    if witness.is_some() {
-        rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
-    }
+    rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
     rendered.suffixes.retain(|suffix| !suffix.text.is_empty());
     rendered.suffixes.insert(
         0,

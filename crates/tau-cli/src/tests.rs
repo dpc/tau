@@ -9329,8 +9329,9 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
 }
 
 /// Ensures the generic watched-agent indicator keeps the compact tool-block
-/// shape, distinguishes normal direct-running from passive transitive styling,
-/// keeps an explicit agent-id chip, and omits an in-progress ellipsis.
+/// shape, distinguishes direct-running from transitive activity by wording
+/// under the shared watched-agent label style, keeps an explicit agent-id chip,
+/// and omits an in-progress ellipsis.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -9363,13 +9364,16 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
-    assert!(
-        block
-            .content
-            .spans()
-            .iter()
-            .any(|span| span.text == "running"),
-        "direct activity is distinguished with accessible wording"
+    let running = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "running")
+        .expect("running tool-name span");
+    assert_eq!(
+        running.style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
+        "direct activity keeps accessible wording without taking the tool-call color"
     );
 
     let percent_only_stats = tau_proto::AgentStatsUpdated {
