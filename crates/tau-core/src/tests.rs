@@ -1897,6 +1897,119 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
+/// A failed lock-time reload must invalidate an unlocked cached view so retries
+/// cannot bypass corruption validation and append with its stale sequence
+/// cursor.
+#[test]
+fn session_store_revalidates_after_failed_lock_time_reload() {
+    let sessions_dir = temp_dir("sessions-lock-reload-corrupt");
+    let events_path = sessions_dir.join("session-1").join("events.cbor");
+    let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
+    setup
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-old", false),
+        )
+        .expect("baseline membership");
+    drop(setup);
+    let mut store = SessionStore::open(&sessions_dir).expect("preload unlocked membership");
+
+    std::fs::remove_file(&events_path).expect("remove baseline journal");
+    append_raw_cbor(
+        &events_path,
+        &PersistedSessionEvent {
+            seq: PersistedSessionEventSeq::new(5),
+            source: None,
+            event: session_loaded("session-1", "agent-corrupt", false),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+    let journal_before = std::fs::read(&events_path).expect("corrupt journal");
+
+    for attempt in 0..2 {
+        let error = store
+            .lock_and_load_session("session-1")
+            .expect_err("corrupt reload must fail");
+        assert!(
+            matches!(error, SessionStoreError::InvalidSequence { .. }),
+            "attempt {attempt} must retain typed corruption: {error}"
+        );
+    }
+    let append_error = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-new", false),
+        )
+        .expect_err("append must not reuse stale cached sequence");
+    assert!(matches!(
+        append_error,
+        SessionStoreError::InvalidSequence { .. }
+    ));
+    assert_eq!(
+        std::fs::read(&events_path).expect("journal remains"),
+        journal_before,
+        "failed retries must not mutate the corrupt journal"
+    );
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// A successful retry after lock-time replay failure must compose the existing
+/// process-local overlay instead of restoring only the repaired durable
+/// journal.
+#[test]
+fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
+    let sessions_dir = temp_dir("sessions-lock-reload-overlay");
+    let events_path = sessions_dir.join("session-1").join("events.cbor");
+    let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
+    setup
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-durable", false),
+        )
+        .expect("baseline membership");
+    drop(setup);
+    let durable_journal = std::fs::read(&events_path).expect("baseline journal");
+    let mut store = SessionStore::open(&sessions_dir).expect("preload unlocked membership");
+    store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-ephemeral", true),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("ephemeral membership");
+
+    std::fs::remove_file(&events_path).expect("remove baseline journal");
+    append_raw_cbor(
+        &events_path,
+        &PersistedSessionEvent {
+            seq: PersistedSessionEventSeq::new(5),
+            source: None,
+            event: session_loaded("session-1", "agent-corrupt", false),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+    assert!(matches!(
+        store.lock_and_load_session("session-1"),
+        Err(SessionStoreError::InvalidSequence { .. })
+    ));
+
+    std::fs::write(&events_path, durable_journal).expect("repair durable journal");
+    let membership = store
+        .lock_and_load_session("session-1")
+        .expect("repaired retry")
+        .expect("repaired membership");
+    assert!(membership.contains_agent(&AgentId::parse("agent-durable").expect("agent id")));
+    assert!(membership.contains_agent(&AgentId::parse("agent-ephemeral").expect("agent id")));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
 #[test]
 fn session_store_rejects_partial_persisted_record_header_on_load() {
     // A partial length header means the durable membership log was torn. Resume

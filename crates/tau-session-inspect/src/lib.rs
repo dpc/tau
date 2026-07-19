@@ -127,19 +127,47 @@ pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, Inspect
     if !path.try_exists()? {
         return Ok(vec!["no sessions".to_owned()]);
     }
-    let store = open_session_store(path)?;
-    let mut sessions = store.sessions();
-    sessions.sort_by(|a, b| a.session_id().cmp(b.session_id()));
-    if sessions.is_empty() {
+    let mut session_ids = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let session_path = entry.path();
+        if !session_path.is_dir() || !session_path.join("events.cbor").exists() {
+            continue;
+        }
+        let session_id = session_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                InspectError::SessionStore(SessionStoreError::InvalidSessionDir {
+                    path: session_path.clone(),
+                })
+            })?;
+        session_ids.push(session_id.to_owned());
+    }
+    session_ids.sort();
+    if session_ids.is_empty() {
         return Ok(vec!["no sessions".to_owned()]);
     }
-    Ok(sessions
-        .into_iter()
-        .map(|s| {
-            let loaded = s.loaded_agents();
-            format!("{} ({} loaded agent(s))", s.session_id(), loaded.len())
-        })
-        .collect())
+
+    let mut store = SessionStore::open_lazy(path)?;
+    let mut lines = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        match store.load_session(&session_id) {
+            Ok(Some(session)) => lines.push(format!(
+                "{} ({} loaded agent(s))",
+                session.session_id(),
+                session.loaded_agents().len()
+            )),
+            Ok(None) => {}
+            Err(error) => {
+                lines.push(format!("{session_id} (invalid session state: {error})"));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push("no sessions".to_owned());
+    }
+    Ok(lines)
 }
 
 /// Returns printable lines summarizing persisted subscription-policy approvals.

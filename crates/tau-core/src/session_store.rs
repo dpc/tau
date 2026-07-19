@@ -470,13 +470,13 @@ impl SessionStore {
         Ok(())
     }
 
-    fn ensure_locked(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+    fn ensure_locked(&mut self, session_id: &str) -> Result<bool, SessionStoreError> {
         if self.mode.is_ephemeral() {
-            return Ok(());
+            return Ok(false);
         }
         let sid = validate_session_id(session_id)?;
         if self.locks.contains_key(&sid) {
-            return Ok(());
+            return Ok(false);
         }
         let session_dir = self.session_dir(&sid);
         fs::create_dir_all(&session_dir).map_err(|source| {
@@ -520,7 +520,7 @@ impl SessionStore {
             },
         )?;
         self.locks.insert(sid, file);
-        Ok(())
+        Ok(true)
     }
 
     /// Appends one session membership or fallback event.
@@ -581,9 +581,10 @@ impl SessionStore {
             validate_ephemeral_membership_overlay_event(session_id, &event)?;
         }
         if write_to_disk {
-            self.ensure_locked(session_id)?;
+            let _ = self.lock_and_load_session(session_id)?;
+        } else {
+            self.load_session_if_needed(session_id)?;
         }
-        self.load_session_if_needed(session_id)?;
         let session_dir = self.session_dir(&sid);
         if write_to_disk {
             fs::create_dir_all(&session_dir).map_err(|source| {
@@ -721,7 +722,7 @@ impl SessionStore {
             });
             return Ok(());
         }
-        self.ensure_locked(session_id)?;
+        let _ = self.lock_and_load_session(session_id)?;
         let path = self.session_dir(&sid).join("restore-events.cbor");
         let events = load_session_events(&path)?;
         for record in &events {
@@ -784,6 +785,37 @@ impl SessionStore {
         Ok(self.sessions.get(&session_id))
     }
 
+    /// Acquires the durable session lock before loading its membership view.
+    ///
+    /// Writers use this ordering when they need the folded view before their
+    /// first append. It prevents retention cleanup from deleting the journal
+    /// between loading its sequence cursor and acquiring write ownership.
+    pub fn lock_and_load_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<&SessionMembership>, SessionStoreError> {
+        let session_id = validate_session_id(session_id)?;
+        if self.ensure_locked(session_id.as_str())? {
+            self.sessions.remove(&session_id);
+        }
+        if self.mode.is_durable() && !self.sessions.contains_key(&session_id) {
+            let path = self.session_dir(&session_id).join("events.cbor");
+            let overlay = self.ephemeral_membership_overlay.get(&session_id);
+            if path.exists() || overlay.is_some_and(|events| !events.is_empty()) {
+                let events = load_session_events(&path)?;
+                let mut membership =
+                    SessionMembership::try_from_events(session_id.clone(), &events)?;
+                if let Some(overlay) = overlay {
+                    membership.apply_ephemeral_membership_overlay(overlay)?;
+                }
+                self.sessions.insert(session_id.clone(), membership);
+            }
+        } else if self.mode.is_ephemeral() {
+            self.load_session_if_needed(session_id.as_str())?;
+        }
+        Ok(self.sessions.get(&session_id))
+    }
+
     /// Returns one already-loaded session membership view.
     #[must_use]
     pub fn session(&self, session_id: &str) -> Option<&SessionMembership> {
@@ -805,7 +837,7 @@ impl SessionStore {
             return Ok(());
         }
         let session_id = validate_session_id(session_id)?;
-        self.ensure_locked(session_id.as_str())?;
+        let _ = self.lock_and_load_session(session_id.as_str())?;
         let path = self.session_dir(&session_id).join("meta.json");
         let now = unix_now();
         let mut meta = read_meta(&path).unwrap_or_default();

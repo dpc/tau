@@ -1,4 +1,6 @@
-use tau_proto::{ContextRole, MessageItem, ToolType};
+use tau_proto::{
+    AgentId, ContextRole, Event, MessageItem, SessionAgentLoaded, SessionId, ToolType,
+};
 
 use super::*;
 
@@ -121,4 +123,49 @@ fn invalid_inspection_roots_return_errors() {
     assert!(session_list_lines(&sessions_dir).is_err());
     assert!(session_lines(&sessions_dir, "default").is_err());
     assert!(policy_lines(&policy_path).is_err());
+}
+
+/// Ensures one corrupt journal cannot prevent `session-list` from reporting
+/// healthy sessions, while preserving a visible typed diagnostic for the
+/// corrupt session instead of folding or silently skipping it.
+#[test]
+fn session_list_isolates_invalid_session_journals() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp_dir.path().join("sessions");
+    let mut store = SessionStore::open(&sessions_dir).expect("session store");
+    for (session_id, agent_id) in [("healthy", "agent-good"), ("invalid", "agent-bad")] {
+        store
+            .append_session_event(
+                session_id,
+                None,
+                Event::SessionAgentLoaded(SessionAgentLoaded {
+                    session_id: SessionId::from(session_id),
+                    agent_id: AgentId::parse(agent_id).expect("agent id"),
+                    ephemeral: false,
+                }),
+            )
+            .expect("membership append");
+    }
+    drop(store);
+
+    let invalid_path = sessions_dir.join("invalid").join("events.cbor");
+    let mut bytes = std::fs::read(&invalid_path).expect("read invalid journal");
+    let seq_value = bytes
+        .windows(5)
+        .position(|window| window == b"\x63seq\x00")
+        .map(|offset| offset + 4)
+        .expect("encoded sequence field");
+    bytes[seq_value] = 5;
+    std::fs::write(&invalid_path, bytes).expect("write invalid journal");
+
+    let lines = session_list_lines(&sessions_dir).expect("session list");
+    assert_eq!(lines[0], "healthy (1 loaded agent(s))");
+    assert!(
+        lines[1].starts_with("invalid (invalid session state: invalid session event sequence in "),
+        "corrupt session must retain its typed diagnostic: {lines:?}"
+    );
+    assert!(
+        lines[1].ends_with("events.cbor: expected 0, got 5)"),
+        "diagnostic must identify the nonzero initial sequence: {lines:?}"
+    );
 }

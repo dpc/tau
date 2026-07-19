@@ -2870,7 +2870,7 @@ impl Harness {
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         let mut store = store;
-        let _ = store.load_session(eager_session_id)?;
+        let _ = store.lock_and_load_session(eager_session_id)?;
         if session_persistence.is_durable() {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
@@ -3283,7 +3283,7 @@ impl Harness {
     }
 
     fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
-        let _ = parts.store.load_session(&parts.eager_session_id)?;
+        let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
         let (tx, rx) = mpsc::channel();
         let bus = EventBus::with_subscription_policy(Box::new(
             DefaultSubscriptionPolicy::with_store(parts.policy_store),
@@ -14944,14 +14944,19 @@ impl Harness {
         self.current_session_generation = self.current_session_generation.saturating_add(1);
         self.current_session_start_reason = reason;
         self.reset_extension_restart_budgets_at(Instant::now());
+        if self.session_persistence.is_durable() {
+            // Take write ownership before replay loads the durable sequence
+            // cursor. Retention cleanup holds this same lock through deletion.
+            let _ = self.store.lock_and_load_session(new_session_id.as_str())?;
+        }
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();
         }
         self.publish_delegate_roles_context();
 
         if self.session_persistence.is_durable() {
-            // Record session metadata + acquire the new session dir flock before
-            // anyone tries to write to its membership log.
+            // Refresh metadata after replay; write ownership was acquired before
+            // loading the membership log above.
             self.store.record_session_meta(new_session_id.as_str())?;
 
             // Send the new debug log to the new session's dir, so each
