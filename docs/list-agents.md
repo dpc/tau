@@ -53,7 +53,10 @@ pipe is treated as normal command completion.
 In the terminal UI, C-b opens `fzf` over the current live, non-suspended rows.
 `fzf` is optional and is started only when the binding is used. Tau passes rows
 through stdin and invokes `fzf` directly rather than interpolating agent data
-into a shell command.
+into a shell command. The picker shows agent id, role, display name, lifecycle,
+and runtime in space-padded, terminal-width-aware columns. Long values are
+truncated for display only; the selected stable id and original escaped TSV row
+remain unchanged.
 
 Canceling the picker, a missing `fzf`, malformed output, or a stale selection
 does not change the selected transcript or prompt draft. Before switching, Tau

@@ -15,9 +15,11 @@ Bounded subprocess execution lives in `src/bounded_command.rs`.
   inherited-pipe failures, but does not hand foreground terminal ownership to the
   child.
 - The built-in agent picker starts `fzf` directly with fixed arguments and
-  bounded stdin/stdout. It uses foreground process-group ownership and the same
-  raw-mode pause/resume guard as other terminal-releasing actions; agent/session
-  interpretation remains in `tau-cli`.
+  bounded stdin/stdout. It appends one terminal-width-aware, Unicode-width
+  presentation field to each stable TSV row, asks `fzf` to show only that field,
+  and removes it from the accepted row. It uses foreground process-group
+  ownership and the same raw-mode pause/resume guard as other
+  terminal-releasing actions; agent/session interpretation remains in `tau-cli`.
 - User-configured `complete_with_command` and prompt shell actions use
   `ProcessOwnership::ForegroundProcessGroup`: Tau first releases raw terminal
   mode, starts the command in an owned process group, hands that group the

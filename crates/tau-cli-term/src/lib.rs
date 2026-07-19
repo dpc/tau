@@ -31,6 +31,7 @@ pub use tau_cli_term_raw::{
     TermHandle,
 };
 use tau_cli_term_raw::{Candidate, Event as RawEvent};
+use tau_term_screen::{display_width, truncate_to_width};
 use tau_themes::Theme;
 
 const PROMPT_TRAILER_MARKER: &str =
@@ -44,14 +45,23 @@ const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 // Keep these fixed display columns synchronized with the ten-field contract in
-// docs/list-agents.md#output. Fzf still returns the complete original row.
+// docs/list-agents.md#output. A final presentation-only field is removed after
+// fzf returns the complete input row.
 const AGENT_PICKER_FZF_ARGS: &[&str] = &[
     "--height=100%",
     "--delimiter=\t",
-    "--with-nth=1,7,10,2,3",
+    "--with-nth=11",
     "--no-multi",
+    "--no-hscroll",
     "--prompt=agent> ",
 ];
+const AGENT_PICKER_SOURCE_FIELDS: usize = 10;
+const AGENT_PICKER_DISPLAY_FIELDS: [usize; 5] = [0, 6, 9, 1, 2];
+const AGENT_PICKER_COLUMN_GAP: &str = "  ";
+const AGENT_PICKER_COLUMN_PREFERRED_WIDTHS: [usize; 5] = [16, 12, 24, 11, 7];
+const AGENT_PICKER_COLUMN_MAX_WIDTHS: [usize; 5] = [32, 20, 40, 11, 7];
+// fzf reserves screen columns for its pointer, marker, and gutter.
+const AGENT_PICKER_FZF_DECORATION_WIDTH: usize = 4;
 const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
 const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
 const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
@@ -296,11 +306,12 @@ impl HighTerm {
         if rows.is_empty() {
             return Ok(None);
         }
+        let picker_rows = format_agent_picker_rows(rows, self.handle.size().0)?;
         self.term
             .pause_for_external()
             .map_err(|error| format!("could not release terminal: {error}"))?;
         let guard = ExternalResumeGuard::new(&self.term);
-        let selection = run_agent_fzf_command(std::ffi::OsStr::new("fzf"), rows);
+        let selection = run_agent_fzf_command(std::ffi::OsStr::new("fzf"), &picker_rows);
         guard
             .finish()
             .map_err(|error| format!("could not resume terminal after agent picker: {error}"))?;
@@ -642,6 +653,93 @@ fn run_agent_fzf_command_with_ownership(
     }
 }
 
+fn format_agent_picker_rows(rows: &str, terminal_width: usize) -> Result<String, String> {
+    let fields = rows
+        .lines()
+        .map(|row| {
+            let fields = row.split('\t').collect::<Vec<_>>();
+            if fields.len() != AGENT_PICKER_SOURCE_FIELDS {
+                return Err(format!(
+                    "agent row has {} fields instead of {AGENT_PICKER_SOURCE_FIELDS}",
+                    fields.len()
+                ));
+            }
+            Ok(fields)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let content_width = terminal_width.saturating_sub(AGENT_PICKER_FZF_DECORATION_WIDTH);
+    let column_widths = agent_picker_column_widths(&fields, content_width);
+    let mut output = String::new();
+    for fields in fields {
+        let display = AGENT_PICKER_DISPLAY_FIELDS
+            .iter()
+            .zip(&column_widths)
+            .map(|(&field, &width)| {
+                let value = truncate_to_width(fields[field], width);
+                let padding = width.saturating_sub(display_width(&value));
+                format!("{value}{}", " ".repeat(padding))
+            })
+            .collect::<Vec<_>>()
+            .join(AGENT_PICKER_COLUMN_GAP)
+            .trim_end()
+            .to_owned();
+        output.push_str(&fields.join("\t"));
+        output.push('\t');
+        output.push_str(&display);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<usize> {
+    let mut column_count = AGENT_PICKER_DISPLAY_FIELDS.len();
+    while column_count > 1
+        && content_width
+            < column_count + AGENT_PICKER_COLUMN_GAP.len() * column_count.saturating_sub(1)
+    {
+        column_count -= 1;
+    }
+    if content_width == 0 {
+        return Vec::new();
+    }
+    let gap_width = AGENT_PICKER_COLUMN_GAP.len() * column_count.saturating_sub(1);
+    let available = content_width.saturating_sub(gap_width);
+    let natural = AGENT_PICKER_DISPLAY_FIELDS[..column_count]
+        .iter()
+        .enumerate()
+        .map(|(column, &field)| {
+            rows.iter()
+                .map(|row| display_width(row[field]))
+                .max()
+                .unwrap_or(1)
+                .max(1)
+                .min(AGENT_PICKER_COLUMN_MAX_WIDTHS[column])
+        })
+        .collect::<Vec<_>>();
+    let mut widths = vec![1; column_count];
+    let mut remaining = available.saturating_sub(column_count);
+    for targets in [
+        &AGENT_PICKER_COLUMN_PREFERRED_WIDTHS[..column_count],
+        natural.as_slice(),
+    ] {
+        while remaining > 0 {
+            let mut grew = false;
+            for (column, width) in widths.iter_mut().enumerate() {
+                let target = targets[column].min(natural[column]);
+                if *width < target && remaining > 0 {
+                    *width += 1;
+                    remaining -= 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+    }
+    widths
+}
+
 fn parse_agent_fzf_output(output: Vec<u8>) -> Result<Option<String>, String> {
     let output =
         String::from_utf8(output).map_err(|error| format!("fzf output was not UTF-8: {error}"))?;
@@ -653,7 +751,13 @@ fn parse_agent_fzf_output(output: Vec<u8>) -> Result<Option<String>, String> {
     if output.contains(['\n', '\r']) {
         return Err("fzf returned more than one row".to_owned());
     }
-    Ok(Some(output.to_owned()))
+    let (row, _) = output
+        .rsplit_once('\t')
+        .ok_or_else(|| "fzf returned a malformed agent row".to_owned())?;
+    if row.split('\t').count() != AGENT_PICKER_SOURCE_FIELDS {
+        return Err("fzf returned a malformed agent row".to_owned());
+    }
+    Ok(Some(row.to_owned()))
 }
 
 fn make_completion_source(

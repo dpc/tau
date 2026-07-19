@@ -154,6 +154,8 @@ presentation remain local to each UI.
 `tau list-agents` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
 parent-before-child TSV ordering, and escaping. The C-b action invokes `fzf`
-directly through `tau-cli-term`, revalidates the chosen current non-suspended
-agent with a second snapshot, and uses the existing local selection transition.
-Picker cancellation and failure do not retarget the prompt draft.
+directly through `tau-cli-term`, which projects width-aware aligned display
+columns without changing the stable TSV selection row. The CLI revalidates the
+chosen current non-suspended agent with a second snapshot and uses the existing
+local selection transition. Picker cancellation and failure do not retarget the
+prompt draft.

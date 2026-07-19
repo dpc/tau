@@ -649,8 +649,12 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
 #[test]
 fn agent_fzf_output_parses_one_row() {
     assert_eq!(
-        parse_agent_fzf_output(b"agent-1\tlive\n".to_vec()).expect("valid output"),
-        Some("agent-1\tlive".to_owned())
+        parse_agent_fzf_output(
+            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n"
+                .to_vec()
+        )
+        .expect("valid output"),
+        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname".to_owned())
     );
     assert_eq!(
         parse_agent_fzf_output(Vec::new()).expect("empty output"),
@@ -663,6 +667,77 @@ fn agent_fzf_output_parses_one_row() {
 fn agent_fzf_output_rejects_malformed_selection() {
     assert!(parse_agent_fzf_output(b"agent-1\nagent-2\n".to_vec()).is_err());
     assert!(parse_agent_fzf_output(vec![0xff]).is_err());
+    assert!(parse_agent_fzf_output(b"agent-1\tlive\tdisplay\n".to_vec()).is_err());
+}
+
+/// Width-aware picker projection aligns columns by terminal display width while
+/// preserving Unicode, escaped controls, missing values, and the source TSV.
+#[test]
+fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
+    let rows = concat!(
+        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\n",
+        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\n",
+        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\n",
+    );
+    let formatted = format_agent_picker_rows(rows, 100).expect("valid picker rows");
+    let formatted_rows = formatted.lines().collect::<Vec<_>>();
+    assert_eq!(formatted_rows.len(), 3);
+
+    let displays = formatted_rows
+        .iter()
+        .map(|row| row.rsplit_once('\t').expect("display field").1)
+        .collect::<Vec<_>>();
+    for display in &displays {
+        assert!(display_width(display) <= 96);
+    }
+    let starts = displays
+        .iter()
+        .map(|display| {
+            let role = display
+                .find(if display.contains("dev") {
+                    "dev"
+                } else if display.contains("研究員") {
+                    "研究員"
+                } else {
+                    "line\\nrole"
+                })
+                .expect("role");
+            display_width(&display[..role])
+        })
+        .collect::<Vec<_>>();
+    assert!(starts.windows(2).all(|pair| pair[0] == pair[1]));
+
+    for (source, picker_row) in rows.lines().zip(formatted_rows) {
+        assert_eq!(
+            parse_agent_fzf_output(format!("{picker_row}\n").into_bytes())
+                .expect("picker selection"),
+            Some(source.to_owned())
+        );
+    }
+}
+
+/// Narrow terminals truncate safely to their display budget and progressively
+/// omit trailing columns rather than allowing fzf horizontal scrolling.
+#[test]
+fn agent_picker_rows_fit_narrow_and_long_values() {
+    let rows = format!(
+        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\n",
+        "agent-id-".repeat(20),
+        "役割".repeat(30),
+        "display-name-".repeat(20),
+    );
+    for terminal_width in [1, 8, 20, 40, 80] {
+        let formatted = format_agent_picker_rows(&rows, terminal_width).expect("valid picker row");
+        let display = formatted
+            .trim_end_matches('\n')
+            .rsplit_once('\t')
+            .expect("display field")
+            .1;
+        assert!(
+            display_width(display)
+                <= terminal_width.saturating_sub(AGENT_PICKER_FZF_DECORATION_WIDTH)
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -690,24 +765,28 @@ fn agent_fzf_command_uses_bounded_direct_process() {
     let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
     let program = fake_fzf(
         r#"set -eu
-test "$#" -eq 5
+test "$#" -eq 6
 test "$1" = "--height=100%"
 test "$2" = "$(printf '%s\t' '--delimiter=')"
-test "$3" = "--with-nth=1,7,10,2,3"
+test "$3" = "--with-nth=11"
 test "$4" = "--no-multi"
-test "$5" = "--prompt=agent> "
+test "$5" = "--no-hscroll"
+test "$6" = "--prompt=agent> "
 cat >/dev/null
-printf 'agent-1\tlive\n'"#,
+printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n'"#,
     );
 
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
-        "agent-1\tlive\n",
+        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n",
         ProcessOwnership::ProcessGroup,
     )
     .expect("fake fzf succeeds");
 
-    assert_eq!(selected.as_deref(), Some("agent-1\tlive"));
+    assert_eq!(
+        selected.as_deref(),
+        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname")
+    );
 }
 
 /// Conventional fzf cancel statuses leave selection unchanged.
