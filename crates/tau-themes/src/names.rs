@@ -59,6 +59,8 @@ pub const SESSION_STATUS: &str = "session.status";
 
 // -- System --
 pub const SYSTEM_INFO: &str = "system.info";
+/// Sender and recipient identities in agent-message routing headers.
+pub const AGENT_MESSAGE_IDENTITY: &str = "agent.message.identity";
 pub const SYSTEM_INFO_IMPORTANT: &str = "system.info.important";
 pub const SYSTEM_DISCONNECT: &str = "system.disconnect";
 pub const SYSTEM_PATH: &str = "system.path";

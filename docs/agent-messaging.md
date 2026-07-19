@@ -36,8 +36,8 @@ Message from <sender> to <recipient>:
 
 Agent endpoint identity always remains visible. When the CLI knows
 authoritative session metadata, it supplements either endpoint independently,
-for example `Message from reviewer-YiBh (research findings) to
-reviewer-VVSq (final review)`. Unknown agent endpoints and peers without an
+for example `Message from @reviewer-YiBh (research findings) to
+@reviewer-VVSq (final review)`. Unknown agent endpoints and peers without an
 advertised name keep their existing id-only labels; the human endpoint remains
 the literal `user`. Names are escaped and bounded UI metadata; they do not enter
 the message body, change routing, or become identity authority. Historical
@@ -139,8 +139,9 @@ a dedicated external-message RPC on a helper thread, so the harness event loop i
 not blocked by socket lookup or target validation. On confirmed delivery, the
 sender transcript records `agent.message_sent` with recipient
 `external_agent { session_id, agent_id }`; the recipient transcript records
-`agent.message_received` with `sender_session_id`. UI and prompt rendering show
-external addresses as `session/agent`.
+`agent.message_received` with `sender_session_id`. The CLI renders external
+addresses as `session/@agent`; transport and model-facing identities retain
+their canonical typed representation.
 
 Inter-session delivery is best-effort at-least-once. During normal live operation Tau
 reports success only after the exact receive projection commits. If the target
@@ -215,7 +216,7 @@ dedupe state. These relations do not return if the same agent is loaded again;
 enable a new watch to create a fresh subscription.
 
 The CLI presents lifecycle records as compact status lines such as
-`Watching engineer_b · idle` and `engineer_b · turn started`. These statuses are
+`Watching @engineer_b · idle` and `@engineer_b · turn started`. These statuses are
 not agent-authored messages and remain visible independently of the
 `show-messages` content setting.
 

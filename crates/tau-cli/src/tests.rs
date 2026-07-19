@@ -42,6 +42,7 @@ fn cli_test_theme() -> tau_themes::Theme {
                 "action.label": { fg: "dark_grey" },
                 "action.id": { fg: "yellow", bold: true },
                 "action.error": { fg: "red" },
+                "agent.message.identity": { bold: true },
                 "token.stats": { fg: "dark_grey" },
                 "token.stats.symbol.delta": { bold: true },
                 "token.stats.symbol.sigma": { bold: true },
@@ -3937,7 +3938,7 @@ fn old_agent_message_updates_overview_without_selecting_sender() {
         "hidden old-agent message",
     ));
     sync(&handle);
-    assert!(vt.screen_contains(80, "Message from old-agent to other-agent"));
+    assert!(vt.screen_contains(80, "Message from @old-agent to @other-agent"));
     assert!(vt.screen_contains(80, "hidden old-agent message"));
     assert_eq!(
         *renderer
@@ -4319,16 +4320,24 @@ fn draft_snapshot_is_dropped_after_shutdown() {
 }
 
 /// `AgentMessage` events are normal history entries, not active blocks. They
-/// must render for every sender/recipient pair and scroll away as history
-/// grows.
+/// must render for every sender/recipient pair, emphasize `@`-qualified routing
+/// identities, and scroll away as history grows.
 #[test]
 fn agent_messages_render_all_recipients_as_history() {
-    let (_term, handle, vt) = setup(80, 8);
+    let (_term, handle, vt) = setup(120, 8);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("manager_11111111"),
+        role: "manager".to_owned(),
+        display_name: Some("add-all-agent-overview for @engineer_22222222".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
 
     renderer.handle(&agent_message(
         "manager_11111111",
@@ -4336,8 +4345,33 @@ fn agent_messages_render_all_recipients_as_history() {
         "hello worker",
     ));
     sync(&handle);
-    assert!(vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
-    assert!(vt.screen_contains(80, "hello worker"));
+    assert!(vt.screen_contains(
+        120,
+        "Message from @manager_11111111 (add-all-agent-overview for @engineer_22222222) to @engineer_22222222:"
+    ));
+    assert!(vt.screen_contains(120, "hello worker"));
+    let lines = vt.screen_text(120);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Message from @manager_11111111"))
+        .expect("message header row") as u16;
+    let sender_col = lines[row as usize]
+        .find("@manager_11111111")
+        .expect("sender column") as u16;
+    let recipient_col = lines[row as usize]
+        .rfind("@engineer_22222222")
+        .expect("recipient column") as u16;
+    assert!(vt.cell_style(row, sender_col).2);
+    assert!(vt.cell_style(row, recipient_col).2);
+    assert!(!vt.cell_style(row, sender_col - 1).2);
+    let task_context_col = lines[row as usize]
+        .find("(add-all-agent-overview for @engineer_22222222)")
+        .expect("task-name context column") as u16;
+    assert!(!vt.cell_style(row, task_context_col).2);
+    let context_id_col = lines[row as usize]
+        .find("@engineer_22222222")
+        .expect("routing-id text inside task-name context") as u16;
+    assert!(!vt.cell_style(row, context_id_col).2);
 
     for idx in 0..20 {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -4350,7 +4384,10 @@ fn agent_messages_render_all_recipients_as_history() {
         }));
     }
     sync(&handle);
-    assert!(!vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
+    assert!(!vt.screen_contains(
+        120,
+        "Message from @manager_11111111 (add-all-agent-overview for @engineer_22222222) to @engineer_22222222:"
+    ));
 }
 
 /// The no-agent screen aggregates one entry per semantic inter-agent message,
@@ -4517,9 +4554,11 @@ fn no_agent_overview_excludes_structured_watch_status() {
     assert!(vt.screen_contains(100, "overview user broadcast"));
 }
 
+/// Cross-session labels retain and emphasize the complete session-qualified
+/// identity even when the valid session id contains spaces or Unicode.
 #[test]
 fn external_agent_messages_render_session_agent_labels() {
-    let (_term, handle, vt) = setup(96, 8);
+    let (_term, handle, vt) = setup(120, 8);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
@@ -4536,7 +4575,7 @@ fn external_agent_messages_render_session_agent_labels() {
         tau_proto::AgentMessageReceived {
             message_id: "msg-inbound-external".into(),
             sender_id: agent_id("reviewer_33333333"),
-            sender_session_id: Some("session-3".into()),
+            sender_session_id: Some("my project.café-abc123".into()),
             recipient_id: agent_id("manager_11111111"),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
@@ -4547,13 +4586,26 @@ fn external_agent_messages_render_session_agent_labels() {
     sync(&handle);
 
     assert!(vt.screen_contains(
-        96,
-        "Message from manager_11111111 to session-2/engineer_22222222:"
+        120,
+        "Message from @manager_11111111 to session-2/@engineer_22222222:"
     ));
     assert!(vt.screen_contains(
-        96,
-        "Message from session-3/reviewer_33333333 to manager_11111111:"
+        120,
+        "Message from my project.café-abc123/@reviewer_33333333 to @manager_11111111:"
     ));
+    let lines = vt.screen_text(120);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("my project.café-abc123/@reviewer_33333333"))
+        .expect("external message header row") as u16;
+    let session_after_space = lines[row as usize]
+        .find("project.café")
+        .expect("session text after space") as u16;
+    let remote_agent = lines[row as usize]
+        .find("@reviewer_33333333")
+        .expect("remote agent id") as u16;
+    assert!(vt.cell_style(row, session_after_space).2);
+    assert!(vt.cell_style(row, remote_agent).2);
 }
 
 /// Watched-turn lifecycle records are harness-authored status events, not
@@ -4589,14 +4641,14 @@ fn watched_turn_transition_renders_as_compact_status() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "researcher · turn started"));
-    assert!(!vt.screen_contains(80, "Message from researcher"));
+    assert!(!vt.screen_contains(80, "Message from @researcher"));
     assert!(!vt.screen_contains(80, "compatibility presentation"));
 
     for setting in ["none", "all-full", "none"] {
         renderer.apply_setting("show-messages", setting);
         sync(&handle);
         assert!(vt.screen_contains(80, "researcher · turn started"));
-        assert!(!vt.screen_contains(80, "Message from researcher"));
+        assert!(!vt.screen_contains(80, "Message from @researcher"));
         assert!(!vt.screen_contains(80, "compatibility presentation"));
     }
 }
@@ -4647,7 +4699,7 @@ fn user_recipient_agent_messages_broadcast_to_visible_agent_even_when_hidden() {
     ));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Message from sender-agent to user:"));
+    assert!(vt.screen_contains(80, "Message from @sender-agent to user:"));
     assert!(vt.screen_contains(80, "broadcast body for all visible agents"));
 }
 
@@ -4668,7 +4720,7 @@ fn show_messages_summary_modes_do_not_show_body() {
     ));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(vt.screen_contains(80, "Message from @agent-a to @agent-b"));
     assert!(!vt.screen_contains(80, "secret summarized body"));
 }
 
@@ -4686,7 +4738,7 @@ fn late_agent_names_reproject_visible_message_blocks() {
     let message = agent_message("agent-a", "agent-b", "semantic body");
     renderer.handle(&message);
     sync(&handle);
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b:"));
 
     let generation = vt.frame_generation();
     renderer.handle(&Event::AgentDisplayNameSet(
@@ -4697,10 +4749,10 @@ fn late_agent_names_reproject_visible_message_blocks() {
     ));
     vt.wait_for_frame_containing_after(
         generation,
-        "Message from agent-a to agent-b (review result):",
+        "Message from @agent-a to @agent-b (review result):",
     );
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (review result):"));
-    assert!(!vt.screen_contains(100, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (review result):"));
+    assert!(!vt.screen_contains(100, "Message from @agent-a to @agent-b:"));
     assert!(vt.screen_contains(100, "semantic body"));
 }
 
@@ -4730,9 +4782,9 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     renderer.switch_agent("agent-a".to_owned());
     vt.wait_for_frame_containing_after(
         generation,
-        "Message from agent-a to agent-b (late worker):",
+        "Message from @agent-a to @agent-b (late worker):",
     );
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (late worker):"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (late worker):"));
 
     renderer.clear_selected_agent();
     renderer.handle(&agent_message("agent-a", "user", "broadcast history"));
@@ -4746,8 +4798,8 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     sync(&handle);
     let generation = vt.frame_generation();
     renderer.clear_selected_agent();
-    vt.wait_for_frame_containing_after(generation, "Message from agent-a (late sender) to user:");
-    assert!(vt.screen_contains(100, "Message from agent-a (late sender) to user:"));
+    vt.wait_for_frame_containing_after(generation, "Message from @agent-a (late sender) to user:");
+    assert!(vt.screen_contains(100, "Message from @agent-a (late sender) to user:"));
     assert!(vt.screen_contains(100, "broadcast history"));
 }
 
@@ -4774,7 +4826,7 @@ fn resumed_session_names_do_not_relabel_prior_message_history() {
     ));
     renderer.handle(&agent_message("agent-a", "agent-b", "session A body"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (session A worker):"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (session A worker):"));
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "session-b".into(),
@@ -4789,8 +4841,8 @@ fn resumed_session_names_do_not_relabel_prior_message_history() {
     renderer.handle(&agent_message("agent-a", "agent-b", "session B body"));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b:"));
-    assert!(vt.screen_contains(100, "Message from agent-a to agent-b (session B worker):"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b:"));
+    assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (session B worker):"));
     assert_eq!(
         vt.screen_text(100)
             .iter()
@@ -4815,17 +4867,17 @@ fn show_messages_toggle_retroactively_hides_and_shows_history() {
     renderer.apply_setting("show-messages", "none");
     renderer.handle(&agent_message("agent-a", "agent-b", "retro body"));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(!vt.screen_contains(80, "Message from @agent-a to @agent-b"));
     assert!(!vt.screen_contains(80, "retro body"));
 
     renderer.apply_setting("show-messages", "all-full");
     sync(&handle);
-    assert!(vt.screen_contains(80, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(80, "Message from @agent-a to @agent-b:"));
     assert!(vt.screen_contains(80, "retro body"));
 
     renderer.apply_setting("show-messages", "none");
     sync(&handle);
-    assert!(!vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(!vt.screen_contains(80, "Message from @agent-a to @agent-b"));
     assert!(!vt.screen_contains(80, "retro body"));
 }
 

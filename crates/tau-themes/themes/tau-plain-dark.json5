@@ -37,6 +37,7 @@
     "action.error":         { fg: "red" },
 
     // -- System --
+    "agent.message.identity": { bold: true },
     "system.info.important": { fg: "red", bold: true },
     "system.disconnect":    { fg: "red", bold: true },
     "system.path":          { fg: "cyan" },

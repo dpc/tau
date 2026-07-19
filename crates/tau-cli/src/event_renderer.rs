@@ -2158,14 +2158,14 @@ impl EventRenderer {
     /// Builds a message-safe label from current local presentation metadata.
     fn message_agent_display_label(&self, agent_id: &str, use_local_names: bool) -> String {
         if !use_local_names {
-            return agent_id.to_owned();
+            return format!("@{agent_id}");
         }
         let display_name = self
             .agent_display_names
             .lock()
             .ok()
             .and_then(|names| names.get(agent_id).cloned());
-        Self::agent_identity_with_name(agent_id, display_name.as_deref(), agent_id)
+        Self::agent_identity_with_name(&format!("@{agent_id}"), display_name.as_deref(), agent_id)
     }
 
     /// Combines an unambiguous routing identity with bounded presentation-only
@@ -4524,19 +4524,145 @@ impl EventRenderer {
         }
         match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
-            MessageRenderMode::Summary => self.submitted_plain_block(
-                tau_themes::names::SYSTEM_INFO,
-                self.agent_message_summary_with_local_names(event, use_local_names),
-            ),
-            MessageRenderMode::Full => self.submitted_plain_block(
-                tau_themes::names::SYSTEM_INFO,
-                format!(
-                    "{}:\n{}",
-                    self.agent_message_summary_with_local_names(event, use_local_names),
-                    Self::agent_message_body(event)
-                ),
-            ),
+            MessageRenderMode::Summary => {
+                self.submitted_agent_message_block(event, use_local_names, false)
+            }
+            MessageRenderMode::Full => {
+                self.submitted_agent_message_block(event, use_local_names, true)
+            }
         }
+    }
+
+    /// Renders routing identities brightly while leaving surrounding header
+    /// wording, task-name context, and message content in the base style.
+    fn submitted_agent_message_block(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+        include_body: bool,
+    ) -> tau_cli_term::StyledBlock {
+        use tau_cli_term::resolve::{convert_color, themed_text};
+        use tau_themes::{SpanTree, StyleName, ThemedText, names};
+
+        let mut themed = ThemedText::new();
+        let body_style = themed.add_style(names::SYSTEM_INFO);
+        let marker_style = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
+        let identity_style = themed.add_style(names::AGENT_MESSAGE_IDENTITY);
+        let mut content = self
+            .agent_message_header_parts(event, use_local_names)
+            .into_iter()
+            .map(|(text, bright)| {
+                if bright {
+                    SpanTree::span(identity_style, vec![SpanTree::text(text)])
+                } else {
+                    SpanTree::text(text)
+                }
+            })
+            .collect::<Vec<_>>();
+        if include_body {
+            content.push(SpanTree::text(format!(
+                ":\n{}",
+                Self::agent_message_body(event)
+            )));
+        }
+        themed.push_tree(SpanTree::span(
+            body_style,
+            vec![
+                SpanTree::span(
+                    marker_style,
+                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
+                ),
+                SpanTree::span(body_style, content),
+            ],
+        ));
+
+        let body_ts = self
+            .theme
+            .resolve_style(&StyleName::new(names::SYSTEM_INFO));
+        let mut block = tau_cli_term::StyledBlock::new(themed_text(&self.theme, &themed));
+        if let Some(bg) = body_ts.bg {
+            block = block.bg(convert_color(bg));
+        }
+        block
+    }
+
+    /// Builds a header from semantic endpoint pieces so task-name text that
+    /// happens to contain another routing id cannot acquire identity styling.
+    fn agent_message_header_parts(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> Vec<(String, bool)> {
+        let (prefix, first, separator, second) = match event {
+            Event::AgentMessageSent(message) => {
+                let sender =
+                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names);
+                let sender = (sender, Some(format!("@{}", message.sender_id)));
+                let recipient = self.agent_message_sent_recipient_display(message, use_local_names);
+                let recipient_identity = match &message.recipient {
+                    tau_proto::AgentMessageRecipient::Agent { agent_id } => {
+                        Some(format!("@{agent_id}"))
+                    }
+                    tau_proto::AgentMessageRecipient::ExternalAgent {
+                        session_id,
+                        agent_id,
+                    } => Some(format!("{session_id}/@{agent_id}")),
+                    tau_proto::AgentMessageRecipient::User => None,
+                };
+                let recipient = (recipient, recipient_identity);
+                match message.kind {
+                    tau_proto::AgentMessageKind::WatchResponse => {
+                        ("Response from ", sender, " to ", recipient)
+                    }
+                    tau_proto::AgentMessageKind::WatchPrompt => {
+                        ("Prompt to ", sender, " observed by ", recipient)
+                    }
+                    _ => ("Message from ", sender, " to ", recipient),
+                }
+            }
+            Event::AgentMessageReceived(message) => {
+                let sender = self.agent_message_received_sender_label(message, use_local_names);
+                let sender_identity = Some(message.sender_session_id.as_ref().map_or_else(
+                    || format!("@{}", message.sender_id),
+                    |session_id| format!("{session_id}/@{}", message.sender_id),
+                ));
+                let sender = (sender, sender_identity);
+                let recipient = self
+                    .message_agent_display_label(message.recipient_id.as_str(), use_local_names);
+                let recipient = (recipient, Some(format!("@{}", message.recipient_id)));
+                match message.kind {
+                    tau_proto::AgentMessageKind::WatchResponse => {
+                        ("Response from ", sender, " to ", recipient)
+                    }
+                    tau_proto::AgentMessageKind::WatchPrompt => {
+                        ("Prompt to ", sender, " observed by ", recipient)
+                    }
+                    _ => ("Message from ", sender, " to ", recipient),
+                }
+            }
+            _ => unreachable!("only agent message events are rendered here"),
+        };
+        let mut parts = vec![(prefix.to_owned(), false)];
+        Self::push_agent_message_endpoint(&mut parts, first);
+        parts.push((separator.to_owned(), false));
+        Self::push_agent_message_endpoint(&mut parts, second);
+        parts
+    }
+
+    /// Appends one endpoint with only its canonical routing prefix emphasized.
+    fn push_agent_message_endpoint(
+        parts: &mut Vec<(String, bool)>,
+        (endpoint, identity): (String, Option<String>),
+    ) {
+        let Some(identity) = identity else {
+            parts.push((endpoint, false));
+            return;
+        };
+        let context = endpoint
+            .strip_prefix(&identity)
+            .expect("formatted endpoint starts with its routing identity");
+        parts.push((identity, true));
+        parts.push((context.to_owned(), false));
     }
 
     /// Render structured watch lifecycle state as a compact status rather than
@@ -4574,69 +4700,10 @@ impl EventRenderer {
 
     #[cfg(test)]
     fn agent_message_summary(&self, event: &Event) -> String {
-        self.agent_message_summary_with_local_names(event, true)
-    }
-
-    fn agent_message_summary_with_local_names(
-        &self,
-        event: &Event,
-        use_local_names: bool,
-    ) -> String {
-        match event {
-            Event::AgentMessageSent(message)
-                if message.kind == tau_proto::AgentMessageKind::WatchResponse =>
-            {
-                format!(
-                    "Response from {} to {}",
-                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
-                    self.agent_message_sent_recipient_display(message, use_local_names)
-                )
-            }
-            Event::AgentMessageSent(message)
-                if message.kind == tau_proto::AgentMessageKind::WatchPrompt =>
-            {
-                format!(
-                    "Prompt to {} observed by {}",
-                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
-                    self.agent_message_sent_recipient_display(message, use_local_names)
-                )
-            }
-            Event::AgentMessageSent(message) => format!(
-                "Message from {} to {}",
-                self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
-                self.agent_message_sent_recipient_display(message, use_local_names)
-            ),
-            Event::AgentMessageReceived(message)
-                if message.kind == tau_proto::AgentMessageKind::WatchResponse =>
-            {
-                format!(
-                    "Response from {} to {}",
-                    self.agent_message_received_sender_label(message, use_local_names),
-                    self.message_agent_display_label(
-                        message.recipient_id.as_str(),
-                        use_local_names
-                    )
-                )
-            }
-            Event::AgentMessageReceived(message)
-                if message.kind == tau_proto::AgentMessageKind::WatchPrompt =>
-            {
-                format!(
-                    "Prompt to {} observed by {}",
-                    self.agent_message_received_sender_label(message, use_local_names),
-                    self.message_agent_display_label(
-                        message.recipient_id.as_str(),
-                        use_local_names
-                    )
-                )
-            }
-            Event::AgentMessageReceived(message) => format!(
-                "Message from {} to {}",
-                self.agent_message_received_sender_label(message, use_local_names),
-                self.message_agent_display_label(message.recipient_id.as_str(), use_local_names)
-            ),
-            _ => unreachable!("only agent message events are rendered here"),
-        }
+        self.agent_message_header_parts(event, true)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
     }
 
     fn agent_message_body(event: &Event) -> String {
@@ -4714,7 +4781,7 @@ impl EventRenderer {
                 session_id,
                 agent_id,
             } => {
-                format!("{session_id}/{agent_id}")
+                format!("{session_id}/@{agent_id}")
             }
             tau_proto::AgentMessageRecipient::User => "user".to_owned(),
         }
@@ -4727,7 +4794,7 @@ impl EventRenderer {
     ) -> String {
         message.sender_session_id.as_ref().map_or_else(
             || self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
-            |session_id| format!("{session_id}/{}", message.sender_id),
+            |session_id| format!("{session_id}/@{}", message.sender_id),
         )
     }
 

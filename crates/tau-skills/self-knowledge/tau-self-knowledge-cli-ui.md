@@ -21,12 +21,14 @@ Runtime UI toggles changed with `/set` are stored in the state directory as `cli
 
 ## Agent message labels
 
-Harness-owned `message` activity keeps each agent's routing id visible and adds
-the known display/task name in parentheses, independently for sender and
-recipient. Unknown agents and peers without trustworthy advertised metadata
-remain id-only; the human endpoint remains `user`. Display names are escaped,
-bounded presentation metadata and never alter semantic message content or
-routing identity. Late authoritative name updates reproject historical UI
+Harness-owned `message` activity keeps each agent's `@`-prefixed routing id
+visible and adds the known display/task name in parentheses, independently for
+sender and recipient. Routing identities use a bright style while parenthetical
+context retains the base header style. Unknown agents and peers without
+trustworthy advertised metadata remain id-only; cross-session endpoints render
+as `session/@agent`, and the human endpoint remains `user`. Display names are
+escaped, bounded presentation metadata and never alter semantic message content
+or routing identity. Late authoritative name updates reproject historical UI
 blocks without rewriting the stored message event.
 
 ## Watched-agent activity

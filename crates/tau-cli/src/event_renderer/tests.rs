@@ -490,7 +490,7 @@ fn agent_message_summary_excludes_body() {
 
     let summary = renderer_for_agent_id_tests().agent_message_summary(&message);
 
-    assert_eq!(summary, "Message from agent-a to agent-b");
+    assert_eq!(summary, "Message from @agent-a to @agent-b");
     assert!(!summary.contains("secret payload"));
 }
 
@@ -520,7 +520,7 @@ fn agent_message_summary_omits_name_for_unnamed_target() {
 
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from named-sender (engineer) to manual-target"
+        "Message from @named-sender (engineer) to @manual-target"
     );
 }
 
@@ -540,7 +540,7 @@ fn agent_message_summary_projects_known_names_independently() {
     }));
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a (something research) to agent-b"
+        "Message from @agent-a (something research) to @agent-b"
     );
 
     renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
@@ -553,7 +553,7 @@ fn agent_message_summary_projects_known_names_independently() {
     }));
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a (something research) to agent-b (something else something)"
+        "Message from @agent-a (something research) to @agent-b (something else something)"
     );
     renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
         tau_proto::SessionAgentUnloaded {
@@ -563,7 +563,7 @@ fn agent_message_summary_projects_known_names_independently() {
     ));
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a (something research) to agent-b (something else something)",
+        "Message from @agent-a (something research) to @agent-b (something else something)",
         "unloading does not discard durable presentation metadata"
     );
 }
@@ -601,7 +601,7 @@ fn agent_message_names_do_not_duplicate_agent_ids() {
 
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a to agent-b"
+        "Message from @agent-a to @agent-b"
     );
 }
 
@@ -622,7 +622,7 @@ fn peer_message_names_require_endpoint_authority() {
     });
     assert_eq!(
         renderer.agent_message_summary(&event),
-        "Message from agent-a to remote-session/agent-b"
+        "Message from @agent-a to remote-session/@agent-b"
     );
 }
 
@@ -635,7 +635,7 @@ fn late_agent_name_updates_reproject_message_history() {
     renderer.handle(&message);
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a to agent-b"
+        "Message from @agent-a to @agent-b"
     );
 
     renderer.handle(&tau_proto::Event::AgentDisplayNameSet(
@@ -646,7 +646,7 @@ fn late_agent_name_updates_reproject_message_history() {
     ));
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a to agent-b (new task)"
+        "Message from @agent-a to @agent-b (new task)"
     );
     let stored = &renderer.message_history[0].event;
     assert_eq!(stored, &message);
@@ -666,11 +666,11 @@ fn watch_content_summaries_preserve_wording_with_names() {
     let cases = [
         (
             tau_proto::AgentMessageKind::WatchResponse,
-            "Response from worker (research task) to manager (coordination)",
+            "Response from @worker (research task) to @manager (coordination)",
         ),
         (
             tau_proto::AgentMessageKind::WatchPrompt,
-            "Prompt to worker (research task) observed by manager (coordination)",
+            "Prompt to @worker (research task) observed by @manager (coordination)",
         ),
     ];
     for (kind, expected) in cases {
@@ -714,7 +714,7 @@ fn resumed_session_clears_agent_display_name_authority() {
     ));
     assert_eq!(
         renderer.agent_message_summary(&message),
-        "Message from agent-a to agent-b"
+        "Message from @agent-a to @agent-b"
     );
 }
 
@@ -744,7 +744,7 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         renderer_for_agent_id_tests()
             .watch_turn_state_summary(&event)
             .as_deref(),
-        Some("researcher · turn started")
+        Some("@researcher · turn started")
     );
 
     let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
@@ -756,7 +756,7 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         renderer_for_agent_id_tests()
             .watch_turn_state_summary(&event)
             .as_deref(),
-        Some("researcher · turn stopped")
+        Some("@researcher · turn stopped")
     );
 
     let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
@@ -768,7 +768,7 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         renderer_for_agent_id_tests()
             .watch_turn_state_summary(&event)
             .as_deref(),
-        Some("Watching researcher · idle")
+        Some("Watching @researcher · idle")
     );
 
     let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
@@ -783,7 +783,7 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         renderer_for_agent_id_tests()
             .watch_turn_state_summary(&event)
             .as_deref(),
-        Some("Watching researcher · running")
+        Some("Watching @researcher · running")
     );
 }
 
