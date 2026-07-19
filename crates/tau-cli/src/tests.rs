@@ -1294,7 +1294,7 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
             .as_deref(),
         Some("engineer_abc12345")
     );
-    assert!(vt.screen_contains(80, "&s1 @engineer_abc12345"));
+    assert!(vt.screen_contains(80, "@engineer_abc12345"));
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
@@ -1350,10 +1350,10 @@ fn delayed_prompt_started_does_not_duplicate_live_response_block() {
 }
 
 #[test]
-fn initial_session_started_renders_session_status_without_role_placeholder() {
+fn initial_session_started_omits_session_status_and_role_placeholder() {
     // Regression: startup may announce SessionStarted before role selection.
-    // The status bar must still show the human-readable session id, without
-    // adding a misleading no-role placeholder next to it.
+    // The status bar must not duplicate the prompt-context session id or add a
+    // misleading no-role placeholder.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1367,8 +1367,57 @@ fn initial_session_started_renders_session_status_without_role_placeholder() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&tau-agent-test"));
+    assert!(!vt.screen_contains(80, "&tau-agent-test"));
     assert!(!vt.screen_contains(80, "no role selected"));
+}
+
+/// A theme refresh between an optimistic session switch and its authoritative
+/// echo must preserve routing, drafts, and the new prompt-context session.
+#[test]
+fn theme_refresh_preserves_optimistic_session_context() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.set_right_prompt_paths("/tmp/project".into(), None);
+    let draft_handle = Arc::new((Mutex::new(DraftSlot::default()), std::sync::Condvar::new()));
+    let active_session = Arc::new(Mutex::new("old-session".to_owned()));
+    renderer.set_draft_retargeter(draft_handle.clone(), active_session.clone());
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "old-session".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    {
+        let mut draft = draft_handle.0.lock().expect("draft");
+        draft.epoch = 7;
+        draft.pending = Some((
+            7,
+            tau_proto::UiPromptDraft {
+                session_id: "new-session".into(),
+                target_agent_id: None,
+                text: "draft".to_owned(),
+            },
+        ));
+    }
+    *active_session.lock().expect("active session") = "new-session".to_owned();
+    let themed =
+        tau_themes::Theme::parse(r##"{ styles: { "prompt.cwd": { fg: "red", bold: true } } }"##)
+            .expect("theme parses");
+    renderer.apply_theme(themed);
+    sync(&handle);
+
+    assert_eq!(
+        active_session.lock().expect("active session").as_str(),
+        "new-session"
+    );
+    let draft = draft_handle.0.lock().expect("draft");
+    assert_eq!(draft.epoch, 7);
+    assert!(draft.pending.is_some());
+    assert!(vt.screen_contains(80, "/tmp/project &new-session"));
+    assert!(!vt.screen_contains(80, "&old-session"));
 }
 
 #[test]
@@ -4956,7 +5005,7 @@ fn new_session_clears_session_ui_state() {
     assert!(!vt.screen_contains(80, "old prompt"));
     assert!(!vt.screen_contains(80, "old response"));
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
-    assert!(vt.screen_contains(80, "&s2"));
+    assert!(!vt.screen_contains(80, "&s2"));
     assert!(!vt.screen_contains(80, "no role selected"));
 }
 
@@ -5090,7 +5139,7 @@ fn new_session_preserves_role_status() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "+engineer"));
-    assert!(vt.screen_contains(80, "&s2"));
+    assert!(!vt.screen_contains(80, "&s2"));
     assert!(!vt.screen_contains(80, "no role selected"));
 }
 
@@ -5131,7 +5180,7 @@ fn model_status_uses_symbol_prefixed_chips() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row");
-    assert!(status_row.starts_with("&tau-agent-test +engineer ~high"));
+    assert!(status_row.starts_with("+engineer ~high"));
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
@@ -5376,13 +5425,13 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     sync(&handle);
 
     // In the no-agent/start-new-agent state, the status bar mirrors the prompt
-    // placeholder by showing the selected role immediately after the session.
+    // placeholder by showing the selected role.
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row before agent selection");
-    assert!(status_row.starts_with("&s1 +engineer"));
+    assert!(status_row.starts_with("+engineer"));
     assert!(!status_row.contains("@engineer_abc"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -5399,9 +5448,9 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer_abc"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @engineer_abc"));
+    assert!(status_row.starts_with("@engineer_abc"));
     assert!(!status_row.contains("+engineer"));
 
     renderer.clear_selected_agent();
@@ -5410,9 +5459,9 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after clearing agent selection");
-    assert!(status_row.starts_with("&s1 +engineer"));
+    assert!(status_row.starts_with("+engineer"));
     assert!(!status_row.contains("@engineer_abc"));
 }
 
@@ -5452,9 +5501,9 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer-junior_b"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @engineer-junior_b (engineer-junior)"));
+    assert!(status_row.starts_with("@engineer-junior_b (engineer-junior)"));
     assert!(!status_row.contains("@engineer-junior (engineer-junior_b)"));
 }
 
@@ -5494,9 +5543,9 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer-junior_b"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @engineer-junior_b"));
+    assert!(status_row.starts_with("@engineer-junior_b"));
     assert!(!status_row.contains("(engineer-junior)"));
     assert!(!status_row.contains("@engineer-junior_b ("));
 }
@@ -5545,7 +5594,7 @@ fn status_agent_chip_shows_current_agent_watchers() {
     let status_row = vt
         .screen_text(120)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer_child"))
         .expect("status row after watch update");
     assert!(status_row.contains("@engineer_child (fix streaming ellipsis)"));
     assert!(status_row.contains("watched by: manager-AjhD"));
@@ -5591,7 +5640,7 @@ fn status_agent_chip_truncates_multiple_current_agent_watchers() {
     let status_row = vt
         .screen_text(120)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer_child"))
         .expect("status row after watch updates");
     assert!(status_row.contains("watched by: manager-AjhD, +1 more agents"));
     assert!(!status_row.contains("reviewer-Zz99"));
@@ -6487,7 +6536,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s2 +engineer"));
+    assert!(vt.screen_contains(80, "+engineer"));
     assert!(!vt.screen_contains(80, "^medium"));
     assert!(!vt.screen_contains(80, "~medium"));
 
@@ -6510,7 +6559,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s2 +engineer ~high"));
+    assert!(vt.screen_contains(80, "+engineer ~high"));
 }
 
 /// Role availability should feed `/new` argument completion as well as
@@ -6599,7 +6648,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s3 +engineer ^low ~high !off"));
+    assert!(vt.screen_contains(80, "+engineer ^low ~high !off"));
 }
 
 #[test]

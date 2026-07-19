@@ -71,14 +71,19 @@ pub(crate) fn prompt_input_placeholder(
     tau_cli_term::resolve::themed_text(theme, &text)
 }
 
-pub(crate) fn cwd_right_prompt(
+/// Builds the atomic `<cwd> <&session-id>` right-side prompt context.
+pub(crate) fn right_prompt_context(
     theme: &tau_themes::Theme,
     cwd: &Path,
     home: Option<&Path>,
+    session_id: &str,
 ) -> tau_cli_term::StyledText {
     let mut text = ThemedText::new();
-    let cwd_style = text.add_style(tau_themes::names::PROMPT_CWD);
-    text.push(cwd_style, display_cwd(cwd, home));
+    let context_style = text.add_style(tau_themes::names::PROMPT_CWD);
+    text.push(
+        context_style,
+        format!("{} &{session_id}", display_cwd(cwd, home)),
+    );
     tau_cli_term::resolve::themed_text(theme, &text)
 }
 

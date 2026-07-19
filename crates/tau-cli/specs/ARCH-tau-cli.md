@@ -17,6 +17,13 @@ commands, including key-binding shell snippets, completion commands, `$EDITOR`,
 and `$VISUAL`. Treat `cli.yaml`, inherited environment variables, and PATH as
 local code execution inputs rather than untrusted data.
 
+The prompt's right-side context renders `<cwd> <&session-id>` as one
+`prompt.cwd`-styled unit. If prompt input needs that space, terminal overflow
+hides the complete unit. The bottom status line identifies the selected role or
+agent but does not repeat the session id. Authoritative `session.started`
+events reconcile the displayed context and the input loop's routing session,
+including transitions initiated by another attached UI.
+
 Prompt completion may read the local filesystem and query `git` for tracked and
 unignored files. These operations should stay bounded and best-effort: failures
 or quota/size limits should disable the completion source or surface a local

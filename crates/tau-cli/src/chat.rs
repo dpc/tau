@@ -970,7 +970,8 @@ pub(crate) fn run_chat(
     let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
     let cwd = std::env::current_dir()?;
     let home_dir = dirs::home_dir();
-    let right_prompt = crate::theme::cwd_right_prompt(&theme, &cwd, home_dir.as_deref());
+    let right_prompt =
+        crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id);
     let cursor_shape = if settings.bar_cursor {
         tau_cli_term::CursorShape::Bar
     } else {
@@ -1049,6 +1050,7 @@ pub(crate) fn run_chat(
         settings.submitted_prompt_symbol,
     );
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
+    renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
     renderer.set_action_state(action_state.clone());
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new("/skill"),
@@ -1878,6 +1880,11 @@ impl<'a> TerminalInputSession<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
             let event = self.term.get_next_event()?;
+            if let Ok(active_session) = self.ctx.active_session_state.lock()
+                && self.session_id.as_str() != active_session.as_str()
+            {
+                self.session_id.clone_from(&active_session);
+            }
             if let Some(exit) = self.handle_event(event)? {
                 return Ok(exit);
             }
@@ -2134,17 +2141,25 @@ impl<'a> TerminalInputSession<'a> {
     fn start_new_session(&mut self) -> Result<(), CliError> {
         let cwd = std::env::current_dir()?;
         let new_id = crate::daemon::mint_session_id(&cwd);
-        let _ = send_event(
-            self.writer,
-            &Event::UiSwitchSession(tau_proto::UiSwitchSession {
-                new_session_id: new_id.as_str().into(),
-                reason: tau_proto::SessionStartReason::New,
-            }),
-        );
         *self.session_id = new_id;
         if let Ok(mut active_session) = self.ctx.active_session_state.lock() {
             *active_session = self.session_id.clone();
         }
+        self.term
+            .handle()
+            .set_right_prompt(crate::theme::right_prompt_context(
+                &self.ctx.theme,
+                &self.ctx.cwd,
+                self.ctx.home_dir.as_deref(),
+                self.session_id,
+            ));
+        let _ = send_event(
+            self.writer,
+            &Event::UiSwitchSession(tau_proto::UiSwitchSession {
+                new_session_id: self.session_id.as_str().into(),
+                reason: tau_proto::SessionStartReason::New,
+            }),
+        );
         self.pending_new_agent_options.clear();
         self.clear_selected_agent();
         Ok(())
@@ -2330,13 +2345,6 @@ impl<'a> TerminalInputSession<'a> {
                 &theme,
                 &self.ctx.prompt_symbol,
                 current_role.as_deref(),
-            ));
-        self.term
-            .handle()
-            .set_right_prompt(crate::theme::cwd_right_prompt(
-                &theme,
-                &self.ctx.cwd,
-                self.ctx.home_dir.as_deref(),
             ));
         let _ = self.ctx.renderer_tx.send(RendererCmd::SetTheme {
             theme: theme.clone(),

@@ -27,9 +27,9 @@ fn selected_named_builtin_theme() {
 
     let theme = select_theme(&dirs, CliTheme::Named("tau-dpc".to_owned()))
         .expect("built-in theme loads without config dir");
-    let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
+    let prompt = right_prompt_context(&theme, Path::new("/tmp/project"), None, "session-1");
 
-    assert_eq!(prompt.spans()[0].text, "/tmp/project");
+    assert_eq!(prompt.spans()[0].text, "/tmp/project &session-1");
 }
 
 /// Ensures explicitly named built-ins accept documented case-insensitive input.
@@ -69,8 +69,10 @@ fn command_theme_selection_ignores_env_override() {
     .expect("env theme loads");
     let command = select_theme_for_command(&dirs, "tau-dpc").expect("command theme loads");
 
-    let startup_prompt = cwd_right_prompt(&startup, Path::new("/tmp/project"), None);
-    let command_prompt = cwd_right_prompt(&command, Path::new("/tmp/project"), None);
+    let startup_prompt =
+        right_prompt_context(&startup, Path::new("/tmp/project"), None, "session-1");
+    let command_prompt =
+        right_prompt_context(&command, Path::new("/tmp/project"), None, "session-1");
     assert_eq!(
         startup_prompt.spans()[0].style.fg,
         Some(tau_cli_term::Color::Red)
@@ -99,7 +101,7 @@ fn selected_external_theme_from_config_themes_dir() {
     };
 
     let theme = select_theme(&dirs, CliTheme::Named("custom".to_owned())).expect("theme loads");
-    let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
+    let prompt = right_prompt_context(&theme, Path::new("/tmp/project"), None, "session-1");
 
     assert_eq!(prompt.spans()[0].style.fg, Some(tau_cli_term::Color::Red));
     assert!(prompt.spans()[0].style.bold);
@@ -368,13 +370,16 @@ fn suspended_prompt_input_placeholder_explains_explicit_resume() {
     );
 }
 
+/// The directory and session id form one prompt-context span so theme changes
+/// cannot style or hide either half independently.
 #[test]
-fn cwd_right_prompt_uses_prompt_cwd_style() {
+fn right_prompt_context_uses_prompt_cwd_style() {
     let theme = tau_themes::Theme::parse(r##"{ styles: { "prompt.cwd": { fg: "dark_grey" } } }"##)
         .expect("test theme parses");
-    let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
+    let prompt = right_prompt_context(&theme, Path::new("/tmp/project"), None, "session-1");
 
-    assert_eq!(prompt.spans()[0].text, "/tmp/project");
+    assert_eq!(prompt.spans()[0].text, "/tmp/project &session-1");
+    assert_eq!(prompt.spans().len(), 1);
     assert_eq!(
         prompt.spans()[0].style.fg,
         Some(tau_cli_term::Color::DarkGrey)

@@ -19,7 +19,7 @@ use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
 use crate::build_banner;
-use crate::chat::{DraftSlot, retarget_prompt_draft_snapshot};
+use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block, markdown_prompt_block, markdown_streaming_block,
 };
@@ -227,8 +227,11 @@ pub(crate) struct EventRenderer {
     ready_extensions: HashSet<String>,
     /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
-    /// Current session id, rendered as the last status-bar element.
+    /// Current session id used to scope events and detect session transitions.
     current_session_id: Option<tau_proto::SessionId>,
+    /// Filesystem context used to rebuild the right prompt after session
+    /// events.
+    right_prompt_paths: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     /// Live history of completed diff-capable tool blocks plus the data
     /// needed to re-render them. `/set show-diff` flips
     /// `diffs_expanded` and walks this list calling `set_block` so
@@ -397,7 +400,7 @@ pub(crate) struct EventRenderer {
 struct DraftRetargeter {
     /// Debounce mailbox owned by the CLI input/draft subsystem.
     handle: Arc<(Mutex<DraftSlot>, Condvar)>,
-    /// Current session id mirrored by the input loop for `/session new`.
+    /// Authoritative current session id shared with input routing.
     session_id: Arc<Mutex<String>>,
 }
 
@@ -1388,6 +1391,7 @@ impl EventRenderer {
             ready_extensions: HashSet::new(),
             model_status_block: None,
             current_session_id: None,
+            right_prompt_paths: None,
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
@@ -1471,6 +1475,15 @@ impl EventRenderer {
         session_id: Arc<Mutex<String>>,
     ) {
         self.draft_retargeter = Some(DraftRetargeter { handle, session_id });
+    }
+
+    /// Configures the filesystem context rendered beside the current session.
+    pub(crate) fn set_right_prompt_paths(
+        &mut self,
+        cwd: std::path::PathBuf,
+        home: Option<std::path::PathBuf>,
+    ) {
+        self.right_prompt_paths = Some((cwd, home));
     }
 
     pub(crate) fn known_agents(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
@@ -2396,6 +2409,20 @@ impl EventRenderer {
                 self.current_role.as_deref(),
             ));
         self.refresh_prompt_placeholder();
+        let effective_session_id = self
+            .draft_retargeter
+            .as_ref()
+            .and_then(|retargeter| {
+                retargeter
+                    .session_id
+                    .lock()
+                    .ok()
+                    .map(|session_id| tau_proto::SessionId::from(session_id.clone()))
+            })
+            .or_else(|| self.current_session_id.clone());
+        if let Some(session_id) = effective_session_id {
+            self.render_right_prompt_context(&session_id);
+        }
         self.render_model_status_if_present();
         self.rerender_visible_for_current_settings();
         self.handle.invalidate_screen();
@@ -2960,7 +2987,6 @@ impl EventRenderer {
         let status_style = themed.add_style(names::MODEL_STATUS);
         let model_style = themed.add_style(names::STATUS_MODEL);
         let role_style = themed.add_style(names::STATUS_ROLE);
-        let session_style = themed.add_style(names::STATUS_SESSION);
         let effort_style = themed.add_style(names::STATUS_EFFORT);
         let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
         let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
@@ -2979,14 +3005,6 @@ impl EventRenderer {
         let mut needs_space = false;
         let mut right_needs_space = false;
 
-        if let Some(session_id) = self.current_session_id.as_ref() {
-            push_status_chip(
-                &mut themed,
-                session_style,
-                &mut needs_space,
-                format!("&{session_id}"),
-            );
-        }
         match (
             self.current_agent_id.as_deref(),
             self.current_role.as_deref(),
@@ -4865,6 +4883,7 @@ impl EventRenderer {
 
     fn handle_new_session_started(&mut self, started: &tau_proto::SessionStarted) {
         self.current_session_id = Some(started.session_id.clone());
+        self.reconcile_session_context(&started.session_id);
         self.clear_for_new_session();
     }
 
@@ -4874,7 +4893,31 @@ impl EventRenderer {
             self.rerender_message_history();
         }
         self.current_session_id = Some(started.session_id.clone());
+        self.reconcile_session_context(&started.session_id);
         self.render_model_status();
+    }
+
+    fn reconcile_session_context(&self, session_id: &tau_proto::SessionId) {
+        if let Some(retargeter) = &self.draft_retargeter
+            && let Ok(mut active_session) = retargeter.session_id.lock()
+        {
+            *active_session = session_id.to_string();
+            invalidate_pending_draft(retargeter.handle.as_ref());
+        }
+        self.render_right_prompt_context(session_id);
+    }
+
+    fn render_right_prompt_context(&self, session_id: &tau_proto::SessionId) {
+        let Some((cwd, home)) = &self.right_prompt_paths else {
+            return;
+        };
+        self.handle
+            .set_right_prompt(crate::theme::right_prompt_context(
+                &self.theme,
+                cwd,
+                home.as_deref(),
+                session_id.as_ref(),
+            ));
     }
 
     fn handle_prompt_events(&mut self, event: &Event) -> bool {

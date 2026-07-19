@@ -2068,6 +2068,31 @@ fn clipped_full_redraw_keeps_later_diff_redraws_clipped() {
     assert!(screen_contains(&parser, 40, "status"));
 }
 
+/// Prompt overflow must hide the complete right-side context rather than
+/// leaving either its directory or session-id component behind.
+#[test]
+fn prompt_overflow_hides_complete_right_context() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 25, 20);
+    let (term, handle, input_tx) =
+        Term::new_virtual(25, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.set_right_prompt(StyledText::from("/project &session-1"));
+    flush_redraws(&handle, &buf, &mut parser);
+    assert!(screen_contains(&parser, 25, "/project"));
+    assert!(screen_contains(&parser, 25, "&session-1"));
+    input_tx
+        .send(RawEvent::Paste("123456789".to_owned()))
+        .expect("send input");
+    assert!(matches!(
+        term.get_next_event().expect("input event"),
+        Event::BufferChanged
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert!(!screen_contains(&parser, 25, "/project"));
+    assert!(!screen_contains(&parser, 25, "&session-1"));
+}
+
 /// Pasting multiline text should normalize layout and cursor state so the
 /// rendered terminal matches the buffer.
 #[test]

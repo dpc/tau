@@ -107,7 +107,7 @@ pub const COMPLETION_SELECTED: &str = "completion.selected";
 
 // -- Prompt --
 pub const PROMPT_MARKER: &str = "prompt.marker";
-/// Current working directory shown in the right prompt.
+/// Combined `<cwd> <&session-id>` context shown in the right prompt.
 pub const PROMPT_CWD: &str = "prompt.cwd";
 /// Placeholder text shown in the prompt when the input buffer is empty.
 pub const PROMPT_PLACEHOLDER: &str = "prompt.placeholder";
