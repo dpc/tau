@@ -78,7 +78,7 @@ fn all_category_filter_is_additive() {
 /// Each public inclusion flag remains additive and `--all` maps to all three.
 #[test]
 fn public_filter_flags_map_independently_and_all_enables_every_flag() {
-    let base = crate::cli::ListAgentsArgs {
+    let base = crate::cli::AgentListArgs {
         session_id: "s1".to_owned(),
         include_suspended: false,
         include_unavailable: false,
@@ -91,7 +91,7 @@ fn public_filter_flags_map_independently_and_all_enables_every_flag() {
                 include_suspended: true,
                 ..AgentListFilter::default()
             },
-            crate::cli::ListAgentsArgs {
+            crate::cli::AgentListArgs {
                 include_suspended: true,
                 ..base.clone()
             },
@@ -101,7 +101,7 @@ fn public_filter_flags_map_independently_and_all_enables_every_flag() {
                 include_unavailable: true,
                 ..AgentListFilter::default()
             },
-            crate::cli::ListAgentsArgs {
+            crate::cli::AgentListArgs {
                 include_unavailable: true,
                 ..base.clone()
             },
@@ -111,7 +111,7 @@ fn public_filter_flags_map_independently_and_all_enables_every_flag() {
                 include_unloaded: true,
                 ..AgentListFilter::default()
             },
-            crate::cli::ListAgentsArgs {
+            crate::cli::AgentListArgs {
                 include_unloaded: true,
                 ..base.clone()
             },
@@ -120,7 +120,7 @@ fn public_filter_flags_map_independently_and_all_enables_every_flag() {
         assert_eq!(AgentListFilter::from_args(&args), expected);
     }
     assert_eq!(
-        AgentListFilter::from_args(&crate::cli::ListAgentsArgs { all: true, ..base }),
+        AgentListFilter::from_args(&crate::cli::AgentListArgs { all: true, ..base }),
         AgentListFilter {
             include_suspended: true,
             include_unavailable: true,

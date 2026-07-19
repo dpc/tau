@@ -253,12 +253,13 @@ fn component_command_parses_harness() {
     ));
 }
 
-/// Public list-agents flags parse additively around one required session id.
+/// Public agent-list flags parse additively around one required session id.
 #[test]
 fn list_agents_command_parses_filters() {
     let cli = super::cli::Cli::parse_from([
         "tau",
-        "list-agents",
+        "agent",
+        "list",
         "session-1",
         "--include-suspended",
         "--include-unloaded",
@@ -266,13 +267,50 @@ fn list_agents_command_parses_filters() {
 
     assert!(matches!(
         cli.command,
-        Some(super::cli::Command::ListAgents(args))
+        Some(super::cli::Command::Agent {
+            command: super::cli::AgentCommand::List(args),
+        })
             if args.session_id == "session-1"
                 && args.include_suspended
                 && args.include_unloaded
                 && !args.include_unavailable
                 && !args.all
     ));
+}
+
+/// Session inspection operations share the same noun-first nested command shape
+/// as agent inspection without changing their existing arguments.
+#[test]
+fn session_commands_parse_nested_operations() {
+    let list =
+        super::cli::Cli::parse_from(["tau", "session", "list", "--sessions-dir", "/tmp/sessions"]);
+    assert!(matches!(
+        list.command,
+        Some(super::cli::Command::Session {
+            command: super::cli::SessionCommand::List { sessions_dir },
+        }) if sessions_dir == std::path::PathBuf::from("/tmp/sessions")
+    ));
+
+    let show = super::cli::Cli::parse_from(["tau", "session", "show", "--session-id", "s1"]);
+    assert!(matches!(
+        show.command,
+        Some(super::cli::Command::Session {
+            command: super::cli::SessionCommand::Show { session_id, .. },
+        }) if session_id == "s1"
+    ));
+}
+
+/// The superseded flat commands stay rejected instead of creating a second
+/// public spelling for each nested operation.
+#[test]
+fn flat_session_and_agent_commands_are_rejected() {
+    for command in ["session-list", "session-show", "list-agents"] {
+        let err = match super::cli::Cli::try_parse_from(["tau", command]) {
+            Ok(_) => panic!("flat command should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
 }
 
 #[test]
@@ -388,7 +426,7 @@ fn legacy_config_path_is_rejected() {
     assert!(err.to_string().contains("--config is no longer supported"));
 
     let non_run_cli =
-        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "session-list"]);
+        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "session", "list"]);
     let non_run_err = super::reject_legacy_config_path(non_run_cli.run.config.as_deref())
         .expect_err("legacy config path should fail before non-run dispatch");
     assert!(

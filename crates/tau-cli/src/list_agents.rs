@@ -26,7 +26,7 @@ pub(crate) struct AgentListFilter {
 }
 
 impl AgentListFilter {
-    fn from_args(args: &crate::cli::ListAgentsArgs) -> Self {
+    fn from_args(args: &crate::cli::AgentListArgs) -> Self {
         if args.all {
             return Self {
                 include_suspended: true,
@@ -42,8 +42,8 @@ impl AgentListFilter {
     }
 }
 
-/// Runs `tau list-agents`.
-pub(crate) fn run(args: &crate::cli::ListAgentsArgs) -> Result<(), CliError> {
+/// Runs `tau agent list`.
+pub(crate) fn run(args: &crate::cli::AgentListArgs) -> Result<(), CliError> {
     let filter = AgentListFilter::from_args(args);
     let scope = if filter.include_unloaded {
         SessionAgentListScope::History

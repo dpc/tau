@@ -125,7 +125,7 @@ fn invalid_inspection_roots_return_errors() {
     assert!(policy_lines(&policy_path).is_err());
 }
 
-/// Ensures one corrupt journal cannot prevent `session-list` from reporting
+/// Ensures one corrupt journal cannot prevent `session list` from reporting
 /// healthy sessions, while preserving a visible typed diagnostic for the
 /// corrupt session instead of folding or silently skipping it.
 #[test]

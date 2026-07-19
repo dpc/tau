@@ -151,7 +151,7 @@ The CLI caches harness-owned navigation classification only from complete
 `agent.stats_updated` snapshots. Selected transcript, drafts, editor state, and
 presentation remain local to each UI.
 
-`tau list-agents` obtains membership, runtime, and navigation authority through
+`tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
 parent-before-child TSV ordering, and escaping. The C-b action invokes `fzf`
 directly through `tau-cli-term`, which projects width-aware aligned display

@@ -136,26 +136,17 @@ pub enum Command {
     #[command(hide = true)]
     Run(RunArgs),
 
-    /// List all sessions
-    SessionList {
-        /// Path to per-session storage root (`<state-dir>/sessions/`)
-        #[arg(long, default_value_os_t = default_sessions_dir())]
-        sessions_dir: PathBuf,
+    /// Inspect persisted sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
     },
 
-    /// Show a single session's history
-    SessionShow {
-        /// Session identifier
-        #[arg(long, default_value_t = default_session_id().to_owned())]
-        session_id: String,
-
-        /// Path to per-session storage root (`<state-dir>/sessions/`)
-        #[arg(long, default_value_os_t = default_sessions_dir())]
-        sessions_dir: PathBuf,
+    /// Inspect agents in a running session.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
     },
-
-    /// List agents known to a running session
-    ListAgents(ListAgentsArgs),
 
     /// Show persisted policy approvals
     PolicyShow {
@@ -202,9 +193,36 @@ pub enum Command {
     },
 }
 
-/// Filters for `tau list-agents`.
+#[derive(Subcommand)]
+pub enum SessionCommand {
+    /// List all sessions.
+    List {
+        /// Path to per-session storage root (`<state-dir>/sessions/`)
+        #[arg(long, default_value_os_t = default_sessions_dir())]
+        sessions_dir: PathBuf,
+    },
+
+    /// Show a single session's history.
+    Show {
+        /// Session identifier
+        #[arg(long, default_value_t = default_session_id().to_owned())]
+        session_id: String,
+
+        /// Path to per-session storage root (`<state-dir>/sessions/`)
+        #[arg(long, default_value_os_t = default_sessions_dir())]
+        sessions_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// List agents known to a running session.
+    List(AgentListArgs),
+}
+
+/// Filters for `tau agent list`.
 #[derive(Args, Clone)]
-pub struct ListAgentsArgs {
+pub struct AgentListArgs {
     /// Running session to query.
     pub session_id: String,
 

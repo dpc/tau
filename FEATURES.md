@@ -92,7 +92,7 @@ navigation classification for each loaded agent while keeping their selected
 transcript, drafts, and presentation local. Explicit classifications survive UI
 reconnect while the agent remains loaded in the same daemon session. Unload,
 session switch, and daemon exit forget them.
-Running sessions also expose a bounded, pipe-friendly `tau list-agents` roster,
+Running sessions also expose a bounded, pipe-friendly `tau agent list` roster,
 and the terminal's C-b binding can pick a current non-suspended agent through
 optional `fzf` without changing durable navigation state.
 

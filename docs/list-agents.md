@@ -1,6 +1,6 @@
 # Listing and picking session agents
 
-`tau list-agents <session-id>` queries the live harness currently bound to that
+`tau agent list <session-id>` queries the live harness currently bound to that
 session. It does not start a daemon and does not inspect unrelated agent
 directories.
 
@@ -39,8 +39,8 @@ Free-text fields escape backslash, tab, newline, carriage return, and other
 controls. The first field is always the unescaped agent id, so scripts can use:
 
 ```sh
-tau list-agents my-session | cut -f1
-tau list-agents my-session --all | fzf --delimiter=$'\t'
+tau agent list my-session | cut -f1
+tau agent list my-session --all | fzf --delimiter=$'\t'
 ```
 
 An empty result is successful and prints nothing. A missing/ambiguous daemon,

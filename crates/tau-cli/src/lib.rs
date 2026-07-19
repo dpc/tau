@@ -585,14 +585,15 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintTools,
             } => {}
-            cli::Command::SessionList { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-list")?;
+            cli::Command::Session { command } => {
+                let command_name = match command {
+                    cli::SessionCommand::List { .. } => "session list",
+                    cli::SessionCommand::Show { .. } => "session show",
+                };
+                reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
-            cli::Command::SessionShow { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-show")?;
-            }
-            cli::Command::ListAgents(_) => {
-                reject_harness_config_overrides(&harness_config_overrides, "list-agents")?;
+            cli::Command::Agent { .. } => {
+                reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
             }
             cli::Command::PolicyShow { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
@@ -725,27 +726,34 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
             }
 
-            cli::Command::SessionList { sessions_dir } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-list")?;
+            cli::Command::Session {
+                command: cli::SessionCommand::List { sessions_dir },
+            } => {
+                reject_harness_config_overrides(&harness_config_overrides, "session list")?;
                 for line in tau_session_inspect::session_list_lines(sessions_dir)? {
                     println!("{line}");
                 }
                 Ok(())
             }
 
-            cli::Command::SessionShow {
-                session_id,
-                sessions_dir,
+            cli::Command::Session {
+                command:
+                    cli::SessionCommand::Show {
+                        session_id,
+                        sessions_dir,
+                    },
             } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-show")?;
+                reject_harness_config_overrides(&harness_config_overrides, "session show")?;
                 for line in tau_session_inspect::session_lines(sessions_dir, &session_id)? {
                     println!("{line}");
                 }
                 Ok(())
             }
 
-            cli::Command::ListAgents(args) => {
-                reject_harness_config_overrides(&harness_config_overrides, "list-agents")?;
+            cli::Command::Agent {
+                command: cli::AgentCommand::List(args),
+            } => {
+                reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
                 list_agents::run(&args)
             }
 

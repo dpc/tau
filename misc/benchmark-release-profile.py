@@ -34,7 +34,7 @@ def main():
     args = parser.parse_args()
 
     os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
-    command_arguments = ["session-list", "--sessions-dir", args.sessions_dir]
+    command_arguments = ["session", "list", "--sessions-dir", args.sessions_dir]
     for binary in (args.fat, args.thin):
         run_batch(binary, command_arguments, 5)
 

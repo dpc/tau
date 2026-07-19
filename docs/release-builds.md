@@ -97,7 +97,7 @@ each archived target.
 The runtime fixture contained 100 sessions with 100 alternating durable
 load/unload events each. After warming each binary, the benchmark pinned itself
 to one available CPU and timed 25 fixed-seed, randomized-order pairs of ten
-`tau session-list --sessions-dir FIXTURE` invocations, discarding output.
+`tau session list --sessions-dir FIXTURE` invocations, discarding output.
 Record every paired ratio, absolute median, and range; do not infer sustained
 runtime behavior from startup-only loops. Create the fixture with a temporary
 `tau-session-inspect` example that opens a `SessionStore` and, for session ids
