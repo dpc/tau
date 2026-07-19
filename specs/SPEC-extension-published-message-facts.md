@@ -377,15 +377,24 @@ rendered system prompt outside the template.
 
 ## UI projection
 
-The CLI/UI consumes the same committed events and renders each type directly:
-publisher, claimed Tau target when the containing view does not already imply
-it, sender/actor/recipient, optional conversation, message target reference,
-reaction, and text as applicable. It uses stable IDs as identifiers and
-displays optional labels secondarily. It never infers verification, ownership,
-reply authority, or routing and never normally displays `extension_data`.
-Rendering is bounded and escaped identically on live delivery and replay.
-Universally invalid facts use the deterministic diagnostic described above;
-valid unavailable-target facts remain ordinary visible facts.
+The CLI/UI consumes the same committed events and renders each type directly as
+a compact directional heading followed immediately by text or reaction content
+when applicable. The heading keeps the publisher inline and code-styled, uses
+`from`/`by`/`to` semantics appropriate to the fact, and includes the claimed Tau
+target when the containing view does not already imply it. Useful
+sender/actor/recipient and conversation display values are primary; their stable
+IDs are presentation fallbacks when useful display metadata is absent. A
+conversation alias may similarly precede its stable ID as a presentation
+fallback. Message IDs and target references are omitted from routine UI, except
+that an operation with no party or conversation presentation context may show
+its stable target reference as a fallback.
+
+The UI never infers verification, ownership, reply authority, or routing and
+never normally displays `extension_data`. All underlying typed fields remain in
+the committed event and raw inspection surfaces. Rendering is bounded and
+escaped identically on live delivery and replay. Universally invalid facts use
+the deterministic diagnostic described above; valid unavailable-target facts
+remain ordinary visible facts.
 
 ## Extension responsibilities
 

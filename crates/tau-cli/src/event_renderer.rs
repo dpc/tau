@@ -3439,6 +3439,52 @@ impl EventRenderer {
         block
     }
 
+    /// Render a message-fact block while styling only its authenticated
+    /// publisher code span, never interpreting untrusted heading metadata
+    /// or body text.
+    fn submitted_message_fact_block(&self, body_text: String) -> tau_cli_term::StyledBlock {
+        use tau_cli_term::resolve::{convert_color, themed_text};
+        use tau_themes::{SpanTree, StyleName, ThemedText, names};
+
+        let mut themed = ThemedText::new();
+        let body_name = names::SYSTEM_INFO;
+        let body_style = themed.add_style(body_name);
+        let marker_style = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
+        let code_style = themed.add_style(names::MARKDOWN_CODE);
+        let body = if let Some(code_start) = body_text.find('`')
+            && let Some(relative_code_end) = body_text[code_start + 1..].find('`')
+        {
+            let code_end = code_start + 1 + relative_code_end + 1;
+            vec![
+                SpanTree::text(&body_text[..code_start]),
+                SpanTree::span(
+                    code_style,
+                    vec![SpanTree::text(&body_text[code_start..code_end])],
+                ),
+                SpanTree::text(&body_text[code_end..]),
+            ]
+        } else {
+            vec![SpanTree::text(body_text)]
+        };
+        themed.push_tree(SpanTree::span(
+            body_style,
+            vec![
+                SpanTree::span(
+                    marker_style,
+                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
+                ),
+                SpanTree::span(body_style, body),
+            ],
+        ));
+
+        let body_theme_style = self.theme.resolve_style(&StyleName::new(body_name));
+        let mut block = tau_cli_term::StyledBlock::new(themed_text(&self.theme, &themed));
+        if let Some(background) = body_theme_style.bg {
+            block = block.bg(convert_color(background));
+        }
+        block
+    }
+
     pub(crate) fn handle_disconnect(&mut self, reason: Option<String>) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -4334,10 +4380,8 @@ impl EventRenderer {
         let Some(rendered) = crate::message_fact_render::render(event, target_context) else {
             return false;
         };
-        self.handle.print_output(
-            "message-fact",
-            self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, rendered),
-        );
+        self.handle
+            .print_output("message-fact", self.submitted_message_fact_block(rendered));
         true
     }
 

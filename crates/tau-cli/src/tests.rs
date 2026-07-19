@@ -2526,7 +2526,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
     renderer.clear_selected_agent();
     sync(&handle);
     assert!(vt.screen_contains(100, "unavailable body"));
-    assert!(vt.screen_contains(100, "Tau target: unavailable-agent"));
+    assert!(vt.screen_contains(100, "for Tau target unavailable-agent"));
     renderer.switch_agent("fresh-after-global".to_owned());
     sync(&handle);
     assert!(!vt.screen_contains(100, "unavailable body"));
@@ -2563,7 +2563,68 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
     renderer.switch_agent("loaded-agent".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(100, "loaded body"));
-    assert!(!vt.screen_contains(100, "Tau target: loaded-agent"));
+    assert!(!vt.screen_contains(100, "for Tau target loaded-agent"));
+}
+
+/// The compact delivered-message shape wraps naturally at narrow terminal
+/// widths, preserves its immediate body, and styles only publisher provenance
+/// as inline code.
+#[test]
+fn compact_message_fact_wraps_at_narrow_width_with_code_styled_publisher() {
+    let (_term, handle, vt) = setup(28, 20);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer
+        .agent_navigation()
+        .lock()
+        .expect("agent navigation lock")
+        .mark_live("selected-agent");
+    renderer.switch_agent("selected-agent".to_owned());
+    renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("fedi-slack"),
+        tau_proto::MessageAgentTarget::new("selected-agent"),
+        tau_proto::MessageFactId::new("slack-message:opaque"),
+        tau_proto::MessageParty {
+            stable_id: "slack-sender:opaque".to_owned(),
+            display_name: Some("Dawid (dpc)".to_owned()),
+            sender_auth: None,
+        },
+        Some(tau_proto::MessageConversation {
+            stable_id: "D123".to_owned(),
+            display_name: Some("dpc-dm".to_owned()),
+            alias: None,
+        }),
+        "Can you see this?",
+    )));
+    sync(&handle);
+
+    let rows = vt.screen_text(28);
+    assert!(rows.iter().any(|row| row.contains("External `fedi-slack`")));
+    assert!(rows.iter().any(|row| row.contains("Can you see this?")));
+    assert!(!rows.iter().any(|row| row.contains("slack-message:opaque")));
+    assert!(!rows.iter().any(|row| row.contains("slack-sender:opaque")));
+    assert!(!rows.iter().any(|row| row.contains("D123")));
+    assert!(!rows.iter().any(|row| row.contains("Text:")));
+
+    if !std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+        let publisher_row = rows
+            .iter()
+            .position(|row| row.contains("`fedi-slack`"))
+            .expect("publisher row") as u16;
+        let publisher_text = &rows[publisher_row as usize];
+        let publisher_byte = publisher_text.find("fedi-slack").expect("publisher column");
+        let publisher_col = publisher_text[..publisher_byte].chars().count() as u16;
+        let external_byte = publisher_text.find("External").expect("heading column");
+        let external_col = publisher_text[..external_byte].chars().count() as u16;
+        assert_ne!(
+            vt.cell_style(publisher_row, publisher_col).0,
+            vt.cell_style(publisher_row, external_col).0,
+            "publisher should use the inline-code foreground; rows={rows:?}"
+        );
+    }
 }
 
 /// A replayed global fact on the initial no-agent screen remains owned by that

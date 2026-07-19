@@ -2,7 +2,7 @@
 
 use tau_proto::{
     CborValue, MessageDeleted, MessageDelivered, MessageEdited, MessageExtensionData,
-    MessageReactionAdded, MessageReactionRemoved, MessageSent,
+    MessageFactId, MessageReactionAdded, MessageReactionRemoved, MessageSent,
 };
 
 use super::*;
@@ -88,77 +88,143 @@ fn render_delivery(delivery: tau_proto::EventDelivery) -> String {
     render(&event, MessageFactTargetContext::Explicit).expect("message fact render")
 }
 
-/// All six events render distinct bounded headings, preserve stable IDs as
-/// primary identifiers, and never disclose extension-private data.
+/// All six events use compact directional headings and immediate content with
+/// byte-for-byte live/replay parity, while hiding superseded stable metadata.
 #[test]
 fn six_facts_render_distinct_safe_live_and_replay_output() {
-    let expected_headings = [
-        "External message delivered",
-        "External message edited",
-        "External message deleted",
-        "External message reaction added",
-        "External message reaction removed",
-        "External message sent",
+    let expected = [
+        "External `bridge-main` message from \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nhello\\u{000A}world",
+        "External `bridge-main` message edited by \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nedited body",
+        "External `bridge-main` message deleted by \"Ali\\u{202E}ce\" in General for Tau target agent-1:",
+        "External `bridge-main` reaction added by \"Ali\\u{202E}ce\" in General for Tau target agent-1:\n👍",
+        "External `bridge-main` reaction removed by \"Ali\\u{202E}ce\" in General for Tau target agent-1:\n👍",
+        "External `bridge-main` message sent to \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nsent body",
     ];
-    let expected_specific_fields = [
-        ["Message ID: delivered-1", "Sender: user-1", "Text:"],
-        [
-            "Referenced message ID: unknown-message",
-            "Actor: user-1",
-            "Text:",
-        ],
-        [
-            "Referenced message ID: unknown-message",
-            "Actor: user-1",
-            "Conversation: conversation-1",
-        ],
-        [
-            "Referenced message ID: unknown-message",
-            "Actor: user-1",
-            "Reaction: 👍",
-        ],
-        [
-            "Referenced message ID: unknown-message",
-            "Actor: user-1",
-            "Reaction: 👍",
-        ],
-        ["Message ID: sent-1", "Recipient: user-1", "Text:"],
-    ];
-    for ((event, expected_heading), expected_fields) in representative_facts()
-        .into_iter()
-        .zip(expected_headings)
-        .zip(expected_specific_fields)
-    {
+    for (event, expected) in representative_facts().into_iter().zip(expected) {
         let recorded_at = tau_proto::UnixMicros::new(1_700_000_000_000_000);
         let live = render_delivery(tau_proto::EventDelivery::live(recorded_at, event.clone()));
         let replay = render_delivery(tau_proto::EventDelivery::replay(recorded_at, event));
         assert_eq!(live, replay);
-        assert!(live.starts_with(expected_heading));
-        assert!(live.contains("Publisher: bridge-main"));
-        assert!(live.contains("Tau target: agent-1"));
-        assert!(live.contains("user-1 [display: Ali\\u{202E}ce]"));
+        assert_eq!(live, expected);
+        assert!(!live.contains("delivered-1"));
+        assert!(!live.contains("sent-1"));
+        assert!(!live.contains("unknown-message"));
+        assert!(!live.contains("user-1"));
+        assert!(!live.contains("conversation-1"));
         assert!(!live.contains("opaque sentinel"));
-        for expected_field in expected_fields {
-            assert!(
-                live.contains(expected_field),
-                "missing {expected_field}: {live}"
-            );
-        }
     }
 }
 
-/// Operation targets stay unresolved and display both stable namespace
-/// components rather than guessing ownership or reply authority.
+/// The requested Slack-DM presentation remains the exact two-line primary
+/// acceptance shape without field labels or opaque identifiers.
 #[test]
-fn unknown_reference_is_rendered_as_stable_identifiers() {
-    let edited = representative_facts()
-        .into_iter()
-        .nth(1)
-        .expect("edited fixture");
-    let rendered = render(&edited, MessageFactTargetContext::Implied).expect("edited render");
-    assert!(rendered.contains("Referenced publisher: other-bridge"));
-    assert!(rendered.contains("Referenced message ID: unknown-message"));
-    assert!(!rendered.contains("Tau target:"));
+fn delivered_message_matches_compact_primary_shape() {
+    let delivered = Event::MessageDelivered(MessageDelivered::new(
+        MessagePublisherId::new("fedi-slack"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new("slack-message:opaque"),
+        MessageParty {
+            stable_id: "slack-sender:opaque".to_owned(),
+            display_name: Some("Dawid (dpc)".to_owned()),
+            sender_auth: None,
+        },
+        Some(MessageConversation {
+            stable_id: "D123".to_owned(),
+            display_name: Some("dpc-dm".to_owned()),
+            alias: None,
+        }),
+        "Can you see this?",
+    ));
+
+    assert_eq!(
+        render(&delivered, MessageFactTargetContext::Implied).as_deref(),
+        Some("External `fedi-slack` message from \"Dawid (dpc)\" in dpc-dm:\nCan you see this?")
+    );
+}
+
+/// Presentation labels suppress opaque stable identifiers, while absent or
+/// blank metadata falls back to stable party/conversation/reference values.
+#[test]
+fn presentation_values_prefer_useful_labels_with_stable_fallbacks() {
+    let mut facts = representative_facts();
+    let Event::MessageDelivered(delivered) = &mut facts[0] else {
+        unreachable!("first fixture is delivered")
+    };
+    delivered.sender.display_name = Some(" \t".to_owned());
+    let conversation = delivered
+        .conversation
+        .as_mut()
+        .expect("delivered conversation");
+    conversation.display_name = None;
+    conversation.alias = Some("#friendly-route".to_owned());
+    let delivered_rendered =
+        render(&facts[0], MessageFactTargetContext::Implied).expect("delivered render");
+    assert_eq!(
+        delivered_rendered,
+        "External `bridge-main` message from \"user-1\" in #friendly-route:\nhello\\u{000A}world"
+    );
+    assert!(!delivered_rendered.contains("conversation-1"));
+
+    let Event::MessageEdited(edited) = &mut facts[1] else {
+        unreachable!("second fixture is edited")
+    };
+    edited.actor = None;
+    edited.conversation = None;
+    assert_eq!(
+        render(&facts[1], MessageFactTargetContext::Implied).as_deref(),
+        Some(
+            "External `bridge-main` message edited for message `other-bridge`/unknown-message:\nedited body"
+        )
+    );
+}
+
+/// Every fact kind uses stable participant and conversation identifiers when
+/// its corresponding optional presentation values are unavailable.
+#[test]
+fn all_fact_kinds_use_stable_presentation_fallbacks() {
+    for mut event in representative_facts() {
+        match &mut event {
+            Event::MessageDelivered(fact) => fact.sender.display_name = None,
+            Event::MessageEdited(fact) => {
+                fact.actor.as_mut().expect("edited actor").display_name = None;
+            }
+            Event::MessageDeleted(fact) => {
+                fact.actor.as_mut().expect("deleted actor").display_name = None;
+            }
+            Event::MessageReactionAdded(fact) => {
+                fact.actor.as_mut().expect("reaction actor").display_name = None;
+            }
+            Event::MessageReactionRemoved(fact) => {
+                fact.actor.as_mut().expect("reaction actor").display_name = None;
+            }
+            Event::MessageSent(fact) => {
+                fact.recipient
+                    .as_mut()
+                    .expect("sent recipient")
+                    .display_name = None;
+            }
+            _ => unreachable!("fixtures contain only message facts"),
+        }
+        let conversation = match &mut event {
+            Event::MessageDelivered(fact) => fact.conversation.as_mut(),
+            Event::MessageEdited(fact) => fact.conversation.as_mut(),
+            Event::MessageDeleted(fact) => fact.conversation.as_mut(),
+            Event::MessageReactionAdded(fact) => fact.conversation.as_mut(),
+            Event::MessageReactionRemoved(fact) => fact.conversation.as_mut(),
+            Event::MessageSent(fact) => fact.conversation.as_mut(),
+            _ => unreachable!("fixtures contain only message facts"),
+        }
+        .expect("fixture conversation");
+        conversation.display_name = None;
+        conversation.alias = None;
+
+        let rendered =
+            render(&event, MessageFactTargetContext::Implied).expect("message fact render");
+        assert!(rendered.contains("\"user-1\""), "{rendered}");
+        assert!(rendered.contains("in conversation-1"), "{rendered}");
+        assert!(!rendered.contains("Ali"), "{rendered}");
+        assert!(!rendered.contains("General"), "{rendered}");
+    }
 }
 
 /// A universal-field failure produces only the stable event, publisher, and
@@ -215,10 +281,10 @@ fn target_parser_distinguishes_valid_and_invalid_claims() {
     );
 }
 
-/// Literal display delimiters and generated control escapes cannot make
-/// distinct untrusted facts produce identical terminal text.
+/// Quoted heading metadata, context delimiters, backslashes, and control
+/// characters remain visibly escaped and cannot imitate generated prose.
 #[test]
-fn untrusted_identifiers_and_text_render_injectively() {
+fn untrusted_identifiers_and_text_render_safely() {
     let mut delimiter_text = representative_facts()
         .into_iter()
         .next()
@@ -227,21 +293,21 @@ fn untrusted_identifiers_and_text_render_injectively() {
     let Event::MessageDelivered(delimiter_fact) = &mut delimiter_text else {
         unreachable!("fixture is delivered")
     };
-    delimiter_fact.sender.stable_id = "c1 [display: General]".to_owned();
+    delimiter_fact.sender.stable_id = "c1\" in forged".to_owned();
     delimiter_fact.sender.display_name = None;
     let Event::MessageDelivered(display_fact) = &mut secondary_display else {
         unreachable!("fixture is delivered")
     };
-    display_fact.sender.stable_id = "c1".to_owned();
-    display_fact.sender.display_name = Some("General".to_owned());
+    display_fact.sender.stable_id = "opaque-c1".to_owned();
+    display_fact.sender.display_name = Some("c1\" in forged".to_owned());
 
     let delimiter_rendered = render(&delimiter_text, MessageFactTargetContext::Explicit)
         .expect("delimiter-bearing fact");
     let display_rendered = render(&secondary_display, MessageFactTargetContext::Explicit)
         .expect("secondary-display fact");
-    assert_ne!(delimiter_rendered, display_rendered);
-    assert!(delimiter_rendered.contains(r"Sender: c1 \[display: General\]"));
-    assert!(display_rendered.contains("Sender: c1 [display: General]"));
+    assert_eq!(delimiter_rendered, display_rendered);
+    assert!(delimiter_rendered.contains(r#"from "c1\" in forged" in General"#));
+    assert!(!display_rendered.contains("opaque-c1"));
 
     let mut literal_escape = delimiter_text.clone();
     let mut control_character = delimiter_text;
@@ -261,4 +327,28 @@ fn untrusted_identifiers_and_text_render_injectively() {
     assert_ne!(literal_rendered, control_rendered);
     assert!(literal_rendered.contains(r"\\u{000A}"));
     assert!(control_rendered.contains(r"\u{000A}"));
+}
+
+/// Unicode presentation values and content survive unchanged except for the
+/// centralized visible escaping policy applied to dangerous metadata.
+#[test]
+fn unicode_display_and_body_render_compactly() {
+    let mut delivered = representative_facts()
+        .into_iter()
+        .next()
+        .expect("delivered fixture");
+    let Event::MessageDelivered(fact) = &mut delivered else {
+        unreachable!("fixture is delivered")
+    };
+    fact.sender.display_name = Some("Zoë 👩🏽‍💻".to_owned());
+    let conversation = fact.conversation.as_mut().expect("conversation fixture");
+    conversation.display_name = Some("研发-チーム".to_owned());
+    fact.text = "Привет 🌍".to_owned();
+
+    assert_eq!(
+        render(&delivered, MessageFactTargetContext::Implied).as_deref(),
+        Some(
+            "External `bridge-main` message from \"Zoë 👩🏽\\u{200D}💻\" in 研发-チーム:\nПривет 🌍"
+        )
+    );
 }
