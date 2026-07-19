@@ -3,9 +3,7 @@
 Provider output is constrained by
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 Curated provider wire evidence follows
-[SPEC-tau-provider-codex-curated-vcr](SPEC-tau-provider-codex-curated-vcr.md);
-its rationale and evidence boundary are recorded in
-[DECISION-tau-provider-codex-curated-vcr](DECISION-tau-provider-codex-curated-vcr.md).
+[SPEC-tau-provider-codex-curated-vcr](SPEC-tau-provider-codex-curated-vcr.md).
 
 ## Account quota telemetry
 

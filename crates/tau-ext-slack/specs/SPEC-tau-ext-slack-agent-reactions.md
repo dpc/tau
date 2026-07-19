@@ -28,6 +28,3 @@ strictly parsed and clamped for a closed typed error; diagnostics contain no raw
 body, token, native ID, or text. Config freezes immediately before the first
 authorized API attempt. Writer failure activates nothing, and stable
 same-process replay does not repost or rewrite; there is no crash guarantee.
-
-The governing choice is
-[DECISION-tau-ext-slack-agent-reactions](DECISION-tau-ext-slack-agent-reactions.md).

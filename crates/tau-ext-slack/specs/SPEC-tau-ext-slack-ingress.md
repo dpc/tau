@@ -63,7 +63,4 @@ path is the sole generator. Successful registration returns exactly
 unregister returns exactly `{"status":"unregistered"}`.
 
 This behavior refines
-[DECISION-tau-ext-slack-sender-admission](DECISION-tau-ext-slack-sender-admission.md),
-[DECISION-tau-ext-slack-sender-identity](DECISION-tau-ext-slack-sender-identity.md),
-and
-[DECISION-tau-ext-slack-transport-identity-mentions](DECISION-tau-ext-slack-transport-identity-mentions.md).
+[DECISION-tau-ext-slack-sender-admission](DECISION-tau-ext-slack-sender-admission.md).

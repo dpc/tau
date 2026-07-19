@@ -368,7 +368,7 @@ pub(crate) struct EventRenderer {
     /// True while folding an event for a hidden agent transcript. During this
     /// window renderer fields contain the hidden agent's snapshot, but
     /// input-loop mirrors must continue exposing the actually visible
-    /// transcript, per `DECISION-tau-cli-per-transcript-editor-context`.
+    /// transcript.
     suppress_editor_context_publish: bool,
     /// Symbol shown before the active prompt input.
     prompt_symbol: String,

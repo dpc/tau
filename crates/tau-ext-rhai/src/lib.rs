@@ -5,7 +5,6 @@
 //! Component boundaries are summarized in `ARCH-tau-ext-rhai`.
 //! Runtime concurrency and shell-worker supervision follow
 //! `DECISION-tau-ext-rhai-runtime-model`.
-//! End-to-end behavior tests follow `DECISION-tau-ext-rhai-protocol-testing`.
 
 mod shell;
 

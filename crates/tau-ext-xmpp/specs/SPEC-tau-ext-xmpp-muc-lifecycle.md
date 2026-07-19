@@ -24,8 +24,3 @@ Timeout, join/config failure, or a dropped response receiver removes pending and
 routing and sends unavailable presence when connected. Worker-wide shutdown promptly
 interrupts or bounds readiness, join/rejoin, reconnect, send, and notice work so leave
 cleanup gets the remaining shutdown budget.
-
-Room identity and accepted risks are recorded by
-[DECISION-tau-ext-xmpp-muc-identity](DECISION-tau-ext-xmpp-muc-identity.md),
-[DECISION-tau-ext-xmpp-muc-preconditions](DECISION-tau-ext-xmpp-muc-preconditions.md),
-and [DECISION-tau-ext-xmpp-muc-lifecycle](DECISION-tau-ext-xmpp-muc-lifecycle.md).

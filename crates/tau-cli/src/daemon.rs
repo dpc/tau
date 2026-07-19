@@ -332,9 +332,8 @@ struct DaemonCommandSpec<'a> {
     ephemeral: bool,
 }
 
-/// Build the `tau component harness` command selected by
-/// `DECISION-tau-cli-bundled-component-vocabulary`, reserving stdio for the
-/// initial UI protocol.
+/// Build the `tau component harness` command, reserving stdio for the initial
+/// UI protocol.
 fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     let mut cmd = Command::new(spec.tau_binary);
     cmd.arg("component")

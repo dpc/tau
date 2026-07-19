@@ -2,9 +2,7 @@
 
 `dev_tmux` provider-access tests stay focused on config parsing, exact allowlist
 copying, stale scratch reconciliation, warnings, and refusal of symlink,
-non-regular, path-traversal, or unsafe entries. The manual boundary itself is
-governed by
-[`DECISION-tau-cli-manual-tmux-e2e-boundary`](specs/DECISION-tau-cli-manual-tmux-e2e-boundary.md).
+non-regular, path-traversal, or unsafe entries.
 
 Pure transcript-renderer tests use representative fixture themes with distinct
 semantic attributes. They assert text preservation except for documented

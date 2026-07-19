@@ -70,9 +70,5 @@ up to 16 sorted, deduplicated allowed selector values. The complete model-visibl
 hint retains at most 1,200 source characters and may append one ellipsis, with
 rendered arguments using at most half that source-character budget.
 
-These contracts implement
-[DECISION-tau-core-bounded-validation-diagnostics](DECISION-tau-core-bounded-validation-diagnostics.md),
-[DECISION-tau-core-schema-guided-argument-repair](DECISION-tau-core-schema-guided-argument-repair.md),
-and [DECISION-tau-core-tool-examples](DECISION-tau-core-tool-examples.md), and feed
-the failed-call path in
+These contracts feed the failed-call path in
 [SPEC-tau-harness-prompt-dispatch](../../tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).

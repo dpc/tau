@@ -11,6 +11,3 @@ ordinary event rendering in the currently visible transcript. Session reset
 clears all recorded owners. Initial no-agent adoption retargets still-pending
 owners only as specified by
 [SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md).
-
-This behavior implements
-[DECISION-tau-cli-action-completion-snapshot-ownership](DECISION-tau-cli-action-completion-snapshot-ownership.md).

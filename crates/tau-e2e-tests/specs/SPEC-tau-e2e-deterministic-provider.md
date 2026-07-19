@@ -89,4 +89,4 @@ production retry scheduling, crash-exact replay, universal packaging beyond
 the exact Gate 1 CLI and Gate 2 bundled core-shell components, or
 broad terminal rendering fidelity. Live/VCR and transcript-replay fixtures remain separate.
 
-Implements [DECISION-tau-e2e-deterministic-provider-boundary](DECISION-tau-e2e-deterministic-provider-boundary.md) and refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).
+Refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).

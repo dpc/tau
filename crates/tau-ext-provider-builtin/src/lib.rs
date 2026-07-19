@@ -5,11 +5,6 @@
 //! backends. Individual backend crates own provider-specific wire formats.
 //! Component responsibilities and trust boundaries are summarized in
 //! `ARCH-tau-ext-provider-builtin`.
-//! See `DECISION-tau-ext-provider-builtin-testing-boundary` for that test
-//! boundary.
-//! Retry telemetry and debug-capture persistence follow
-//! `DECISION-tau-ext-provider-builtin-structured-retry-facts` and
-//! `DECISION-tau-ext-provider-builtin-durable-session-diagnostics`.
 
 mod chat_completions;
 mod oauth_refresh_rejection;
@@ -4392,8 +4387,7 @@ fn handle_compact_prompt<R, W: Write>(
 where
     R: TurnAbort,
 {
-    // This deliberately has no inline fallback; see
-    // `DECISION-tau-ext-provider-builtin-standalone-compaction`.
+    // Standalone compaction deliberately has no inline fallback.
     match execution
         .runtime
         .compact(agent_prompt_id, config, request, retry_ctx)

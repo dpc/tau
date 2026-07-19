@@ -7,11 +7,9 @@ owned background work, but only for a bounded deadline. It remains in the same
 outer running agent turn and tool round; waiting does not invent a suspended or
 idle lifecycle state and does not itself activate watchers.
 
-Registration is runtime-only, and deadline arbitration remains on the harness
-event loop so accepted input, cancellation, and timeout retain single-writer
-ordering. Cold restore repairs the unresolved tool rather than recreating a
-suspension. This keeps the primitive forgiving and responsive without permitting
-indefinite parking or introducing durable waiter state.
+Wait registration is runtime-only. The harness event loop arbitrates input,
+cancellation, and timeout, and cold restore repairs the unresolved tool rather
+than recreating a waiter. This avoids indefinite parking and durable waiter state.
 
 Exact parameters, wakeup selection, consumption, and restore behavior are
 specified by

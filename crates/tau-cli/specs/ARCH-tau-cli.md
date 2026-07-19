@@ -54,8 +54,7 @@ surfaced as a warning and must continue with no provider credentials in the
 scratch environment.
 
 The manual boundary and observable helper behavior are recorded in
-[`DECISION-tau-cli-manual-tmux-e2e-boundary`](DECISION-tau-cli-manual-tmux-e2e-boundary.md)
-and [`SPEC-tau-cli-dev-tmux`](SPEC-tau-cli-dev-tmux.md).
+[`SPEC-tau-cli-dev-tmux`](SPEC-tau-cli-dev-tmux.md).
 
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
@@ -86,8 +85,7 @@ harness-owned live watch DAG and edge-scoped outer-turn lifecycle into direct
 This projection must not create protocol facts, model-visible notifications,
 navigation state, persistence, or routing behavior. Its authority and exact
 presentation are specified by
-[DECISION-tau-cli-agent-watch-state-authority](DECISION-tau-cli-agent-watch-state-authority.md)
-and [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).
+[SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).
 
 Visible transcript state lives in renderer fields; hidden agent and protected
 no-agent transcripts live in `AgentUiState` snapshots. Hidden folding temporarily

@@ -11,6 +11,3 @@ recorded delay during functional replay.
 Public refreshes add a new key without overwriting reviewed evidence, record
 synthetic provenance and compatibility intent in the manifest, pass the
 network-denied replay-only audit, and receive independent privacy review.
-
-Implements
-[`DECISION-tau-provider-codex-curated-vcr`](DECISION-tau-provider-codex-curated-vcr.md).

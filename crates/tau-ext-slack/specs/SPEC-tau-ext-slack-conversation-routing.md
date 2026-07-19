@@ -54,8 +54,4 @@ Legacy `channel_ids`, `listening_scope`, and `send_destinations` configuration
 keys are hard errors, not compatibility aliases.
 
 These contracts refine
-[DECISION-tau-ext-slack-canonical-reply-selectors](DECISION-tau-ext-slack-canonical-reply-selectors.md),
-[DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md),
-[DECISION-tau-ext-slack-conversation-discovery](DECISION-tau-ext-slack-conversation-discovery.md),
-[DECISION-tau-ext-slack-immutable-thread-destinations](DECISION-tau-ext-slack-immutable-thread-destinations.md),
-and [DECISION-tau-ext-slack-proactive-sends](DECISION-tau-ext-slack-proactive-sends.md).
+[DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md).

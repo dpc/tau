@@ -242,8 +242,7 @@ fn classify_http_status(
     body: &str,
     transport_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
-    // Keep adapter classification independent from UI prose as required by
-    // DECISION-tau-provider-codex-retry-observability.
+    // Keep adapter classification independent from UI prose.
     let provider_code = canonical_error_identifiers(body).into_iter().next();
     if http_failure_kind(code, body).is_some() {
         return None;

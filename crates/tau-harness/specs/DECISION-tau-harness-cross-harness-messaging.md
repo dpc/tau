@@ -8,17 +8,13 @@ authentication run off the central harness event loop with bounded admission and
 deadlines. Sender identity and exact-versus-bare recipient authority remain typed
 protocol values rather than being packed into agent IDs.
 
-A sender records success only after the target's exact receive projection commits.
-Delivery is nevertheless cooperative same-UID, best-effort at-least-once IPC: a
-crash after receive commit but before acknowledgement can duplicate a prompt,
-agent creation, model work, or spend on retry. Tau deliberately does not add a
-distributed WAL, restart deduplication index, or transaction coordinator for this
-path.
+A sender records success only after the target commits its receive projection.
+Delivery is nevertheless cooperative same-UID, best-effort at-least-once IPC; a
+crash after commit but before acknowledgement can duplicate work. Tau accepts
+that ambiguity rather than adding a distributed WAL, restart deduplication, or a
+transaction coordinator.
 
-The dedicated RPC and callback correlation protect against accidental misrouting
-and unintended spend, not malicious same-user processes. Exact routing, bare
-entrypoint selection, discovery, admission, limits, and failure behavior are
-specified by
+The RPC protects against accidental misrouting, not malicious same-user
+processes. Exact behavior is specified by
 [SPEC-tau-harness-peer-routing](SPEC-tau-harness-peer-routing.md) and
-[SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md). The wider
-boundary is [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
+[SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).

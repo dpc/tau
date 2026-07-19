@@ -18,6 +18,3 @@ The closed stage set is frame receipt, envelope decode, pre-ACK reservation, ACK
 attempt, ACK completion, FIFO dequeue, identity start, identity completion,
 local-post start, local-post completion, and direct fact publication. The closed
 ordinal classes are connection, occurrence, and request.
-
-The governing choice is
-[DECISION-tau-ext-slack-latency-observability](DECISION-tau-ext-slack-latency-observability.md).

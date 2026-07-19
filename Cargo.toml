@@ -278,7 +278,7 @@ lto = "off"
 [profile.release]
 # Keep the universal binary's whole-program optimization parallel. Fat LTO with
 # one codegen unit made the final source-release build take several minutes.
-# flake.nix asserts these values; see DECISION-release-build-profile.
+# flake.nix asserts these values; see docs/release-builds.md.
 codegen-units = 16
 debug = false
 lto = "thin"

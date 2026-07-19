@@ -10,7 +10,6 @@ its ownership or accounting.
 
 Shared cooldowns remain exact-generation scoped, and only an admitted successful
 terminal probe or profile replacement releases them; quota display telemetry is not
-scheduler authority. The synchronous scheduler actor owns state transitions and is
-tested independently from production-runtime profile, telemetry, cancellation, and
-shutdown fixtures. Exact states and cadence are specified by
+scheduler authority. This accepts loss on process restart rather than risk duplicate
+remote work. Exact states and cadence are specified by
 [SPEC-tau-ext-provider-builtin-retry-scheduler](SPEC-tau-ext-provider-builtin-retry-scheduler.md).

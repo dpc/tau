@@ -3,35 +3,15 @@
 Authority: confirmed, 2026-07-15, dpc
 
 Tau preserves the provider/model-native top-level shape of tool surfaces that
-are deliberately offered to models trained on established tool interfaces.
-For the ChatGPT/Codex shell surface, the compatibility reference is the
-verified Codex CLI interface. Model-specific tool selection remains harness
-policy over neutral extension and provider tags; it does not require the shell
-extension to own model selection.
+are deliberately offered to models trained on established tool interfaces. For
+the ChatGPT/Codex shell surface, the compatibility reference is the verified
+Codex CLI interface. Model-specific selection remains harness policy over
+neutral extension and provider tags.
 
-Compatibility is practical rather than exact emulation. Tau may make a small
-intentional divergence for a concrete architectural, safety, or product
-reason, but the difference must be explicit, justified, documented, and
-covered at the provider-visible boundary. Internal implementation, transport,
-and unrelated Codex CLI behavior are outside this decision.
-
-Generic per-instance prefixes may structurally qualify names as defined by
-[DECISION-extension-tool-prefixes](DECISION-extension-tool-prefixes.md); they do
-not authorize arbitrary schema or semantic rewriting. The harness continues
-to choose the effective prompt surface according to
-[SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md),
-using provider metadata described by
-[ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md)
-and neutral shell metadata described by
-[ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).
-
-## Rationale
-
-Tool definitions are part of the effective interface between Tau and the
-model, not merely an internal API. Preserving a familiar top-level interface
-reduces avoidable model errors while leaving Tau free to retain its own
-architecture and to make narrow, reviewable exceptions when compatibility
-would conflict with stronger constraints.
+Compatibility is practical rather than exact emulation. A divergence requires a
+concrete architectural, safety, or product reason and provider-visible coverage.
+Tool definitions are part of the model interface, so familiar top-level shapes
+reduce avoidable model errors at the cost of an explicit compatibility constraint.
 
 This decision implements
 [REQ-model-trained-tool-compatibility](REQ-model-trained-tool-compatibility.md).

@@ -6,23 +6,12 @@ Slack receive and initiation policy uses one bounded `conversations` list. Each
 record binds a stable alias to one exact native conversation and optional fixed
 thread, declares its explicit `channel`, `mpim`, or `dm` kind, and independently
 enables `receive` and `proactive_send`. Dynamic direct-message discovery is a
-separate explicit, bounded, exact-user-bound, receive-and-source-reply-only policy.
-An optional bounded operator-authored description may annotate any active static
-record.
+separate explicit, bounded, exact-user-bound policy.
 
-One list makes duplicate aliases/routes and receive parent/child overlap
-rejectable atomically, keeps receive mode local to the route it affects, and
-lets one record combine both permissions without granting either implicitly.
+Aliases, not native identifiers, are proactive selectors. Receive creates
+source-bound reply authority but no proactive authority; proactive send grants no
+receive or reply authority. Current policy is revalidated at use time.
 
-Aliases, not native ids, are the only proactive selectors. Receive creates
-source-bound Tau-issued reply authority but no proactive authority; proactive send
-creates no receive, reply, linking, or control authority. Parent receive includes
-all threads, while a fixed-thread receive route isolates state and normalizes its
-root create. Static receive DM policy takes precedence over dynamic discovery;
-proactive-only static DM policy remains compatible with a dynamic reply link.
-The separately authorized discovery tool may disclose every static record's alias,
-kind, scope, description, and factual configured policy, but never its native
-route, dynamic links, identities, or runtime state.
-
-The tradeoff is more explicit records in exchange for representing
-channel/private/MPIM/DM/thread policy without asymmetric global grants.
+This trades explicit configuration for atomic conflict validation and avoids
+asymmetric global grants. Exact behavior is specified by
+[SPEC-tau-ext-slack-conversation-routing](SPEC-tau-ext-slack-conversation-routing.md).

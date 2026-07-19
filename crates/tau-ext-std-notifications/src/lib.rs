@@ -55,8 +55,7 @@ pub const TEXT_VAR_NAME: &str = "user-text-notification";
 /// Sound key emitted when the user submits a prompt.
 pub const VALUE_AGENT_START: &str = "protoss-probe-ack";
 
-/// Sound key emitted at the end of an agent turn, as defined by
-/// `DECISION-agent-turn-terminology`.
+/// Sound key emitted at the end of an outer agent turn.
 pub const VALUE_AGENT_END: &str = "protoss-upgrade-complete";
 
 /// Default idle window before the extension nudges the user via a

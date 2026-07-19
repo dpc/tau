@@ -19,7 +19,5 @@ sessions, logs, and unrelated profiles are never copied. Path traversal, symlink
 non-regular files, and unsafe source or destination entries fail closed.
 `provider-builtin` is enabled only while the allowlist is non-empty.
 
-Implements
-[`DECISION-tau-cli-manual-tmux-e2e-boundary`](DECISION-tau-cli-manual-tmux-e2e-boundary.md).
 The trusted-local process and scratch-cleanup boundaries are described by
 [`ARCH-tau-cli`](ARCH-tau-cli.md).

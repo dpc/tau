@@ -15,8 +15,3 @@ authoritative; omitted later thread metadata is tolerated, conflicting metadata
 rejects. Actor display never affects authority. Every published reaction retains
 Tau reply authority even if presentation omits a marker. Delete revokes and
 replay does not reconstruct.
-
-This behavior refines
-[DECISION-tau-ext-slack-edit-ownership](DECISION-tau-ext-slack-edit-ownership.md)
-and
-[DECISION-tau-ext-slack-reaction-ownership](DECISION-tau-ext-slack-reaction-ownership.md).

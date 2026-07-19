@@ -1,7 +1,5 @@
 // Built-in "tau-plain-dark" theme.
 //
-// Palette and emphasis constraints follow `DECISION-tau-cli-conservative-default-theme`.
-//
 // This is a conservative subset of the richer `tau-dpc` theme. It keeps semantic
 // emphasis attributes and only uses default terminal color plus yellow, cyan,
 // green, and red foregrounds, which are considered generally safe terminal

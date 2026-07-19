@@ -15,8 +15,7 @@ const SECRET_ENV_SUBPROCESS: &str = "TAU_SUPERVISOR_SECRET_ENV_SUBPROCESS";
 const STDERR_POLICY_SUBPROCESS: &str = "TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS";
 const FLOOD_MESSAGE_COUNT: usize = 128;
 
-/// Builds the command used to launch the real subprocess fixture described by
-/// `DECISION-tau-supervisor-integration-test-fixture`.
+/// Builds the command used to launch the real subprocess fixture.
 fn test_command(args: &[&str]) -> ExtensionCommand {
     ExtensionCommand {
         name: "test-child".into(),

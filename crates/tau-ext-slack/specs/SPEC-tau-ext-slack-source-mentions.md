@@ -21,6 +21,3 @@ safe boolean. Results, facts, and logs expose no mention/native ID. The complete
 route, text, flags, and installation freeze before send and retry byte-identically.
 Errors are categorical and non-oracular. Slack acceptance is not a delivery,
 read, or notification guarantee.
-
-The governing choice is
-[DECISION-tau-ext-slack-safe-source-mentions](DECISION-tau-ext-slack-safe-source-mentions.md).

@@ -15,10 +15,8 @@ also records Cargo's final elapsed-time status and GNU `time -v`'s command,
 wall time, and maximum-resident-set statistic in the build log. Update the
 assertion and repeat the measurements below when intentionally changing the
 profile; do not remove the guard while the universal component graph remains
-in one executable. The governing profile choice is in
-[DECISION-release-build-profile](../specs/DECISION-release-build-profile.md).
-The recorded adoption limits and re-evaluation triggers below are evidence for
-that choice rather than permanent product requirements.
+in one executable. The recorded adoption limits and re-evaluation triggers below
+are evidence for the current profile rather than permanent product requirements.
 
 ## Reference measurement
 

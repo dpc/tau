@@ -171,12 +171,8 @@ rules above.
 ## Release build resource reliability
 
 The universal release binary's accepted build-time, memory, size, and runtime
-tradeoffs are documented in
-[`DECISION-release-build-profile`](specs/DECISION-release-build-profile.md) with
-measurement details in
-[`docs/release-builds.md`](docs/release-builds.md). The decision record owns the
-profile tradeoff; the evidence document owns the recorded temporary adoption
-limits, measurements, and re-evaluation triggers.
+tradeoffs, measurements, temporary adoption limits, and re-evaluation triggers
+are documented in [`docs/release-builds.md`](docs/release-builds.md).
 
 ## Reporting guidance
 

@@ -41,7 +41,6 @@ The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and
 the bounded semantic provider trace. See
-[`DECISION-tau-e2e-deterministic-provider-boundary`](specs/DECISION-tau-e2e-deterministic-provider-boundary.md) and
 [`SPEC-tau-e2e-deterministic-provider`](specs/SPEC-tau-e2e-deterministic-provider.md)
 for the coverage ceiling.
 

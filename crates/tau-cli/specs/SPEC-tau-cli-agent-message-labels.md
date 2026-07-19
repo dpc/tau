@@ -82,6 +82,5 @@ Genuine watched responses and direct-user-prompt notifications retain their
 `WatchResponse` and `WatchPrompt` kinds, sender/watcher attribution, history
 classification, and summary/full/hidden visibility behavior.
 
-This specification implements
-[DECISION-tau-cli-agent-watch-state-authority](DECISION-tau-cli-agent-watch-state-authority.md)
-and is constrained by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).
+This specification is constrained by
+[SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).

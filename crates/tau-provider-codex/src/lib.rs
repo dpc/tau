@@ -6,8 +6,6 @@
 //! Component boundaries and provider-visible replay are summarized in
 //! `ARCH-tau-provider-codex` and
 //! `SPEC-tau-provider-codex-streaming-replay`.
-//! Its transport test boundary is recorded in
-//! `DECISION-tau-provider-codex-backend-testing-boundary`.
 
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
@@ -409,9 +407,6 @@ pub(crate) fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
 /// already-reserved socket. Implementors should register the supplied waker
 /// with their native cancellation primitive and call it when the current turn
 /// is canceled or the provider is shutting down.
-///
-/// The cooperative wake contract is recorded in
-/// `DECISION-tau-provider-codex-cooperative-cancellation`.
 pub trait TurnAbort {
     /// Return whether the current turn has already been canceled.
     fn is_aborted(&mut self) -> bool;

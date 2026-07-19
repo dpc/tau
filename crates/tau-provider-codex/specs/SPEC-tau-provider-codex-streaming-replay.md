@@ -4,8 +4,6 @@ This record refines
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md)
 and
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md).
-Replay-sidecar semantics are constrained by
-[DECISION-tau-provider-codex-replay-sidecars](DECISION-tau-provider-codex-replay-sidecars.md).
 
 ## Streaming provider output
 

@@ -4,9 +4,6 @@ use tempfile::TempDir;
 
 use super::*;
 
-// Keep behavior-level loader and normalization coverage aligned with
-// `DECISION-tau-config-regression-testing`.
-
 /// Ensures the supported extension environment grammar trims OWS, preserves
 /// first-seen order, and makes duplicate enables idempotent.
 #[test]

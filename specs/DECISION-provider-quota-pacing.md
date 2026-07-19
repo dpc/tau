@@ -3,23 +3,15 @@
 Authority: confirmed, 2026-07-14, dpc
 
 Tau presents provider account quota as bounded ephemeral current state. A
-colored pacing claim requires fresh, explicit in-band evidence binding the
-selected model to every applicable quota pool; account presence, display names,
-or a sole reported pool are never applicability evidence. Missing, stale,
-contradictory, or timing-untrusted inputs conservatively produce neutral unknown
-rather than an inferred claim or fabricated rollover.
+colored pacing claim requires fresh, explicit evidence binding the selected
+model to every applicable pool. Missing, stale, contradictory, or timing-untrusted
+inputs produce neutral unknown rather than inferred applicability or rollover.
 
-Provider adapters normalize upstream observations, the built-in provider owns
-credentialed acquisition and reconciliation, the harness owns validated current
-state, and the CLI owns generic accessible pacing presentation. Quota is not
-transcript state, per-response usage, retry authority, credits, or spend control.
+Provider adapters normalize observations, the built-in provider owns credentialed
+acquisition, the harness owns validated current state, and the CLI owns
+presentation. Quota is not transcript state, retry authority, credits, or spend
+control.
 
-This correctness-first boundary avoids confident but false pacing guidance
-across heterogeneous provider routes. Its cost is a neutral result until enough
-fresh applicability and timing evidence exists.
-
-Exact applicability, freshness, pacing, hysteresis, and presentation behavior is
-specified by [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
-The approved Codex WebSocket-only cutover narrows its sparse observation source as
-recorded by
-[DECISION-provider-backend-split-and-codex-ws-only](DECISION-provider-backend-split-and-codex-ws-only.md).
+This avoids confident but false guidance at the cost of neutral output until
+sufficient evidence exists. Exact behavior is specified by
+[SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).

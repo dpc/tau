@@ -9,12 +9,6 @@
 //! `SPEC-tau-ext-xmpp-allowlist-and-default-recipient`.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
-//! The plaintext-over-TLS limitation is recorded in
-//! `DECISION-tau-ext-xmpp-tls-security-model`.
-//! Resource generation, MUC identity, and failed-registration cleanup follow
-//! `DECISION-tau-ext-xmpp-generated-resources`,
-//! `DECISION-tau-ext-xmpp-muc-identity`, and
-//! `DECISION-tau-ext-xmpp-registration-rollback`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -1506,9 +1500,8 @@ impl WorkerState {
         Ok(address)
     }
 
-    /// Send the best-effort invitation and fallback notice described by
-    /// `DECISION-tau-ext-xmpp-muc-lifecycle` after registration has already
-    /// succeeded for the tool caller.
+    /// Send the best-effort invitation and fallback notice after registration
+    /// has already succeeded for the tool caller.
     async fn send_post_register_notice(&self, agent_id: &AgentId, client: &mut Client) {
         if !self.cfg.muc.invite_default_recipient || self.shutdown_requested() {
             return;
@@ -1775,8 +1768,7 @@ impl WorkerState {
     }
 
     /// Apply state changes for a newly online stream and return direct-resource
-    /// registrations whose externally visible address changed, following
-    /// `DECISION-tau-ext-xmpp-direct-resource-fallback`.
+    /// registrations whose externally visible address changed.
     fn apply_online_state(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
         self.bound_jid = Some(bound_jid.clone());
         self.occupant_real_jids.clear();
@@ -2341,8 +2333,6 @@ fn muc_presence_from(presence: &Presence, occupant: &Jid) -> bool {
 }
 
 async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Result<(), String> {
-    // See `DECISION-tau-ext-xmpp-muc-preconditions` for the deliberately limited
-    // room configuration and its deployment implications.
     // XEP-0045 instant-room setup: an empty owner data-form submit unlocks a
     // newly-created room using server defaults. This is intentionally not a
     // full privacy or member-affiliation configuration flow.

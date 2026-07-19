@@ -48,9 +48,7 @@ quota, and invalidation operations. The extension owns public response sampling,
 tentative-output clearing, event ordering, logical retry, mutable-profile reload,
 and supervised prewarm lifecycle; neither backend serializes harness frames.
 
-This ownership implements
-[DECISION-tau-ext-provider-builtin-profile-ownership](DECISION-tau-ext-provider-builtin-profile-ownership.md)
-and the selected surface is constrained by
+The selected surface is constrained by
 [DECISION-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/DECISION-tau-provider-codex-responses-surface-selection.md).
 
 ## Credentials and diagnostics
