@@ -64,11 +64,22 @@ configure the final endpoint URL directly when a provider publishes a redirect.
 ## Runtime and security assumptions
 
 The extension makes outbound HTTPS requests to the configured MCP providers and
-trusts those providers for returned web content. It caps HTTP error bodies,
-successful MCP response bodies, and decoded model-visible text so provider
-responses cannot grow without bound. At most eight searches/fetches run at once;
-additional calls fail fast with a busy tool error so harness control messages are
-not blocked behind network calls.
+treats all returned text and metadata as untrusted external web data. Every
+successful result is an ordinary tool-result string enclosed in
+`<tau_web_content adapter="exa|parallel" operation="search|fetch"
+content_trust="external">…</tau_web_content>`. Tau owns the closed outer
+attributes and escapes provider text, including structural Unicode, so it cannot
+close or forge the envelope. The adapter label identifies only the configured
+adaptation path; it does not authenticate a page author, URL, title, rank,
+freshness, or truth. The boundary is defense-in-depth, not a prompt-injection
+sandbox or a grant of instruction authority.
+
+The extension caps HTTP error bodies, successful MCP response bodies, decoded
+provider text, and the final post-escape closed XML so provider responses cannot
+grow without bound. A projected result over 512 KiB fails rather than being
+silently truncated. At most eight searches/fetches run at once; additional calls
+fail fast with a busy tool error so harness control messages are not blocked
+behind network calls.
 
 Provider transport diagnostics and JSON-RPC error messages can become
 model-visible `ToolError` text. Before surfacing them, the extension sanitizes

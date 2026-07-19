@@ -4,6 +4,24 @@ Provider calls send model-supplied tool arguments to external hosted MCP
 services. Provider output is untrusted web content that can contain prompt
 injection, misleading text, or large payloads before it re-enters model context.
 
+Every successful result has exactly one extension-owned projection:
+`<tau_web_content adapter="exa|parallel" operation="search|fetch"
+content_trust="external">…</tau_web_content>`. Attribute values are closed:
+Exa supports search, while Parallel supports search and fetch. Attribute order is
+`adapter`, `operation`, `content_trust`; no query, requested URL, tool-call id,
+endpoint, MCP id, remote tool name, or extension identifier is repeated.
+Provider-returned titles, URLs, sources, ranks, and similar metadata remain
+escaped claims in the body.
+
+The adapter is the locally selected adaptation path, not authentication of page
+authorship, truth, freshness, or provider-returned metadata. There is no sender
+authentication analogue. XML delimiters and quotes are escaped, while controls,
+bidi and zero-width/default-ignorable structure, variation selectors, fillers,
+and noncharacters become visible Unicode escapes. This prevents body text from
+closing or forging the outer markup, but it is defense-in-depth rather than a
+sandbox: body prose remains capable of prompt injection and grants no identity,
+routing, instruction, tool, authorization, or egress authority.
+
 Exa defaults to `https://mcp.exa.ai/mcp`. Parallel defaults to the
 unauthenticated `https://search.parallel.ai/mcp` endpoint; the extension has no
 Parallel API-key configuration and sends no Parallel Authorization header.

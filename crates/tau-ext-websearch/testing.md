@@ -10,3 +10,10 @@ Cover registration/default policy, endpoint parsing, rejection, and
 application, provider argument forwarding and local rejection, no-Authorization
 behavior, JSON/SSE decode, independent response/output/error caps, redaction,
 saturation with responsive control handling, and replay suppression.
+
+Successful-result coverage must exercise Exa search, Parallel search, and
+Parallel fetch with exact canonical `<tau_web_content>` attributes. Adversarial
+coverage keeps provider titles/URLs and attempted markup in the escaped body,
+makes unsafe Unicode visible, checks the exact final 512 KiB post-escape boundary
+and oversize rejection, and proves identical preservation through Chat
+Completions and Codex/Responses tool-result lowering.

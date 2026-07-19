@@ -2,6 +2,20 @@ use std::io::Write as _;
 
 use super::*;
 
+/// Ensures successful extension-owned web-content XML remains byte-for-byte
+/// intact on the Chat Completions native tool-result path.
+#[test]
+fn web_content_envelope_is_preserved_in_chat_tool_result() {
+    let envelope = "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: &lt;claim&gt;</tau_web_content>";
+    let output =
+        tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(envelope.to_owned()));
+
+    assert_eq!(
+        tool_result_text(tau_proto::ToolResultStatus::Success, &output),
+        envelope
+    );
+}
+
 /// Ensures shared outbound categories retain their intended scheduler cadence
 /// at the Chat Completions adapter boundary.
 #[test]

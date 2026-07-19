@@ -6,6 +6,12 @@ default model-visible `web_search`; Parallel search and fetch are registered in
 the same component but disabled by default for explicit role opt-in and to avoid
 two default tools named `web_search`.
 
+All three successful paths project provider text at the extension boundary as
+one escaped `<tau_web_content>` string, then publish that string as the ordinary
+invocation-correlated `ToolResult`. The existing transcript, replay, compaction,
+Chat Completions, and Codex/Responses paths therefore retain their normal
+semantics without a websearch-specific protocol or persistence representation.
+
 Provider trust, endpoint, transport, and redaction behavior is
 [SPEC-tau-ext-websearch-provider-boundary](SPEC-tau-ext-websearch-provider-boundary.md).
 Concurrency and independent resource caps are

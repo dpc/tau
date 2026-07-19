@@ -6,10 +6,14 @@ Configure and Disconnect processing responsive. Disconnect may detach blocked
 workers; workers may finish, but the reader never blocks waiting for a permit.
 
 HTTP error bodies are capped at 64 KiB. Successful MCP response bodies are
-capped at 1 MiB before decode. Decoded model-visible text is capped at 512 KiB.
-A JSON-RPC error above 512 KiB is replaced by a compact deterministic diagnostic,
-and every final sanitized model-visible error is capped to 512 KiB with a
-UTF-8-safe suffix. Endpoint redaction occurs before the final cap.
+capped at 1 MiB before decode. Decoded provider text retains its 512 KiB
+pre-projection cap, and the complete escaped, closed `<tau_web_content>` result
+is independently capped at 512 KiB. Expansion from XML or visible-Unicode
+escaping counts toward that final bound; oversize results fail clearly as a
+`ToolError` and are not truncated into a different success contract. A JSON-RPC
+error above 512 KiB is replaced by a compact deterministic diagnostic, and every
+final sanitized model-visible error is capped to 512 KiB with a UTF-8-safe
+suffix. Endpoint redaction occurs before the final cap.
 
 Exa result count defaults to five and accepts only 1–100. Replay-marked
 `ToolStarted` deliveries are ignored: they issue no provider request and publish
