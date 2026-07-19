@@ -3590,6 +3590,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "socket2",
  "tau-actions",
  "tau-cli-picker",
  "tau-cli-term",

@@ -25,6 +25,7 @@ sample `config/cli.yaml`.
 | `Left`, `Right` | `cursor-left`, `cursor-right` | Move by one character. |
 | `Up`, `Down` | `cursor-up`, `cursor-down` | Cycle completion candidates, move/scroll within capped multiline input, then step prompt history at the input edges. |
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
+| `C-b` | `agent-pick` | Pick a current non-suspended agent with optional `fzf`. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
 | `C-k` | `agent-previous` | Switch to the previous active agent. |
 | `C-j` | `agent-next` | Switch to the next active agent. |
@@ -103,6 +104,10 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
 - `cycle-role-group` — cycle to the first role in the next role group.
 - `agent-previous` — switch to the previous active agent.
 - `agent-next` — switch to the next active agent.
+- `agent-pick` — invoke `fzf` directly over a bounded current-session agent
+  snapshot and switch only after revalidating the selected live,
+  non-suspended id. Cancel, failure, and stale selections preserve the current
+  transcript and prompt draft. See [Listing and picking agents](list-agents.md).
 - `prompt-history-search` — feed indexed prompt-history rows
   (`<index>\t<single-line summary>`) to `command`; bounded original-prompt
   previews are also written under `$TAU_PROMPT_HISTORY_DIR/<index>`. Replace the

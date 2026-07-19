@@ -1749,6 +1749,7 @@ impl EventRenderer {
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(updated.agent_id.as_str()) {
             self.refresh_prompt_placeholder();
+            self.handle.redraw();
         }
         self.refresh_watched_agent_blocks();
     }

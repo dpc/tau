@@ -138,6 +138,22 @@ prompts.
   harness-generated catch-up timestamp; replay boundaries are non-replay
   deliveries.
 
+## Current-session agent roster RPC
+
+UI-classified local clients use `get_session_agent_list` to request a shallow,
+read-only roster from the harness currently bound to an exact `session_id`.
+`current` scope returns current members; `history` also returns previously loaded
+members whose latest membership fact is unload. The directed
+`session_agent_list_result` echoes the request and session ids and returns either
+all rows or one typed error without partial output.
+
+The result carries harness-authoritative lifecycle, runtime, shared navigation
+mode, and persistence plus bounded creation and display-name projections. It does
+not publish events, scan unrelated agent directories, load agents, or expose
+transcript content. Extension and non-UI client connections cannot request or
+observe the result. See [Listing and picking session agents](list-agents.md) for
+the command, filtering, and stable TSV contract.
+
 ## Extension data RPC
 
 Extensions use `extension_data_request` to ask the harness to read or mutate

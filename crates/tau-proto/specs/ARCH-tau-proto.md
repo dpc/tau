@@ -72,3 +72,9 @@ successful response carries the concrete resolved agent id and started flag.
 `peer_session_probe` is a separate narrow RPC that returns only whether the live
 harness is currently bound to a claimed session and accepts bare inter-session
 messages. It does not enumerate agents or expose receiving policy.
+
+`get_session_agent_list` is a separate UI-only, requester-directed RPC for the
+harness's exact current session. Its bounded result contains membership
+lifecycle, persistence, runtime/navigation classification for live rows, and
+content-minimized creation labels. It is not an event and has no
+extension/external request path.

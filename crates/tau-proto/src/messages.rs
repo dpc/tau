@@ -590,6 +590,147 @@ pub struct RenderedToolDefinitionsResult {
     pub error: Option<String>,
 }
 
+/// Agent-roster scope requested from the currently bound harness session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentListScope {
+    /// Return current members, including members whose agent is unavailable.
+    Current,
+    /// Return current members plus previously loaded and now-unloaded members.
+    History,
+}
+
+/// Current-session lifecycle of one listed agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SessionAgentLifecycle {
+    /// The current member has a live harness agent and navigation snapshot.
+    Live {
+        /// Current outer-turn runtime state.
+        runtime_state: crate::AgentRuntimeState,
+        /// Current harness-owned navigation mode.
+        navigation_mode: crate::AgentNavigationMode,
+    },
+    /// The session currently contains the agent, but no live harness agent
+    /// exists.
+    Unavailable,
+    /// The agent was previously loaded and its latest membership state is
+    /// unloaded.
+    Unloaded,
+}
+
+/// Persistence policy recorded for one session agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentPersistence {
+    /// Membership and transcript facts are durable.
+    Durable,
+    /// Membership and transcript facts exist only in the current daemon.
+    Ephemeral,
+}
+
+/// Read-only creation-fact enrichment for one listed agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SessionAgentFacts {
+    /// A valid matching first `agent.started` record was read.
+    Available {
+        /// Creation timestamp from the persisted first record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<crate::UnixMicros>,
+        /// Parent recorded by the immutable creation fact.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_agent: Option<AgentId>,
+        /// Role recorded by the immutable creation fact.
+        role: String,
+        /// Display name from current memory or a journal-bound checkpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+    },
+    /// No creation journal or first record exists.
+    Missing,
+    /// The first record exists but is not a valid matching creation fact.
+    Invalid,
+    /// Bounded read, decoding, or I/O prevented classification.
+    Unreadable,
+}
+
+/// One content-minimized agent-roster entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentListEntry {
+    /// Stable agent id.
+    pub agent_id: AgentId,
+    /// Current-session lifecycle.
+    pub lifecycle: SessionAgentLifecycle,
+    /// Agent transcript and membership persistence.
+    pub persistence: SessionAgentPersistence,
+    /// Bounded creation-fact enrichment.
+    pub facts: SessionAgentFacts,
+}
+
+/// Stable whole-request error category for an agent-roster snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentListErrorKind {
+    /// The request did not name the harness's currently bound session.
+    StaleSession,
+    /// The harness's maintained membership projection is inconsistent.
+    SessionRead,
+    /// The distinct member count exceeded the fixed response bound.
+    TooManyAgents,
+    /// Bounded per-agent enrichment exceeded its aggregate read budget.
+    EnrichmentTooLarge,
+    /// The encoded successful response exceeded the protocol message bound.
+    ResponseTooLarge,
+}
+
+/// Whole-request agent-roster error.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentListError {
+    /// Stable machine-readable category.
+    pub kind: SessionAgentListErrorKind,
+    /// Bounded user-facing detail.
+    pub message: String,
+}
+
+/// Request for a content-minimized roster of the currently bound session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetSessionAgentList {
+    /// Caller-generated correlation id.
+    pub request_id: String,
+    /// Exact currently bound session expected by the caller.
+    pub session_id: SessionId,
+    /// Current-only or complete membership-history scope.
+    pub scope: SessionAgentListScope,
+}
+
+/// Directed response to [`GetSessionAgentList`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentListResult {
+    /// Correlation id copied from the request.
+    pub request_id: String,
+    /// Session id copied from the request.
+    pub session_id: SessionId,
+    /// Complete success rows or one whole-request error.
+    pub result: SessionAgentListResultPayload,
+}
+
+/// Success or whole-request failure for one agent-roster snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SessionAgentListResultPayload {
+    /// The complete row set.
+    Ok {
+        /// Every row in the requested scope.
+        agents: Vec<SessionAgentListEntry>,
+    },
+    /// The snapshot failed atomically.
+    Error {
+        /// Stable typed failure.
+        error: SessionAgentListError,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Extension data RPC
 // ---------------------------------------------------------------------------
@@ -832,6 +973,7 @@ pub enum HarnessInputMessage {
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
     GetRenderedPrompt(GetRenderedPrompt),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
+    GetSessionAgentList(GetSessionAgentList),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),
@@ -868,6 +1010,7 @@ pub enum HarnessOutputMessage {
     RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     RenderedPromptResult(Box<RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
+    SessionAgentListResult(Box<SessionAgentListResult>),
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),

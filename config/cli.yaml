@@ -18,6 +18,8 @@
 
 # Optional keybinding overrides. Merge on top of built-in defaults.
 # bind:
+#   C-b:
+#     action: agent-pick
 #   C-g:
 #     action: shell-prompt-insert
 #     command: git status --short

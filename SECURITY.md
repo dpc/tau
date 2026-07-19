@@ -193,3 +193,26 @@ Navigation modes are same-user UI control state with presentation-only effects.
 The harness accepts absolute mutations only through UI intake; extensions cannot
 mutate them. Modes do not authorize loading, routing, prompt delivery, watches,
 execution, or model access and are intentionally not durable.
+
+The directed agent-roster RPC is available only to same-user local connections
+classified as UI clients. It exposes stable ids, lifecycle/persistence,
+navigation/runtime status, creation role/parent/time, and a verified display
+name, including unloaded history when requested. These are content-minimized
+coordination labels, not secrets or an authorization boundary. Results go only to
+the requester and never enter event publication, interception, subscription
+replay, or extension delivery.
+The harness seeds roster caches atomically from validated committed membership
+before runtime restoration and updates them only after later membership commits;
+any restore/commit failure invalidates the projection. Entry count is checked
+before ids are cloned. Creation records, checkpoint reads,
+in-memory ephemeral projections, intermediate encoding, and the final protocol
+message are bounded before allocation or transmission. Malformed creation facts
+remain categorical without repair, locking, or writes; a cold display name is
+used only when its checkpoint identity and boundary still bind it to the exact
+journal. Snapshot failures return no partial rows.
+
+The optional picker resolves `fzf` through the same user's `PATH` and therefore
+treats it as trusted local code. Tau invokes fixed arguments directly, bounds its
+stdin/stdout and runtime, restores foreground ownership and raw terminal state,
+and revalidates the selected agent. Cancellation, subprocess/RPC errors, and stale
+selection are no-mutation outcomes.

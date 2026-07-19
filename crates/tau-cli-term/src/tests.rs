@@ -644,3 +644,113 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
     assert!(term.menu_block_id.is_none());
     assert!(!term.dismiss_completion_menu());
 }
+
+/// Agent-picker output accepts one UTF-8 row and strips its line terminator.
+#[test]
+fn agent_fzf_output_parses_one_row() {
+    assert_eq!(
+        parse_agent_fzf_output(b"agent-1\tlive\n".to_vec()).expect("valid output"),
+        Some("agent-1\tlive".to_owned())
+    );
+    assert_eq!(
+        parse_agent_fzf_output(Vec::new()).expect("empty output"),
+        None
+    );
+}
+
+/// Agent-picker output rejects malformed multi-row and non-UTF-8 selections.
+#[test]
+fn agent_fzf_output_rejects_malformed_selection() {
+    assert!(parse_agent_fzf_output(b"agent-1\nagent-2\n".to_vec()).is_err());
+    assert!(parse_agent_fzf_output(vec![0xff]).is_err());
+}
+
+#[cfg(unix)]
+fn fake_fzf(script: &str) -> tempfile::TempPath {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let file = tempfile::NamedTempFile::new().expect("fake fzf file");
+    std::fs::write(file.path(), format!("#!/bin/sh\n{script}\n")).expect("write fake fzf");
+    let mut permissions = std::fs::metadata(file.path())
+        .expect("fake fzf metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(file.path(), permissions).expect("make fake fzf executable");
+    file.into_temp_path()
+}
+
+#[cfg(unix)]
+static AGENT_FZF_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The direct picker passes rows through stdin and returns the exact selected
+/// row without requiring a real `fzf` binary in CI.
+#[cfg(unix)]
+#[test]
+fn agent_fzf_command_uses_bounded_direct_process() {
+    let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    let program = fake_fzf(
+        r#"set -eu
+test "$#" -eq 5
+test "$1" = "--height=100%"
+test "$2" = "$(printf '%s\t' '--delimiter=')"
+test "$3" = "--with-nth=1,7,10,2,3"
+test "$4" = "--no-multi"
+test "$5" = "--prompt=agent> "
+cat >/dev/null
+printf 'agent-1\tlive\n'"#,
+    );
+
+    let selected = run_agent_fzf_command_with_ownership(
+        program.as_os_str(),
+        "agent-1\tlive\n",
+        ProcessOwnership::ProcessGroup,
+    )
+    .expect("fake fzf succeeds");
+
+    assert_eq!(selected.as_deref(), Some("agent-1\tlive"));
+}
+
+/// Conventional fzf cancel statuses leave selection unchanged.
+#[cfg(unix)]
+#[test]
+fn agent_fzf_command_treats_cancel_statuses_as_cancel() {
+    let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    for status in [1, 130] {
+        let program = fake_fzf(&format!("cat >/dev/null\nexit {status}"));
+        let selected = run_agent_fzf_command_with_ownership(
+            program.as_os_str(),
+            "agent-1\tlive\n",
+            ProcessOwnership::ProcessGroup,
+        )
+        .expect("cancel is not an error");
+        assert_eq!(selected, None);
+    }
+}
+
+/// Spawn failures and non-cancel statuses remain visible picker errors.
+#[cfg(unix)]
+#[test]
+fn agent_fzf_command_reports_missing_program_and_failure_status() {
+    let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    let missing = tempfile::tempdir()
+        .expect("missing-program parent")
+        .path()
+        .join("fzf");
+    assert!(
+        run_agent_fzf_command_with_ownership(
+            missing.as_os_str(),
+            "agent-1\tlive\n",
+            ProcessOwnership::ProcessGroup,
+        )
+        .is_err()
+    );
+
+    let failed = fake_fzf("cat >/dev/null\nexit 2");
+    let error = run_agent_fzf_command_with_ownership(
+        failed.as_os_str(),
+        "agent-1\tlive\n",
+        ProcessOwnership::ProcessGroup,
+    )
+    .expect_err("status 2 is an error");
+    assert!(error.contains("status 2"));
+}

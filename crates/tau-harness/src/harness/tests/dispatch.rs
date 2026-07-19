@@ -22727,7 +22727,7 @@ fn embedded_tool_trace_records_call_and_byte_free_result() {
 #[test]
 fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(&td.path().join("state")).expect("harness");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
     let requester = connect_test_client(&mut h, "navigation-ui", tau_proto::ClientKind::Ui);
     let observer = connect_test_client(&mut h, "navigation-observer", tau_proto::ClientKind::Ui);
     let external = connect_test_client(

@@ -44,6 +44,8 @@ C-f:
   command: >-
     rg --files --hidden --glob '!.git' | fzf --height=100% --preview 'cat -- {}' --preview-window 'right,60%,wrap'
   trim: true
+C-b:
+  action: agent-pick
 C-k:
   action: agent-previous
 C-j:

@@ -21,6 +21,8 @@ const POST_EXIT_PIPE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::f
 #[cfg(test)]
 static FAIL_NEXT_FOREGROUND_CLAIM: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
+static FAIL_NEXT_FOREGROUND_RESTORE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
 static FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_FAILED_FOREGROUND_CHILD_ID: AtomicU32 = AtomicU32::new(0);
@@ -161,6 +163,15 @@ impl BoundedStdoutRun {
     /// Waits until the child exits, a pipe error occurs, or the timeout
     /// expires.
     fn finish(mut self, timeout: std::time::Duration) -> Result<BoundedCommandOutput, String> {
+        let result = self.wait_for_completion(timeout);
+        self.process_group.restore_foreground()?;
+        result
+    }
+
+    fn wait_for_completion(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<BoundedCommandOutput, String> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
@@ -577,6 +588,22 @@ impl ProcessGroupHandle {
         self.child_pgid
     }
 
+    fn restore_foreground(&mut self) -> Result<(), String> {
+        #[cfg(unix)]
+        if let Some(parent_pgid) = self.parent_pgid {
+            #[cfg(test)]
+            if FAIL_NEXT_FOREGROUND_RESTORE.swap(false, Ordering::SeqCst) {
+                return Err(
+                    "could not restore Tau terminal foreground: injected failure".to_owned(),
+                );
+            }
+            set_foreground_process_group(parent_pgid)
+                .map_err(|error| format!("could not restore Tau terminal foreground: {error}"))?;
+            self.parent_pgid = None;
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn claim_foreground(child_id: u32) -> Result<Self, String> {
         let parent_pgid =
@@ -601,9 +628,7 @@ impl ProcessGroupHandle {
 #[cfg(unix)]
 impl Drop for ProcessGroupHandle {
     fn drop(&mut self) {
-        if let Some(parent_pgid) = self.parent_pgid {
-            let _ = set_foreground_process_group(parent_pgid);
-        }
+        let _ = self.restore_foreground();
     }
 }
 

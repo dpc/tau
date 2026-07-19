@@ -20,3 +20,7 @@ Durability mode is governed by
 Per-agent listing checkpoints and their journal-authority boundary are governed
 by
 [DECISION-tau-core-agent-summary-checkpoints](DECISION-tau-core-agent-summary-checkpoints.md).
+Current-session roster enrichment is read-only and path-exact: `AgentStore`
+reads at most the bounded first record plus an already-loaded or journal-bound checkpoint
+display projection. It does not replay the transcript, repair the checkpoint, or
+scan the global agents directory.

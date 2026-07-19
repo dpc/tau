@@ -154,6 +154,9 @@ pub enum Command {
         sessions_dir: PathBuf,
     },
 
+    /// List agents known to a running session
+    ListAgents(ListAgentsArgs),
+
     /// Show persisted policy approvals
     PolicyShow {
         /// Path to tau state directory (policy.cbor lives inside)
@@ -197,6 +200,30 @@ pub enum Command {
         #[arg(long, hide = true)]
         initial_ui_stdio: bool,
     },
+}
+
+/// Filters for `tau list-agents`.
+#[derive(Args, Clone)]
+pub struct ListAgentsArgs {
+    /// Running session to query.
+    pub session_id: String,
+
+    /// Include suspended live agents.
+    #[arg(long)]
+    pub include_suspended: bool,
+
+    /// Include current unavailable agents and rows with missing, invalid, or
+    /// unreadable creation facts.
+    #[arg(long)]
+    pub include_unavailable: bool,
+
+    /// Include previously loaded and now-unloaded agents.
+    #[arg(long)]
+    pub include_unloaded: bool,
+
+    /// Include every supported agent category.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Subcommand)]

@@ -370,6 +370,7 @@ pub(crate) fn dispatch_message<State>(
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)
+        | tau_proto::HarnessOutputMessage::SessionAgentListResult(_)
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageAuthResult(_)

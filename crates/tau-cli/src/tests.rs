@@ -253,6 +253,28 @@ fn component_command_parses_harness() {
     ));
 }
 
+/// Public list-agents flags parse additively around one required session id.
+#[test]
+fn list_agents_command_parses_filters() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "list-agents",
+        "session-1",
+        "--include-suspended",
+        "--include-unloaded",
+    ]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::ListAgents(args))
+            if args.session_id == "session-1"
+                && args.include_suspended
+                && args.include_unloaded
+                && !args.include_unavailable
+                && !args.all
+    ));
+}
+
 #[test]
 fn ext_command_is_not_a_component_alias() {
     let err = match super::cli::Cli::try_parse_from(["tau", "ext", "harness"]) {
@@ -2952,22 +2974,12 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
     // Exercise the placeholder-only navigation path: the operation must request
     // its own redraw even when no model-status block is present to do so.
     renderer.clear_model_status_for_test();
+    sync(&handle);
     let generation = vt.frame_generation();
     apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Suspended);
-    let frame = vt.wait_for_frame_after(generation);
-    assert!(
-        frame
-            .iter()
-            .any(|row| row.contains("This agent is suspended"))
-    );
-    let generation = vt.frame_generation();
+    let generation = vt.wait_for_frame_containing_after(generation, "This agent is suspended");
     apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
-    let frame = vt.wait_for_frame_after(generation);
-    assert!(
-        frame
-            .iter()
-            .any(|row| row.contains("Write a message to worker-1"))
-    );
+    vt.wait_for_frame_containing_after(generation, "Write a message to worker-1");
 }
 
 /// Ensures start-result delivery cannot replace canonical outer-turn runtime

@@ -92,10 +92,14 @@ navigation classification for each loaded agent while keeping their selected
 transcript, drafts, and presentation local. Explicit classifications survive UI
 reconnect while the agent remains loaded in the same daemon session. Unload,
 session switch, and daemon exit forget them.
+Running sessions also expose a bounded, pipe-friendly `tau list-agents` roster,
+and the terminal's C-b binding can pick a current non-suspended agent through
+optional `fzf` without changing durable navigation state.
 
 See [agent messaging](docs/agent-messaging.md),
 [agent roles](docs/agent-roles.md), and the
-[agent-watch specification](specs/SPEC-agent-watch.md).
+[agent-watch specification](specs/SPEC-agent-watch.md). The command and picker
+format are documented in [Listing and picking session agents](docs/list-agents.md).
 
 ## Tools, project context, and policy
 

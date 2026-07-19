@@ -9,7 +9,7 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 - Keep bounded subprocess ownership centralized in `src/bounded_command.rs`;
   do not add ad-hoc command timeout/output handling in completion or prompt
   action call sites.
-- Terminal foreground ownership belongs only to user-configured commands that
-  release raw mode, such as `complete_with_command` and prompt shell/editor
-  actions. Git/fuzzy helpers should own a process group for cleanup but must not
-  call `tcsetpgrp`.
+- Terminal foreground ownership belongs to interactive commands that release raw
+  mode, including the built-in agent picker and user-configured prompt/editor
+  actions. Noninteractive git and fuzzy completion helpers should own a process
+  group for cleanup but must not call `tcsetpgrp`.

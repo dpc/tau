@@ -66,6 +66,7 @@ enum TestMessage {
     ConfigError(tau_proto::ConfigError),
     Emit(tau_proto::Emit),
     InterceptReply(InterceptReply),
+    GetSessionAgentList(tau_proto::GetSessionAgentList),
     Configure(tau_proto::Configure),
     InterceptRequest(tau_proto::InterceptRequest),
     LiveDelivery(EventDelivery),
@@ -73,6 +74,7 @@ enum TestMessage {
     RenderedSystemPromptResult(Box<tau_proto::RenderedSystemPromptResult>),
     RenderedPromptResult(Box<tau_proto::RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
+    SessionAgentListResult(Box<tau_proto::SessionAgentListResult>),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
@@ -129,6 +131,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::RenderedToolDefinitionsResult(message) => {
                 Self::Message(TestMessage::RenderedToolDefinitionsResult(message))
             }
+            HarnessOutputMessage::SessionAgentListResult(message) => {
+                Self::Message(TestMessage::SessionAgentListResult(message))
+            }
             HarnessOutputMessage::ExtensionDataResult(message) => {
                 Self::Message(TestMessage::ExtensionDataResult(message))
             }
@@ -176,6 +181,7 @@ impl TestMessage {
             Self::ConfigError(message) => HarnessInputMessage::ConfigError(message),
             Self::Emit(message) => HarnessInputMessage::Emit(message),
             Self::InterceptReply(message) => HarnessInputMessage::InterceptReply(message),
+            Self::GetSessionAgentList(message) => HarnessInputMessage::GetSessionAgentList(message),
             Self::Configure(_)
             | Self::InterceptRequest(_)
             | Self::LiveDelivery(_)
@@ -183,6 +189,7 @@ impl TestMessage {
             | Self::RenderedSystemPromptResult(_)
             | Self::RenderedPromptResult(_)
             | Self::RenderedToolDefinitionsResult(_)
+            | Self::SessionAgentListResult(_)
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
@@ -1680,6 +1687,7 @@ fn draft_event(text: &str) -> Event {
 }
 
 mod action;
+mod agent_list;
 mod dedup;
 mod dispatch;
 mod format;

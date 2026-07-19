@@ -1,9 +1,11 @@
 //! Shared UI socket client helpers.
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tau_proto::{
     ClientKind, EventName, EventSelector, HarnessInputMessage, Hello, PROTOCOL_VERSION,
@@ -22,6 +24,94 @@ pub(crate) fn connect_ui_client(
     let stream = UnixStream::connect(socket_path)?;
     let read_stream = stream.try_clone()?;
     connect_ui_streams(read_stream, stream, client_name)
+}
+
+pub(crate) fn connect_ui_client_until(
+    socket_path: &Path,
+    client_name: impl Into<tau_proto::ExtensionName>,
+    deadline: std::time::Instant,
+) -> io::Result<(UiInputReader, UiOutputWriter)> {
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "agent roster deadline elapsed while connecting",
+        ));
+    }
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.connect_timeout(&socket2::SockAddr::unix(socket_path)?, timeout)?;
+    let fd: OwnedFd = socket.into();
+    let stream: UnixStream = fd.into();
+    stream.set_write_timeout(Some(timeout))?;
+    let read_stream = stream.try_clone()?;
+    connect_ui_streams(
+        DeadlineUnixReader {
+            stream: read_stream,
+            deadline,
+        },
+        DeadlineUnixWriter { stream, deadline },
+        client_name,
+    )
+}
+
+/// Unix reader that reapplies one absolute deadline before every underlying
+/// read, including reads performed inside CBOR decoding.
+struct DeadlineUnixReader {
+    /// Connected stream.
+    stream: UnixStream,
+    /// Absolute end of the one-shot request.
+    deadline: std::time::Instant,
+}
+
+impl Read for DeadlineUnixReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let remaining = self
+                .deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::TimedOut, "agent roster deadline elapsed")
+                })?;
+            self.stream
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))?;
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+/// Unix writer that applies the same absolute request deadline to every write.
+struct DeadlineUnixWriter {
+    /// Connected stream.
+    stream: UnixStream,
+    /// Absolute end of the one-shot request.
+    deadline: std::time::Instant,
+}
+
+impl Write for DeadlineUnixWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "agent roster deadline elapsed")
+            })?;
+        self.stream.set_write_timeout(Some(remaining))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 pub(crate) fn connect_ui_streams<R, W>(

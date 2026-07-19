@@ -2,6 +2,55 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 
+/// Foreground restoration is a visible error, while the still-armed handle
+/// retains its Drop fallback for a second best-effort attempt.
+#[cfg(unix)]
+#[test]
+fn foreground_restore_failure_is_reported() {
+    let _guard = FOREGROUND_CLAIM_TEST_LOCK
+        .lock()
+        .expect("foreground restore test lock");
+    let mut handle = ProcessGroupHandle {
+        child_pgid: None,
+        parent_pgid: Some(nix::unistd::getpgrp()),
+    };
+    FAIL_NEXT_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+
+    let error = handle
+        .restore_foreground()
+        .expect_err("injected restore failure");
+
+    assert!(error.contains("restore Tau terminal foreground"));
+    assert!(handle.parent_pgid.is_some(), "Drop fallback remains armed");
+}
+
+/// The bounded runner propagates restoration failure after collecting a child,
+/// rather than returning output while Tau may still be backgrounded.
+#[cfg(unix)]
+#[test]
+fn bounded_command_propagates_foreground_restore_failure() {
+    let _guard = FOREGROUND_CLAIM_TEST_LOCK
+        .lock()
+        .expect("foreground restore test lock");
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "printf done"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    FAIL_NEXT_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+
+    let error = run_with_bounded_stdout(
+        &mut command,
+        None,
+        1024,
+        std::time::Duration::from_secs(2),
+        ProcessOwnership::ForegroundProcessGroup,
+    )
+    .expect_err("restore failure must replace otherwise successful output");
+
+    assert!(error.contains("restore Tau terminal foreground"));
+}
+
 /// Prevents external prompt/completion commands from allocating unbounded
 /// memory when a misconfigured command writes a very large stdout stream.
 #[test]

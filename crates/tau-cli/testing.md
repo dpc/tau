@@ -35,3 +35,11 @@ This exception refines the exact-by-default policy in
 [`DECISION-exact-event-subscriptions`](../../specs/DECISION-exact-event-subscriptions.md).
 Cross-crate boundaries pair harness subscription/catch-up coverage with CLI
 renderer ordering coverage using the same protocol event shapes.
+
+Agent-roster verification is layered: tau-core owns bounded first-record and
+journal-bound checkpoint enrichment; tau-harness owns bounded current/history
+lifecycle projection plus requester-directed UI RPC behavior; tau-cli owns
+additive filters, deterministic topology, and exact ten-column escaped TSV; and
+tau-cli-term owns fixed fzf arguments, statuses, and output. Input-loop coverage
+should simulate changes between initial and revalidation snapshots and prove both
+successful switching and no-retarget failure paths.

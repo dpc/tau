@@ -202,6 +202,35 @@ pub(crate) fn read_checkpoint(path: &Path) -> io::Result<AgentCheckpoint> {
     Ok(checkpoint)
 }
 
+/// Reads a checkpoint only when its covered journal prefix still matches the
+/// exact open journal.
+pub(crate) fn read_journal_bound_checkpoint(
+    path: &Path,
+    agent_id: &AgentId,
+    journal: &mut File,
+) -> io::Result<AgentCheckpoint> {
+    let checkpoint = read_checkpoint(path)?;
+    if checkpoint.agent_id != *agent_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint agent id does not match journal",
+        ));
+    }
+    let metadata = journal.metadata()?;
+    let (device, inode) = metadata_identity(&metadata);
+    if device != checkpoint.journal.device
+        || inode != checkpoint.journal.inode
+        || metadata.len() < checkpoint.journal.covered_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint is not bound to this journal",
+        ));
+    }
+    verify_boundary(journal, &checkpoint.journal)?;
+    Ok(checkpoint)
+}
+
 /// Atomically replace `meta.json` without exposing partial JSON.
 pub(crate) fn write_checkpoint_atomic(path: &Path, checkpoint: &AgentCheckpoint) -> io::Result<()> {
     let parent = path

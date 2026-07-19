@@ -41,11 +41,56 @@ const PROMPT_COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 const COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+// Keep these fixed display columns synchronized with the ten-field contract in
+// docs/list-agents.md#output. Fzf still returns the complete original row.
+const AGENT_PICKER_FZF_ARGS: &[&str] = &[
+    "--height=100%",
+    "--delimiter=\t",
+    "--with-nth=1,7,10,2,3",
+    "--no-multi",
+    "--prompt=agent> ",
+];
 const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
 const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
 const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PROMPT_HISTORY_PREVIEW_TOTAL_BYTES: usize = 1024 * 1024;
 const COMPLETION_MENU_BLOCK_ID: BlockId = BlockId(u64::MAX);
+
+/// Re-acquires raw terminal state on every external-command exit path.
+struct ExternalResumeGuard<'a> {
+    /// Terminal whose external pause remains armed.
+    term: &'a tau_cli_term_raw::Term,
+    /// Cleared only after an explicit successful-or-reported resume attempt.
+    armed: bool,
+}
+
+impl<'a> ExternalResumeGuard<'a> {
+    fn new(term: &'a tau_cli_term_raw::Term) -> Self {
+        Self { term, armed: true }
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.armed = false;
+        self.term.resume_after_external()
+    }
+}
+
+impl Drop for ExternalResumeGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = self.term.resume_after_external()
+        {
+            tracing::warn!(
+                target: "tau_cli::input",
+                %error,
+                "failed to resume terminal after external command"
+            );
+        }
+    }
+}
+
 /// High-level events surfaced to the caller.
 pub enum Event {
     /// The user submitted a line (pressed Enter by default, Ctrl-Enter,
@@ -240,6 +285,26 @@ impl HighTerm {
     /// Triggers a redraw.
     pub fn redraw(&self) {
         self.handle.redraw();
+    }
+
+    /// Runs the optional `fzf` agent-row picker while safely releasing raw
+    /// mode.
+    ///
+    /// `rows` must be headerless TSV with the stable agent id in field one.
+    /// Cancellation and an empty input return `Ok(None)`.
+    pub fn pick_agent_row_with_fzf(&self, rows: &str) -> Result<Option<String>, String> {
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        self.term
+            .pause_for_external()
+            .map_err(|error| format!("could not release terminal: {error}"))?;
+        let guard = ExternalResumeGuard::new(&self.term);
+        let selection = run_agent_fzf_command(std::ffi::OsStr::new("fzf"), rows);
+        guard
+            .finish()
+            .map_err(|error| format!("could not resume terminal after agent picker: {error}"))?;
+        selection
     }
 
     /// Closes the active completion menu, if any, and updates its rendered
@@ -543,6 +608,54 @@ impl HighTerm {
     }
 }
 
+fn run_agent_fzf_command(program: &std::ffi::OsStr, rows: &str) -> Result<Option<String>, String> {
+    run_agent_fzf_command_with_ownership(program, rows, ProcessOwnership::ForegroundProcessGroup)
+}
+
+fn run_agent_fzf_command_with_ownership(
+    program: &std::ffi::OsStr,
+    rows: &str,
+    ownership: ProcessOwnership,
+) -> Result<Option<String>, String> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(AGENT_PICKER_FZF_ARGS)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output = run_with_bounded_stdout(
+        &mut command,
+        Some(rows.as_bytes()),
+        AGENT_PICKER_OUTPUT_LIMIT_BYTES,
+        AGENT_PICKER_TIMEOUT,
+        ownership,
+    )?;
+    match output.status.code() {
+        Some(1 | 130) => Ok(None),
+        _ if !output.status.success() => Err(format!(
+            "fzf exited with status {}",
+            output.status.code().map_or_else(
+                || "terminated by signal".to_owned(),
+                |code| code.to_string()
+            )
+        )),
+        _ => parse_agent_fzf_output(output.stdout),
+    }
+}
+
+fn parse_agent_fzf_output(output: Vec<u8>) -> Result<Option<String>, String> {
+    let output =
+        String::from_utf8(output).map_err(|error| format!("fzf output was not UTF-8: {error}"))?;
+    let output = output.strip_suffix('\n').unwrap_or(&output);
+    let output = output.strip_suffix('\r').unwrap_or(output);
+    if output.is_empty() {
+        return Ok(None);
+    }
+    if output.contains(['\n', '\r']) {
+        return Err("fzf returned more than one row".to_owned());
+    }
+    Ok(Some(output.to_owned()))
+}
+
 fn make_completion_source(
     commands: Vec<SlashCommand>,
     data: CompletionData,
@@ -564,15 +677,7 @@ fn run_completion_command(
     };
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
-    struct ResumeGuard<'a>(&'a tau_cli_term_raw::Term);
-    impl Drop for ResumeGuard<'_> {
-        fn drop(&mut self) {
-            if let Err(error) = self.0.resume_after_external() {
-                tracing::warn!(target: "tau_cli::input", %error, "failed to resume terminal after completion command");
-            }
-        }
-    }
-    let _guard = ResumeGuard(term);
+    let _guard = ExternalResumeGuard::new(term);
     let mut command_builder = std::process::Command::new(program);
     command_builder
         .args(args)
@@ -836,15 +941,7 @@ fn run_prompt_shell_action(
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
     // RAII so a spawn error / panic still restores raw mode.
-    struct ResumeGuard<'a>(&'a tau_cli_term_raw::Term);
-    impl Drop for ResumeGuard<'_> {
-        fn drop(&mut self) {
-            if let Err(error) = self.0.resume_after_external() {
-                tracing::warn!(target: "tau_cli::input", %error, "failed to resume terminal after prompt action");
-            }
-        }
-    }
-    let _guard = ResumeGuard(term);
+    let _guard = ExternalResumeGuard::new(term);
 
     let mut command_builder = prompt_shell_command_builder(
         command,

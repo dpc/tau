@@ -13,6 +13,7 @@ mod chat;
 mod daemon;
 mod dev_tmux;
 mod event_renderer;
+mod list_agents;
 mod markdown_render;
 mod message_fact_render;
 mod print_prompt;
@@ -590,6 +591,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             cli::Command::SessionShow { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "session-show")?;
             }
+            cli::Command::ListAgents(_) => {
+                reject_harness_config_overrides(&harness_config_overrides, "list-agents")?;
+            }
             cli::Command::PolicyShow { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
             }
@@ -738,6 +742,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     println!("{line}");
                 }
                 Ok(())
+            }
+
+            cli::Command::ListAgents(args) => {
+                reject_harness_config_overrides(&harness_config_overrides, "list-agents")?;
+                list_agents::run(&args)
             }
 
             cli::Command::PolicyShow { state_dir } => {

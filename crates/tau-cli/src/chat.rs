@@ -853,6 +853,7 @@ pub(crate) fn run_chat(
         cli_overrides,
         ephemeral,
     )?;
+    let harness_socket_path = daemon.socket_path();
     let ui_io_meter = UiIoMeter::default();
     let UiConnection {
         mut read_stream,
@@ -1171,6 +1172,7 @@ pub(crate) fn run_chat(
             prompt_history,
             custom_prompts,
             ui_io_meter: ui_io_meter.clone(),
+            harness_socket_path,
         },
     )?;
 
@@ -1359,6 +1361,8 @@ struct TerminalInputLoopCtx {
     prompt_history: PromptHistoryStore,
     custom_prompts: Arc<Mutex<Vec<tau_proto::HarnessCustomPrompt>>>,
     ui_io_meter: UiIoMeter,
+    /// Socket used for requester-directed roster snapshots.
+    harness_socket_path: std::path::PathBuf,
 }
 
 #[derive(Clone)]
@@ -1924,6 +1928,7 @@ impl<'a> TerminalInputSession<'a> {
             "cycle-role-group" => self.cycle_role_group(),
             "agent-previous" => self.switch_agent_by_delta(-1),
             "agent-next" => self.switch_agent_by_delta(1),
+            "agent-pick" => self.pick_agent(),
             _ => self
                 .output
                 .system_info(&format!("binding: unknown application action `{action}`")),
@@ -2821,6 +2826,76 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         self.switch_to_agent(next);
+    }
+
+    fn pick_agent(&mut self) {
+        let session_id = self.session_id.clone();
+        let agents = match crate::list_agents::request_at_socket(
+            &self.ctx.harness_socket_path,
+            &session_id,
+            tau_proto::SessionAgentListScope::Current,
+        ) {
+            Ok(agents) => agents,
+            Err(error) => {
+                self.output.system_info(&format!("agent-picker: {error}"));
+                return;
+            }
+        };
+        let visible = crate::list_agents::visible_agents(
+            agents,
+            crate::list_agents::AgentListFilter::default(),
+        );
+        if visible.is_empty() {
+            self.output
+                .system_info("agent-picker: no non-suspended agents available");
+            return;
+        }
+        let rows = crate::list_agents::format_rows(&visible);
+        let selected = match self.term.pick_agent_row_with_fzf(&rows) {
+            Ok(Some(row)) => row,
+            Ok(None) => return,
+            Err(error) => {
+                self.output.system_info(&format!("agent-picker: {error}"));
+                return;
+            }
+        };
+        let agent_id = match crate::list_agents::selected_agent_id(&selected) {
+            Ok(agent_id) => agent_id,
+            Err(error) => {
+                self.output.system_info(&format!("agent-picker: {error}"));
+                return;
+            }
+        };
+        let revalidated = crate::list_agents::request_at_socket(
+            &self.ctx.harness_socket_path,
+            &session_id,
+            tau_proto::SessionAgentListScope::Current,
+        )
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|agent| {
+            agent.agent_id == agent_id
+                && matches!(
+                    agent.lifecycle,
+                    tau_proto::SessionAgentLifecycle::Live {
+                        navigation_mode: tau_proto::AgentNavigationMode::Active
+                            | tau_proto::AgentNavigationMode::ActiveAuto,
+                        ..
+                    }
+                )
+        });
+        if self.session_id != &session_id
+            || !revalidated
+            || !self.ctx.routing.agent_is_known(agent_id.as_str())
+        {
+            self.output
+                .system_info("agent-picker: selected agent is no longer available");
+            return;
+        }
+        if self.selected_agent_id().as_deref() != Some(agent_id.as_str()) {
+            self.switch_to_agent(agent_id.to_string());
+        }
     }
 
     fn switch_to_agent(&mut self, agent_id: String) {

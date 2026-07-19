@@ -101,3 +101,24 @@ Every `agent.stats_updated` complete operational snapshot carries a required
 navigation mode independently of runtime state. Transient
 `ui.set_agent_navigation_mode` requests absolute changes; requester-directed
 results acknowledge processing but do not replace the authoritative snapshot.
+
+## Directed current-session agent roster
+
+`get_session_agent_list` carries a correlation id, exact current session id, and
+`current` or `history` scope. `session_agent_list_result` echoes the correlation
+and session ids and carries either every row or one whole-request error with no
+partial rows.
+
+Row lifecycle is `live`, `unavailable`, or `unloaded`. Runtime and navigation
+fields are present only for `live`. Persistence is `durable` or `ephemeral`.
+Creation-fact status is `available`, `missing`, `invalid`, or `unreadable`;
+available rows may carry start time, parent, creation role, and an in-memory or
+checkpoint display-name projection.
+
+The fixed limits are 4096 distinct agents checked against the maintained
+membership cache before ids are cloned, 256 KiB for one first creation record,
+4 MiB aggregate creation/checkpoint projection work, and the shared 16 MiB
+encoded protocol message bound enforced by a limited writer. Stable
+whole-request errors distinguish stale session, membership-projection
+inconsistency, entry overflow, aggregate enrichment overflow, and encoded
+response overflow.

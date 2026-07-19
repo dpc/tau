@@ -144,3 +144,20 @@ The harness owns a daemon-lifetime mode for every loaded current-session agent.
 UI disconnect preserves it; committed unload, session switch, and process exit
 forget it. Cold restore recomputes ordinary/delegated defaults and does not
 restore explicit overrides.
+
+## Agent roster projection
+
+The current roster scope contains every distinct currently loaded membership id.
+A current member with a non-terminating runtime agent and navigation mode is
+`live`; any other current member is `unavailable`. History scope adds every
+distinct id with a prior load whose composed latest membership state is
+unloaded. Durable session history survives restart; ephemeral history exists
+only in the validated process-local overlay.
+
+Projection uses committed loaded and ever-loaded caches seeded before runtime
+restoration and updated after membership persistence. Restore/commit failure
+invalidates the projection and fails later requests atomically. The fixed entry
+limit is checked before retaining a result.
+Per-agent enrichment reads only the bounded first creation record and an
+already-loaded or journal-bound checkpoint display projection; missing, invalid,
+and unreadable facts remain categorical rows. Any snapshot failure is atomic.

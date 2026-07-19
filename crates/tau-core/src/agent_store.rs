@@ -25,7 +25,7 @@ use tau_proto::{
 
 use crate::agent_checkpoint::{
     AgentCheckpoint, AgentSummary, CommittedJournalPosition, journal_position, read_checkpoint,
-    write_checkpoint_atomic,
+    read_journal_bound_checkpoint, write_checkpoint_atomic,
 };
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
@@ -237,6 +237,70 @@ impl AgentPersistenceMode {
     pub const fn is_ephemeral(self) -> bool {
         matches!(self, Self::Ephemeral)
     }
+}
+
+/// Content-minimized facts read without replaying an agent transcript.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentCreationFacts {
+    /// The first record is a valid matching `agent.started` fact.
+    Available {
+        /// Timestamp attached to the first record, unless legacy zero.
+        started_at: Option<UnixMicros>,
+        /// Parent copied from the immutable creation fact.
+        parent_agent: Option<AgentId>,
+        /// Role copied from the immutable creation fact.
+        role: String,
+        /// Display name from current memory or a journal-bound checkpoint.
+        display_name: Option<String>,
+        /// Bounded projection bytes consumed.
+        bytes_read: u64,
+    },
+    /// The journal or its first record does not exist.
+    Missing,
+    /// The decoded first record is not a valid matching creation fact.
+    Invalid {
+        /// Bounded projection bytes consumed.
+        bytes_read: u64,
+    },
+    /// I/O, decoding, or the individual record bound prevented classification.
+    Unreadable {
+        /// Bounded projection bytes consumed.
+        bytes_read: u64,
+    },
+}
+
+impl AgentCreationFacts {
+    /// Returns the aggregate enrichment charge for this projection.
+    #[must_use]
+    pub const fn bytes_read(&self) -> u64 {
+        match self {
+            Self::Available { bytes_read, .. }
+            | Self::Invalid { bytes_read }
+            | Self::Unreadable { bytes_read } => *bytes_read,
+            Self::Missing => 0,
+        }
+    }
+}
+
+/// Aggregate roster-enrichment budget was too small for the next first record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentCreationFactsBudgetExceeded;
+
+impl fmt::Display for AgentCreationFactsBudgetExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("agent creation-fact enrichment budget exceeded")
+    }
+}
+
+impl Error for AgentCreationFactsBudgetExceeded {}
+
+/// Caller-selected bounds for one shallow creation-fact projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentCreationFactsBudget {
+    /// Largest encoded first record accepted.
+    pub max_record_bytes: u64,
+    /// Aggregate projection bytes still available to the caller.
+    pub remaining_bytes: u64,
 }
 
 fn parse_agent_id_for_store(agent_id: &str) -> Result<AgentId, AgentStoreError> {
@@ -532,6 +596,118 @@ impl AgentStore {
         } else {
             AgentPersistenceMode::Durable
         }
+    }
+
+    /// Reads one bounded creation fact and current display-name projection.
+    ///
+    /// This method never scans beyond the first journal record, repairs a
+    /// checkpoint, acquires a writer lock, or mutates the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentCreationFactsBudgetExceeded`] when a first record fits
+    /// the individual record limit but exceeds `remaining_bytes`.
+    pub fn agent_creation_facts(
+        &self,
+        agent_id: &AgentId,
+        budget: AgentCreationFactsBudget,
+    ) -> Result<AgentCreationFacts, AgentCreationFactsBudgetExceeded> {
+        let AgentCreationFactsBudget {
+            max_record_bytes,
+            remaining_bytes,
+        } = budget;
+        if self.ephemeral_agents.contains(agent_id) {
+            let Some(record) = self
+                .ephemeral_events
+                .get(agent_id)
+                .and_then(|events| events.first())
+            else {
+                return Ok(AgentCreationFacts::Missing);
+            };
+            let display_name = self.agents.get(agent_id).and_then(AgentTree::display_name);
+            let Some(record_bytes) = encoded_size_with_limit(record, max_record_bytes) else {
+                return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
+            };
+            let projected_bytes = record_bytes
+                .saturating_add(display_name.map_or(0, |display_name| display_name.len() as u64));
+            if projected_bytes > remaining_bytes {
+                return Err(AgentCreationFactsBudgetExceeded);
+            }
+            return Ok(agent_creation_facts_from_record(
+                agent_id,
+                record,
+                display_name.map(str::to_owned),
+                projected_bytes,
+            ));
+        }
+
+        let path = self.agent_dir(agent_id.as_str()).join("events.cbor");
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(AgentCreationFacts::Missing);
+            }
+            Err(_) => {
+                return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
+            }
+        };
+        let record_length = match crate::record_log::read_record_length(&mut file) {
+            Ok(Some(length)) => length,
+            Ok(None) => {
+                return Ok(AgentCreationFacts::Missing);
+            }
+            Err(_) => {
+                return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
+            }
+        };
+        if record_length > max_record_bytes {
+            return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
+        }
+        if record_length > remaining_bytes {
+            return Err(AgentCreationFactsBudgetExceeded);
+        }
+        let mut bytes = vec![0; record_length as usize];
+        if file.read_exact(&mut bytes).is_err() {
+            return Ok(AgentCreationFacts::Unreadable {
+                bytes_read: record_length,
+            });
+        }
+        let record = match tau_proto::decode_message_from_slice::<PersistedAgentEvent>(&bytes) {
+            Ok(record) => record,
+            Err(_) => {
+                return Ok(AgentCreationFacts::Unreadable {
+                    bytes_read: record_length,
+                });
+            }
+        };
+        let in_memory_display_name = self.agents.get(agent_id).and_then(AgentTree::display_name);
+        let checkpoint_path = self.agent_dir(agent_id.as_str()).join("meta.json");
+        let display_projection_bytes = if let Some(display_name) = &in_memory_display_name {
+            display_name.len() as u64
+        } else {
+            fs::metadata(&checkpoint_path)
+                .ok()
+                .map_or(0, |metadata| metadata.len())
+        };
+        if record_length.saturating_add(display_projection_bytes) > remaining_bytes {
+            return Err(AgentCreationFactsBudgetExceeded);
+        }
+        let display_name = match in_memory_display_name {
+            Some(display_name) => Some(display_name.to_owned()),
+            None => read_journal_bound_checkpoint(
+                &self.agent_dir(agent_id.as_str()).join("meta.json"),
+                agent_id,
+                &mut file,
+            )
+            .ok()
+            .and_then(|checkpoint| checkpoint.summary.display_name),
+        };
+        Ok(agent_creation_facts_from_record(
+            agent_id,
+            &record,
+            display_name,
+            record_length.saturating_add(display_projection_bytes),
+        ))
     }
 
     /// Acquires an exclusive flock on the agent's `lock` file if not
@@ -1265,6 +1441,61 @@ fn records_begin_with_creation(agent_id: &AgentId, events: &[PersistedAgentEvent
         events.first().map(|record| &record.event),
         Some(Event::AgentStarted(started)) if &started.agent_id == agent_id
     )
+}
+
+fn agent_creation_facts_from_record(
+    agent_id: &AgentId,
+    record: &PersistedAgentEvent,
+    display_name: Option<String>,
+    bytes_read: u64,
+) -> AgentCreationFacts {
+    let valid = record.seq == PersistedAgentEventSeq::new(0)
+        && records_begin_with_creation(agent_id, std::slice::from_ref(record))
+        && AgentTree::try_from_events(agent_id.clone(), std::slice::from_ref(record)).is_ok();
+    let Event::AgentStarted(started) = &record.event else {
+        return AgentCreationFacts::Invalid { bytes_read };
+    };
+    if !valid {
+        return AgentCreationFacts::Invalid { bytes_read };
+    }
+    AgentCreationFacts::Available {
+        started_at: (record.recorded_at.get() != 0).then_some(record.recorded_at),
+        parent_agent: started.parent_agent.clone(),
+        role: started.role.clone(),
+        display_name,
+        bytes_read,
+    }
+}
+
+fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
+    /// Non-retaining serialized-size counter.
+    struct Counter {
+        /// Bytes accepted so far.
+        written: u64,
+        /// Largest accepted total.
+        limit: u64,
+    }
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if self.written.saturating_add(length) > self.limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::FileTooLarge,
+                    "encoded value exceeds bound",
+                ));
+            }
+            self.written += length;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { written: 0, limit };
+    tau_proto::encode_message(&mut counter, value)
+        .ok()
+        .map(|()| counter.written)
 }
 
 /// Largest individual CBOR record we'll allocate from the

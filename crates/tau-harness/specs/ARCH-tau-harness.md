@@ -143,3 +143,16 @@ watches, execution, or model behavior.
 
 The authoritative rationale and lifecycle are recorded in
 [DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).
+
+## Directed agent roster
+
+The event loop owns a bounded, read-only current-session roster RPC for local UI
+connections. It reads current and ever-loaded caches atomically seeded from
+validated committed membership before runtime restoration and updated only after
+later membership commits. Restore/commit failures invalidate the projection.
+The RPC checks the entry limit before cloning ids, joins live runtime/navigation
+state, then adds shallow bounded creation facts.
+Results are correlated and requester-directed; they are not events and never
+enter persistence, interception, publication, subscription replay, or extension
+delivery. Exact wire behavior is specified by
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).

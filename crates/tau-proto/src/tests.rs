@@ -1311,6 +1311,11 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             request_id: "render-tools-1".to_owned(),
             role: "engineer".to_owned(),
         }),
+        HarnessInputMessage::GetSessionAgentList(GetSessionAgentList {
+            request_id: "agent-list-1".to_owned(),
+            session_id: "s1".into(),
+            scope: SessionAgentListScope::History,
+        }),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
@@ -1403,6 +1408,26 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                 error: None,
             },
         )),
+        HarnessOutputMessage::SessionAgentListResult(Box::new(SessionAgentListResult {
+            request_id: "agent-list-1".to_owned(),
+            session_id: "s1".into(),
+            result: SessionAgentListResultPayload::Ok {
+                agents: vec![SessionAgentListEntry {
+                    agent_id: agent_id("agent-1"),
+                    lifecycle: SessionAgentLifecycle::Live {
+                        runtime_state: AgentRuntimeState::Idle,
+                        navigation_mode: AgentNavigationMode::Active,
+                    },
+                    persistence: SessionAgentPersistence::Durable,
+                    facts: SessionAgentFacts::Available {
+                        started_at: Some(UnixMicros::new(1_700_000_000_000_000)),
+                        parent_agent: None,
+                        role: "engineer".to_owned(),
+                        display_name: Some("Agent one".to_owned()),
+                    },
+                }],
+            },
+        })),
         HarnessOutputMessage::ExtensionDataResult(Box::new(ExtensionDataResult {
             request_id: "ext-data-1".to_owned(),
             result: ExtensionDataResultPayload::Ok {

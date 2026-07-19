@@ -111,3 +111,9 @@ Navigation classification is shared by UIs attached to the same daemon. Use
 presentation remain local to each UI. Overrides survive UI reconnect while the
 agent remains loaded in the same daemon session; unload, session switch, and
 harness restart forget them.
+
+Use `tau list-agents <session-id>` for a stable headerless TSV roster from a
+running session; `--include-suspended`, `--include-unavailable`,
+`--include-unloaded`, and `--all` widen its default live non-suspended view.
+Inside the terminal UI, C-b opens optional `fzf` over the same current
+non-suspended category and revalidates the selection before switching.

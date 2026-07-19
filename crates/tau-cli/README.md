@@ -39,6 +39,11 @@ drafts, and presentation remain UI-local. Explicit overrides are not persisted;
 cold restore recomputes defaults from existing provenance. Selecting or
 prompting a hidden agent does not change its mode.
 
+The public `tau list-agents <session-id>` command reads a directed harness roster
+and emits stable headerless TSV; it does not infer membership or navigation from
+renderer state. The C-b picker uses the same current non-suspended rule, while
+C-j/C-k retain their narrower effective-active cycling rule.
+
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because
 the pasted Gmail loopback URL contains a one-time OAuth authorization code and

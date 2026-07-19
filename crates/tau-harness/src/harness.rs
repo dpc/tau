@@ -129,6 +129,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_EXTENSION_ACTIVATION_MESSAGES: usize = 1_024;
 const MAX_EXTENSION_ACTIVATION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EXTENSION_CONFIG_ERROR_BYTES: usize = 4 * 1024;
+const MAX_SESSION_AGENT_LIST_ENTRIES: usize = 4_096;
+const MAX_SESSION_AGENT_LIST_FIRST_RECORD_BYTES: u64 = 256 * 1024;
+const MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES: u64 = 4 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
@@ -164,6 +167,48 @@ fn session_dir_status_from_reason(
         }
         tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
     }
+}
+
+fn session_agent_list_error(
+    kind: tau_proto::SessionAgentListErrorKind,
+    message: &str,
+) -> tau_proto::SessionAgentListError {
+    tau_proto::SessionAgentListError {
+        kind,
+        message: message.to_owned(),
+    }
+}
+
+/// Counting writer that rejects a roster before its encoded size exceeds the
+/// protocol frame limit.
+struct EncodedSizeLimit {
+    /// Bytes still accepted.
+    remaining: u64,
+}
+
+impl io::Write for EncodedSizeLimit {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if length > self.remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "encoded agent roster exceeds its protocol bound",
+            ));
+        }
+        self.remaining -= length;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn session_agent_list_message_fits(message: &HarnessOutputMessage) -> bool {
+    let mut encoded_size = EncodedSizeLimit {
+        remaining: tau_proto::MAX_PROTOCOL_MESSAGE_BYTES,
+    };
+    tau_proto::encode_message(&mut encoded_size, message).is_ok()
 }
 
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
@@ -1858,6 +1903,12 @@ pub struct Harness {
     /// Agents that have appeared in the current session's membership history,
     /// including agents that are presently unloaded.
     pub(crate) session_ever_loaded_agents: HashSet<tau_proto::AgentId>,
+    /// Successfully committed current membership used by roster snapshots.
+    session_roster_loaded_agents: HashSet<tau_proto::AgentId>,
+    /// Successfully validated/committed membership history used by rosters.
+    session_roster_ever_loaded_agents: HashSet<tau_proto::AgentId>,
+    /// False after membership restore/persistence failure until a new session.
+    session_roster_valid: bool,
     /// Harness-owned navigation classification for loaded current-session
     /// agents.
     pub(crate) agent_navigation_modes: HashMap<tau_proto::AgentId, tau_proto::AgentNavigationMode>,
@@ -2595,6 +2646,9 @@ impl Harness {
             precommitted_user_interactions: HashMap::new(),
             session_loaded_agents: HashSet::new(),
             session_ever_loaded_agents: HashSet::new(),
+            session_roster_loaded_agents: HashSet::new(),
+            session_roster_ever_loaded_agents: HashSet::new(),
+            session_roster_valid: true,
             agent_navigation_modes: HashMap::new(),
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
@@ -4333,6 +4387,11 @@ impl Harness {
         ) {
             Ok(folded_node_id) => folded_node_id,
             Err(error) => {
+                if semantic_event_router::session_membership_id_for_event(&event)
+                    .is_some_and(|session_id| session_id == self.current_session_id)
+                {
+                    self.session_roster_valid = false;
+                }
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event.name(),
@@ -4350,6 +4409,18 @@ impl Harness {
                 return;
             }
         };
+        if let Event::SessionAgentLoaded(loaded) = &event
+            && loaded.session_id == self.current_session_id
+        {
+            self.session_roster_loaded_agents
+                .insert(loaded.agent_id.clone());
+            self.session_roster_ever_loaded_agents
+                .insert(loaded.agent_id.clone());
+        } else if let Event::SessionAgentUnloaded(unloaded) = &event
+            && unloaded.session_id == self.current_session_id
+        {
+            self.session_roster_loaded_agents.remove(&unloaded.agent_id);
+        }
         if let Event::AgentPromptCreated(prompt) = &event {
             self.note_agent_prompt_created(prompt);
         }
@@ -6387,6 +6458,163 @@ impl Harness {
         );
     }
 
+    fn send_session_agent_list_result(
+        &mut self,
+        connection_id: &str,
+        request: tau_proto::GetSessionAgentList,
+    ) {
+        let request_id = request.request_id;
+        let session_id = request.session_id;
+        let result = match self.build_session_agent_list(&session_id, request.scope) {
+            Ok(agents) => tau_proto::SessionAgentListResult {
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                result: tau_proto::SessionAgentListResultPayload::Ok { agents },
+            },
+            Err(error) => tau_proto::SessionAgentListResult {
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                result: tau_proto::SessionAgentListResultPayload::Error { error },
+            },
+        };
+        let mut message = HarnessOutputMessage::SessionAgentListResult(Box::new(result));
+        if !session_agent_list_message_fits(&message) {
+            message = HarnessOutputMessage::SessionAgentListResult(Box::new(
+                tau_proto::SessionAgentListResult {
+                    request_id,
+                    session_id,
+                    result: tau_proto::SessionAgentListResultPayload::Error {
+                        error: session_agent_list_error(
+                            tau_proto::SessionAgentListErrorKind::ResponseTooLarge,
+                            "agent roster response exceeds the protocol message bound",
+                        ),
+                    },
+                },
+            ));
+        }
+        let _ = self.bus.send_to(connection_id, None, message);
+    }
+
+    fn build_session_agent_list(
+        &self,
+        session_id: &SessionId,
+        scope: tau_proto::SessionAgentListScope,
+    ) -> Result<Vec<tau_proto::SessionAgentListEntry>, tau_proto::SessionAgentListError> {
+        if session_id != &self.current_session_id {
+            return Err(session_agent_list_error(
+                tau_proto::SessionAgentListErrorKind::StaleSession,
+                "the harness is bound to a different session",
+            ));
+        }
+        if !self.session_roster_valid
+            || !self
+                .session_roster_loaded_agents
+                .is_subset(&self.session_roster_ever_loaded_agents)
+        {
+            return Err(session_agent_list_error(
+                tau_proto::SessionAgentListErrorKind::SessionRead,
+                "current membership is inconsistent with membership history",
+            ));
+        }
+        let source = match scope {
+            tau_proto::SessionAgentListScope::Current => &self.session_roster_loaded_agents,
+            tau_proto::SessionAgentListScope::History => &self.session_roster_ever_loaded_agents,
+        };
+        if source.len() > MAX_SESSION_AGENT_LIST_ENTRIES {
+            return Err(session_agent_list_error(
+                tau_proto::SessionAgentListErrorKind::TooManyAgents,
+                "agent roster exceeds the fixed entry bound",
+            ));
+        }
+
+        let loaded = &self.session_roster_loaded_agents;
+        let mut agent_ids = source.iter().cloned().collect::<Vec<_>>();
+        agent_ids.sort();
+        let live_agents = self
+            .agents
+            .values()
+            .filter(|agent| {
+                !agent.terminating
+                    && agent.session_id == self.current_session_id
+                    && agent.agent_id.is_some()
+            })
+            .filter_map(|agent| {
+                let agent_id = AgentId::parse(agent.agent_id.as_deref()?).ok()?;
+                let navigation_mode = self.agent_navigation_modes.get(&agent_id).copied()?;
+                Some((agent_id, (agent.published_runtime_state, navigation_mode)))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut remaining_enrichment_bytes = MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES;
+        let mut agents = Vec::with_capacity(agent_ids.len());
+        for agent_id in agent_ids {
+            let live = loaded
+                .contains(&agent_id)
+                .then(|| live_agents.get(&agent_id))
+                .flatten();
+            let lifecycle = match live {
+                Some((runtime_state, navigation_mode)) => tau_proto::SessionAgentLifecycle::Live {
+                    runtime_state: *runtime_state,
+                    navigation_mode: *navigation_mode,
+                },
+                None if loaded.contains(&agent_id) => tau_proto::SessionAgentLifecycle::Unavailable,
+                None => tau_proto::SessionAgentLifecycle::Unloaded,
+            };
+            let facts = self
+                .agent_store
+                .agent_creation_facts(
+                    &agent_id,
+                    tau_core::AgentCreationFactsBudget {
+                        max_record_bytes: MAX_SESSION_AGENT_LIST_FIRST_RECORD_BYTES,
+                        remaining_bytes: remaining_enrichment_bytes,
+                    },
+                )
+                .map_err(|_| {
+                    session_agent_list_error(
+                        tau_proto::SessionAgentListErrorKind::EnrichmentTooLarge,
+                        "agent roster exceeds the aggregate enrichment-read bound",
+                    )
+                })?;
+            remaining_enrichment_bytes =
+                remaining_enrichment_bytes.saturating_sub(facts.bytes_read());
+            let facts = match facts {
+                tau_core::AgentCreationFacts::Available {
+                    started_at,
+                    parent_agent,
+                    role,
+                    display_name,
+                    ..
+                } => tau_proto::SessionAgentFacts::Available {
+                    started_at,
+                    parent_agent,
+                    role,
+                    display_name,
+                },
+                tau_core::AgentCreationFacts::Missing => tau_proto::SessionAgentFacts::Missing,
+                tau_core::AgentCreationFacts::Invalid { .. } => {
+                    tau_proto::SessionAgentFacts::Invalid
+                }
+                tau_core::AgentCreationFacts::Unreadable { .. } => {
+                    tau_proto::SessionAgentFacts::Unreadable
+                }
+            };
+            agents.push(tau_proto::SessionAgentListEntry {
+                agent_id: agent_id.clone(),
+                lifecycle,
+                persistence: if self
+                    .agent_store
+                    .agent_persistence(agent_id.as_str())
+                    .is_ephemeral()
+                {
+                    tau_proto::SessionAgentPersistence::Ephemeral
+                } else {
+                    tau_proto::SessionAgentPersistence::Durable
+                },
+                facts,
+            });
+        }
+        Ok(agents)
+    }
+
     fn send_extension_data_result(
         &mut self,
         connection_id: &str,
@@ -7800,6 +8028,7 @@ impl Harness {
             | HarnessInputMessage::GetRenderedSystemPrompt(_)
             | HarnessInputMessage::GetRenderedPrompt(_)
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
+            | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
             | HarnessInputMessage::PeerSessionProbe(_) => {}
@@ -8683,6 +8912,15 @@ impl Harness {
             }
             HarnessInputMessage::GetRenderedToolDefinitions(request) => {
                 self.send_rendered_tool_definitions_result(client_id, request);
+                Ok(true)
+            }
+            HarnessInputMessage::GetSessionAgentList(request) => {
+                let is_ui = self.bus.connections().iter().any(|connection| {
+                    connection.id.as_str() == client_id && connection.kind == ClientKind::Ui
+                });
+                if is_ui {
+                    self.send_session_agent_list_result(client_id, request);
+                }
                 Ok(true)
             }
             HarnessInputMessage::ExternalAgentMessage(request) => {
@@ -14433,6 +14671,9 @@ impl Harness {
         self.agent_routes.clear();
         self.session_loaded_agents.clear();
         self.session_ever_loaded_agents.clear();
+        self.session_roster_loaded_agents.clear();
+        self.session_roster_ever_loaded_agents.clear();
+        self.session_roster_valid = true;
         self.agent_navigation_modes.clear();
         self.agent_watches.clear();
         self.agent_watchers.clear();
@@ -15517,31 +15758,52 @@ impl Harness {
     }
 
     fn rehydrate_agents_from_session(&mut self) {
-        match self.store.session_events(self.current_session_id.as_str()) {
-            Ok(events) => {
-                self.session_ever_loaded_agents
-                    .extend(events.into_iter().filter_map(|entry| match entry.event {
-                        Event::SessionAgentLoaded(loaded) => Some(loaded.agent_id),
-                        _ => None,
-                    }));
+        let history = self.store.session_events(self.current_session_id.as_str());
+        let ephemeral_history = self
+            .store
+            .ephemeral_membership_events(self.current_session_id.as_str());
+        let membership = self
+            .store
+            .load_session(self.current_session_id.as_str())
+            .map(|membership| membership.cloned());
+        let (events, ephemeral_events, membership) = match (history, ephemeral_history, membership)
+        {
+            (Ok(events), Ok(ephemeral_events), Ok(Some(membership))) => {
+                (events, ephemeral_events, membership)
             }
-            Err(error) => {
+            (Ok(events), Ok(ephemeral_events), Ok(None))
+                if events.is_empty() && ephemeral_events.is_empty() =>
+            {
+                return;
+            }
+            (history, ephemeral_history, membership) => {
+                self.session_roster_valid = false;
                 self.emit_harness_failure(&format!(
-                    "failed to load session membership history during restore: {error}"
+                    "failed to load session membership during restore: history={:?}, ephemeral={:?}, current={:?}",
+                    history.err(),
+                    ephemeral_history.err(),
+                    membership.err()
                 ));
+                return;
             }
-        }
-        let loaded_agents: Vec<tau_proto::AgentId> =
-            match self.store.load_session(self.current_session_id.as_str()) {
-                Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
-                Ok(None) => return,
-                Err(error) => {
-                    self.emit_harness_failure(&format!(
-                        "failed to load session during restore: {error}"
-                    ));
-                    return;
-                }
-            };
+        };
+        let ever_loaded = events
+            .into_iter()
+            .chain(ephemeral_events)
+            .filter_map(|entry| match entry.event {
+                Event::SessionAgentLoaded(loaded) => Some(loaded.agent_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let loaded_agents = membership
+            .loaded_agents()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.session_ever_loaded_agents
+            .extend(ever_loaded.iter().cloned());
+        self.session_roster_ever_loaded_agents = ever_loaded;
+        self.session_roster_loaded_agents = loaded_agents.iter().cloned().collect();
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
             match self.agent_store.load_agent(agent_id.as_str()) {

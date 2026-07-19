@@ -122,3 +122,12 @@ The event loop consumes `ui.set_agent_navigation_mode` only from UI intake and
 serializes accepted absolute writes, so the last accepted write wins. Extensions
 cannot mutate this state. Harness-authored `agent.stats_updated` snapshots are
 must-pass and immutable because they carry the complete shared classification.
+
+## Directed agent-roster reads
+
+`get_session_agent_list` is accepted only from a connection whose `Hello`
+classified it as `ClientKind::Ui`. Its result is correlated and sent only to the
+requester. It bypasses event publication, interception, persistence,
+subscriptions, and replay. The serialized event-loop position supplies one
+coherent membership/runtime/navigation cut, although the result may become stale
+immediately after delivery.
