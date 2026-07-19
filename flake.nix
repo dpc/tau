@@ -76,6 +76,10 @@
 
         cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         releaseProfile = cargoManifest.profile.release;
+        # Selfci captures and replays Nix build logs verbatim. Keep every nextest
+        # lane plain and non-interactive so terminal detection cannot add progress
+        # frames or ANSI escapes to those persistent logs.
+        nextestReporterArgs = "--color never --show-progress none --status-level none --no-input-handler";
         buildSrc =
           # The universal release binary needs parallel LLVM optimization. This
           # evaluation guard prevents normal release builds from silently
@@ -204,7 +208,7 @@
 
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
-              cargoNextestExtraArgs = "--workspace --show-progress none --status-level=none";
+              cargoNextestExtraArgs = "--workspace ${nextestReporterArgs}";
               nativeBuildInputs = [ pkgs.ripgrep ];
             };
 
@@ -222,6 +226,7 @@
                   -p tau-provider-codex \
                   --cargo-profile $CARGO_PROFILE \
                   --no-tests=fail \
+                  ${nextestReporterArgs} \
                   -E 'test(/curated_provider_vcr_replay_only_lane/)'
                 mkdir -p "$out"
               '';
@@ -249,7 +254,8 @@
                     --test deterministic_provider \
                     --test cancellation_liveness \
                     --cargo-profile $CARGO_PROFILE \
-                    --no-tests=fail
+                    --no-tests=fail \
+                    ${nextestReporterArgs}
                  # The PTY gate must spawn the exact universal binary from this
                  # Cargo profile rather than discovering a user PATH entry.
                  export TAU_E2E_TAU_BIN="$PWD/target/$CARGO_PROFILE/tau"
@@ -259,7 +265,8 @@
                    --test core_resume \
                    --test core_shell_resume \
                    --cargo-profile $CARGO_PROFILE \
-                   --no-tests=fail
+                   --no-tests=fail \
+                   ${nextestReporterArgs}
                  mkdir -p "$out"
               '';
               doInstallCargoArtifacts = false;
@@ -300,7 +307,7 @@
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 source <(cargo llvm-cov show-env --export-prefix)
-                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE --show-progress none --status-level=none
+                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE ${nextestReporterArgs}
                 mkdir -p $out
                 cargo llvm-cov report --profile $CARGO_PROFILE --lcov --output-path $out/lcov.info
                 test -s $out/lcov.info
