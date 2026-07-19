@@ -2,6 +2,7 @@
 name: tau-tool-verification-agent-coordination
 description: >
   Use this skill when verifying Tau agent_start, message, or agent_watch coordination, including routing, validation, interruption, notification formatting, watch lifecycle, and deduplication.
+advertise: false
 ---
 
 # Tau Tool Verification Agent Coordination
@@ -305,5 +306,4 @@ Report concise but complete findings:
 * Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both `message` the user and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
 * Include whether `wait` was interrupted by a watch notification while waiting; this is expected if it reports that new input is queued.
 * Include whether `self_agent_id` and `sub_agent_id` made the watcher and watched IDs clear enough.
-
 

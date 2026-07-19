@@ -1,5 +1,33 @@
 use super::*;
 
+const TOOL_VERIFICATION_ROOT: &str = "tau-tool-verification";
+
+fn repository_tool_verification_skills() -> Vec<Skill> {
+    let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".agents/skills");
+    let result = load_skills_from_skill_dirs(&[SkillDir {
+        path: skills_dir,
+        add_to_prompt_by_default: true,
+        source_precedence: None,
+    }]);
+    assert!(
+        result.diagnostics.is_empty(),
+        "repository skills must load cleanly: {:?}",
+        result.diagnostics
+    );
+    result
+        .skills
+        .into_iter()
+        .filter(|skill| {
+            skill.name == TOOL_VERIFICATION_ROOT
+                || skill
+                    .name
+                    .starts_with(&format!("{TOOL_VERIFICATION_ROOT}-"))
+        })
+        .collect()
+}
+
 // -- Frontmatter parsing ------------------------------------------------
 
 #[test]
@@ -89,6 +117,59 @@ fn load_skill_advertise_true_opts_into_prompt() {
     let (skill, _diags) = load_skill_from_content(content, path);
     let skill = skill.expect("should load");
     assert!(skill.add_to_prompt);
+}
+
+/// Keeps the shared verification index in initial context without making every
+/// focused verification plan consume prompt space in every repository session.
+#[test]
+fn repository_tool_verification_prompt_listing_only_advertises_root() {
+    let skills = repository_tool_verification_skills();
+    let advertised: Vec<&str> = skills
+        .iter()
+        .filter(|skill| skill.add_to_prompt)
+        .map(|skill| skill.name.as_str())
+        .collect();
+
+    assert_eq!(advertised, [TOOL_VERIFICATION_ROOT]);
+    assert!(
+        skills
+            .iter()
+            .any(|skill| skill.name != TOOL_VERIFICATION_ROOT),
+        "expected focused verification sub-skills"
+    );
+    for skill in skills
+        .iter()
+        .filter(|skill| skill.name != TOOL_VERIFICATION_ROOT)
+    {
+        assert!(
+            !skill.disable_model_invocation,
+            "{} must remain exact-query loadable",
+            skill.name
+        );
+    }
+}
+
+/// The root is the deliberate discovery surface for focused plans. Requiring
+/// an exact set prevents both stale references and silently unindexed skills.
+#[test]
+fn repository_tool_verification_root_references_every_focused_skill() {
+    let skills = repository_tool_verification_skills();
+    let root = skills
+        .iter()
+        .find(|skill| skill.name == TOOL_VERIFICATION_ROOT)
+        .expect("verification root");
+    let root_content = fs::read_to_string(&root.file_path).expect("load verification root");
+    let focused_names: std::collections::BTreeSet<&str> = skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .filter(|name| *name != TOOL_VERIFICATION_ROOT)
+        .collect();
+    let referenced_names: std::collections::BTreeSet<&str> = root_content
+        .split('`')
+        .filter(|token| token.starts_with(&format!("{TOOL_VERIFICATION_ROOT}-")))
+        .collect();
+
+    assert_eq!(referenced_names, focused_names);
 }
 
 #[test]

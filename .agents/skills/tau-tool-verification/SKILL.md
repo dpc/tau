@@ -4,6 +4,7 @@ description: >
   Use this skill when asked to verify Tau harness tools or tool output behavior,
   especially read, edit, shell/shell_command, line-oriented output, truncation, metadata
   headers, UTF-8 handling, diffs, timeouts, or skill/tool conformance.
+advertise: true
 ---
 
 # Tau Tool Verification

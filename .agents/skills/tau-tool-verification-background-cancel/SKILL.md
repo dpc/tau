@@ -5,6 +5,7 @@ description: >
   agent_start interruption, including result consumption, completion prompt
   suppression, races, delegate interruption, cancellation isolation, and event
   logs.
+advertise: false
 ---
 
 # Tau Tool Verification Background Cancel

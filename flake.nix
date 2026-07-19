@@ -70,6 +70,7 @@
           "Cargo.toml"
           "Cargo.lock"
           ".config/nextest.toml"
+          ".agents/skills"
           "config"
           "crates"
         ];

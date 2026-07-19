@@ -2,6 +2,7 @@
 name: tau-tool-verification-file-shell
 description: >
   Use this skill when verifying Tau file and command tools: read, edit, apply_patch, shell, or shell_command, including ranges, UTF-8, truncation, diffs, timeouts, mutation safety, and shell lock coverage.
+advertise: false
 ---
 
 # Tau Tool Verification File Shell

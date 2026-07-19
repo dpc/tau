@@ -2,6 +2,7 @@
 name: tau-tool-verification-directory-locks
 description: >
   Use this skill when verifying Tau dir_lock behavior, including manual and automatic lock scopes, conflict matrices, lock wait metadata, cancellation, force unlock, and lifecycle cleanup.
+advertise: false
 ---
 
 # Tau Tool Verification Directory Locks

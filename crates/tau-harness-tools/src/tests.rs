@@ -1,5 +1,56 @@
 use super::*;
 
+/// Hidden repository verification sub-skills must remain exact-query loadable
+/// through the same selection, bounded read, and body extraction path as the
+/// model-visible `skill` tool.
+#[test]
+fn hidden_repository_tool_verification_skills_load_by_exact_query() {
+    const PREFIX: &str = "tau-tool-verification-";
+    let skills_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".agents/skills");
+    let loaded = tau_skills::load_skills_from_skill_dirs(&[tau_skills::SkillDir {
+        path: skills_dir,
+        add_to_prompt_by_default: true,
+        source_precedence: None,
+    }]);
+    assert!(loaded.diagnostics.is_empty());
+    let focused: Vec<_> = loaded
+        .skills
+        .into_iter()
+        .filter(|skill| skill.name.starts_with(PREFIX))
+        .collect();
+    assert!(!focused.is_empty(), "expected focused verification skills");
+    let skills: Vec<InternalSkill> = focused
+        .into_iter()
+        .map(|skill| {
+            assert!(
+                !skill.disable_model_invocation,
+                "{} must remain exact-query loadable",
+                skill.name
+            );
+            InternalSkill {
+                name: skill.name,
+                description: skill.description,
+                source: InternalSkillSource::File(skill.file_path),
+            }
+        })
+        .collect();
+
+    for skill in &skills {
+        let outcome = search_discovered_skills(&skills, std::slice::from_ref(&skill.name), false);
+        assert_eq!(outcome.auto_load_name.as_deref(), Some(skill.name.as_str()));
+        let selected = skills
+            .iter()
+            .find(|candidate| Some(candidate.name.as_str()) == outcome.auto_load_name.as_deref())
+            .expect("exact-query selection");
+        let read = read_skill_source_prefix(&selected.source, MAX_SKILL_CONTENT_BYTES)
+            .expect("bounded exact-name skill read");
+        let body = skill_body_from_prefix(&read).expect("strip exact-name skill frontmatter");
+        assert!(body.contains("# Tau Tool Verification"));
+    }
+}
+
 fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
         return None;
