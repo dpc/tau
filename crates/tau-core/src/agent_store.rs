@@ -27,6 +27,7 @@ use crate::agent_checkpoint::{
     AgentCheckpoint, AgentSummary, CommittedJournalPosition, journal_position, read_checkpoint,
     read_journal_bound_checkpoint, write_checkpoint_atomic,
 };
+use crate::record_log::MAX_RECORD_BYTES;
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
     PersistedAgentEventSeq,
@@ -1497,15 +1498,6 @@ fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
         .ok()
         .map(|()| counter.written)
 }
-
-/// Largest individual CBOR record we'll allocate from the
-/// length-prefix on disk. A torn or corrupt log can have garbage in
-/// the 8-byte length header; without a sanity bound a single
-/// `vec![0; record_length]` could try to allocate up to
-/// `usize::MAX` bytes. 64 MiB is generous compared to any agent
-/// event we actually persist (largest are tool results, which live
-/// in the same KB-to-MB range as user-visible chat content).
-const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), AgentStoreError>
 where

@@ -2,6 +2,13 @@
 
 use std::io::{self, Read};
 
+/// Largest individual CBOR record that durable journal readers allocate.
+///
+/// A torn or corrupt length header can otherwise request an effectively
+/// unbounded allocation. Writers use the same limit so every committed record
+/// remains readable by the matching loader.
+pub(crate) const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Reads the next little-endian record length from a durable record log.
 ///
 /// Clean EOF before a new 8-byte length header means the log ended normally and

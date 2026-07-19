@@ -3,7 +3,9 @@
 `AgentStore` owns per-agent semantic trees and `SessionStore` owns session
 membership/event streams. Each supports durable journals and selected
 process-lifetime memory streams. Durable records advance their on-disk sequence;
-memory-only membership does not consume that cursor.
+memory-only membership does not consume that cursor. Both durable journal
+writers reject encoded records larger than the shared 64 MiB reader allocation
+limit before opening or mutating the journal.
 
 A durable session keeps ephemeral-agent loads and matching unloads in a separate
 process-local, independently sequenced overlay. Late same-daemon replay first
