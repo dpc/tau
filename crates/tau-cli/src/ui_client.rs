@@ -211,8 +211,9 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::PROVIDER_PROMPT_SUBMITTED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_UPDATED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
-        // Tool and shell progress shown in generic ToolUseState blocks.
-        EventSelector::Exact(E::TOOL_REQUEST),
+        // Tool and shell progress shown in generic ToolUseState blocks. The
+        // interactive renderer starts pending tool state from `tool.started`;
+        // it does not consume `tool.request`.
         EventSelector::Exact(E::TOOL_STARTED),
         EventSelector::Exact(E::TOOL_REJECTED),
         EventSelector::Exact(E::TOOL_RESULT),
@@ -257,16 +258,13 @@ pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMe
     })
 }
 
-/// Builds the production chat subscription without replaying transient tool
-/// admission state that would briefly resurrect already-terminal calls.
+/// Builds the production chat subscription without replaying transient
+/// `tool.started` state that would briefly resurrect already-terminal calls.
 pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
     let live_selectors = chat_subscription_selectors();
     let historical_selectors = live_selectors
         .iter()
-        .filter(|selector| {
-            **selector != EventSelector::Exact(EventName::TOOL_REQUEST)
-                && **selector != EventSelector::Exact(EventName::TOOL_STARTED)
-        })
+        .filter(|selector| **selector != EventSelector::Exact(EventName::TOOL_STARTED))
         .cloned()
         .collect();
     HarnessInputMessage::Subscribe(Subscribe {

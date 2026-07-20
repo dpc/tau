@@ -31,10 +31,12 @@ hook.
 
 Event-wiring regressions lock historical and live selector sets, payload
 dependencies, and catch-up/lifecycle orderings. The chat UI receives
-`tool.request` and `tool.started` live but intentionally omits them from
-append-only restore history, where replaying a completed call's start would
-transiently resurrect it as pending before its durable terminal result arrives.
-This exception refines the exact-by-default policy in
+`tool.started` live but intentionally omits it from append-only restore history,
+where replaying a completed call's start would transiently resurrect it as
+pending before its durable terminal result arrives. Chat does not select
+`tool.request` historically or live because its renderer does not consume that
+fact; generic and non-chat subscribers can still select it. These exceptions
+refine the exact-by-default policy in
 [`DECISION-exact-event-subscriptions`](../../specs/DECISION-exact-event-subscriptions.md).
 Cross-crate boundaries pair harness subscription/catch-up coverage with CLI
 renderer ordering coverage using the same protocol event shapes.

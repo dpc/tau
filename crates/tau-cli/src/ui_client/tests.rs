@@ -58,7 +58,6 @@ fn chat_subscription_uses_no_prefix_selectors() {
         EventName::PROVIDER_PROMPT_SUBMITTED,
         EventName::PROVIDER_RESPONSE_UPDATED,
         EventName::PROVIDER_RESPONSE_FINISHED,
-        EventName::TOOL_REQUEST,
         EventName::TOOL_STARTED,
         EventName::TOOL_REJECTED,
         EventName::TOOL_RESULT,
@@ -102,18 +101,21 @@ fn chat_subscription_uses_no_prefix_selectors() {
     assert_eq!(subscription.live_selectors, selectors);
 }
 
-/// Ensures cold chat replay cannot paint a completed historical tool as newly
-/// pending while preserving the same admission events for future live calls.
+/// Ensures chat does not request the unused tool admission fact and cold replay
+/// cannot paint a completed historical tool as newly pending.
 #[test]
-fn chat_subscription_excludes_transient_tool_admission_only_from_history() {
+fn chat_subscription_excludes_unused_request_and_historical_started() {
     let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
         panic!("chat subscription must produce Subscribe")
     };
-    for event in [EventName::TOOL_REQUEST, EventName::TOOL_STARTED] {
-        let selector = EventSelector::Exact(event);
-        assert!(!subscription.historical_selectors.contains(&selector));
-        assert!(subscription.live_selectors.contains(&selector));
-    }
+    let request = EventSelector::Exact(EventName::TOOL_REQUEST);
+    assert!(!subscription.historical_selectors.contains(&request));
+    assert!(!subscription.live_selectors.contains(&request));
+
+    let started = EventSelector::Exact(EventName::TOOL_STARTED);
+    assert!(!subscription.historical_selectors.contains(&started));
+    assert!(subscription.live_selectors.contains(&started));
+
     for event in [
         EventName::PROVIDER_RESPONSE_FINISHED,
         EventName::TOOL_RESULT,
@@ -123,4 +125,21 @@ fn chat_subscription_excludes_transient_tool_admission_only_from_history() {
         assert!(subscription.historical_selectors.contains(&selector));
         assert!(subscription.live_selectors.contains(&selector));
     }
+}
+
+/// Generic UI subscription construction remains capable of requesting
+/// `tool.request`; only the interactive chat allow-list drops the event.
+#[test]
+fn generic_ui_subscription_preserves_tool_request() {
+    let request = EventSelector::Exact(EventName::TOOL_REQUEST);
+    let HarnessInputMessage::Subscribe(subscription) = subscribe_message(vec![request.clone()])
+    else {
+        panic!("generic subscription must produce Subscribe")
+    };
+
+    assert_eq!(
+        subscription.historical_selectors,
+        std::slice::from_ref(&request)
+    );
+    assert_eq!(subscription.live_selectors, [request]);
 }

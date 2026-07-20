@@ -64,12 +64,34 @@ output.
 `ProtocolIoMeter` is a protocol-mechanical frame counter shared by UI and
 extension transports. It groups already-decoded/encoded frames by delivered or
 emitted event name, or by `message.*` for non-event protocol frames, and records
-encoded byte counts. It does not subscribe to events, affect replay/live
-filtering, own lifecycle policy, or call back into the harness. The harness may
-depend on this protocol-I/O utility surface without depending on tau-client
-runner or extension lifecycle abstractions. Per-direction keys are capped and
-overflow into an `other` bucket so extension-owned custom event names cannot grow
-the harness's debug accounting state without bound.
+encoded byte counts. The default meter used by extension transports remains
+cumulative-only; the interactive UI explicitly opts into detailed diagnostics.
+Those diagnostics classify two orthogonal axes: the initial connection remains in
+`cold-attach` through the non-replay `session.replay_complete` boundary, while
+each delivery independently retains its replay/non-replay marker. Later
+per-agent replay therefore appears as `steady.replay`, not cold attach. For
+selected high-volume events the diagnostics retain only byte-size
+distributions and equality classifications: tool-result encoded frame, full bare
+event, raw result, display, provider components, and missing-display occurrences;
+final-response authoritative semantic output, provider replay sidecars, and a
+metadata-only event projection; exact agent-stats duplicates within the observed
+loaded epoch; and
+exact/sequence-only/substantive quota changes. Agent comparison state resets on
+load, unload, and session start; quota comparison state resets on session start.
+Equality caches are also separated by attach and replay dimensions, so a replay
+snapshot is not counted as a duplicate predecessor for the first live snapshot.
+These diagnostics do not log payload content, suppress events, or change event
+semantics. Component encodings are independent CBOR size measurements and are not
+expected to add up to the enclosing frame.
+
+The meter does not subscribe to events, affect replay/live filtering, own
+lifecycle policy, or call back into the harness. The harness may depend on this
+protocol-I/O utility surface without depending on tau-client runner or extension
+lifecycle abstractions. Per-direction keys are capped and overflow into an
+`other` bucket so extension-owned custom event names cannot grow the harness's
+debug accounting state without bound. Detailed measurement keys are a fixed set
+derived from built-in event types, and percentile histograms use fixed
+logarithmic buckets rather than retaining individual samples.
 
 Extensions that intentionally leave background workers running after disconnect
 can opt into a detached-writer run mode. That mode preserves startup and handler
@@ -183,4 +205,8 @@ demux, builder validation, empty subscriptions, and plugin composition. Add
 focused coverage when changing lifecycle, writer shutdown, replay filtering,
 configuration, intercept, action dispatch, manual receive loops, extension-data
 request correlation, or startup declaration behavior so migrated extensions do
-not need to rediscover runtime regressions independently.
+not need to rediscover runtime regressions independently. Focused
+`protocol_io/tests.rs` and `protocol_io/diagnostics/tests.rs` coverage owns
+cumulative-counter compatibility, cold-attach boundaries, replay/non-replay
+classification, selected payload attribution, bounded histograms, and
+equality-cache reset boundaries.

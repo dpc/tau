@@ -152,6 +152,20 @@ returned only as a directed non-persisted notice, and must remain bounded by
 key-cardinality caps with overflow buckets so a noisy peer cannot grow daemon
 memory by emitting many unique custom event names.
 
+The local `/debug-show-ui-event-stats` report preserves its lifetime cumulative
+totals and additionally reports an attach-phase by delivery-kind matrix. Initial
+traffic, including the non-replay `session.replay_complete` boundary, is cold
+attach; traffic after that boundary is steady. Replay/non-replay remains an
+independent axis, so later agent replay is visible as steady replay. The report
+includes exact encoded byte totals plus bounded size distributions for selected
+payload components and equality classifications; it never reports payload
+contents. Only interactive chat opts into this detailed work; extension meters
+remain cumulative-only. The interactive chat exact subscription omits
+`tool.request` in both historical and live selectors because its renderer does
+not consume that admission fact. `tool.started` remains live so the renderer can
+create pending tool state, and generic UI, provider, extension, and restore
+subscriptions remain independent of the chat allow-list.
+
 ## Navigation projection
 
 The CLI caches harness-owned navigation classification only from complete

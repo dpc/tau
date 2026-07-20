@@ -213,13 +213,23 @@ fn format_ui_io_cumulative_stats(stats: &UiIoCumulativeStats) -> String {
     )
 }
 
+fn format_ui_io_stats(meter: &UiIoMeter) -> String {
+    let cumulative = format_ui_io_cumulative_stats(&meter.cumulative_stats());
+    let diagnostics = meter.format_diagnostics();
+    if diagnostics.is_empty() {
+        cumulative
+    } else {
+        format!("{cumulative}\n\n{diagnostics}")
+    }
+}
+
 fn handle_debug_show_ui_event_stats_command_text(
     text: &str,
     meter: &UiIoMeter,
     mut system_info: impl FnMut(&str),
 ) -> bool {
     if text == "/debug-show-ui-event-stats" {
-        system_info(&format_ui_io_cumulative_stats(&meter.cumulative_stats()));
+        system_info(&format_ui_io_stats(meter));
         return true;
     }
     if text.starts_with("/debug-show-ui-event-stats ") {
@@ -370,6 +380,39 @@ mod ui_io_tests {
             format_ui_io_cumulative_stats(&UiIoCumulativeStats::default()),
             "UI event I/O cumulative stats\nuplink: 0B in 0 frame(s)\n  (none)\ndownlink: 0B in 0 frame(s)\n  (none)\nno UI frames recorded yet"
         );
+    }
+
+    /// The interactive debug dump reports cold catch-up separately from steady
+    /// live delivery and includes exact encoded byte totals.
+    #[test]
+    fn ui_io_stats_report_separates_catch_up_and_steady_live() {
+        let meter = UiIoMeter::with_diagnostics();
+        meter.record_downlink_frame(&HarnessOutputMessage::deliver_replay(
+            UnixMicros::new(1),
+            Event::TermBell(tau_proto::TermBell {}),
+        ));
+        meter.record_downlink_frame(&HarnessOutputMessage::deliver(
+            Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+                session_id: "session-1".into(),
+                error: None,
+            }),
+        ));
+        meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(2),
+            Event::TermBell(tau_proto::TermBell {}),
+        ));
+        meter.record_downlink_frame(&HarnessOutputMessage::deliver_replay(
+            UnixMicros::new(3),
+            Event::TermBell(tau_proto::TermBell {}),
+        ));
+
+        let formatted = format_ui_io_stats(&meter);
+
+        assert!(formatted.contains("cold-attach.replay: bytes="));
+        assert!(formatted.contains("cold-attach.non-replay: bytes="));
+        assert!(formatted.contains("steady.non-replay: bytes="));
+        assert!(formatted.contains("steady.replay: bytes="));
+        assert_eq!(formatted.matches("  term.bell: bytes=").count(), 3);
     }
 
     /// The slash-command handler should print the same cumulative dump users
@@ -856,7 +899,7 @@ pub(crate) fn run_chat(
         ephemeral,
     )?;
     let harness_socket_path = daemon.socket_path();
-    let ui_io_meter = UiIoMeter::default();
+    let ui_io_meter = UiIoMeter::with_diagnostics();
     let UiConnection {
         mut read_stream,
         writer,

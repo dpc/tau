@@ -1,9 +1,17 @@
 //! Protocol frame byte/count accounting shared by Tau clients.
 
+mod diagnostics;
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use diagnostics::{
+    DeliveryKind as ProtocolIoDeliveryKind, State as ProtocolIoDiagnosticsState,
+    collect_measurements,
+};
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
 /// Number of one-second samples retained for rolling protocol-I/O status.
@@ -64,38 +72,79 @@ struct ProtocolIoBuckets {
 struct ProtocolIoState {
     buckets: ProtocolIoBuckets,
     cumulative: ProtocolIoCumulativeStats,
+    /// Present only for explicitly opted-in UI meters.
+    diagnostics: Option<ProtocolIoDiagnosticsState>,
 }
 
 /// Shared protocol frame meter.
 ///
 /// The meter records frames that already cross an existing transport. It does
-/// not subscribe to events, does not inspect replay policy, and does not affect
-/// dispatch; callers choose where in their read/write path a successful frame
-/// is counted.
+/// not subscribe to events or affect dispatch; callers choose where in their
+/// read/write path a successful frame is counted. [`Self::with_diagnostics`]
+/// opts a UI connection into attach-phase, replay-kind, field-size, and
+/// equality diagnostics; [`Self::default`] retains only the inexpensive
+/// cumulative and rolling counters used by extension transports.
 #[derive(Clone, Default)]
 pub struct ProtocolIoMeter {
     state: Arc<Mutex<ProtocolIoState>>,
+    /// Fast-path mirror of `state.diagnostics.is_some()` that avoids locking or
+    /// component serialization on cumulative-only extension meters.
+    detailed: bool,
 }
 
 impl ProtocolIoMeter {
+    /// Create a meter that also records content-free UI delivery diagnostics.
+    #[must_use]
+    pub fn with_diagnostics() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ProtocolIoState {
+                diagnostics: Some(ProtocolIoDiagnosticsState::default()),
+                ..ProtocolIoState::default()
+            })),
+            detailed: true,
+        }
+    }
+
     /// Record a peer-to-harness input frame, grouped by event name for `Emit`
     /// messages and by protocol message variant for all other frames.
     pub fn record_uplink_frame(&self, message: &HarnessInputMessage) {
-        self.record_bytes(
+        let Some(bytes) = message_len(message) else {
+            return;
+        };
+        let mut state = self.state.lock().expect("protocol io meter mutex");
+        state.record_bytes(
             ProtocolIoDirection::Uplink,
-            input_message_key(message),
-            message_len(message),
+            &input_message_key(message),
+            bytes,
         );
     }
 
     /// Record a harness-to-peer output frame, grouped by event name for
     /// delivered events and by protocol message variant for all other frames.
     pub fn record_downlink_frame(&self, message: &HarnessOutputMessage) {
-        self.record_bytes(
-            ProtocolIoDirection::Downlink,
-            output_message_key(message),
-            message_len(message),
-        );
+        let Some(bytes) = message_len(message) else {
+            return;
+        };
+        let key = output_message_key(message);
+        let measurements = self.detailed.then(|| collect_measurements(message, bytes));
+        let mut state = self.state.lock().expect("protocol io meter mutex");
+        state.record_bytes(ProtocolIoDirection::Downlink, &key, bytes);
+        if let (Some(diagnostics), HarnessOutputMessage::Deliver(delivery)) =
+            (&mut state.diagnostics, message)
+        {
+            let delivery_kind = if delivery.is_replay() {
+                ProtocolIoDeliveryKind::Replay
+            } else {
+                ProtocolIoDeliveryKind::NonReplay
+            };
+            diagnostics.record_delivery(
+                delivery_kind,
+                delivery.event(),
+                &key,
+                bytes,
+                measurements.unwrap_or_default(),
+            );
+        }
     }
 
     /// Record an already-classified frame.
@@ -107,27 +156,7 @@ impl ProtocolIoMeter {
             return;
         };
         let mut state = self.state.lock().expect("protocol io meter mutex");
-        let (bucket_entries, cumulative_entries): (
-            &mut BTreeMap<String, u64>,
-            &mut BTreeMap<String, ProtocolIoFrameStats>,
-        ) = match direction {
-            ProtocolIoDirection::Uplink => {
-                let ProtocolIoState {
-                    buckets,
-                    cumulative,
-                } = &mut *state;
-                (&mut buckets.uplink, &mut cumulative.uplink)
-            }
-            ProtocolIoDirection::Downlink => {
-                let ProtocolIoState {
-                    buckets,
-                    cumulative,
-                } = &mut *state;
-                (&mut buckets.downlink, &mut cumulative.downlink)
-            }
-        };
-        record_bytes_bounded(bucket_entries, &key, bytes);
-        record_frame_bounded(cumulative_entries, &key, bytes);
+        state.record_bytes(direction, &key, bytes);
     }
 
     /// Drain the current one-second sample buckets without clearing cumulative
@@ -145,6 +174,33 @@ impl ProtocolIoMeter {
             .expect("protocol io meter mutex")
             .cumulative
             .clone()
+    }
+
+    /// Format lifetime content-free attach/replay and payload diagnostics.
+    #[must_use]
+    pub fn format_diagnostics(&self) -> String {
+        let state = self.state.lock().expect("protocol io meter mutex");
+        state
+            .diagnostics
+            .as_ref()
+            .map(ProtocolIoDiagnosticsState::format)
+            .unwrap_or_default()
+    }
+}
+
+impl ProtocolIoState {
+    fn record_bytes(&mut self, direction: ProtocolIoDirection, key: &str, bytes: u64) {
+        let (bucket_entries, cumulative_entries): (
+            &mut BTreeMap<String, u64>,
+            &mut BTreeMap<String, ProtocolIoFrameStats>,
+        ) = match direction {
+            ProtocolIoDirection::Uplink => (&mut self.buckets.uplink, &mut self.cumulative.uplink),
+            ProtocolIoDirection::Downlink => {
+                (&mut self.buckets.downlink, &mut self.cumulative.downlink)
+            }
+        };
+        record_bytes_bounded(bucket_entries, key, bytes);
+        record_frame_bounded(cumulative_entries, key, bytes);
     }
 }
 
