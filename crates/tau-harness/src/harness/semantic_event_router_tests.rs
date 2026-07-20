@@ -1,10 +1,27 @@
 use tau_proto::{
-    AgentStarted, CborValue, Event, PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded,
-    ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
+    AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderModelsDeclared,
+    ProviderModelsUpdated, SessionAgentLoaded, SessionAgentUnloaded, ToolError, ToolName,
+    ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
 use crate::parse_agent_id;
+
+/// Provider declaration and canonical model snapshots are reconstructed current
+/// state, never durable semantic history.
+#[test]
+fn provider_model_state_never_enters_semantic_history() {
+    for event in [
+        Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),
+        Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            publisher_extension_id: ExtensionName::from("provider"),
+            models: Vec::new(),
+        }),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
 
 /// Ensures ordinary transient facts remain live-only so progress/status updates
 /// cannot accidentally enter durable session or agent replay logs.

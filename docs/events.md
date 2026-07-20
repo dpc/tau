@@ -235,15 +235,22 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   node target.
 
 
-## Provider execution
+## Provider models and execution
 
-Emitted by the provider backend that owns the selected model.
+Configured provider extensions declare model capability; the harness owns accepted
+current model state. Provider backends emit execution events for work routed to
+their selected models.
 
-- **`provider.models_updated`** — Provider extension replacement snapshot of
-  currently servable models and their capabilities, including the exact route's
-  accepted prompt-input and native tool-result modalities. Omitted modality
-  metadata means text-only. The harness folds provider snapshots into
-  `harness.models_available` and related role/model availability events.
+- **`provider.models_declared`** — Transient, mutable replacement declaration from
+  a configured provider extension. It enters ordinary exact/prefix interception.
+- **`provider.models_updated`** — Transient, immutable harness-authored accepted
+  current state derived after a model declaration commits. Its
+  `publisher_extension_id` identifies the stable configured provider whose complete
+  snapshot is replaced; an empty model list withdraws that provider's state. It
+  includes the exact route's accepted prompt-input and native tool-result
+  modalities; omitted modality metadata means text-only. The harness then publishes
+  `harness.models_available` and related role/model availability events. Current
+  state replay regenerates only this canonical event, never the declaration.
 - **`provider.quota_replace`**, **`provider.quota_patch`**, and
   **`provider.quota_clear`** — Transient provider-owned account-quota current
   state. Replacements establish or reconcile an opaque profile epoch; patches

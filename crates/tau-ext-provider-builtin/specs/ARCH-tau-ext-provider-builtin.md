@@ -91,8 +91,9 @@ broadcasts these stats unchanged.
 ## Prompt worker wakeups
 
 Protocol startup publishes provider client kind, exact subscriptions, the
-startup `ProviderModelsUpdated` snapshot, and then `Ready`. Current-state session
-directory restore is the only replay catch-up used by this provider. Prewarm,
+transient startup `ProviderModelsDeclared` declaration, and then `Ready`. The
+harness derives canonical `ProviderModelsUpdated` current state after activation.
+Current-state session directory restore is the only replay catch-up used by this provider. Prewarm,
 session-directory, cancel, and shutdown inputs use exact selectors; directed
 `ui.retry_prompt` and `agent.prompt_created` arrive as routed live deliveries
 without subscribing to or replaying provider work.

@@ -2,12 +2,12 @@
 
 ## Status
 
-The external-message slice now uses generic `Emit` publication, an authenticated
-internal publisher snapshot, declared bridge authority, and downstream
-canonicalization as required by
+The external-message and provider-model slices now use generic `Emit`
+publication, immutable authenticated internal publisher snapshots, source-aware
+admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
-The general protocol-level authenticated publisher envelope and other peer event
-families remain to be migrated.
+The general protocol-level authenticated publisher envelope and remaining peer
+event families remain to be migrated.
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,
@@ -69,6 +69,24 @@ extension-private authority. Invalid or unavailable targets remain committed and
 visible to subscribers even when no prompt projection is possible.
 The complete schema, persistence, and projection contract is
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+
+## Provider model declarations and canonical state
+
+Only authenticated configured provider extensions may publish transient,
+interceptable `provider.models_declared` replacement declarations. The generic
+publication envelope snapshots the configured connection and provider kind so
+parking, disconnect, or replacement cannot substitute publisher identity.
+Post-commit processing stages startup declarations until activation or publishes
+protected harness-authored `provider.models_updated` current state before applying
+the existing route, collision, availability, and restored-work reconciliation.
+Canonical model state cannot be dropped or rewritten; the existing availability
+projections retain their existing interception behavior. Each canonical snapshot
+also carries the stable configured provider publisher so replacement and empty
+snapshots remain attributable even though their delivery source is the harness.
+Subscribe-time current-state replay synthesizes canonical updates with that stable
+publisher and harness source metadata only; it never replays declarations or reruns
+their side-effects. The payload and event-name contract is documented in
+[SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-model-declarations-and-canonical-state).
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

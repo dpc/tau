@@ -20,6 +20,9 @@ The runner writes `Hello`, requires the initial harness `Configure`, installs an
 immutable logical-to-wire tool-name scope, constructs state, and dispatches
 initial Configure handlers exactly once. It then writes static declarations,
 accepted Configure-derived declarations, and `Ready`, in that order.
+`startup_event` preserves durable `Emit` metadata, while
+`startup_transient_event` sets `Emit.transient` for runtime-only declarations;
+both retain their builder order before `Ready`.
 Configure-derived declarations are buffered while handlers run so they override
 same-name static defaults without becoming visible before configuration is
 accepted. Rejection emits `ConfigError`, discards buffered declarations, and

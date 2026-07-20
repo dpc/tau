@@ -143,8 +143,8 @@ fn write_startup(
             )],
         },
     )))?;
-    writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsUpdated(
-        tau_proto::ProviderModelsUpdated {
+    writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsDeclared(
+        tau_proto::ProviderModelsDeclared {
             models: vec![tau_proto::ProviderModelInfo {
                 id: "strict/model".into(),
                 display_name: Some("Strict compaction".to_owned()),

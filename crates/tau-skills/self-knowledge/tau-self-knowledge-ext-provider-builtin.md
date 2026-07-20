@@ -94,7 +94,11 @@ HTTPS/WSS CONNECT tunnel, so Tau safely reports a hidden proxy 407 as a redacted
 proxy-route transport failure rather than guessing authentication from error
 text. Plain HTTP/WS proxy 407 responses remain specifically classified.
 
-The harness assembles prompts and routes provider-owned turns to this extension. The extension publishes `ProviderModelsUpdated`, streams response updates, and emits final response events with stop reasons and usage/cache diagnostics.
+The harness assembles prompts and routes provider-owned turns to this extension.
+The extension publishes a transient `ProviderModelsDeclared`; after generic
+commit and activation, the harness derives canonical `ProviderModelsUpdated`
+current state. The extension streams response updates and emits final response
+events with stop reasons and usage/cache diagnostics.
 
 ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay within that finite provider attempt; an ambiguous failed attempt then returns to the logical-prompt scheduler.
 

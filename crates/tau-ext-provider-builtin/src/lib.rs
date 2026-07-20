@@ -48,7 +48,7 @@ use tau_client::{
 use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
     ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
-    ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsUpdated, ProviderName,
+    ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsDeclared, ProviderName,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
     ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
@@ -1247,7 +1247,7 @@ where
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
                 handle_provider_delivery::<F>,
             )
-            .startup_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            .startup_transient_event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
                 models: models_for_profiles(&self.startup_profiles),
             }))
             .ready_message("builtin provider ready");

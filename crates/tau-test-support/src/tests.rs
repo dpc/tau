@@ -217,7 +217,9 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                     .expect("provider subscriptions should be stored");
             }
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ProviderModelsUpdated(_) => {}
+                Event::ProviderModelsDeclared(_) => {
+                    assert!(emit.transient, "model declaration must be transient");
+                }
                 other => panic!("unexpected provider startup event: {other:?}"),
             },
             HarnessInputMessage::Ready(_) => break,
@@ -270,7 +272,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                 Event::ActionSchemaPublished(_)
                 | Event::ExtensionStarting(_)
                 | Event::ExtensionReady(_)
-                | Event::ProviderModelsUpdated(_)
+                | Event::ProviderModelsDeclared(_)
                 | Event::ExtensionContextProviderRegister(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
                 | Event::ExtPromptFragmentPublish(_) => {}

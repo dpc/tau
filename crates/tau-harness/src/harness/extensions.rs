@@ -38,7 +38,8 @@ pub(super) struct DeferredExtensionMessage {
 pub(super) struct ExtensionActivationStage {
     /// Tool registrations received before the extension finished its handshake.
     pub(super) tool_registrations: Vec<ToolRegister>,
-    /// Provider model snapshots received before `Ready`, in wire order.
+    /// Canonical provider model updates derived from committed declarations and
+    /// awaiting activation, in declaration commit order.
     pub(super) provider_model_updates: Vec<tau_proto::ProviderModelsUpdated>,
     /// Action schema received before `Ready`. Schema publishing is a
     /// replacement, so only the latest staged schema matters.
@@ -100,6 +101,9 @@ pub(crate) struct ExtensionRuntimeState {
     /// the extension sends `Ready`. Activation happens in the main harness loop
     /// so prompt assembly, routing, and subscribers see the full batch at once.
     pub(super) activation_staging: HashMap<tau_proto::ConnectionId, ExtensionActivationStage>,
+    /// Pre-`Ready` provider declarations admitted but not yet committed or
+    /// dropped by interception.
+    pub(super) pending_provider_model_declarations: HashMap<tau_proto::ConnectionId, usize>,
     /// Connections that sent `Ready` but are still waiting for the global
     /// initial collision preflight or their atomic stage activation.
     pub(super) ready_received: HashSet<tau_proto::ConnectionId>,

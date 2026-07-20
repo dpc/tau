@@ -397,6 +397,27 @@ impl<State> ManualExtensionRuntime<State> {
             .send_startup(tau_proto::HarnessInputMessage::emit(event))
     }
 
+    /// Emits one transient dynamic startup event before `Ready`.
+    ///
+    /// This is intended for wire-level declarations such as provider model
+    /// snapshots that are computed after initial configuration. Tool
+    /// registrations expressed in logical/local names must use
+    /// [`Self::startup_local_tool`]; raw tool events passed here must already
+    /// contain final wire identifiers. Runtime events after `Ready` should use
+    /// [`Self::handle`] and [`ClientHandle::emit_transient`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup has already completed or the event cannot
+    /// be queued and flushed.
+    pub fn startup_transient_event(&mut self, event: tau_proto::Event) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        self.handle
+            .send_startup(tau_proto::HarnessInputMessage::emit_with_transient(
+                event, true,
+            ))
+    }
+
     /// Register one logical/local tool during deferred startup.
     ///
     /// # Errors
@@ -1107,7 +1128,8 @@ where
     /// declarations and send them with
     /// [`ManualExtensionRuntime::startup_subscribe`],
     /// [`ManualExtensionRuntime::startup_intercept`], and
-    /// [`ManualExtensionRuntime::startup_event`], using
+    /// [`ManualExtensionRuntime::startup_event`] or
+    /// [`ManualExtensionRuntime::startup_transient_event`], using
     /// [`ManualExtensionRuntime::startup_local_tool`] for logical tool names,
     /// and finish exactly once with
     /// [`ManualExtensionRuntime::startup_ready`].

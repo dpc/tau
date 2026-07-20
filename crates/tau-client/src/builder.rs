@@ -132,7 +132,16 @@ impl<State> ExtensionBuilder<State> {
     /// Emits one startup event before the terminal `Ready` frame.
     pub fn startup_event(&mut self, event: tau_proto::Event) -> &mut Self {
         self.startup_events
-            .push(StartupDeclaration::Event(Box::new(event)));
+            .push(StartupDeclaration::Emit(tau_proto::Emit::new(event)));
+        self
+    }
+
+    /// Emits one transient startup event before the terminal `Ready` frame.
+    pub fn startup_transient_event(&mut self, event: tau_proto::Event) -> &mut Self {
+        self.startup_events
+            .push(StartupDeclaration::Emit(tau_proto::Emit::with_transient(
+                event, true,
+            )));
         self
     }
 
@@ -563,12 +572,12 @@ impl<State> ExtensionBuilder<State> {
         }
         let declarations = std::mem::take(&mut self.startup_events);
         for declaration in declarations {
-            let event = match declaration {
-                StartupDeclaration::Event(mut event) => {
-                    if let tau_proto::Event::ToolRegister(registration) = event.as_mut() {
+            let emit = match declaration {
+                StartupDeclaration::Emit(mut emit) => {
+                    if let tau_proto::Event::ToolRegister(registration) = emit.event.as_mut() {
                         *registration = scope.scope_registration(registration.clone())?;
                     }
-                    event
+                    emit
                 }
                 StartupDeclaration::ScopedTool(declaration) => {
                     let registration = (declaration.factory)(scope)?;
@@ -578,12 +587,12 @@ impl<State> ExtensionBuilder<State> {
                             declaration.local_tool_name, registration.tool.name
                         )));
                     }
-                    Box::new(tau_proto::Event::ToolRegister(
+                    tau_proto::Emit::new(tau_proto::Event::ToolRegister(
                         scope.scope_registration(registration)?,
                     ))
                 }
             };
-            self.startup_events.push(StartupDeclaration::Event(event));
+            self.startup_events.push(StartupDeclaration::Emit(emit));
         }
         Ok(())
     }
@@ -618,6 +627,6 @@ pub(crate) struct ScopedToolDeclaration {
 
 /// One startup event or delayed tool declaration in public call order.
 pub(crate) enum StartupDeclaration {
-    Event(Box<tau_proto::Event>),
+    Emit(tau_proto::Emit),
     ScopedTool(ScopedToolDeclaration),
 }

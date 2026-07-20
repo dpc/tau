@@ -77,7 +77,12 @@ impl TauExtension for StartupExtension {
             .tool(tool_spec("demo_tool"), |_| Ok(()))
             .startup_event(Event::HarnessNotice(HarnessNotice::new(
                 "startup",
-                "startup event",
+                "durable startup event",
+                NoticeLevel::Info,
+            )))
+            .startup_transient_event(Event::HarnessNotice(HarnessNotice::new(
+                "startup",
+                "transient startup event",
                 NoticeLevel::Info,
             )))
             .ready_message("ready");
@@ -1122,7 +1127,7 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
     }
 }
 
-/// Ensures startup frames preserve the harness-required order before `Ready`.
+/// Ensures startup frames preserve order and transient metadata before `Ready`.
 #[test]
 fn startup_frame_order_is_stable() {
     let (_, frames) = run_messages(StartupExtension, (), &[]);
@@ -1131,9 +1136,28 @@ fn startup_frame_order_is_stable() {
     assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
     assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
     assert!(matches!(frames[3], HarnessInputMessage::Emit(_)));
-    assert!(matches!(frames[4], HarnessInputMessage::Emit(_)));
-    assert!(matches!(frames[5], HarnessInputMessage::Ready(_)));
-    assert_eq!(frames.len(), 6);
+    assert!(matches!(
+        &frames[4],
+        HarnessInputMessage::Emit(emit)
+            if !emit.transient
+                && matches!(
+                    emit.event.as_ref(),
+                    Event::HarnessNotice(notice)
+                        if notice.message == "durable startup event"
+                )
+    ));
+    assert!(matches!(
+        &frames[5],
+        HarnessInputMessage::Emit(emit)
+            if emit.transient
+                && matches!(
+                    emit.event.as_ref(),
+                    Event::HarnessNotice(notice)
+                        if notice.message == "transient startup event"
+                )
+    ));
+    assert!(matches!(frames[6], HarnessInputMessage::Ready(_)));
+    assert_eq!(frames.len(), 7);
 }
 
 /// A bridge builder declaration must become authenticated handshake metadata.
@@ -1847,6 +1871,9 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
         .startup_event(notice("dynamic startup event"))
         .expect("dynamic startup event");
     runtime
+        .startup_transient_event(notice("dynamic transient startup event"))
+        .expect("dynamic transient startup event");
+    runtime
         .startup_ready(Some("dynamic ready".to_owned()))
         .expect("dynamic ready");
     runtime.finish().expect("finish");
@@ -1858,13 +1885,20 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
     assert!(matches!(
         &frames[3],
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic startup event")
+            if !emit.transient
+                && matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic startup event")
     ));
     assert!(matches!(
         &frames[4],
+        HarnessInputMessage::Emit(emit)
+            if emit.transient
+                && matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic transient startup event")
+    ));
+    assert!(matches!(
+        &frames[5],
         HarnessInputMessage::Ready(ready) if ready.message.as_deref() == Some("dynamic ready")
     ));
-    assert_eq!(frames.len(), 5);
+    assert_eq!(frames.len(), 6);
 }
 
 /// Deferred startup declarations cannot race ahead of the harness-provided

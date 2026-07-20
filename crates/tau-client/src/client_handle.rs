@@ -144,7 +144,7 @@ impl ClientHandle {
                         | tau_proto::Event::ToolUnregister(_)
                         | tau_proto::Event::ExtSkillAvailable(_)
                         | tau_proto::Event::ExtAgentsMdAvailable(_)
-                        | tau_proto::Event::ProviderModelsUpdated(_)
+                        | tau_proto::Event::ProviderModelsDeclared(_)
                         | tau_proto::Event::ExtensionContextProviderRegister(_)
                         | tau_proto::Event::ExtensionSessionContextProviderRegister(_)
                         | tau_proto::Event::ExtAgentContextPublish(_)

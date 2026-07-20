@@ -3,10 +3,11 @@
 ## Status
 
 The protocol now separates transient `message.*_reported` inputs from
-harness-authored canonical `message.*` facts and carries declared
-`PeerCapability::MessageBridge` authority in `Hello`. The generic authenticated
-publisher delivery envelope and the remaining exact event-family mappings
-required by
+harness-authored canonical `message.*` facts, carries declared
+`PeerCapability::MessageBridge` authority in `Hello`, and separates transient
+provider `provider.models_declared` inputs from harness-authored canonical
+`provider.models_updated` current state. The generic authenticated publisher
+delivery envelope and the remaining exact event-family mappings required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
 remain to be implemented.
 
@@ -39,6 +40,9 @@ harness-stamped publisher ID for canonical `message.*` facts derived
 downstream from extension-published `message.*_reported` events.
 Their wire and validation contract is
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+The same configured instance identity appears as `publisher_extension_id` in
+harness-authored `provider.models_updated` snapshots derived downstream from
+provider `provider.models_declared` events.
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
 with `agent_id`, `text`, and optional `ctx_id`.

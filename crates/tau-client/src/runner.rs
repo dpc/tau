@@ -302,12 +302,12 @@ pub(crate) fn write_startup_after_configure<State>(
         handle.send_startup(tau_proto::HarnessInputMessage::Intercept(intercept.clone()))?;
     }
     for declaration in &builder.startup_events {
-        let crate::builder::StartupDeclaration::Event(event) = declaration else {
+        let crate::builder::StartupDeclaration::Emit(emit) = declaration else {
             return Err(ClientError::builder(
                 "startup declaration was not resolved after initial Configure",
             ));
         };
-        handle.send_startup(tau_proto::HarnessInputMessage::emit(event.as_ref().clone()))?;
+        handle.send_startup(tau_proto::HarnessInputMessage::Emit(emit.clone()))?;
     }
     handle.flush_configure_outputs()?;
     write_ready(handle, builder.ready_message.clone())?;

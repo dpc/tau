@@ -18,6 +18,493 @@ fn extension_message_report(message_id: &str) -> Event {
     ))
 }
 
+/// Construct one provider model declaration with an observable context window.
+fn provider_models_declaration(model: &str, context_window: u64) -> Event {
+    Event::ProviderModelsDeclared(tau_proto::ProviderModelsDeclared {
+        models: vec![tau_proto::ProviderModelInfo {
+            id: model.into(),
+            display_name: None,
+            tags: Vec::new(),
+            supported_tool_types: Vec::new(),
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
+            supports_parallel_tool_calls: true,
+            default_affinity: 0,
+            context_window,
+            efforts: vec![tau_proto::Effort::Medium],
+            verbosities: vec![tau_proto::Verbosity::Medium],
+            thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
+            supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
+        }],
+    })
+}
+
+/// Clear the quiet fixture's startup model without adding declaration log
+/// noise.
+fn clear_interception_fixture_models(h: &mut Harness) {
+    let provider_id = h
+        .extension_connection_id("provider")
+        .expect("quiet provider")
+        .to_owned();
+    h.set_provider_models(&provider_id, Vec::new());
+}
+
+/// Collect committed model declaration/state events with their delivery source.
+fn committed_provider_model_events(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
+    let mut events = Vec::new();
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        let relevant = match &entry.event {
+            Event::ProviderModelsDeclared(_) => entry.source.as_deref() == Some("model-provider"),
+            Event::ProviderModelsUpdated(update) => update
+                .models
+                .iter()
+                .any(|model| model.id.provider.as_str() == "declared"),
+            _ => false,
+        };
+        if relevant {
+            events.push((entry.source, entry.event));
+        }
+    }
+    events
+}
+
+/// A model declaration enters exact interception and a drop prevents every
+/// downstream model-state effect.
+#[test]
+fn dropping_provider_model_declaration_prevents_canonical_state() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/dropped", 1),
+        Some(true),
+    )
+    .expect("declare models");
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsDeclared(_))
+    ));
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop declaration");
+
+    let model: tau_proto::ModelId = "declared/dropped".into();
+    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(committed_provider_model_events(&h).is_empty());
+}
+
+/// Same-name declaration replacement drives canonicalization from the committed
+/// payload, preserving declaration-before-state order and immutable sources.
+#[test]
+fn replaced_provider_model_declaration_drives_canonical_state() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/original", 1),
+        Some(true),
+    )
+    .expect("declare models");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(provider_models_declaration(
+                "declared/replacement",
+                2,
+            )))),
+        })),
+    )
+    .expect("replace declaration");
+
+    let events = committed_provider_model_events(&h);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            (Some(declaration_source), Event::ProviderModelsDeclared(declaration)),
+            (Some(canonical_source), Event::ProviderModelsUpdated(canonical)),
+        ] if declaration_source == "model-provider"
+            && canonical_source == HARNESS_CONNECTION_ID
+            && declaration.models[0].id.to_string() == "declared/replacement"
+            && canonical.models[0].id.to_string() == "declared/replacement"
+    ));
+    let replacement: tau_proto::ModelId = "declared/replacement".into();
+    let original: tau_proto::ModelId = "declared/original".into();
+    assert_eq!(
+        h.provider_model_routes
+            .get(&replacement)
+            .map(tau_proto::ConnectionId::as_str),
+        Some("model-provider")
+    );
+    assert!(!h.provider_model_routes.contains_key(&original));
+}
+
+/// A provider-prefix interceptor sees both the declaration and canonical state;
+/// it may mutate the declaration but cannot rewrite or drop canonical state.
+#[test]
+fn provider_prefix_interception_protects_canonical_model_state() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Prefix("provider".to_owned())],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/protected", 10),
+        Some(true),
+    )
+    .expect("declare models");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit declaration");
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsUpdated(_))
+    ));
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::ProviderModelsUpdated(
+                tau_proto::ProviderModelsUpdated {
+                    publisher_extension_id: tau_proto::ExtensionName::from("configured-provider"),
+                    models: Vec::new(),
+                },
+            )))),
+        })),
+    )
+    .expect("reject canonical rewrite");
+
+    let model: tau_proto::ModelId = "declared/protected".into();
+    assert!(h.provider_model_routes.contains_key(&model));
+    assert!(matches!(
+        committed_provider_model_events(&h).as_slice(),
+        [
+            (_, Event::ProviderModelsDeclared(_)),
+            (_, Event::ProviderModelsUpdated(update)),
+        ] if update.models[0].id == model
+    ));
+
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/drop-protected", 20),
+        Some(true),
+    )
+    .expect("declare replacement models");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit replacement declaration");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("canonical drop is overridden");
+    let replacement: tau_proto::ModelId = "declared/drop-protected".into();
+    assert!(h.provider_model_routes.contains_key(&replacement));
+}
+
+/// Disconnecting after a canonical update enters interception rewrites that
+/// must-pass snapshot to the provider's empty terminal state.
+#[test]
+fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Prefix("provider".to_owned())],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/disconnected", 10),
+        Some(true),
+    )
+    .expect("declare models");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit declaration");
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsUpdated(update)) if !update.models.is_empty()
+    ));
+    let model: tau_proto::ModelId = "declared/disconnected".into();
+    assert!(h.provider_model_routes.contains_key(&model));
+
+    h.handle_disconnect("model-provider");
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsUpdated(update))
+            if update.publisher_extension_id.as_str() == "configured-provider"
+                && update.models.is_empty()
+    ));
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit corrected canonical state");
+
+    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderModelsUpdated(update)
+            if update.publisher_extension_id.as_str() == "configured-provider"
+                && update.models.is_empty()
+    )));
+}
+
+/// A parked declaration retains its admitted source envelope, but disconnect
+/// cleanup and extension-generation replacement prevent it from recreating a
+/// stale provider route.
+#[test]
+fn parked_provider_declaration_cannot_mutate_replacement_generation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "original-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/stale", 1),
+        Some(true),
+    )
+    .expect("park declaration");
+
+    h.handle_disconnect("model-provider");
+    h.extensions.entries.remove("model-provider");
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "replacement-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.extensions
+        .entries
+        .get_mut("model-provider")
+        .expect("replacement provider")
+        .instance_id = 43.into();
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit old declaration");
+
+    let events = committed_provider_model_events(&h);
+    assert!(matches!(
+        events.as_slice(),
+        [(Some(source), Event::ProviderModelsDeclared(_))]
+            if source == "model-provider"
+    ));
+    let stale: tau_proto::ModelId = "declared/stale".into();
+    assert!(!h.provider_model_routes.contains_key(&stale));
+}
+
+/// An old generation's dropped declaration cannot release the activation
+/// reservation or pending count owned by a handshaking replacement that
+/// reuses the same synthetic connection id.
+#[test]
+fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "original-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/old-generation", 1),
+        Some(true),
+    )
+    .expect("park old declaration");
+
+    h.handle_disconnect("model-provider");
+    h.extensions.entries.remove("model-provider");
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "replacement-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let replacement = h
+        .extensions
+        .entries
+        .get_mut("model-provider")
+        .expect("replacement provider");
+    replacement.instance_id = 43.into();
+    replacement.state = crate::extension::ExtensionState::Handshaking;
+    h.extensions.activation_staging.insert(
+        "model-provider".into(),
+        crate::harness::extensions::ExtensionActivationStage::default(),
+    );
+    h.handle_extension_event_inner_with_transient(
+        "model-provider",
+        provider_models_declaration("declared/new-generation", 2),
+        Some(true),
+    )
+    .expect("queue replacement declaration");
+    h.handle_extension_message(
+        "model-provider",
+        TestMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("replacement ready waits");
+
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop old declaration");
+    assert_eq!(
+        h.extensions.entries["model-provider"].state,
+        crate::extension::ExtensionState::Handshaking
+    );
+    assert_eq!(
+        h.extensions
+            .pending_provider_model_declarations
+            .get("model-provider"),
+        Some(&1)
+    );
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsDeclared(update))
+            if update.models[0].id.to_string() == "declared/new-generation"
+    ));
+
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit replacement declaration");
+    let model: tau_proto::ModelId = "declared/new-generation".into();
+    assert_eq!(
+        h.extensions.entries["model-provider"].state,
+        crate::extension::ExtensionState::Ready
+    );
+    assert_eq!(
+        h.provider_model_routes
+            .get(&model)
+            .map(tau_proto::ConnectionId::as_str),
+        Some("model-provider")
+    );
+}
+
 /// Assert one report selector sees the report before downstream
 /// canonicalization.
 fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_canonical: bool) {

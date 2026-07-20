@@ -1,6 +1,6 @@
 use tau_proto::{
-    Effort, ModelId, NoticeLevel, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary,
-    Verbosity,
+    Effort, ModelId, NoticeLevel, ProviderModelInfo, ProviderModelsDeclared, ProviderModelsUpdated,
+    ThinkingSummary, Verbosity,
 };
 
 use super::*;
@@ -93,7 +93,7 @@ fn clear_startup_echo_models(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &provider_id,
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: Vec::new(),
         })),
     )
@@ -101,7 +101,45 @@ fn clear_startup_echo_models(h: &mut Harness) {
 }
 
 fn connect_provider_source(h: &mut Harness, name: &str) {
-    let _frames = connect_test_client(h, name, tau_proto::ClientKind::Provider);
+    let _frames =
+        connect_ready_configured_extension(h, name, name, tau_proto::ClientKind::Provider);
+}
+
+/// The built-in echo provider publishes a transient declaration before Ready.
+#[test]
+fn echo_provider_declares_transient_models_before_ready() {
+    let (harness_writer, provider_reader) = UnixStream::pair().expect("provider input pair");
+    let (provider_writer, harness_reader) = UnixStream::pair().expect("provider output pair");
+    let provider = std::thread::spawn(move || {
+        crate::harness::run_echo_provider(provider_reader, provider_writer)
+            .map_err(|error| error.to_string())
+    });
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_reader));
+
+    assert!(matches!(
+        reader.read_message().expect("read hello"),
+        Some(HarnessInputMessage::Hello(_))
+    ));
+    assert!(matches!(
+        reader.read_message().expect("read subscribe"),
+        Some(HarnessInputMessage::Subscribe(_))
+    ));
+    assert!(matches!(
+        reader.read_message().expect("read model declaration"),
+        Some(HarnessInputMessage::Emit(emit))
+            if emit.transient
+                && matches!(emit.event.as_ref(), Event::ProviderModelsDeclared(_))
+    ));
+    assert!(matches!(
+        reader.read_message().expect("read ready"),
+        Some(HarnessInputMessage::Ready(_))
+    ));
+
+    drop(harness_writer);
+    provider
+        .join()
+        .expect("echo provider thread")
+        .expect("echo provider shutdown");
 }
 
 /// Role info keeps the machine-readable model/knob summary separate from the
@@ -259,7 +297,7 @@ fn provider_models_snapshot_updates_available_models() {
     assert!(!h.available_models.contains(&model_id));
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 128_000)],
         })),
     )
@@ -276,17 +314,23 @@ fn provider_models_snapshot_updates_available_models() {
         Some("provider-ext"),
     );
 
-    let mut saw_provider_snapshot = false;
+    let mut saw_provider_declaration = false;
+    let mut saw_canonical_snapshot = false;
     let mut saw_harness_models = false;
     let mut saw_harness_roles = false;
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match entry.event {
-            Event::ProviderModelsUpdated(update)
+            Event::ProviderModelsDeclared(update)
                 if entry.source.as_deref() == Some("provider-ext") =>
             {
-                saw_provider_snapshot = update.models.iter().any(|info| info.id == model_id);
+                saw_provider_declaration = update.models.iter().any(|info| info.id == model_id);
+            }
+            Event::ProviderModelsUpdated(update)
+                if entry.source.as_deref() == Some(HARNESS_CONNECTION_ID) =>
+            {
+                saw_canonical_snapshot = update.models.iter().any(|info| info.id == model_id);
             }
             Event::HarnessModelsAvailable(available) => {
                 saw_harness_models = available.models.contains(&model_id);
@@ -297,7 +341,8 @@ fn provider_models_snapshot_updates_available_models() {
             _ => {}
         }
     }
-    assert!(saw_provider_snapshot);
+    assert!(saw_provider_declaration);
+    assert!(saw_canonical_snapshot);
     assert!(saw_harness_models);
     assert!(saw_harness_roles);
 }
@@ -317,7 +362,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
         .collect::<Vec<_>>();
     h.handle_extension_event(
         "provider-a",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: duplicate_ids
                 .iter()
                 .cloned()
@@ -328,7 +373,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     .expect("handle first provider snapshot");
     h.handle_extension_event(
         "provider-z",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: duplicate_ids
                 .iter()
                 .cloned()
@@ -349,6 +394,52 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
         h.provider_model_routes.get(model_id).map(|id| id.as_str()),
         Some("provider-z"),
     );
+    let canonical_snapshots = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ProviderModelsUpdated(update)
+                if matches!(
+                    update.publisher_extension_id.as_str(),
+                    "provider-a" | "provider-z"
+                ) =>
+            {
+                Some(update)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(canonical_snapshots.iter().any(|update| {
+        update.publisher_extension_id.as_str() == "provider-a"
+            && update.models[0].context_window == 1_000
+    }));
+    assert!(canonical_snapshots.iter().any(|update| {
+        update.publisher_extension_id.as_str() == "provider-z"
+            && update.models[0].context_window == 2_000
+    }));
+
+    h.handle_extension_event(
+        "provider-z",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: Vec::new(),
+        })),
+    )
+    .expect("withdraw colliding provider snapshot");
+    assert_eq!(
+        h.provider_model_info
+            .get(model_id)
+            .map(|info| info.context_window),
+        Some(1_000),
+    );
+    assert_eq!(
+        h.provider_model_routes.get(model_id).map(|id| id.as_str()),
+        Some("provider-a"),
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderModelsUpdated(update)
+            if update.publisher_extension_id.as_str() == "provider-z"
+                && update.models.is_empty()
+    )));
 
     let mut warning = None;
     let mut seq = crate::event_log::EventLogSeq::new(0);
@@ -385,14 +476,14 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     ));
     h.handle_extension_event(
         "provider-a",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(hostile_id.clone(), 1_000)],
         })),
     )
     .expect("replace first provider snapshot");
     h.handle_extension_event(
         "provider-z",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(hostile_id, 2_000)],
         })),
     )
@@ -416,20 +507,26 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     assert!(bounded_warning.message.len() < 256);
 }
 
-/// Model snapshots are an execution-provider contract. A tool connection that
-/// publishes `provider.models_updated` must not be able to claim a model route,
-/// otherwise the next prompt could be sent to a non-provider participant.
+/// Model declarations are an execution-provider contract. A configured tool
+/// extension that publishes `provider.models_declared` must not be able to
+/// claim a model route, otherwise the next prompt could be sent to a
+/// non-provider participant.
 #[test]
-fn provider_models_snapshot_from_non_provider_is_ignored() {
+fn provider_model_declaration_from_non_provider_is_ignored() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
-    let _frames = connect_test_client(&mut h, "tool-ext", tau_proto::ClientKind::Tool);
+    let _frames = connect_ready_configured_extension(
+        &mut h,
+        "tool-ext",
+        "tool-ext",
+        tau_proto::ClientKind::Tool,
+    );
 
     let model_id: ModelId = "evil/model".parse().expect("model id");
     h.handle_extension_event(
         "tool-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 1)],
         })),
     )
@@ -442,7 +539,7 @@ fn provider_models_snapshot_from_non_provider_is_ignored() {
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
-            !matches!(entry.event, Event::ProviderModelsUpdated(_))
+            !matches!(entry.event, Event::ProviderModelsDeclared(_))
                 || entry.source.as_deref() != Some("tool-ext"),
             "forged provider snapshot must not be published"
         );
@@ -462,7 +559,7 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     let model_id: ModelId = "evil/ui-model".parse().expect("model id");
     h.handle_client_event_inner(
         "ui-client",
-        Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 1)],
         }),
     )
@@ -475,11 +572,71 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
-            !matches!(entry.event, Event::ProviderModelsUpdated(_))
+            !matches!(entry.event, Event::ProviderModelsDeclared(_))
                 || entry.source.as_deref() != Some("ui-client"),
             "client-forged provider snapshot must not be published"
         );
     }
+}
+
+/// A provider-kind socket or in-memory participant is not a configured
+/// extension and therefore has no model-declaration authority.
+#[test]
+fn unconfigured_provider_cannot_declare_models() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_test_client(
+        &mut h,
+        "unconfigured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let model_id: ModelId = "evil/unconfigured".into();
+
+    h.handle_extension_event(
+        "unconfigured-provider",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(model_id.clone(), 1)],
+        })),
+    )
+    .expect("reject unconfigured declaration");
+
+    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(event_log_events(&h).iter().all(|event| {
+        !matches!(
+            event,
+            Event::ProviderModelsDeclared(update)
+                if update.models.iter().any(|model| model.id == model_id)
+        )
+    }));
+}
+
+/// Even a configured provider cannot author canonical accepted model state.
+#[test]
+fn configured_provider_cannot_emit_canonical_model_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let model_id: ModelId = "evil/canonical".into();
+
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            publisher_extension_id: tau_proto::ExtensionName::from("configured-provider"),
+            models: vec![provider_model(model_id.clone(), 1)],
+        })),
+    )
+    .expect("reject provider-authored canonical state");
+
+    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(event_log_events(&h).iter().all(|event| {
+        !matches!(
+            event,
+            Event::ProviderModelsUpdated(update)
+                if update.models.iter().any(|model| model.id == model_id)
+        )
+    }));
 }
 
 /// Roles without an explicit model should use provider intent, not incidental
@@ -527,7 +684,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 128_000)],
         })),
     )
@@ -560,7 +717,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![
                 provider_model(default_model, 128_000),
                 provider_model(selected_model.clone(), 128_000),
@@ -605,7 +762,7 @@ fn ui_create_agent_applies_initial_model_override() {
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![
                 provider_model(default_model.clone(), 128_000),
                 provider_model(selected_model.clone(), 128_000),
@@ -683,7 +840,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
 
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(selected_model.clone(), 128_000)],
         })),
     )
@@ -707,7 +864,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     let role_model: ModelId = "test/role-model".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(role_model.clone(), 128_000)],
         })),
     )
@@ -734,7 +891,7 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(selected_model.clone(), 128_000)],
         })),
     )
@@ -788,7 +945,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     let available_model: ModelId = "openai/available".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(available_model, 128_000)],
         })),
     )
@@ -815,7 +972,7 @@ fn provider_model_metadata_drives_selection_state() {
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 123_456)],
         })),
     )
@@ -845,7 +1002,7 @@ fn provider_model_metadata_drives_selection_state() {
 
     h.handle_extension_event(
         "provider-ext",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![ProviderModelInfo {
                 id: model_id.clone(),
                 display_name: None,

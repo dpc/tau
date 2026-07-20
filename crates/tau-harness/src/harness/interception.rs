@@ -75,12 +75,35 @@ pub(crate) struct PendingIntercept {
     pub(crate) cursor: InterceptorCursor,
 }
 
+/// Immutable authenticated configured-extension publication identity.
+#[derive(Clone)]
+pub(crate) struct AuthenticatedExtensionPublication {
+    /// Stable configured extension publisher.
+    pub(crate) publisher: tau_proto::ExtensionName,
+    /// Configured extension connection that authored this publish.
+    pub(crate) source: tau_proto::ConnectionId,
+    /// Authenticated configured extension kind captured at admission.
+    pub(crate) kind: tau_proto::ClientKind,
+    /// Configured extension generation captured at admission.
+    pub(crate) instance_id: tau_proto::ExtensionInstanceId,
+    /// Activation-stage reservation made before interception.
+    pub(crate) activation_reservation: Option<ActivationReservation>,
+}
+
+/// Pre-activation quota reservation for one intercepted declaration.
+#[derive(Clone, Copy)]
+pub(crate) struct ActivationReservation {
+    /// Encoded input-envelope bytes charged before interception.
+    pub(crate) encoded_bytes: usize,
+    /// Original delivery transience retained across same-name replacement.
+    pub(crate) transient: bool,
+}
+
 /// Immutable authenticated metadata carried beside one generic peer publish.
 #[derive(Clone, Default)]
 pub(crate) struct PeerPublicationContext {
-    /// Stable configured message publisher, when captured from an authenticated
-    /// extension connection.
-    pub(crate) message_publisher: Option<tau_proto::MessagePublisherId>,
+    /// Configured extension identity, when this publish came from one.
+    pub(crate) extension: Option<AuthenticatedExtensionPublication>,
 }
 
 /// Source envelope retained through generic interception and commit.
@@ -170,6 +193,9 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::MESSAGE_REACTION_ADDED,
     EventName::MESSAGE_REACTION_REMOVED,
     EventName::MESSAGE_SENT,
+    // Canonical provider model state is harness-owned current state. Declarations
+    // remain mutable and interceptable before this protected projection.
+    EventName::PROVIDER_MODELS_UPDATED,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -265,6 +291,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::MessageReactionAdded(_)
             | Event::MessageReactionRemoved(_)
             | Event::MessageSent(_)
+            | Event::ProviderModelsUpdated(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
@@ -478,6 +505,33 @@ impl InterceptorRegistry {
 }
 
 impl Harness {
+    /// Rewrite queued canonical model state to an empty snapshot after its
+    /// provider generation disconnects.
+    pub(crate) fn clear_parked_provider_model_updates(
+        &mut self,
+        publisher: &tau_proto::ExtensionName,
+    ) -> bool {
+        let mut cleared = false;
+        if let Some(Event::ProviderModelsUpdated(update)) = self
+            .pending_intercept
+            .as_mut()
+            .map(|pending| &mut pending.event)
+            && &update.publisher_extension_id == publisher
+        {
+            update.models.clear();
+            cleared = true;
+        }
+        for deferred in &mut self.deferred_publishes {
+            if let Event::ProviderModelsUpdated(update) = &mut deferred.event
+                && &update.publisher_extension_id == publisher
+            {
+                update.models.clear();
+                cleared = true;
+            }
+        }
+        cleared
+    }
+
     /// Remove canceled peer receives from current and deferred interception
     /// without exposing their content to another interceptor or commit path.
     pub(crate) fn discard_canceled_peer_receive_publishes(
@@ -721,12 +775,22 @@ impl Harness {
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        let extension = source.and_then(|source_id| self.extensions.entries.get(source_id));
+        let activation_reservation = extension
+            .filter(|entry| entry.state != crate::extension::ExtensionState::Ready)
+            .and_then(|_| {
+                matches!(event, Event::ProviderModelsDeclared(_)).then(|| ActivationReservation {
+                    encoded_bytes: Self::encoded_emit_size(&event, transient),
+                    transient,
+                })
+            });
         let peer_context = PeerPublicationContext {
-            message_publisher: source.and_then(|source_id| {
-                self.extensions
-                    .entries
-                    .get(source_id)
-                    .map(|entry| tau_proto::MessagePublisherId::new(entry.name.clone()))
+            extension: extension.map(|entry| AuthenticatedExtensionPublication {
+                publisher: tau_proto::ExtensionName::from(entry.name.clone()),
+                source: entry.connection_id.clone(),
+                kind: entry.kind.clone(),
+                instance_id: entry.instance_id,
+                activation_reservation,
             }),
         };
         let source = PublicationSource {
@@ -744,6 +808,17 @@ impl Harness {
             return;
         }
         self.dispatch_publish_step(source, event, transient, must_pass, sync_head_for, None);
+    }
+
+    /// Return the encoded input-envelope size charged for one emitted event.
+    pub(super) fn encoded_emit_size(event: &Event, transient: bool) -> usize {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(
+            &tau_proto::HarnessInputMessage::emit_with_transient(event.clone(), transient),
+            &mut encoded,
+        )
+        .expect("an admitted event remains encodable");
+        encoded.len()
     }
 
     /// One step through the interception chain for a single publish.
@@ -830,16 +905,25 @@ impl Harness {
     }
 
     /// Resolve a parked interception with the extension's reply.
-    /// Advances the chain (next interceptor, or commit), then drains
-    /// any publishes that arrived while we were waiting.
-    pub(crate) fn handle_intercept_reply(&mut self, conn_id: &str, reply: InterceptReply) {
+    /// Advances the chain (next interceptor, or commit), then drains publishes
+    /// that arrived while waiting until completion or a downstream failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when committing the resolved publish or a deferred
+    /// publish triggers a fatal extension-activation failure.
+    pub(crate) fn handle_intercept_reply(
+        &mut self,
+        conn_id: &str,
+        reply: InterceptReply,
+    ) -> Result<(), crate::HarnessError> {
         let Some(pending) = self.pending_intercept.take() else {
             tracing::warn!(
                 target: "tau_harness::interception",
                 connection_id = conn_id,
                 "InterceptReply received without a pending intercept; ignoring",
             );
-            return;
+            return Ok(());
         };
         if pending.conn_id != conn_id {
             tracing::warn!(
@@ -851,11 +935,14 @@ impl Harness {
             );
             // Restore — we're still waiting on the original responder.
             self.pending_intercept = Some(pending);
-            return;
+            return Ok(());
         }
         self.advance_pending_intercept(pending, reply.action);
+        self.take_pending_publish_error()?;
         self.drain_deferred_publishes();
+        self.take_pending_publish_error()?;
         self.drain_publish_idle_dispatches();
+        Ok(())
     }
 
     /// Resolve a pending intercept whose responder disconnected.
@@ -875,8 +962,10 @@ impl Harness {
             "interceptor disconnected mid-reply; treating as Pass(None)",
         );
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));
-        self.drain_deferred_publishes();
-        self.drain_publish_idle_dispatches();
+        if self.pending_publish_error.is_none() {
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
     }
 
     /// Apply an [`InterceptAction`] to a pending intercept and drive
@@ -987,6 +1076,7 @@ impl Harness {
         };
 
         let Some(event) = next_event else {
+            self.discard_peer_activation_reservation(&source.peer_context);
             return;
         };
 

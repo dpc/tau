@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension, TauExtensionRunner};
 use tau_proto::{
     CborValue, ClientKind, ContentPart, ContextItem, ContextRecoveryDisposition, ContextRole,
-    Effort, Event, EventName, InputModality, MessageItem, ProviderModelInfo, ProviderModelsUpdated,
-    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseTextDelta,
-    ProviderResponseUpdated, ProviderStopReason, ThinkingSummary, ToolCallItem, ToolName, ToolType,
-    Verbosity,
+    Effort, Event, EventName, InputModality, MessageItem, ProviderModelInfo,
+    ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
+    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
+    ToolCallItem, ToolName, ToolType, Verbosity,
 };
 use validation::{validate_v1, validate_v2};
 
@@ -176,7 +176,7 @@ impl TauExtension for FakeProvider {
                 cx.state.checkpoint = checkpoint;
                 cx.state.trace = Some(Arc::new(Mutex::new(trace)));
                 cx.handle
-                    .emit(Event::ProviderModelsUpdated(model_snapshot()))?;
+                    .emit_transient(Event::ProviderModelsDeclared(model_snapshot()))?;
                 Ok(())
             })
             .on_raw_routed_live(
@@ -212,8 +212,8 @@ impl FakeConfig {
     }
 }
 
-fn model_snapshot() -> ProviderModelsUpdated {
-    ProviderModelsUpdated {
+fn model_snapshot() -> ProviderModelsDeclared {
+    ProviderModelsDeclared {
         models: vec![ProviderModelInfo {
             id: FAKE_MODEL_ID.into(),
             display_name: Some("Deterministic test model".to_owned()),

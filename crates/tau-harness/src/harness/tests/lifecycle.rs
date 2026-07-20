@@ -281,8 +281,8 @@ fn clear_quiet_provider_models(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &provider_id,
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(
-            tau_proto::ProviderModelsUpdated { models: Vec::new() },
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared { models: Vec::new() },
         )),
     )
     .expect("clear provider models");
@@ -3034,8 +3034,8 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     let model_id: tau_proto::ModelId = model_name.into();
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(
-            tau_proto::ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
                 models: vec![staged_provider_model(model_name)],
             },
         )),
@@ -3053,9 +3053,20 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
             .iter()
             .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
-    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(event, Event::ProviderModelsUpdated(_))
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::ProviderModelsDeclared(_))
     }));
+    assert!(!event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| {
+            matches!(
+                event,
+                Event::ProviderModelsUpdated(update)
+                    if update.models.iter().any(|model| model.id == model_id)
+            )
+        }
+    ));
 
     h.handle_extension_message(
         conn_id,
@@ -3071,13 +3082,236 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
         Some(conn_id)
     );
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
+        matches!(event, Event::ProviderModelsDeclared(update) if update.models.iter().any(|model| model.id == model_id))
     }));
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| {
+            matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
+        }
+    ));
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(prompt.model, model_id);
     assert!(prompt_context_contains(&prompt, "wait for staged model"));
 
     h.shutdown().expect("shutdown");
+}
+
+/// `Ready` cannot overtake pre-Ready declarations that are still parked in
+/// generic interception; activation observes their final committed replacement.
+#[test]
+fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    clear_quiet_provider_models(&mut h);
+    let conn_id = "intercepted-startup-provider";
+    connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    connect_test_tool(&mut h, "startup-model-interceptor");
+    h.handle_extension_event(
+        "startup-model-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let model: tau_proto::ModelId = "staged/intercepted".into();
+
+    for models in [
+        vec![staged_provider_model("staged/intercepted")],
+        Vec::<tau_proto::ProviderModelInfo>::new(),
+    ] {
+        h.handle_extension_event(
+            conn_id,
+            TestProtocolItem::Event(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared { models },
+            )),
+        )
+        .expect("admit declaration");
+    }
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("receive ready");
+    assert_eq!(
+        h.extensions.entries[conn_id].state,
+        ExtensionState::Handshaking
+    );
+    assert!(h.extensions.ready_received.contains(conn_id));
+    assert!(!h.provider_model_routes.contains_key(&model));
+
+    h.handle_extension_event(
+        "startup-model-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit first declaration");
+    assert_eq!(
+        h.extensions.entries[conn_id].state,
+        ExtensionState::Handshaking
+    );
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderModelsDeclared(update)) if update.models.is_empty()
+    ));
+
+    h.handle_extension_event(
+        "startup-model-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit final declaration");
+    assert_eq!(h.extensions.entries[conn_id].state, ExtensionState::Ready);
+    assert!(!h.provider_model_routes.contains_key(&model));
+    assert_eq!(
+        h.provider_models_by_extension
+            .get(conn_id)
+            .expect("active empty provider snapshot"),
+        &Vec::<tau_proto::ProviderModelInfo>::new()
+    );
+    let canonical = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ProviderModelsUpdated(update)
+                if update.publisher_extension_id.as_str() == conn_id =>
+            {
+                Some(update)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(canonical.len(), 2);
+    assert!(canonical[0].models.iter().any(|info| info.id == model));
+    assert!(canonical[1].models.is_empty());
+}
+
+/// A required initial provider's oversized interception replacement propagates
+/// the startup-fatal activation quota error.
+#[test]
+fn required_intercepted_provider_replacement_overflow_fails_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.initial_extension_tool_preflight_complete = false;
+    let conn_id = "oversized-replacement-provider";
+    connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    connect_test_tool(&mut h, "replacement-size-interceptor");
+    h.handle_extension_event(
+        "replacement-size-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
+                models: vec![staged_provider_model("staged/small")],
+            },
+        )),
+    )
+    .expect("admit small declaration");
+
+    let mut oversized = staged_provider_model("staged/oversized");
+    oversized.display_name = Some("x".repeat(super::super::MAX_EXTENSION_ACTIVATION_BYTES));
+    let error = h
+        .handle_extension_event(
+            "replacement-size-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(Event::ProviderModelsDeclared(
+                    tau_proto::ProviderModelsDeclared {
+                        models: vec![oversized],
+                    },
+                )))),
+            })),
+        )
+        .expect_err("required provider overflow must fail startup");
+
+    assert!(error.to_string().contains("activation staging exceeds"));
+    assert_eq!(
+        h.extensions.entries[conn_id].state,
+        ExtensionState::Handshaking
+    );
+    assert!(
+        !h.provider_model_routes
+            .contains_key(&tau_proto::ModelId::from("staged/oversized"))
+    );
+}
+
+/// Resolving a provider declaration as the last initial-barrier blocker must
+/// propagate an unrelated required tool collision instead of logging and
+/// partially activating the staged extensions.
+#[test]
+fn intercepted_provider_resolution_propagates_initial_tool_collision() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.initial_extension_tool_preflight_complete = false;
+    for owner in ["required-a", "required-b"] {
+        connect_handshaking_tool(&mut h, owner);
+        h.handle_extension_event(
+            owner,
+            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+                tool: staged_tool_spec("intercept_blocked_collision"),
+                tool_group: None,
+                prompt_fragment: None,
+            })),
+        )
+        .expect("stage colliding tool");
+    }
+    let provider = "collision-barrier-provider";
+    connect_handshaking_extension(&mut h, provider, tau_proto::ClientKind::Provider);
+    connect_test_tool(&mut h, "collision-barrier-interceptor");
+    h.handle_extension_event(
+        "collision-barrier-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_MODELS_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event(
+        provider,
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
+                models: vec![staged_provider_model("staged/collision-barrier")],
+            },
+        )),
+    )
+    .expect("park provider declaration");
+    for source in ["required-a", "required-b", provider] {
+        h.handle_extension_message(source, TestMessage::Ready(Default::default()))
+            .expect("ready waits on provider declaration");
+    }
+
+    let error = h
+        .handle_extension_event(
+            "collision-barrier-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect_err("required collision must fail startup");
+    assert!(error.to_string().contains("required extensions"));
+    assert!(
+        h.registry
+            .providers_for("intercept_blocked_collision")
+            .is_empty()
+    );
+    assert_eq!(
+        h.extensions.entries[provider].state,
+        ExtensionState::Handshaking
+    );
 }
 
 #[test]
@@ -3785,8 +4019,8 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(
-            tau_proto::ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
                 models: vec![staged_provider_model(model_name)],
             },
         )),
@@ -3925,8 +4159,8 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     for models in [vec![captured_info], Vec::new()] {
         h.handle_extension_event(
             conn_id,
-            TestProtocolItem::Event(Event::ProviderModelsUpdated(
-                tau_proto::ProviderModelsUpdated { models },
+            TestProtocolItem::Event(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared { models },
             )),
         )
         .expect("stage model snapshot");
@@ -4051,8 +4285,8 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     for models in [Vec::new(), vec![captured_info]] {
         h.handle_extension_event(
             conn_id,
-            TestProtocolItem::Event(Event::ProviderModelsUpdated(
-                tau_proto::ProviderModelsUpdated { models },
+            TestProtocolItem::Event(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared { models },
             )),
         )
         .expect("stage model snapshot");

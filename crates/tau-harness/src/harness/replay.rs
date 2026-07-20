@@ -32,7 +32,7 @@ use tau_proto::{
 
 use super::agent_runtime_state_for_turn;
 use crate::extension::ExtensionState;
-use crate::harness::{Harness, selector_matches_event};
+use crate::harness::{HARNESS_CONNECTION_ID, Harness, selector_matches_event};
 use crate::model::{
     baseline_params_for_selection, context_window_for_model, efforts_for_model, role_infos,
     thinking_summaries_for_model, verbosities_for_model,
@@ -596,10 +596,15 @@ impl Harness {
             let Some(models) = self.provider_models_by_extension.get(&source_id).cloned() else {
                 continue;
             };
-            let provider_event =
-                Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated { models });
+            let Some(entry) = self.extensions.entries.get(source_id.as_str()) else {
+                continue;
+            };
+            let provider_event = Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated {
+                publisher_extension_id: tau_proto::ExtensionName::from(entry.name.clone()),
+                models,
+            });
             if selector_matches_event(selectors, &provider_event) {
-                self.send_catch_up_event(client_id, Some(source_id.as_str()), provider_event);
+                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), provider_event);
             }
         }
         let mut quota_snapshots = self

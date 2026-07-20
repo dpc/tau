@@ -1002,7 +1002,9 @@ fn representative_events() -> Vec<Event> {
             )
             .expect("valid custom event"),
         ),
+        Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),
         Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            publisher_extension_id: ExtensionName::from("provider"),
             models: vec![ProviderModelInfo {
                 id: "openai/gpt-4.1".parse().expect("model id"),
                 display_name: Some("GPT-4.1".to_owned()),
@@ -1617,6 +1619,8 @@ fn expected_default_transient(event: &Event) -> bool {
         || matches!(
             event,
             Event::ToolCancelled(_)
+                | Event::ProviderModelsDeclared(_)
+                | Event::ProviderModelsUpdated(_)
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderPromptSubmitted(_)
                 | Event::ProviderQuotaReplace(_)
@@ -1725,6 +1729,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "message.sent",
         "message.sent_reported",
         "provider.cache_miss_diagnostic",
+        "provider.models_declared",
         "provider.models_updated",
         "provider.prompt_submitted",
         "provider.quota_clear",
@@ -2405,18 +2410,38 @@ fn model_id_parses_provider_and_slashy_model_name() {
     assert_eq!(model.to_string(), "openrouter/anthropic/claude-sonnet-4");
 }
 
-/// Ensures provider model-list events use the provider event namespace.
+/// Ensures provider model declaration and canonical state use distinct provider
+/// event names.
 #[test]
-fn provider_models_updated_name_matches_wire_family() {
-    // `provider.models_updated` is routed by event name, so `Event::name()` must
-    // match the serde tag exactly. A past implementation accidentally reported
-    // this as `extension.provider_models_updated`, which made prefix selectors
-    // and debug output disagree with the wire protocol.
-    let event = Event::ProviderModelsUpdated(ProviderModelsUpdated { models: Vec::new() });
+fn provider_model_event_names_match_wire_family() {
+    // Both names are routed and intercepted independently. Keep the peer-authored
+    // declaration distinct from the harness-authored current-state projection.
+    let cases = [
+        (
+            Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),
+            "provider.models_declared",
+        ),
+        (
+            Event::ProviderModelsUpdated(ProviderModelsUpdated {
+                publisher_extension_id: ExtensionName::from("provider"),
+                models: Vec::new(),
+            }),
+            "provider.models_updated",
+        ),
+    ];
 
-    assert_eq!(event.name().to_string(), "provider.models_updated");
-    let json = serde_json::to_value(&event).expect("serialize");
-    assert_eq!(json["event"], "provider.models_updated");
+    for (event, expected) in cases {
+        assert_eq!(event.name().to_string(), expected);
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(json["event"], expected);
+        assert!(event.defaults_to_transient());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode cbor");
+        assert_eq!(
+            ciborium::from_reader::<Event, _>(cbor.as_slice()).expect("decode cbor"),
+            event
+        );
+    }
 }
 
 /// Ensures execution lifecycle events retain the provider wire-family event

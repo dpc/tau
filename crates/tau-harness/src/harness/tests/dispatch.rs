@@ -5910,8 +5910,12 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let provider_frames =
-        connect_test_client(&mut h, "provider-owner", tau_proto::ClientKind::Provider);
+    let provider_frames = connect_ready_configured_extension(
+        &mut h,
+        "provider-owner",
+        "provider-owner",
+        tau_proto::ClientKind::Provider,
+    );
     let provider_observer_frames =
         connect_test_client(&mut h, "provider-observer", tau_proto::ClientKind::Provider);
     let ui_frames = connect_test_client(&mut h, "ui-observer", tau_proto::ClientKind::Ui);
@@ -5925,16 +5929,11 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         .set_subscriptions("ui-observer", Vec::new(), prompt_selector)
         .expect("ui observer subscription");
 
-    h.handle_extension_message(
-        "provider-owner",
-        TestMessage::Ready(tau_proto::Ready { message: None }),
-    )
-    .expect("provider ready");
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(
-            tau_proto::ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
                 models: vec![tau_proto::ProviderModelInfo {
                     id: model_id.clone(),
                     display_name: None,
@@ -6032,23 +6031,22 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let _owner_frames =
-        connect_test_client(&mut h, "provider-owner", tau_proto::ClientKind::Provider);
+    let _owner_frames = connect_ready_configured_extension(
+        &mut h,
+        "provider-owner",
+        "provider-owner",
+        tau_proto::ClientKind::Provider,
+    );
     let _other_frames =
         connect_test_client(&mut h, "provider-other", tau_proto::ClientKind::Provider);
     let _tool_frames =
         connect_test_client(&mut h, "tool-impersonator", tau_proto::ClientKind::Tool);
 
-    h.handle_extension_message(
-        "provider-owner",
-        TestMessage::Ready(tau_proto::Ready { message: None }),
-    )
-    .expect("provider ready");
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderModelsUpdated(
-            tau_proto::ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(
+            tau_proto::ProviderModelsDeclared {
                 models: vec![tau_proto::ProviderModelInfo {
                     id: model_id.clone(),
                     display_name: None,
@@ -10324,7 +10322,8 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     unrelated.id = "provider-a/other".into();
     h.publish_provider_models_update(
         "provider-a",
-        tau_proto::ProviderModelsUpdated {
+        tau_proto::ExtensionName::from("provider-a"),
+        tau_proto::ProviderModelsDeclared {
             models: vec![unrelated],
         },
     );
@@ -10339,7 +10338,8 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     );
     h.publish_provider_models_update(
         &provider_owner,
-        tau_proto::ProviderModelsUpdated {
+        tau_proto::ExtensionName::from(provider_owner.clone()),
+        tau_proto::ProviderModelsDeclared {
             models: vec![capable],
         },
     );
@@ -10453,7 +10453,8 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         .clone();
     h.publish_provider_models_update(
         "provider-recovery-owner",
-        tau_proto::ProviderModelsUpdated {
+        tau_proto::ExtensionName::from("provider-recovery-owner"),
+        tau_proto::ProviderModelsDeclared {
             models: vec![unsupported],
         },
     );
@@ -10822,7 +10823,8 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         model.id = "provider-b/model".into();
         h.publish_provider_models_update(
             &owner,
-            tau_proto::ProviderModelsUpdated {
+            tau_proto::ExtensionName::from(owner.clone()),
+            tau_proto::ProviderModelsDeclared {
                 models: vec![model],
             },
         );
@@ -10991,7 +10993,8 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
 
     h.publish_provider_models_update(
         &provider,
-        tau_proto::ProviderModelsUpdated { models: Vec::new() },
+        tau_proto::ExtensionName::from(provider.clone()),
+        tau_proto::ProviderModelsDeclared { models: Vec::new() },
     );
 
     let events = event_log_events(&h);

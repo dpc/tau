@@ -2550,11 +2550,22 @@ pub struct ProviderModelInfo {
     pub standalone_compaction_threshold: Option<u64>,
 }
 
-/// Provider extension snapshot of its currently available models.
+/// Provider extension declaration of its currently available models.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelsDeclared {
+    /// Complete replacement declaration. An empty list means the provider
+    /// declares no currently servable models.
+    pub models: Vec<ProviderModelInfo>,
+}
+
+/// Harness-authored canonical current state for one stable provider publisher.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelsUpdated {
-    /// Complete replacement snapshot for the sending extension. Publishing an
-    /// empty list means the extension currently serves no models.
+    /// Stable configured provider extension that owns this replacement
+    /// snapshot.
+    pub publisher_extension_id: ExtensionName,
+    /// Complete accepted replacement snapshot. An empty list means the provider
+    /// currently serves no models.
     pub models: Vec<ProviderModelInfo>,
 }
 
@@ -4582,6 +4593,8 @@ pub enum Event {
     AgentMessageReceived(AgentMessageReceived),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
+    #[serde(rename = "provider.models_declared")]
+    ProviderModelsDeclared(ProviderModelsDeclared),
     #[serde(rename = "provider.models_updated")]
     ProviderModelsUpdated(ProviderModelsUpdated),
     #[serde(rename = "provider.quota_replace")]
@@ -4962,6 +4975,7 @@ impl Event {
 
     fn provider_capability_event_name(&self) -> Option<EventName> {
         match self {
+            Self::ProviderModelsDeclared(_) => EventName::PROVIDER_MODELS_DECLARED,
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderQuotaReplace(_) => EventName::PROVIDER_QUOTA_REPLACE,
             Self::ProviderQuotaPatch(_) => EventName::PROVIDER_QUOTA_PATCH,
@@ -5113,6 +5127,8 @@ impl Event {
                 | Self::MessageReactionAddedReported(_)
                 | Self::MessageReactionRemovedReported(_)
                 | Self::MessageSentReported(_)
+                | Self::ProviderModelsDeclared(_)
+                | Self::ProviderModelsUpdated(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderQuotaReplace(_)
                 | Self::ProviderQuotaPatch(_)

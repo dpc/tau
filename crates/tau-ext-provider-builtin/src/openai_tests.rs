@@ -4582,9 +4582,15 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
         .iter()
         .position(|frame| {
             matches!(
-                input_event(frame),
-                Some(Event::ProviderModelsUpdated(updated))
-                    if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()])
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if emit.transient
+                        && matches!(
+                            emit.event.as_ref(),
+                            Event::ProviderModelsDeclared(updated)
+                                if model_ids(&updated.models)
+                                    .starts_with(&["chatgpt/gpt-5.6-sol".to_owned()])
+                        )
             )
         })
         .unwrap_or_else(|| panic!("startup frames should announce provider models: {frames:?}"));

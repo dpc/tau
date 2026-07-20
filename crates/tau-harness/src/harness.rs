@@ -1963,6 +1963,9 @@ pub struct Harness {
     /// the awaited [`InterceptReply`] arrives (or the awaited
     /// connection disconnects, treated as `Pass(None)`).
     pub(crate) pending_intercept: Option<PendingIntercept>,
+    /// Fatal error raised while a parked publish commits downstream. The
+    /// surrounding runtime/interception operation takes and propagates it.
+    pending_publish_error: Option<HarnessError>,
     /// Publishes that arrived while `pending_intercept` was active.
     /// Drained in FIFO order once the pending intercept resolves.
     pub(crate) deferred_publishes: VecDeque<DeferredPublish>,
@@ -2170,8 +2173,8 @@ where
     use tau_proto::{
         ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
         HarnessOutputMessage, Hello, MessageItem, PROTOCOL_VERSION, PeerInputReader,
-        PeerOutputWriter, ProviderModelInfo, ProviderModelsUpdated, ProviderPromptSubmitted, Ready,
-        Subscribe, ThinkingSummary, ToolCallItem, ToolName, Verbosity,
+        PeerOutputWriter, ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted,
+        Ready, Subscribe, ThinkingSummary, ToolCallItem, ToolName, Verbosity,
     };
 
     fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
@@ -2198,8 +2201,8 @@ where
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
     }))?;
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderModelsUpdated(
-        ProviderModelsUpdated {
+    writer.write_message(&HarnessInputMessage::emit_with_transient(
+        Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![ProviderModelInfo {
                 id: "echo/model".into(),
                 display_name: Some("Echo".to_owned()),
@@ -2217,8 +2220,9 @@ where
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
             }],
-        },
-    )))?;
+        }),
+        true,
+    ))?;
     writer.write_message(&HarnessInputMessage::Ready(Ready {
         message: Some("echo provider ready".to_owned()),
     }))?;
@@ -2688,6 +2692,7 @@ impl Harness {
             debug_log: None,
             interceptors: InterceptorRegistry::default(),
             pending_intercept: None,
+            pending_publish_error: None,
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
             pending_publish_idle_dispatches: VecDeque::new(),
@@ -6310,7 +6315,7 @@ impl Harness {
             }
             HarnessEvent::Command(command) => self.handle_harness_command(command)?,
         }
-        Ok(())
+        self.take_pending_publish_error()
     }
 
     fn handle_runtime_connection_message(
@@ -7168,10 +7173,15 @@ impl Harness {
     fn publish_provider_models_update(
         &mut self,
         source_id: &str,
-        update: tau_proto::ProviderModelsUpdated,
+        publisher_extension_id: tau_proto::ExtensionName,
+        declaration: tau_proto::ProviderModelsDeclared,
     ) {
+        let update = tau_proto::ProviderModelsUpdated {
+            publisher_extension_id,
+            models: declaration.models,
+        };
         self.publish_event(
-            Some(source_id),
+            Some(HARNESS_CONNECTION_ID),
             Event::ProviderModelsUpdated(update.clone()),
         );
         self.apply_provider_models_snapshot(source_id, update.models);
@@ -7463,7 +7473,7 @@ impl Harness {
         for update in stage.provider_model_updates {
             staged_model_ids.extend(update.models.iter().map(|model| model.id.clone()));
             self.publish_event(
-                Some(source_id),
+                Some(HARNESS_CONNECTION_ID),
                 Event::ProviderModelsUpdated(update.clone()),
             );
             final_provider_models = Some(update.models);
@@ -7543,6 +7553,10 @@ impl Harness {
     /// run.
     fn initial_extension_preflight_ready(&self) -> bool {
         self.extensions.pending_connects == 0
+            && self
+                .extensions
+                .pending_provider_model_declarations
+                .is_empty()
             && self
                 .extensions
                 .entries
@@ -7742,6 +7756,13 @@ impl Harness {
     /// readiness only after its complete staged batch succeeds.
     fn finish_ready_extension_activation(&mut self, source_id: &str) -> Result<(), HarnessError> {
         if !self.extensions.ready_received.contains(source_id) {
+            return Ok(());
+        }
+        if self
+            .extensions
+            .pending_provider_model_declarations
+            .contains_key(source_id)
+        {
             return Ok(());
         }
         let activated = self.activate_staged_extension_capabilities(source_id);
@@ -7991,7 +8012,7 @@ impl Harness {
                         | Event::ToolUnregister(_)
                         | Event::ExtSkillAvailable(_)
                         | Event::ExtAgentsMdAvailable(_)
-                        | Event::ProviderModelsUpdated(_)
+                        | Event::ProviderModelsDeclared(_)
                         | Event::ExtensionContextProviderRegister(_)
                         | Event::ExtensionSessionContextProviderRegister(_)
                         | Event::ExtAgentContextPublish(_)
@@ -8141,7 +8162,7 @@ impl Harness {
                 )?;
             }
             HarnessInputMessage::InterceptReply(reply) => {
-                self.handle_intercept_reply(source_id, reply);
+                self.handle_intercept_reply(source_id, reply)?;
             }
             HarnessInputMessage::GetAgentPromptCreated(request) => {
                 self.send_agent_prompt_created_result(source_id, request);
@@ -8203,6 +8224,32 @@ impl Harness {
             // corresponding `message.*_reported` event instead.
             return Ok(());
         }
+        if matches!(event, Event::ProviderModelsUpdated(_)) {
+            // Canonical provider state is harness-authored. Providers publish the
+            // mutable `provider.models_declared` input instead.
+            return Ok(());
+        }
+        if matches!(event, Event::ProviderModelsDeclared(_)) {
+            // This is declarative source-aware admission, not provider-model
+            // processing. `DECISION-generic-peer-event-emission` requires the
+            // accepted declaration to use ordinary interception/commit before the
+            // downstream consumer derives canonical current state.
+            if !self.is_provider_extension(source_id)
+                || !self.accepts_provider_event_from(source_id, &event_name)
+            {
+                return Ok(());
+            }
+            if self.should_stage_extension_capabilities(source_id) {
+                *self
+                    .extensions
+                    .pending_provider_model_declarations
+                    .entry(source_id.into())
+                    .or_default() += 1;
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
@@ -8247,13 +8294,163 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
-        let Some(publisher) = peer_context.message_publisher.clone() else {
+        if let Some(publisher) = peer_context
+            .extension
+            .as_ref()
+            .map(|extension| tau_proto::MessagePublisherId::new(extension.publisher.to_string()))
+            && let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher)
+        {
+            self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, true, None);
+            return;
+        }
+        let Event::ProviderModelsDeclared(declaration) = event else {
             return;
         };
-        let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher) else {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| extension.kind == ClientKind::Provider)
+        else {
             return;
         };
-        self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, true, None);
+        let source_id = &extension.source;
+        let publisher_extension_id = extension.publisher.clone();
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.instance_id == extension.instance_id
+                && entry.kind == ClientKind::Provider
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            // The declaration still committed with its captured publisher
+            // envelope, but a disconnected or replaced provider generation must
+            // not recreate stale routes or consume the new generation's
+            // activation reservation.
+            return;
+        }
+        if let Some(reservation) = extension.activation_reservation
+            && !self.reaccount_provider_model_activation_reservation(
+                source_id.as_str(),
+                reservation,
+                event,
+            )
+        {
+            self.finish_pending_provider_model_declaration(source_id.as_str());
+            return;
+        }
+        if self.should_stage_extension_capabilities(source_id.as_str())
+            && extension.activation_reservation.is_some()
+        {
+            self.stage_provider_models_update(
+                source_id.as_str(),
+                tau_proto::ProviderModelsUpdated {
+                    publisher_extension_id,
+                    models: declaration.models.clone(),
+                },
+            );
+        } else {
+            self.publish_provider_models_update(
+                source_id.as_str(),
+                publisher_extension_id,
+                declaration.clone(),
+            );
+        }
+        if extension.activation_reservation.is_some() {
+            self.finish_pending_provider_model_declaration(source_id.as_str());
+        }
+    }
+
+    /// Resize a pre-activation frame reservation to its committed replacement.
+    fn reaccount_provider_model_activation_reservation(
+        &mut self,
+        source_id: &str,
+        reservation: interception::ActivationReservation,
+        event: &Event,
+    ) -> bool {
+        let replacement_bytes = Self::encoded_emit_size(event, reservation.transient);
+        let Some(stage) = self.extensions.activation_staging.get_mut(source_id) else {
+            return false;
+        };
+        let next_bytes = stage
+            .retained_message_bytes
+            .saturating_sub(reservation.encoded_bytes)
+            .saturating_add(replacement_bytes);
+        if MAX_EXTENSION_ACTIVATION_BYTES < next_bytes {
+            let message = format!(
+                "extension activation staging exceeds {} messages or {} encoded bytes after interception",
+                MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
+            );
+            if let Err(error) = self.handle_extension_protocol_failure(source_id, message) {
+                self.pending_publish_error.get_or_insert(error);
+            }
+            return false;
+        }
+        stage.retained_message_bytes = next_bytes;
+        true
+    }
+
+    /// Release activation quota for a declaration dropped by interception.
+    fn discard_peer_activation_reservation(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref() else {
+            return;
+        };
+        let Some(reservation) = extension.activation_reservation else {
+            return;
+        };
+        if !self
+            .extensions
+            .entries
+            .get(&extension.source)
+            .is_some_and(|entry| {
+                entry.instance_id == extension.instance_id
+                    && entry.state != ExtensionState::Disconnected
+            })
+        {
+            return;
+        }
+        if let Some(stage) = self
+            .extensions
+            .activation_staging
+            .get_mut(&extension.source)
+        {
+            stage.retained_message_count = stage.retained_message_count.saturating_sub(1);
+            stage.retained_message_bytes = stage
+                .retained_message_bytes
+                .saturating_sub(reservation.encoded_bytes);
+        }
+        self.finish_pending_provider_model_declaration(extension.source.as_str());
+    }
+
+    /// Release one admitted pre-`Ready` declaration and retry activation.
+    fn finish_pending_provider_model_declaration(&mut self, source_id: &str) {
+        let source_id = tau_proto::ConnectionId::from(source_id);
+        if let Some(count) = self
+            .extensions
+            .pending_provider_model_declarations
+            .get_mut(&source_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.extensions
+                    .pending_provider_model_declarations
+                    .remove(&source_id);
+            }
+        }
+        if self.pending_publish_error.is_none()
+            && let Err(error) = self.maybe_finish_extension_activation(source_id.as_str())
+        {
+            self.pending_publish_error = Some(error);
+        }
+    }
+
+    /// Propagate a fatal error raised synchronously by downstream publish work.
+    fn take_pending_publish_error(&mut self) -> Result<(), HarnessError> {
+        match self.pending_publish_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn handle_extension_action_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
@@ -8715,14 +8912,6 @@ impl Harness {
                     self.stage_agents_md_available(source_id, agents);
                 } else {
                     self.publish_agents_md_available(source_id, agents);
-                }
-                Ok(None)
-            }
-            Event::ProviderModelsUpdated(updated) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_provider_models_update(source_id, updated);
-                } else {
-                    self.publish_provider_models_update(source_id, updated);
                 }
                 Ok(None)
             }
@@ -10976,7 +11165,30 @@ impl Harness {
             // session init or prompt dispatch.
             self.set_extension_state(connection_id, ExtensionState::Disconnected);
         }
+        let disconnected_provider = self
+            .extensions
+            .entries
+            .get(connection_id)
+            .filter(|entry| entry.kind == ClientKind::Provider)
+            .map(|entry| tau_proto::ExtensionName::from(entry.name.clone()));
+        if let Some(publisher_extension_id) = disconnected_provider
+            && self
+                .provider_models_by_extension
+                .contains_key(connection_id)
+            && !self.clear_parked_provider_model_updates(&publisher_extension_id)
+        {
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated {
+                    publisher_extension_id,
+                    models: Vec::new(),
+                }),
+            );
+        }
         self.extensions.activation_staging.remove(connection_id);
+        self.extensions
+            .pending_provider_model_declarations
+            .remove(connection_id);
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
@@ -11827,6 +12039,7 @@ impl Harness {
                 | Event::AgentStarted(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
+                | Event::ProviderModelsUpdated(_)
         )
     }
 
@@ -14168,12 +14381,8 @@ impl Harness {
     }
 
     fn set_provider_models(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
-        if models.is_empty() {
-            self.provider_models_by_extension.remove(source_id);
-        } else {
-            self.provider_models_by_extension
-                .insert(source_id.to_owned(), models);
-        }
+        self.provider_models_by_extension
+            .insert(source_id.to_owned(), models);
         self.refresh_provider_models_and_publish_state();
     }
 

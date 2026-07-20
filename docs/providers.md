@@ -84,8 +84,15 @@ ModelId::new("chatgpt", "gpt-5.6-sol")
 ModelId::new("chatgpt", "gpt-5.3-codex")
 ```
 
-The provider extension publishes `provider.models_updated` with the models it can currently serve.
-This snapshot carries model metadata, not just IDs:
+The provider extension publishes transient `provider.models_declared` replacement
+declarations with the models it can currently serve. After ordinary interception
+and commit, the harness publishes protected canonical `provider.models_updated`
+current state and updates routing/availability projections. The declaration
+payload contains the proposed model list. The canonical payload adds
+`publisher_extension_id`, the stable configured provider whose complete current
+state it replaces; an empty list withdraws that provider's models. Replay exposes
+one canonical snapshot per active provider, including empty snapshots. Model lists
+carry metadata, not just IDs:
 
 ```rust
 struct ProviderModelInfo {

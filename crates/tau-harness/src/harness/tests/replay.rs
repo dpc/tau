@@ -69,6 +69,79 @@ fn message_delivery_sources(
         .collect()
 }
 
+/// Subscribe-time provider current-state catch-up emits canonical harness state
+/// only and does not replay declarations or reapply the snapshot.
+#[test]
+fn provider_model_catch_up_replays_canonical_state_only() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let existing_source = h.provider_model_routes[&"test/model".into()].clone();
+    let existing_publisher = h.extensions.entries[&existing_source].name.clone();
+    connect_ready_configured_extension(
+        &mut h,
+        "empty-provider-connection",
+        "empty-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    h.set_provider_models("empty-provider-connection", Vec::new());
+    let before_routes = h.provider_model_routes.clone();
+    let before_log = event_log_events(&h).len();
+    let sink = connect_test_client(&mut h, "model-replay-ui", tau_proto::ClientKind::Ui);
+
+    h.handle_client_event(
+        "model-replay-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_MODELS_DECLARED),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_MODELS_UPDATED),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe to provider model state");
+
+    let deliveries = sink
+        .lock()
+        .expect("model replay sink")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(
+                    delivery.event.as_ref(),
+                    Event::ProviderModelsDeclared(_) | Event::ProviderModelsUpdated(_)
+                ) =>
+            {
+                Some((
+                    routed.source_id.clone(),
+                    delivery.replay,
+                    (*delivery.event).clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deliveries.len(), 2, "{deliveries:?}");
+    assert!(deliveries.iter().all(|(source, replay, event)| {
+        source.as_deref() == Some(HARNESS_CONNECTION_ID)
+            && *replay
+            && matches!(event, Event::ProviderModelsUpdated(_))
+    }));
+    assert!(deliveries.iter().any(|(_, _, event)| matches!(
+        event,
+        Event::ProviderModelsUpdated(update)
+            if update.publisher_extension_id.as_str() == existing_publisher
+                && update.models.iter().any(|model| model.id == "test/model".into())
+    )));
+    assert!(deliveries.iter().any(|(_, _, event)| matches!(
+        event,
+        Event::ProviderModelsUpdated(update)
+            if update.publisher_extension_id.as_str() == "empty-provider"
+                && update.models.is_empty()
+    )));
+    assert_eq!(h.provider_model_routes, before_routes);
+    assert_eq!(event_log_events(&h).len(), before_log);
+}
+
 /// Construct one stamped fallback message fact for persistence/replay tests.
 fn replay_message_fact() -> Event {
     Event::MessageDelivered(tau_proto::MessageDelivered::new(

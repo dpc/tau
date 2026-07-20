@@ -1247,8 +1247,8 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
                     capabilities: Default::default(),
                 },
             )))?;
-            writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsUpdated(
-                tau_proto::ProviderModelsUpdated {
+            writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared {
                     models: vec![tau_proto::ProviderModelInfo {
                         id: "test/model".into(),
                         display_name: Some("Test".to_owned()),
@@ -1340,9 +1340,14 @@ pub(super) fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<Ro
     connect_test_client(h, name, tau_proto::ClientKind::Tool)
 }
 
-/// Connect one ready tool extension with a stable configured publisher name.
-fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &str) {
-    let _sink = connect_test_tool(h, connection_id);
+/// Connect one configured extension that has completed activation.
+fn connect_ready_configured_extension(
+    h: &mut Harness,
+    connection_id: &str,
+    name: &str,
+    kind: tau_proto::ClientKind,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let sink = connect_test_client(h, connection_id, kind.clone());
     let connection_id: tau_proto::ConnectionId = connection_id.into();
     h.extensions.entries.insert(
         connection_id.clone(),
@@ -1351,10 +1356,8 @@ fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &
             name: name.to_owned(),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
-            kind: tau_proto::ClientKind::Tool,
-            peer_capabilities: [tau_proto::PeerCapability::MessageBridge]
-                .into_iter()
-                .collect(),
+            kind,
+            peer_capabilities: Default::default(),
             require: true,
             respawn_allowed: true,
             pid: None,
@@ -1367,6 +1370,20 @@ fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &
         },
     );
     h.extensions.order.push(connection_id);
+    sink
+}
+
+/// Connect one ready tool extension with a stable configured publisher name.
+fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &str) {
+    let _sink =
+        connect_ready_configured_extension(h, connection_id, name, tau_proto::ClientKind::Tool);
+    h.extensions
+        .entries
+        .get_mut(connection_id)
+        .expect("configured message publisher")
+        .peer_capabilities = [tau_proto::PeerCapability::MessageBridge]
+        .into_iter()
+        .collect();
 }
 
 /// Pre-seed the per-conversation `AgentThinking` state for tests that

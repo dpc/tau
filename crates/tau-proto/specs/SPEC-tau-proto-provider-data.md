@@ -97,6 +97,26 @@ line separators, bidi/format controls, and noncharacters become visible
 unsafe controls and format characters. Message-fact references are descriptive
 opaque identifiers, not generic reply routes or capabilities.
 
+## Provider model declarations and canonical state
+
+Configured provider extensions publish complete replacement snapshots as
+transient `provider.models_declared` events. The harness publishes accepted
+current state as a separate transient `provider.models_updated` event, then emits
+model and role availability projections. `ProviderModelsDeclared` contains the
+provider's proposed model list. `ProviderModelsUpdated` contains the accepted list
+plus `publisher_extension_id`, the stable configured provider identity whose
+current state the snapshot replaces. Empty canonical lists therefore withdraw only
+that publisher's state and remain attributable during live delivery and replay.
+
+Declarations are mutable through same-name interception before commit. Canonical
+updates are harness-authored, immutable, and must-pass. Live delivery identifies
+the provider connection as the declaration source and the harness as the canonical
+source; canonical payload provenance remains the stable configured publisher.
+Current-state replay emits one canonical update for each active provider, including
+an active provider's empty snapshot, and must not regenerate declarations or
+model-application side effects. This is the provider-model row of
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
+
 ## Provider tool-type metadata
 
 `ProviderModelInfo.supported_tool_types` is provider-published capability
