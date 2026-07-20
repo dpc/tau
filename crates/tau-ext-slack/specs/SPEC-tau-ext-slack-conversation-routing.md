@@ -8,9 +8,11 @@ overlap reject atomically. Parent receive covers threads; fixed routes normalize
 to their configured root. Static receive DM wins over dynamic linking;
 proactive-only static DM may coexist with a dynamic link.
 
-Reply authority is installed only after successful local immutable message-fact
-publication and requires its exact fact ID. Publication failure and replay
-install nothing. Proactive send requires a current configured alias with
+Reply authority is installed only after successful local transient message-report
+submission and requires its exact fact ID. Submission failure and canonical-fact
+replay install nothing. Interception, append failure, or a crash may prevent the
+later canonical fact without revoking already installed Slack-local authority.
+Proactive send requires a current configured alias with
 `proactive_send:true`, independently of receive, registration, and dynamic DMs.
 Native IDs, prompt correlation, text, arrival order, thread coordinates, and
 discovery results are never selectors. A call supplies exactly one `reply_to` or
@@ -21,7 +23,7 @@ are revalidated and frozen. Without a current worker observation, read-only
 Threads are immutable roots subordinate to one conversation. Incoming replies
 use authenticated `thread_ts`; fixed routing root-normalizes the root create and
 preserves the actual optional root for parent routes. Reply, prepared send,
-`message.sent`, edit, and reaction routing retain the same frozen root. Callers
+`message.sent_reported`, edit, and reaction routing retain the same frozen root. Callers
 cannot supply or mutate thread coordinates.
 
 Conversation discovery is disabled by default, separately tagged, config-only,

@@ -175,6 +175,7 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: "claim-external".into(),
                 client_kind: tau_proto::ClientKind::External,
+                capabilities: Default::default(),
             }),
         )
         .expect("Hello claim");

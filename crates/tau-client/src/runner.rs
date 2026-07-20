@@ -323,6 +323,7 @@ pub(crate) fn write_hello<State>(
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: builder.name.clone(),
         client_kind: builder.kind.clone(),
+        capabilities: builder.peer_capabilities.clone(),
     }))
 }
 

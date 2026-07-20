@@ -116,8 +116,11 @@ split at UTF-8 boundaries into sequential messages with visible `[part N/M]`
 markers; the agent label and marker are included within each 4096-byte body.
 Multipart delivery is sequential and non-atomic: if a later part fails, earlier
 parts remain visible and the tool error reports the failed, total, and completed
-part counts. Partial delivery emits no `message.sent`; complete delivery emits
-one fact containing the original unsplit tool text.
+part counts. Partial delivery emits no `message.sent_reported`; complete delivery
+submits one transient report containing the original unsplit tool text. The
+harness publishes the canonical durable fact downstream after interception.
+Submission does not acknowledge canonical commit, so interception, append
+failure, or a crash may leave transport effects without a canonical fact.
 
 ## Routing modes
 

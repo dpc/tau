@@ -2,8 +2,8 @@
 
 External messages follow
 [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md)
-and the extension-published fact interface in
-[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
+and the extension-report/canonical-fact interface in
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 Conversation policy follows
 [DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md).
 Exact routing, ingress, and mutation behavior is specified by
@@ -28,7 +28,7 @@ time. Multi-agent sharing or retargeting is ad hoc best-effort behavior and does
 not provide exact cross-agent routing, permanent ownership, once-only delivery,
 or cross-agent deduplication.
 
-## Receive and fact publication
+## Receive and report submission
 
 Supported Socket events reserve one of 64 process-local outstanding slots before
 ACK. A successful local ACK write admits the occurrence to one persistent
@@ -61,27 +61,29 @@ Deadline or shutdown drops the WebSocket rather than attempting a potentially
 blocked close write. Stale connections reconnect through the same installation
 validation path rather than waiting indefinitely for another inbound frame.
 
-Admitted creates, edits, deletes, and reactions publish ordinary immutable
-`message.delivered`, `message.edited`, `message.deleted`,
-`message.reaction_added`, or `message.reaction_removed` facts. Slack derives
+Admitted creates, edits, deletes, and reactions submit ordinary transient
+`message.delivered_reported`, `message.edited_reported`, `message.deleted_reported`,
+`message.reaction_added_reported`, or `message.reaction_removed_reported` reports. Slack derives
 opaque fact IDs from native channel/message coordinates and uses
 `MessageFactRef` for later operations on the same logical message. The harness
-stamps the configured extension publisher and persists the fact before prompt
+stamps the configured extension publisher and persists the canonical fact before prompt
 projection. There is no Slack-specific ingress acknowledgement or harness
 transport-registration state.
 
 Slack installs and revalidates reply, edit, and reaction routes locally. A
-locally written create establishes source reply authority under its Tau-issued
+locally submitted create report establishes source reply authority under its Tau-issued
 `MessageFactId`, while edit lookup uses the private native `(channel, ts)` tuple
-bound to that fact. A locally written outgoing send establishes posted-message
-reaction authority under its sent fact ID while retaining private native
-coordinates for API routing. Delete publication revokes matching local
+bound to that report. A locally submitted outgoing send report establishes posted-message
+reaction authority under its sent report ID while retaining private native
+coordinates for API routing. Delete-report submission revokes matching local
 source/reply/edit/reaction state. These maps are bounded, process-local, agent-
-and lifecycle-scoped, and never reconstructed by fact replay.
+and lifecycle-scoped, and never reconstructed by canonical-fact replay. This
+Slack-local authority can exist even if interception, append failure, or a crash
+prevents a later canonical fact.
 
 The extension drops recently repeated native occurrence IDs with a bounded
 4,096-entry process-local FIFO set. Cache eviction, races, or restart may
-duplicate publication. Generic infrastructure does not deduplicate or resolve
+duplicate report submission. Generic infrastructure does not deduplicate or resolve
 message facts.
 
 Exact U/W identity remains extension-local authority. Model context receives an
@@ -112,14 +114,14 @@ success can leave one or two Slack copies. There is no durable outbox,
 `client_msg_id`, restart guarantee, remote/local transaction, or exactly-once
 claim.
 
-After Slack reports success, the extension writes `message.sent` and then the
+After Slack reports success, the extension writes `message.sent_reported` and then the
 ordinary `tool.result` through one serialized local write-and-flush gate. This
 preserves frame order but does not acknowledge a harness commit. The result's
-`message_ref` becomes local reaction authority keyed to the sent fact ID. Its
+`message_ref` becomes local reaction authority keyed to the sent report's ID. Its
 documented `slack-message:<opaque-digest>` representation exposes no native
 coordinates and is accepted only when it resolves to an exact retained target.
 Same-call replay returns the retained stable result without posting again or
-publishing another sent fact. Conflicting call-ID reuse fails, while a new call
+submitting another sent report. Conflicting call-ID reuse fails, while a new call
 ID is new intent.
 
 Agent-authored text is unchanged by default. The presentation-only
@@ -132,7 +134,7 @@ the selected live reply route.
 
 Reconnect must match both halves of the established bot/workspace pair. A
 changed, incomplete, or malformed observation permanently retires
-installation-scoped routes, links, ownership, workers, and publication authority
+installation-scoped routes, links, ownership, workers, and report-submission authority
 until restart. Configuration freezes after successful worker preflight or before
 the first authorized post or reaction API attempt.
 
@@ -149,7 +151,7 @@ bounded closed outcome categories and never expose tokens, URLs, response
 bodies, message text, or native identifiers other than documented message fact IDs.
 
 The disabled-by-default `slack_react` tool accepts only exact retained Tau-issued
-fact references from locally written incoming facts or successful `slack_send` results.
+fact references from locally submitted incoming reports or successful `slack_send` results.
 Targets, same-agent reaction ownership, in-flight reservations, and tool-call
 attempts are bounded runtime state. Adds establish ownership only after
 unambiguous Slack success; removes require that ownership. Ambiguous effects are

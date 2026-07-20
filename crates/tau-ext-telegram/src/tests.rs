@@ -284,23 +284,24 @@ fn expect_tool_finished(rx: &mpsc::Receiver<HarnessInputMessage>) {
     let _result = rx.recv().expect("result");
 }
 
-/// A successful Telegram send must publish `message.sent` before its ordinary
-/// terminal tool result on the serialized extension output.
+/// A successful Telegram send must submit `message.sent_reported` before its
+/// ordinary terminal tool result on the serialized extension output.
 fn expect_successful_send(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageSent {
     let _progress = rx.recv().expect("progress");
-    let message = rx.recv().expect("message.sent");
+    let message = rx.recv().expect("message.sent_reported");
     let HarnessInputMessage::Emit(emit) = message else {
         panic!("emit")
     };
-    let Event::MessageSent(fact) = *emit.event else {
-        panic!("message.sent fact")
+    assert!(emit.transient);
+    let Event::MessageSentReported(report) = *emit.event else {
+        panic!("message.sent_reported event")
     };
     let result = rx.recv().expect("tool result");
     let HarnessInputMessage::Emit(emit) = result else {
         panic!("emit")
     };
     assert!(matches!(*emit.event, Event::ToolResult(_)));
-    fact
+    report
 }
 
 fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
@@ -331,17 +332,18 @@ fn expect_delivered(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageDelivere
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::MessageDelivered(fact) = *emit.event else {
-        panic!("message.delivered fact")
+    assert!(emit.transient);
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    fact
+    report
 }
 
-/// Stamp a bridge-produced delivered fact as the harness would, then prove its
-/// projection is identical after a serde round trip.
-fn assert_delivered_live_replay_parity(mut fact: MessageDelivered) {
-    fact.publisher_extension_id = MessagePublisherId::new("std-telegram");
-    let live = Event::MessageDelivered(fact);
+/// Stamp a bridge-produced delivered report payload as the harness would, then
+/// prove its projection is identical after a serde round trip.
+fn assert_delivered_live_replay_parity(mut report: MessageDelivered) {
+    report.publisher_extension_id = MessagePublisherId::new("std-telegram");
+    let live = Event::MessageDelivered(report);
     let encoded = serde_json::to_value(&live).expect("encode fact");
     let replay: Event = serde_json::from_value(encoded).expect("decode replay fact");
     assert_eq!(
@@ -471,7 +473,8 @@ fn gateway_client_config_requires_only_socket_path() {
 
 /// In gateway-client mode the sidecar must not touch Telegram polling APIs.
 /// Registration goes to the local gateway socket, and any queued inbound
-/// delivery is published locally as a direct `message.delivered` fact.
+/// delivery is submitted locally as a transient `message.delivered_reported`
+/// report.
 #[test]
 fn gateway_client_registers_without_polling_and_submits_delivery() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -627,9 +630,9 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
 }
 
 /// A gateway-declared send failure must return only a tool error and must not
-/// claim remote success with `message.sent`.
+/// claim remote success with `message.sent_reported`.
 #[test]
-fn gateway_client_send_failure_does_not_publish_sent_fact() {
+fn gateway_client_send_failure_does_not_submit_sent_report() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("gateway.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
@@ -673,7 +676,7 @@ fn gateway_client_send_failure_does_not_publish_sent_fact() {
     assert!(expect_tool_error(&rx).contains("gateway send failed"));
     assert!(
         rx.try_recv().is_err(),
-        "unexpected message.sent after failure"
+        "unexpected message.sent_reported after failure"
     );
     server.join().expect("fake gateway thread");
 }
@@ -736,7 +739,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
 }
 
 /// Gateway deliveries are only accepted for the current session and a currently
-/// registered local agent; stale gateway records cannot be published after
+/// registered local agent; stale gateway records cannot be submitted after
 /// local state has failed closed or unregistered.
 #[test]
 fn gateway_delivery_requires_live_local_registration() {
@@ -988,10 +991,10 @@ fn telegram_send_fails_before_registration() {
     assert!(error.message.contains("telegram_register"));
 }
 
-/// A Telegram API send failure must produce a tool error without publishing a
-/// preceding or later `message.sent` fact.
+/// A Telegram API send failure must produce a tool error without submitting a
+/// preceding or later `message.sent_reported` report.
 #[test]
-fn telegram_send_transport_failure_does_not_publish_sent_fact() {
+fn telegram_send_transport_failure_does_not_submit_sent_report() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
@@ -1003,7 +1006,7 @@ fn telegram_send_transport_failure_does_not_publish_sent_fact() {
     assert_eq!(expect_tool_error(&rx), "Telegram transport error");
     assert!(
         rx.try_recv().is_err(),
-        "unexpected message.sent after failure"
+        "unexpected message.sent_reported after failure"
     );
 }
 
@@ -1437,8 +1440,8 @@ fn textless_allowed_message_gets_unsupported_reply() {
     );
 }
 
-/// With exactly one registered agent, plain Telegram text publishes a direct
-/// delivered fact with transport-neutral source metadata.
+/// With exactly one registered agent, plain Telegram text submits a transient
+/// delivered report with transport-neutral source metadata.
 #[test]
 fn one_registered_agent_routes_plain_text() {
     let (ext, rx, _client) = extension();
@@ -1462,27 +1465,32 @@ fn one_registered_agent_routes_plain_text() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.agent_id.as_str(), "agent-1");
-    assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, telegram_sender_ref("123"));
+    assert_eq!(report.agent_id.as_str(), "agent-1");
+    assert_eq!(report.text, "hello");
+    assert_eq!(report.sender.stable_id, telegram_sender_ref("123"));
     assert_eq!(
-        req.sender.sender_auth,
+        report.sender.sender_auth,
         Some(MessageSenderAuth::VerifiedAllowlisted)
     );
     assert_eq!(
-        req.conversation
+        report
+            .conversation
             .as_ref()
             .and_then(|value| value.alias.as_ref()),
         None
     );
     assert_eq!(
-        req.conversation.as_ref().expect("conversation").stable_id,
+        report
+            .conversation
+            .as_ref()
+            .expect("conversation")
+            .stable_id,
         "123"
     );
-    assert_delivered_live_replay_parity(req);
+    assert_delivered_live_replay_parity(report);
 }
 
 /// Multiple registered agents without selection are ambiguous, so the bridge
@@ -1673,10 +1681,10 @@ fn select_then_plain_text_routes_to_selected_agent() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.agent_id.as_str(), "agent-2");
+    assert_eq!(report.agent_id.as_str(), "agent-2");
 }
 
 /// Runtime argument validation must match the schema so a model cannot rely on
@@ -1772,7 +1780,7 @@ fn configured_group_chat_can_route() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::MessageDelivered(_)));
+    assert!(matches!(*emit.event, Event::MessageDeliveredReported(_)));
 }
 
 /// When a fixed chat is configured, allowlisted messages from any other private
@@ -1903,15 +1911,15 @@ fn linked_chat_rejects_other_private_chat() {
         },
     );
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
-    let sent_fact = expect_successful_send(&rx);
+    let sent_report = expect_successful_send(&rx);
 
     let sent = client.sent.lock().expect("lock");
     assert_eq!(sent[0].0, 123);
     assert_eq!(sent[1].0, 456);
     assert_eq!(sent[2], (123, "[agent-1] reply".to_owned()));
-    assert_eq!(sent_fact.text, "reply");
+    assert_eq!(sent_report.text, "reply");
     assert_eq!(
-        sent_fact.conversation.expect("conversation").stable_id,
+        sent_report.conversation.expect("conversation").stable_id,
         "123"
     );
 }
@@ -2064,10 +2072,10 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "fresh");
+    assert_eq!(report.text, "fresh");
 }
 
 /// Telegram updates without a usable message still carry update ids and must be
@@ -2607,10 +2615,10 @@ fn initial_empty_drain_then_fresh_message_routes() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "fresh");
+    assert_eq!(report.text, "fresh");
     assert_eq!(client.poll_timeouts.lock().expect("lock")[0], 0);
 }
 
@@ -2708,7 +2716,7 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
 }
 
 /// Non-empty poll responses from an old config generation must also be
-/// discarded, avoiding both stale offset updates and fact publication under
+/// discarded, avoiding both stale offset updates and report submission under
 /// the new config.
 #[test]
 fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
@@ -2794,10 +2802,10 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "fresh after reregister");
+    assert_eq!(report.text, "fresh after reregister");
 }
 
 /// Error backoff uses the shared-state condvar so a config change wakes it

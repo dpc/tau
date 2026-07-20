@@ -15054,6 +15054,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 instance_id: 42.into(),
                 connection_id: connection_id.clone(),
                 kind: tau_proto::ClientKind::Tool,
+                peer_capabilities: Default::default(),
                 require: true,
                 respawn_allowed: true,
                 pid: None,
@@ -20706,6 +20707,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "ordinary-ui".into(),
             client_kind: tau_proto::ClientKind::Ui,
+            capabilities: Default::default(),
         }),
     )
     .expect("ordinary hello");
@@ -20722,6 +20724,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
             client_kind: tau_proto::ClientKind::External,
+            capabilities: Default::default(),
         }),
     )
     .expect("external hello");
@@ -20766,6 +20769,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
+        capabilities: Default::default(),
     }))
     .expect("send external hello");
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
@@ -20901,6 +20905,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
+        capabilities: Default::default(),
     }))
     .expect("target hello");
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
@@ -21077,6 +21082,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
             client_kind: tau_proto::ClientKind::External,
+            capabilities: Default::default(),
         }),
     )
     .expect("external hello");

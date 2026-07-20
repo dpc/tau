@@ -70,7 +70,8 @@ matching authorization; missing/mixed/mismatched evidence is dropped before
 identity lookup. Slack Connect actor home team is not installation authority.
 
 Agents register to receive. Accepted Slack creates, edits, deletes, and reactions
-publish direct immutable `message.*` facts. `slack_send` requires `message` plus
+submit transient `message.*_reported` events; the harness publishes immutable
+canonical `message.*` facts downstream. `slack_send` requires `message` plus
 exactly one Tau-issued `reply_to` or proactive `destination` alias. Successfully
 published creates and edits install source-bound reply authority in Slack-local
 runtime state. Edits require a known

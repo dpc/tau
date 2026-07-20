@@ -4,11 +4,12 @@ Reaction refs are at most 128 bytes. Emoji use a 1–64-character lowercase ASCI
 base of letters, digits, `_+-`, with an optional exact `::skin-tone-[2-6]` suffix.
 Only add/remove operations exist; strict parsing rejects unknown fields.
 
-Eligible targets are locally written and flushed create/edit facts and successful
-sends, never reaction occurrences, help/control output, failed or unpublished
-events, or arbitrary Slack objects. A successful local fact write/flush happens
-before target activation; it is not a harness commit ACK. A successful send
-publishes `message.sent` before its ordinary result. Unknown, stale, evicted,
+Eligible targets are locally written and flushed create/edit reports and successful
+sends, never reaction occurrences, help/control output, failed or unsubmitted
+reports, or arbitrary Slack objects. A successful local report write/flush happens
+before target activation; it is not a harness commit ACK and local authority may
+exist without a later canonical fact. A successful send submits
+`message.sent_reported` before its ordinary result. Unknown, stale, evicted,
 cross-agent, cross-instance, or cross-route refs fail generically before I/O. The
 exact item timestamp is the mutation target while its immutable authenticated
 conversation/thread root remains separate routing authority.

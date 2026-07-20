@@ -658,8 +658,8 @@ fn routing_session_aliases_survive_registry_churn() {
 }
 
 /// Ensures pending deliveries are removed if a route unregisters before the
-/// sidecar drains them, so stale delivery records cannot be published as facts
-/// after ownership loss.
+/// sidecar drains them, so stale delivery records cannot become submitted
+/// reports after ownership loss.
 #[test]
 fn routing_unregister_drops_pending_delivery() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -696,7 +696,7 @@ fn routing_pending_delivery_queue_is_bounded() {
     assert!(sent.iter().any(|(_, text)| text.contains("queue is full")));
 }
 
-/// Ensures queued message-fact deliveries are exposed through the persistent
+/// Ensures queued inbound delivery records are exposed through the persistent
 /// sidecar socket response shape and drained after one successful response.
 #[test]
 fn sidecar_heartbeat_drains_queued_delivery_response() {

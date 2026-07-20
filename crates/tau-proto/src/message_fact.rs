@@ -1,4 +1,9 @@
-//! Transport-neutral extension-published message fact schema.
+//! Shared transport-neutral payloads for bridge reports and canonical message
+//! facts.
+//!
+//! In `message.*_reported`, `publisher_extension_id` is an untrusted peer
+//! claim. In canonical `message.*`, the harness stamps the authenticated
+//! configured extension identity.
 
 #[cfg(test)]
 #[path = "message_fact/tests.rs"]
@@ -87,11 +92,13 @@ impl MessageFactId {
     }
 }
 
-/// Raw wire-decodable identifier for the extension that published a fact.
+/// Raw wire-decodable publisher claim in a report or harness-stamped publisher
+/// identity in a canonical fact.
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MessagePublisherId(
-    /// Raw claimed publisher name retained for post-commit validation.
+    /// Untrusted publisher claim in a report or authenticated publisher
+    /// identity in a canonical fact.
     String,
 );
 
@@ -182,10 +189,11 @@ impl MessageAgentTarget {
     }
 }
 
-/// Immutable fact reporting an externally delivered text message.
+/// Shared report/canonical payload describing an externally delivered text
+/// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelivered {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -203,7 +211,7 @@ pub struct MessageDelivered {
 }
 
 impl MessageDelivered {
-    /// Construct a delivered-message fact with CBOR null extension data.
+    /// Construct a delivered-message payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,
@@ -224,10 +232,11 @@ impl MessageDelivered {
     }
 }
 
-/// Immutable fact reporting replacement text for a referenced message.
+/// Shared report/canonical payload describing replacement text for a referenced
+/// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageEdited {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -246,7 +255,7 @@ pub struct MessageEdited {
 }
 
 impl MessageEdited {
-    /// Construct an edited-message fact with CBOR null extension data.
+    /// Construct an edited-message payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,
@@ -267,10 +276,10 @@ impl MessageEdited {
     }
 }
 
-/// Immutable fact reporting deletion of a referenced message.
+/// Shared report/canonical payload describing deletion of a referenced message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageDeleted {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -287,7 +296,7 @@ pub struct MessageDeleted {
 }
 
 impl MessageDeleted {
-    /// Construct a deleted-message fact with CBOR null extension data.
+    /// Construct a deleted-message payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,
@@ -306,10 +315,11 @@ impl MessageDeleted {
     }
 }
 
-/// Immutable fact reporting a reaction added to a referenced message.
+/// Shared report/canonical payload describing a reaction added to a referenced
+/// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageReactionAdded {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -328,7 +338,7 @@ pub struct MessageReactionAdded {
 }
 
 impl MessageReactionAdded {
-    /// Construct a reaction-added fact with CBOR null extension data.
+    /// Construct a reaction-added payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,
@@ -349,10 +359,11 @@ impl MessageReactionAdded {
     }
 }
 
-/// Immutable fact reporting a reaction removed from a referenced message.
+/// Shared report/canonical payload describing a reaction removed from a
+/// referenced message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageReactionRemoved {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -371,7 +382,7 @@ pub struct MessageReactionRemoved {
 }
 
 impl MessageReactionRemoved {
-    /// Construct a reaction-removed fact with CBOR null extension data.
+    /// Construct a reaction-removed payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,
@@ -392,10 +403,11 @@ impl MessageReactionRemoved {
     }
 }
 
-/// Immutable fact reporting publisher-defined remote send success.
+/// Shared report/canonical payload describing publisher-defined remote send
+/// success.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageSent {
-    /// Harness-stamped configured extension publisher identifier.
+    /// Untrusted in a report; harness-stamped in a canonical fact.
     pub publisher_extension_id: MessagePublisherId,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
@@ -414,7 +426,7 @@ pub struct MessageSent {
 }
 
 impl MessageSent {
-    /// Construct a sent-message fact with CBOR null extension data.
+    /// Construct a sent-message payload with CBOR null extension data.
     pub fn new(
         publisher_extension_id: MessagePublisherId,
         agent_id: MessageAgentTarget,

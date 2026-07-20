@@ -2,14 +2,13 @@
 
 ## Status
 
-The current protocol lets extensions directly emit the six canonical
-`message.*` facts and does not carry authenticated publisher metadata in the
-generic event delivery envelope.
+The protocol now separates transient `message.*_reported` inputs from
+harness-authored canonical `message.*` facts and carries declared
+`PeerCapability::MessageBridge` authority in `Hello`. The generic authenticated
+publisher delivery envelope and the remaining exact event-family mappings
+required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
-requires distinct bridge report events, harness-authored canonical facts, and
-an immutable publisher envelope across interception, live delivery, persistence,
-and replay. The current wire contract remains in force until that migration
-completes.
+remain to be implemented.
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately
@@ -36,9 +35,10 @@ Protocol version 0 requires an extension's first harness response after
 the connection's immutable structural name scope as specified by
 [DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
 The configured extension instance name is required and supplies the stable
-harness-stamped publisher ID for extension-published `message.*` facts.
+harness-stamped publisher ID for canonical `message.*` facts derived
+downstream from extension-published `message.*_reported` events.
 Their wire and validation contract is
-[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
 with `agent_id`, `text`, and optional `ctx_id`.

@@ -45,6 +45,7 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
             protocol_version: PROTOCOL_VERSION,
             client_name: "test-child".into(),
             client_kind: ClientKind::Tool,
+            capabilities: Default::default(),
         })
     );
 

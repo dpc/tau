@@ -276,12 +276,12 @@ pub(crate) struct GatewaySocketResponse {
     /// Whether the gateway asks clients to reannounce registrations.
     #[serde(default)]
     pub(crate) reannounce_required: bool,
-    /// Queued inbound message-fact deliveries for this sidecar.
+    /// Queued inbound delivery records for this sidecar.
     #[serde(default)]
     pub(crate) deliveries: Vec<GatewayMessageDelivery>,
 }
 
-/// Queued inbound message-fact delivery received from the gateway.
+/// Queued inbound delivery record received from the gateway.
 #[derive(serde::Deserialize)]
 pub(crate) struct GatewayMessageDelivery {
     /// Gateway request correlation id.

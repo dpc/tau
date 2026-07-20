@@ -4515,7 +4515,7 @@ pub enum Event {
     #[serde(rename = "action.error")]
     ActionError(ActionError),
 
-    // Extension-published message facts
+    // Harness-authored canonical external-message facts
     #[serde(rename = "message.delivered")]
     MessageDelivered(MessageDelivered),
     #[serde(rename = "message.edited")]
@@ -4528,6 +4528,20 @@ pub enum Event {
     MessageReactionRemoved(MessageReactionRemoved),
     #[serde(rename = "message.sent")]
     MessageSent(MessageSent),
+
+    // Extension-published external-message reports
+    #[serde(rename = "message.delivered_reported")]
+    MessageDeliveredReported(MessageDelivered),
+    #[serde(rename = "message.edited_reported")]
+    MessageEditedReported(MessageEdited),
+    #[serde(rename = "message.deleted_reported")]
+    MessageDeletedReported(MessageDeleted),
+    #[serde(rename = "message.reaction_added_reported")]
+    MessageReactionAddedReported(MessageReactionAdded),
+    #[serde(rename = "message.reaction_removed_reported")]
+    MessageReactionRemovedReported(MessageReactionRemoved),
+    #[serde(rename = "message.sent_reported")]
+    MessageSentReported(MessageSent),
 
     // Extension supervision
     #[serde(rename = "extension.starting")]
@@ -4743,6 +4757,54 @@ pub enum Event {
 }
 
 impl Event {
+    /// Convert one extension message report into its canonical fact shape.
+    ///
+    /// The harness replaces the claimed publisher after this conversion. Other
+    /// events return `None`.
+    #[must_use]
+    pub fn into_canonical_message_fact(self) -> Option<Self> {
+        match self {
+            Self::MessageDeliveredReported(report) => Some(Self::MessageDelivered(report)),
+            Self::MessageEditedReported(report) => Some(Self::MessageEdited(report)),
+            Self::MessageDeletedReported(report) => Some(Self::MessageDeleted(report)),
+            Self::MessageReactionAddedReported(report) => Some(Self::MessageReactionAdded(report)),
+            Self::MessageReactionRemovedReported(report) => {
+                Some(Self::MessageReactionRemoved(report))
+            }
+            Self::MessageSentReported(report) => Some(Self::MessageSent(report)),
+            _ => None,
+        }
+    }
+
+    /// Convert one message report and stamp its canonical authenticated
+    /// publisher in one operation.
+    #[must_use]
+    pub fn into_stamped_canonical_message_fact(
+        self,
+        publisher: crate::MessagePublisherId,
+    ) -> Option<Self> {
+        let mut fact = self.into_canonical_message_fact()?;
+        assert!(
+            fact.stamp_message_publisher(publisher),
+            "message report conversion must produce a canonical message fact"
+        );
+        Some(fact)
+    }
+
+    /// Return whether this event is an extension-authored message report.
+    #[must_use]
+    pub const fn is_message_report(&self) -> bool {
+        matches!(
+            self,
+            Self::MessageDeliveredReported(_)
+                | Self::MessageEditedReported(_)
+                | Self::MessageDeletedReported(_)
+                | Self::MessageReactionAddedReported(_)
+                | Self::MessageReactionRemovedReported(_)
+                | Self::MessageSentReported(_)
+        )
+    }
+
     /// Return the raw claimed transcript target for a message fact.
     #[must_use]
     pub fn message_agent_target(&self) -> Option<&crate::MessageAgentTarget> {
@@ -4851,11 +4913,17 @@ impl Event {
     fn message_event_name(&self) -> Option<EventName> {
         match self {
             Self::MessageDelivered(_) => EventName::MESSAGE_DELIVERED,
+            Self::MessageDeliveredReported(_) => EventName::MESSAGE_DELIVERED_REPORTED,
             Self::MessageEdited(_) => EventName::MESSAGE_EDITED,
+            Self::MessageEditedReported(_) => EventName::MESSAGE_EDITED_REPORTED,
             Self::MessageDeleted(_) => EventName::MESSAGE_DELETED,
+            Self::MessageDeletedReported(_) => EventName::MESSAGE_DELETED_REPORTED,
             Self::MessageReactionAdded(_) => EventName::MESSAGE_REACTION_ADDED,
+            Self::MessageReactionAddedReported(_) => EventName::MESSAGE_REACTION_ADDED_REPORTED,
             Self::MessageReactionRemoved(_) => EventName::MESSAGE_REACTION_REMOVED,
+            Self::MessageReactionRemovedReported(_) => EventName::MESSAGE_REACTION_REMOVED_REPORTED,
             Self::MessageSent(_) => EventName::MESSAGE_SENT,
+            Self::MessageSentReported(_) => EventName::MESSAGE_SENT_REPORTED,
             _ => return None,
         }
         .into()
@@ -5039,6 +5107,12 @@ impl Event {
         matches!(
             self,
             Self::ToolCancelled(_)
+                | Self::MessageDeliveredReported(_)
+                | Self::MessageEditedReported(_)
+                | Self::MessageDeletedReported(_)
+                | Self::MessageReactionAddedReported(_)
+                | Self::MessageReactionRemovedReported(_)
+                | Self::MessageSentReported(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderQuotaReplace(_)
                 | Self::ProviderQuotaPatch(_)

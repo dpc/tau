@@ -2,9 +2,9 @@ use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::{PendingTool, background_completion_prompt};
 
-/// Construct one forged-provenance fact for direct extension intake.
-fn extension_message_fact(message_id: &str) -> Event {
-    Event::MessageDelivered(tau_proto::MessageDelivered::new(
+/// Construct one forged-provenance report for ordinary extension publication.
+fn extension_message_report(message_id: &str) -> Event {
+    Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::new("forged"),
         tau_proto::MessageAgentTarget::new("invalid target"),
         tau_proto::MessageFactId::new(message_id),
@@ -18,9 +18,9 @@ fn extension_message_fact(message_id: &str) -> Event {
     ))
 }
 
-/// Assert one selector cannot observe a pre-commit interception request or
-/// alter the exact stamped canonical fact.
-fn assert_message_fact_bypasses_interceptor(selector: EventSelector) {
+/// Assert one report selector sees the report before downstream
+/// canonicalization.
+fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_canonical: bool) {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let interceptor_sink = connect_test_tool(&mut h, "message-interceptor");
@@ -36,20 +36,49 @@ fn assert_message_fact_bypasses_interceptor(selector: EventSelector) {
 
     h.handle_extension_event_inner_with_transient(
         "bridge-connection",
-        extension_message_fact("m1"),
+        extension_message_report("m1"),
         Some(true),
     )
-    .expect("message fact intake");
+    .expect("message report intake");
 
-    assert!(h.pending_intercept.is_none());
+    assert!(h.pending_intercept.is_some());
     assert!(
         interceptor_sink
             .lock()
             .expect("interceptor sink")
             .iter()
-            .all(|frame| !matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_))),
-        "message fact must never produce an InterceptRequest"
+            .any(|frame| matches!(
+                &frame.frame,
+                HarnessOutputMessage::InterceptRequest(request)
+                    if matches!(request.event.as_ref(), Event::MessageDeliveredReported(_))
+            )),
+        "message report must enter ordinary interception"
     );
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("fallback records")
+            .is_empty(),
+        "canonical fact must wait for report commit"
+    );
+    h.handle_extension_event(
+        "message-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit report");
+    if intercepts_canonical {
+        assert!(h.pending_intercept.is_some());
+        h.handle_extension_event(
+            "message-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("protected canonical fact survives drop");
+    }
+    assert!(h.pending_intercept.is_none());
     let records = h.store.session_events("s1").expect("fallback records");
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -60,25 +89,153 @@ fn assert_message_fact_bypasses_interceptor(selector: EventSelector) {
     ));
 }
 
-/// An exact message selector cannot intercept a direct message fact.
+/// An exact report selector runs before downstream canonicalization.
 #[test]
-fn message_fact_bypasses_exact_interceptor() {
-    assert_message_fact_bypasses_interceptor(EventSelector::Exact(
-        tau_proto::EventName::MESSAGE_DELIVERED,
+fn message_report_enters_exact_interception() {
+    assert_message_report_is_intercepted(
+        EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED_REPORTED),
+        false,
+    );
+}
+
+/// A message-prefix interceptor sees both the report and protected canonical
+/// fact.
+#[test]
+fn message_report_and_canonical_fact_enter_prefix_interception() {
+    assert_message_report_is_intercepted(EventSelector::Prefix("message".to_owned()), true);
+}
+
+/// Dropping a mutable bridge report prevents downstream canonical publication.
+#[test]
+fn dropping_message_report_produces_no_canonical_fact() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED_REPORTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "bridge",
+        extension_message_report("original"),
+        Some(true),
+    )
+    .expect("report");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop report");
+    assert!(h.store.session_events("s1").expect("journal").is_empty());
+    assert!(event_log_events(&h).iter().all(|event| {
+        !matches!(
+            event,
+            Event::MessageDelivered(_) | Event::MessageDeliveredReported(_)
+        )
+    }));
+}
+
+/// Downstream canonicalization consumes the committed same-name replacement,
+/// not the pre-interception report.
+#[test]
+fn replacing_message_report_canonicalizes_replacement() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED_REPORTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "bridge",
+        extension_message_report("original"),
+        Some(true),
+    )
+    .expect("report");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(extension_message_report("replacement")))),
+        })),
+    )
+    .expect("replace report");
+    assert!(matches!(
+        h.store.session_events("s1").expect("journal").as_slice(),
+        [tau_core::PersistedSessionEvent {
+            event: Event::MessageDelivered(fact),
+            ..
+        }] if fact.message_id.as_str() == "replacement"
+            && fact.publisher_extension_id.as_str() == "configured-bridge"
     ));
 }
 
-/// A category prefix selector cannot intercept a direct message fact.
+/// Authenticated publisher identity survives bridge disconnect while the report
+/// is parked in interception.
 #[test]
-fn message_fact_bypasses_prefix_interceptor() {
-    assert_message_fact_bypasses_interceptor(EventSelector::Prefix("message".to_owned()));
+fn parked_message_report_survives_bridge_disconnect() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED_REPORTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_transient(
+        "bridge",
+        extension_message_report("m1"),
+        Some(true),
+    )
+    .expect("report");
+    h.handle_disconnect("bridge");
+    // Supervised replacement removes the disconnected entry before installing
+    // its successor connection.
+    h.extensions.entries.remove("bridge");
+    assert!(!h.extensions.entries.contains_key("bridge"));
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass report");
+    assert!(matches!(
+        h.store.session_events("s1").expect("journal").as_slice(),
+        [tau_core::PersistedSessionEvent {
+            source: Some(source),
+            event: Event::MessageDelivered(fact),
+            ..
+        }] if source.as_str() == HARNESS_CONNECTION_ID
+            && fact.publisher_extension_id.as_str() == "configured-bridge"
+    ));
 }
 
-/// A direct fact arriving behind an unrelated intercepted publish waits for
-/// that earlier publish, then appends without entering its own interception
-/// chain.
+/// A report arriving behind an unrelated intercepted publish retains FIFO order
+/// before downstream canonical publication.
 #[test]
-fn message_fact_bypass_preserves_deferred_publish_fifo() {
+fn message_report_preserves_deferred_publish_fifo() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let interceptor = connect_test_tool(&mut h, "draft-interceptor");
@@ -108,10 +265,10 @@ fn message_fact_bypass_preserves_deferred_publish_fifo() {
 
     h.handle_extension_event_inner_with_transient(
         "bridge-connection",
-        extension_message_fact("m1"),
-        None,
+        extension_message_report("m1"),
+        Some(true),
     )
-    .expect("queue message fact");
+    .expect("queue message report");
     assert!(
         h.store
             .session_events("s1")
@@ -142,7 +299,7 @@ fn message_fact_bypass_preserves_deferred_publish_fifo() {
             .filter(|frame| matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_)))
             .count()
             == 1,
-        "only the earlier draft may be intercepted"
+        "only the earlier draft matches this interceptor"
     );
     let delivered_names = observer
         .lock()

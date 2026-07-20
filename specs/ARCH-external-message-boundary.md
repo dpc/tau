@@ -1,23 +1,15 @@
 # ARCH-external-message-boundary: External message boundary
 
-## Status
-
-The current implementation uses direct bridge publication of canonical
-`message.*` facts as described below.
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
-requires a transition to generic bridge report events and downstream
-harness-authored canonical facts. Transport authority, canonical fact
-projection, and the external-content trust boundary remain unchanged.
-
-External-message bridges publish immutable `message.*` facts through ordinary
-extension event emission. The harness stamps the authenticated extension's
-stable configured publisher ID, persists each fact before any consumer acts, and
-then broadcasts the same record. It does not own transport registration,
-admission, routing, reply authority, or send completion.
+External-message bridges publish transient `message.*_reported` events through
+ordinary extension event emission. After report commit and broadcast, the
+harness stamps the authenticated extension's stable configured publisher ID
+and publishes the corresponding immutable durable `message.*` fact. It does not
+own transport registration, admission, routing, reply authority, or send
+completion.
 The exact shared behavior is specified by
-[SPEC-extension-published-message-facts](SPEC-extension-published-message-facts.md);
-the underlying boundary choice is
-[DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md).
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md);
+the underlying publication choice is
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
 
 Extension-provided labels or payload can never claim `HumanUi`,
 harness-internal, authenticated Tau-agent, or another extension instance

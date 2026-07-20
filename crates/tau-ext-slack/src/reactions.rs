@@ -102,7 +102,7 @@ pub(super) enum ReactionApiError {
 /// Live authority retained for one reaction target.
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum ReactionAuthority {
-    /// Exact published incoming source route.
+    /// Exact submitted incoming source route.
     Source {
         /// Publisher-scoped message fact id.
         message_id: MessageFactId,
@@ -395,7 +395,7 @@ pub(super) fn react_tool_spec() -> ToolSpec {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Tau-issued message fact ID from a locally written Slack fact or successful slack_send result"
+                    "description": "Tau-issued message fact ID from a locally submitted Slack report or successful slack_send result"
                 },
                 "emoji": {
                     "type": "string",

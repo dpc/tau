@@ -7,7 +7,7 @@ owner for that Telegram update stream plus lightweight per-session gateway-clien
 sidecars. The gateway owns the token, `getUpdates` cursor, webhook/conflict handling,
 stream lock, durable offset/deduplication state, allowlist and destination policy, and
 Telegram sends. Sidecars retain only harness-local registration and direct
-message-fact publication and never poll Telegram or select raw chat ids.
+message-report submission and never poll Telegram or select raw chat ids.
 
 ## Rationale
 

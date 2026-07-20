@@ -161,11 +161,11 @@ fn agent_id(text: &str) -> AgentId {
     AgentId::parse(text).expect("agent id")
 }
 
-/// Stamp a bridge-produced delivered fact as the harness would, then prove its
-/// projection is identical after a serde round trip.
-fn assert_delivered_live_replay_parity(mut fact: MessageDelivered) {
-    fact.publisher_extension_id = MessagePublisherId::new("std-xmpp");
-    let live = Event::MessageDelivered(fact);
+/// Stamp a bridge-produced delivered report payload as the harness would, then
+/// prove its projection is identical after a serde round trip.
+fn assert_delivered_live_replay_parity(mut report: MessageDelivered) {
+    report.publisher_extension_id = MessagePublisherId::new("std-xmpp");
+    let live = Event::MessageDelivered(report);
     let encoded = serde_json::to_value(&live).expect("encode fact");
     let replay: Event = serde_json::from_value(encoded).expect("decode replay fact");
     assert_eq!(
@@ -950,16 +950,17 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
         .clone();
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("hello")));
     let _progress = rx.recv().expect("progress");
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent_reported") else {
         panic!("emit")
     };
-    let Event::MessageSent(fact) = *emit.event else {
-        panic!("message.sent fact")
+    assert!(emit.transient);
+    let Event::MessageSentReported(report) = *emit.event else {
+        panic!("message.sent_reported report")
     };
-    assert_eq!(fact.agent_id.as_str(), "agent-1");
-    assert_eq!(fact.text, "hello");
+    assert_eq!(report.agent_id.as_str(), "agent-1");
+    assert_eq!(report.text, "hello");
     assert_eq!(
-        fact.conversation.expect("conversation").stable_id,
+        report.conversation.expect("conversation").stable_id,
         conversation
     );
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
@@ -983,13 +984,13 @@ fn xmpp_send_keeps_exact_outbound_body_limit_in_one_message() {
     let message = "a".repeat(OUTBOUND_BODY_LIMIT_BYTES - prefix.len());
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args(&message)));
     let _progress = rx.recv().expect("send progress");
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent_reported") else {
         panic!("emit")
     };
-    let Event::MessageSent(fact) = *emit.event else {
-        panic!("message.sent fact")
+    let Event::MessageSentReported(report) = *emit.event else {
+        panic!("message.sent_reported report")
     };
-    assert_eq!(fact.text, message);
+    assert_eq!(report.text, message);
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
         panic!("emit")
     };
@@ -1014,13 +1015,13 @@ fn xmpp_send_numbers_message_beyond_outbound_body_limit() {
     let message = "a".repeat(OUTBOUND_BODY_LIMIT_BYTES - prefix.len() + 1);
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args(&message)));
     let _progress = rx.recv().expect("send progress");
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent_reported") else {
         panic!("emit")
     };
-    let Event::MessageSent(fact) = *emit.event else {
-        panic!("message.sent fact")
+    let Event::MessageSentReported(report) = *emit.event else {
+        panic!("message.sent_reported report")
     };
-    assert_eq!(fact.text, message);
+    assert_eq!(report.text, message);
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
         panic!("emit")
     };
@@ -1086,9 +1087,10 @@ fn outbound_message_parts_converge_across_ten_part_boundary() {
 }
 
 /// A failure after the first multipart write must report partial delivery,
-/// stop sending, and avoid publishing an all-message `message.sent` fact.
+/// stop sending, and avoid submitting an all-message `message.sent_reported`
+/// report.
 #[test]
-fn xmpp_send_reports_partial_multipart_failure_without_sent_fact() {
+fn xmpp_send_reports_partial_multipart_failure_without_sent_report() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("registration progress");
@@ -1111,7 +1113,7 @@ fn xmpp_send_reports_partial_multipart_failure_without_sent_fact() {
     assert_eq!(bridge.sent.lock().expect("lock").len(), 1);
     assert!(
         rx.try_recv().is_err(),
-        "unexpected message.sent or later write"
+        "unexpected message.sent_reported or later write"
     );
 }
 
@@ -1127,10 +1129,10 @@ fn reconstruct_multipart_payload(sent: &[(AgentId, String)], prefix: &str) -> St
         .collect()
 }
 
-/// An XMPP transport send failure must return a tool error without publishing a
-/// preceding or later `message.sent` fact.
+/// An XMPP transport send failure must return a tool error without submitting a
+/// preceding or later `message.sent_reported` report.
 #[test]
-fn xmpp_send_transport_failure_does_not_publish_sent_fact() {
+fn xmpp_send_transport_failure_does_not_submit_sent_report() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("registration progress");
@@ -1148,7 +1150,7 @@ fn xmpp_send_transport_failure_does_not_publish_sent_fact() {
     assert_eq!(error.message, "xmpp transport failed");
     assert!(
         rx.try_recv().is_err(),
-        "unexpected message.sent after failure"
+        "unexpected message.sent_reported after failure"
     );
 }
 
@@ -1178,10 +1180,10 @@ fn xmpp_send_waits_for_online_readiness_after_registration() {
         handle.join().expect("send thread");
     });
 
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent") else {
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent_reported") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::MessageSent(_)));
+    assert!(matches!(*emit.event, Event::MessageSentReported(_)));
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
         panic!("emit")
     };
@@ -1950,10 +1952,10 @@ fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
     assert!(!sender.contains("example.org"));
 }
 
-/// Allowed MUC text with a cached real JID publishes one transport-neutral fact
+/// Allowed MUC text with a cached real JID submits one transport-neutral report
 /// whose live projection is identical on replay.
 #[test]
-fn allowed_muc_message_publishes_replay_stable_fact() {
+fn allowed_muc_message_submits_replay_stable_report() {
     let (tx, rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = Jid::new("tau-agent-1@conference.example.org")
@@ -1982,21 +1984,26 @@ fn allowed_muc_message_publishes_replay_stable_fact() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    assert!(emit.transient);
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.agent_id.as_str(), "agent-1");
-    assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, xmpp_sender_ref("me@example.org"));
+    assert_eq!(report.agent_id.as_str(), "agent-1");
+    assert_eq!(report.text, "hello");
+    assert_eq!(report.sender.stable_id, xmpp_sender_ref("me@example.org"));
     assert_eq!(
-        req.sender.sender_auth,
+        report.sender.sender_auth,
         Some(MessageSenderAuth::VerifiedAllowlisted)
     );
     assert_eq!(
-        req.conversation.as_ref().expect("conversation").stable_id,
+        report
+            .conversation
+            .as_ref()
+            .expect("conversation")
+            .stable_id,
         "tau-agent-1@conference.example.org"
     );
-    assert_delivered_live_replay_parity(req);
+    assert_delivered_live_replay_parity(report);
 }
 
 /// MUC messages with an unallowlisted real JID must be dropped even when they
@@ -2034,18 +2041,18 @@ fn muc_hidden_real_jid_with_trust_routes() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.display_name.as_deref(), Some("alice"));
+    assert_eq!(report.text, "hello");
+    assert_eq!(report.sender.display_name.as_deref(), Some("alice"));
     assert_eq!(
-        req.sender.sender_auth,
+        report.sender.sender_auth,
         Some(MessageSenderAuth::TrustedMembership)
     );
 }
 
-/// Trusted-membership MUC facts retain the accepted occupant nickname as
+/// Trusted-membership MUC reports retain the accepted occupant nickname as
 /// descriptive metadata; generic projection owns visible escaping.
 #[test]
 fn muc_hidden_real_jid_occupant_label_is_descriptive_metadata() {
@@ -2056,22 +2063,22 @@ fn muc_hidden_real_jid_occupant_label_is_descriptive_metadata() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "hello");
+    assert_eq!(report.text, "hello");
     assert_eq!(
-        req.sender.display_name.as_deref(),
+        report.sender.display_name.as_deref(),
         Some("alice] [xmpp direct")
     );
     assert_eq!(
-        req.conversation.expect("conversation").stable_id,
+        report.conversation.expect("conversation").stable_id,
         room.as_str()
     );
 }
 
 /// The bridge must suppress groupchat echoes from its own occupant nick so
-/// agent replies do not come back as fresh delivered facts.
+/// agent replies do not come back as fresh delivered reports.
 #[test]
 fn muc_own_message_is_not_routed() {
     let (mut worker, rx, _room, _occupant) = worker_with_muc_agent();
@@ -2083,7 +2090,7 @@ fn muc_own_message_is_not_routed() {
     assert!(rx.try_recv().is_err());
 }
 
-/// Oversized inbound MUC text is dropped before fact publication to bound
+/// Oversized inbound MUC text is dropped before report submission to bound
 /// external prompt amplification.
 #[test]
 fn oversized_muc_message_is_not_routed() {
@@ -2214,17 +2221,17 @@ fn direct_message_requires_exact_bound_full_jid() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    let Event::MessageDelivered(req) = *emit.event else {
-        panic!("message.delivered fact")
+    let Event::MessageDeliveredReported(report) = *emit.event else {
+        panic!("message.delivered_reported event")
     };
-    assert_eq!(req.text, "hello");
-    assert_eq!(req.sender.stable_id, xmpp_sender_ref("me@example.org"));
+    assert_eq!(report.text, "hello");
+    assert_eq!(report.sender.stable_id, xmpp_sender_ref("me@example.org"));
     assert_eq!(
-        req.sender.sender_auth,
+        report.sender.sender_auth,
         Some(MessageSenderAuth::VerifiedAllowlisted)
     );
     assert_eq!(
-        req.conversation.expect("conversation").stable_id,
+        report.conversation.expect("conversation").stable_id,
         "me@example.org"
     );
 }

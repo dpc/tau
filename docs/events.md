@@ -1,14 +1,16 @@
 # Event log reference
 
-## Extension-published message facts
+## External-message reports and canonical facts
 
-Message bridges publish immutable durable facts through ordinary `emit`:
-`message.delivered`, `message.edited`, `message.deleted`,
-`message.reaction_added`, `message.reaction_removed`, and `message.sent`. The
-harness replaces the claimed publisher with the authenticated extension's stable
-configured name, persists the fact before any consumer acts, and broadcasts the
-same committed record. There is no generic transport registration, admission,
-reply-routing, or send-completion service.
+Message bridges publish transient `message.delivered_reported`,
+`message.edited_reported`, `message.deleted_reported`,
+`message.reaction_added_reported`, `message.reaction_removed_reported`, and
+`message.sent_reported` events through ordinary `emit`. These reports use normal
+interception and live broadcast. A downstream harness consumer replaces the
+claimed publisher with the authenticated extension's stable configured name and
+publishes the corresponding immutable durable `message.*` fact. There is no
+generic transport registration, admission, reply-routing, or send-completion
+service.
 
 Each fact carries a claimed Tau agent target, small universal typed fields, and
 bounded opaque `extension_data`. Delivered and sent facts establish
@@ -17,7 +19,7 @@ references to a base fact. Generic consumers do not resolve those references or
 interpret extension data. Transport authentication, admission, deduplication,
 native routing, reply authority, and send/retry policy remain extension-local.
 
-Valid committed incoming facts project as escaped `<tau_message event="…">`
+Valid committed canonical incoming facts project as escaped `<tau_message event="…">`
 user context and request one live activation after transcript placement.
 `message.sent` projects as assistant context and never activates by itself.
 Replay reconstructs the same projection without waking the agent or restoring
@@ -428,7 +430,8 @@ harness/agent.
   `agent.prompt_submitted` fact; queued prompts folded into an in-flight turn
   preserve the request `ctx_id` on `agent.prompt_steered`. It has no user-message
   class. `tau-ext-utils` uses it for timer wakeups. External user messages instead
-  enter through extension-published `message.delivered` facts.
+  enter through bridge `message.delivered_reported` events and the resulting
+  canonical `message.delivered` facts.
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call

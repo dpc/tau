@@ -967,70 +967,75 @@ fn discovery_aliases(value: &CborValue) -> Vec<String> {
         .collect()
 }
 
-/// Receive the next directly published delivered-message text.
+/// Receive the next submitted delivered-message report text.
 fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     loop {
         if let HarnessInputMessage::Emit(emit) = rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("direct message fact")
-            && let Event::MessageDelivered(fact) = *emit.event
+            .expect("message report")
+            && {
+                assert!(emit.transient);
+                true
+            }
+            && let Event::MessageDeliveredReported(report) = *emit.event
         {
-            return fact.text;
+            return report.text;
         }
     }
 }
 
-/// Receive the next directly published message fact.
-fn recv_message_fact(rx: &mpsc::Receiver<HarnessInputMessage>, expected: &str) -> Event {
+/// Receive the next transient message report.
+fn recv_message_report(rx: &mpsc::Receiver<HarnessInputMessage>, expected: &str) -> Event {
     loop {
         if let HarnessInputMessage::Emit(emit) = rx
             .recv_timeout(Duration::from_secs(1))
-            .unwrap_or_else(|error| panic!("expected {expected} fact: {error}"))
+            .unwrap_or_else(|error| panic!("expected {expected} report: {error}"))
             && matches!(
                 emit.event.as_ref(),
-                Event::MessageDelivered(_)
-                    | Event::MessageEdited(_)
-                    | Event::MessageDeleted(_)
-                    | Event::MessageReactionAdded(_)
-                    | Event::MessageReactionRemoved(_)
+                Event::MessageDeliveredReported(_)
+                    | Event::MessageEditedReported(_)
+                    | Event::MessageDeletedReported(_)
+                    | Event::MessageReactionAddedReported(_)
+                    | Event::MessageReactionRemovedReported(_)
             )
         {
+            assert!(emit.transient);
             return *emit.event;
         }
     }
 }
 
-/// Assert that no directly published message fact is queued.
+/// Assert that no message report is queued.
 fn assert_no_ingress(rx: &mpsc::Receiver<HarnessInputMessage>) {
     while let Ok(message) = rx.try_recv() {
         if let HarnessInputMessage::Emit(emit) = message {
             assert!(
                 !matches!(
                     emit.event.as_ref(),
-                    Event::MessageDelivered(_)
-                        | Event::MessageEdited(_)
-                        | Event::MessageDeleted(_)
-                        | Event::MessageReactionAdded(_)
-                        | Event::MessageReactionRemoved(_)
+                    Event::MessageDeliveredReported(_)
+                        | Event::MessageEditedReported(_)
+                        | Event::MessageDeletedReported(_)
+                        | Event::MessageReactionAddedReported(_)
+                        | Event::MessageReactionRemovedReported(_)
                 ),
-                "unexpected direct message fact"
+                "unexpected message report"
             );
         }
     }
 }
 
-/// Slack publishes create, edit, reaction, and delete occurrences directly as
-/// immutable facts that retain one publisher-scoped target identity.
+/// Slack submits create, edit, reaction, and delete occurrences as reports that
+/// retain one publisher-scoped target identity.
 #[test]
-fn direct_message_fact_lifecycle_preserves_target_identity() {
+fn message_report_lifecycle_preserves_target_identity() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
     let native_id = message.ts.clone().expect("native message id");
 
     ext.process_slack_message(message);
-    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
-        panic!("expected delivered fact");
+    let Event::MessageDeliveredReported(delivered) = recv_message_report(&rx, "delivered") else {
+        panic!("expected delivered report");
     };
     assert_eq!(delivered.publisher_extension_id.as_str(), "std-slack");
     assert_eq!(delivered.text, "hello");
@@ -1052,8 +1057,8 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
     );
 
     ext.process_slack_edit(slack_edit("edit-1", "C123", &native_id, None, "updated"));
-    let Event::MessageEdited(edited) = recv_message_fact(&rx, "edited") else {
-        panic!("expected edited fact");
+    let Event::MessageEditedReported(edited) = recv_message_report(&rx, "edited") else {
+        panic!("expected edited report");
     };
     assert_eq!(edited.target.message_id, delivered.message_id);
     assert_eq!(edited.text, "updated");
@@ -1075,8 +1080,9 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
         "C123",
         "9.0",
     ));
-    let Event::MessageReactionAdded(reaction) = recv_message_fact(&rx, "reaction-added") else {
-        panic!("expected reaction-added fact");
+    let Event::MessageReactionAddedReported(reaction) = recv_message_report(&rx, "reaction-added")
+    else {
+        panic!("expected reaction-added report");
     };
     assert_eq!(reaction.target.message_id, delivered.message_id);
     assert_eq!(reaction.reaction, "thumbsup");
@@ -1087,8 +1093,10 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
         "C123",
         "9.0",
     ));
-    let Event::MessageReactionRemoved(removed) = recv_message_fact(&rx, "reaction-removed") else {
-        panic!("expected reaction-removed fact");
+    let Event::MessageReactionRemovedReported(removed) =
+        recv_message_report(&rx, "reaction-removed")
+    else {
+        panic!("expected reaction-removed report");
     };
     assert_eq!(removed.target.message_id, delivered.message_id);
     assert_eq!(removed.publisher_extension_id.as_str(), "std-slack");
@@ -1123,8 +1131,8 @@ fn direct_message_fact_lifecycle_preserves_target_identity() {
         message_ts: native_id,
         thread_ts: None,
     });
-    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "deleted") else {
-        panic!("expected deleted fact");
+    let Event::MessageDeletedReported(deleted) = recv_message_report(&rx, "deleted") else {
+        panic!("expected deleted report");
     };
     assert_eq!(deleted.publisher_extension_id.as_str(), "std-slack");
     assert_eq!(deleted.target.message_id, delivered.message_id);
@@ -1148,8 +1156,8 @@ fn lax_static_ingress_reports_conversation_authorization() {
     let mut message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
     message.user_id = "U999".to_owned();
     ext.process_slack_message(message);
-    let Event::MessageDelivered(delivered) = recv_message_fact(&rx, "delivered") else {
-        panic!("expected delivered fact");
+    let Event::MessageDeliveredReported(delivered) = recv_message_report(&rx, "delivered") else {
+        panic!("expected delivered report");
     };
     assert_eq!(
         delivered.sender.sender_auth,
@@ -1157,7 +1165,7 @@ fn lax_static_ingress_reports_conversation_authorization() {
     );
 }
 
-/// Deleting a bridge-authored post publishes against its sent fact and revokes
+/// Deleting a bridge-authored post submits against its sent report and revokes
 /// all retained post and reaction authority.
 #[test]
 fn outgoing_message_delete_revokes_post_authority() {
@@ -1206,8 +1214,9 @@ fn outgoing_message_delete_revokes_post_authority() {
         message_ts: "9.0".to_owned(),
         thread_ts: None,
     });
-    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "outgoing deleted") else {
-        panic!("expected deleted fact");
+    let Event::MessageDeletedReported(deleted) = recv_message_report(&rx, "outgoing deleted")
+    else {
+        panic!("expected deleted report");
     };
     assert_eq!(deleted.target.message_id, message_id);
     let state = ext.state.lock().expect("state");
@@ -1255,9 +1264,10 @@ fn outgoing_message_delete_survives_receive_unregister() {
         message_ts: "10.0".to_owned(),
         thread_ts: None,
     });
-    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "unregistered outgoing deleted")
+    let Event::MessageDeletedReported(deleted) =
+        recv_message_report(&rx, "unregistered outgoing deleted")
     else {
-        panic!("expected deleted fact");
+        panic!("expected deleted report");
     };
     assert_eq!(
         deleted.target.message_id,
@@ -1297,8 +1307,10 @@ fn admitted_outgoing_delete_ignores_receive_registration_churn() {
         },
         Some(&admission),
     );
-    let Event::MessageDeleted(deleted) = recv_message_fact(&rx, "churned outgoing deleted") else {
-        panic!("expected deleted fact");
+    let Event::MessageDeletedReported(deleted) =
+        recv_message_report(&rx, "churned outgoing deleted")
+    else {
+        panic!("expected deleted report");
     };
     assert_eq!(
         deleted.target.message_id,
@@ -1306,8 +1318,8 @@ fn admitted_outgoing_delete_ignores_receive_registration_churn() {
     );
 }
 
-/// An ACK-era incoming owner cannot publish deletion after unregister removes
-/// its exact source ownership.
+/// An ACK-era incoming owner cannot submit a deletion report after unregister
+/// removes its exact source ownership.
 #[test]
 fn admitted_incoming_delete_fails_closed_after_unregister() {
     let (ext, rx, _client) = extension();
@@ -1315,8 +1327,8 @@ fn admitted_incoming_delete_fails_closed_after_unregister() {
     let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
     let message_ts = message.ts.clone().expect("native Slack timestamp");
     ext.process_slack_message(message);
-    let Event::MessageDelivered(_) = recv_message_fact(&rx, "delivered") else {
-        panic!("expected delivered fact");
+    let Event::MessageDeliveredReported(_) = recv_message_report(&rx, "delivered") else {
+        panic!("expected delivered report");
     };
     ext.state.lock().expect("state").session_active = true;
     let admission = admission_context(&ext);
@@ -1338,7 +1350,7 @@ fn admitted_incoming_delete_fails_closed_after_unregister() {
 }
 
 /// Confirmed deletion-output failure enters the same synchronous fatal barrier
-/// as send publication failure before any later remote effect can start.
+/// as send submission failure before any later remote effect can start.
 #[test]
 fn deletion_writer_failure_retires_all_remote_effect_authority() {
     let (output_tx, output_rx) = mpsc::channel();
@@ -1492,7 +1504,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
 }
 
 /// The early output-failure latch closes reaction and local-reply admission
-/// even while fatal retirement is blocked behind an in-progress publication.
+/// even while fatal retirement is blocked behind an in-progress submission.
 #[test]
 fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
     let (output_tx, output_rx) = mpsc::channel();
@@ -1555,10 +1567,10 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
     deletion.join().expect("deletion");
 }
 
-/// Session retirement while deletion waits at the publication boundary is
-/// observed by the final owner/lifecycle validation and suppresses the fact.
+/// Session retirement while deletion waits at the submission boundary is
+/// observed by the final owner/lifecycle validation and suppresses the report.
 #[test]
-fn delete_publication_gate_revalidates_after_session_retirement() {
+fn delete_submission_gate_revalidates_after_session_retirement() {
     let (ext, rx, _client) = extension();
     ext.state.lock().expect("state").session_active = true;
     ext.remember_posted_message(
@@ -1575,14 +1587,14 @@ fn delete_publication_gate_revalidates_after_session_retirement() {
     let (reached_tx, reached_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     *ext.test_hooks
-        .delete_publication_boundary
+        .delete_submission_boundary
         .lock()
         .expect("hook") = Some(BlockingTestHook {
         reached: reached_tx,
         release: release_rx,
     });
-    let publication_gate = Arc::clone(&ext.output_publication_gate);
-    let publication = publication_gate.lock().expect("publication gate");
+    let submission_gate = Arc::clone(&ext.output_submission_gate);
+    let submission = submission_gate.lock().expect("submission gate");
     let deleting = Arc::clone(&ext);
     let deletion = std::thread::spawn(move || {
         deleting.process_slack_delete_admitted(
@@ -1597,14 +1609,14 @@ fn delete_publication_gate_revalidates_after_session_retirement() {
     });
     reached_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("deletion reached publication boundary");
+        .expect("deletion reached submission boundary");
     {
         let mut state = ext.state.lock().expect("state");
         state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
         state.session_active = false;
     }
     release_tx.send(()).expect("release deletion");
-    drop(publication);
+    drop(submission);
     deletion.join().expect("deletion");
     assert_no_ingress(&rx);
 }
@@ -2517,7 +2529,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
 }
 
 /// A current Tau-issued reply selector resolves to its retained private route
-/// and publishes the sent fact/result without accepting a native destination.
+/// and submits the sent report/result without accepting a native destination.
 #[test]
 fn successful_send_uses_local_reply_selector() {
     let (ext, rx, client) = extension();
@@ -2534,32 +2546,32 @@ fn successful_send_uses_local_reply_selector() {
         ))
         .is_none()
     );
-    let mut sent_fact = None;
+    let mut sent_report = None;
     loop {
         let message = rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("sent fact and result");
+            .expect("sent report and result");
         if let HarnessInputMessage::Emit(emit) = message {
             match *emit.event {
-                Event::MessageSent(fact) => {
-                    sent_fact = Some(fact);
+                Event::MessageSentReported(report) => {
+                    sent_report = Some(report);
                 }
                 Event::ToolResult(_) => break,
                 _ => {}
             }
         }
     }
-    let sent_fact = sent_fact.expect("sent fact");
-    assert_eq!(sent_fact.publisher_extension_id.as_str(), "std-slack");
+    let sent_report = sent_report.expect("sent report");
+    assert_eq!(sent_report.publisher_extension_id.as_str(), "std-slack");
     assert_eq!(
-        sent_fact
+        sent_report
             .recipient
             .as_ref()
             .map(|party| party.stable_id.as_str()),
         Some(slack_sender_ref("T123", "U123").as_str())
     );
-    let projection = tau_proto::project_message_fact(&Event::MessageSent(sent_fact))
-        .expect("message fact")
+    let projection = tau_proto::project_message_fact(&Event::MessageSent(sent_report))
+        .expect("canonical message fact")
         .expect("valid projection");
     let ContentPart::Text { text } = &projection.item.content[0];
     assert!(text.contains(" recipient_ref=\"slack-sender:"), "{text}");

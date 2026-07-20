@@ -49,6 +49,26 @@ fn message_deliveries(sink: &Arc<Mutex<Vec<RoutedFrame>>>, replay: bool) -> Vec<
         .collect()
 }
 
+fn message_delivery_sources(
+    sink: &Arc<Mutex<Vec<RoutedFrame>>>,
+    replay: bool,
+) -> Vec<Option<tau_proto::ConnectionId>> {
+    sink.lock()
+        .expect("delivery sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if delivery.replay == replay
+                        && delivery.event.name().category()
+                            == &tau_proto::EventCategory::Message
+            )
+        })
+        .map(|routed| routed.source_id.clone())
+        .collect()
+}
+
 /// Construct one stamped fallback message fact for persistence/replay tests.
 fn replay_message_fact() -> Event {
     Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -71,8 +91,12 @@ fn replay_message_fact() -> Event {
 fn fallback_message_fact_live_and_restart_replay_are_exact() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
-    let mut emitted_fact = replay_message_fact();
-    emitted_fact.stamp_message_publisher(tau_proto::MessagePublisherId::new("forged"));
+    let mut report_payload = replay_message_fact();
+    report_payload.stamp_message_publisher(tau_proto::MessagePublisherId::new("forged"));
+    let Event::MessageDelivered(report_payload) = report_payload else {
+        unreachable!("fixture is delivered fact");
+    };
+    let emitted_report = Event::MessageDeliveredReported(report_payload);
     let fact = replay_message_fact();
     {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
@@ -92,7 +116,7 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
         h.handle_extension_event(
             "bridge-connection",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
-                emitted_fact.clone(),
+                emitted_report.clone(),
                 true,
             ))),
         )
@@ -100,7 +124,7 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
         h.handle_extension_event(
             "bridge-connection",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
-                emitted_fact,
+                emitted_report,
                 false,
             ))),
         )
@@ -109,6 +133,13 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
         assert_eq!(
             message_deliveries(&live_sink, false),
             vec![fact.clone(), fact.clone()]
+        );
+        assert_eq!(
+            message_delivery_sources(&live_sink, false),
+            vec![
+                Some(HARNESS_CONNECTION_ID.into()),
+                Some(HARNESS_CONNECTION_ID.into()),
+            ]
         );
         let records = h.store.session_events("s1").expect("fallback records");
         assert_eq!(records.len(), 2);
@@ -135,6 +166,13 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
     assert_eq!(
         message_deliveries(&replay_sink, true),
         vec![fact.clone(), fact]
+    );
+    assert_eq!(
+        message_delivery_sources(&replay_sink, true),
+        vec![
+            Some(HARNESS_CONNECTION_ID.into()),
+            Some(HARNESS_CONNECTION_ID.into()),
+        ]
     );
     resumed.shutdown().expect("shutdown");
 }
@@ -379,7 +417,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     assert!(
         projected_prompt
             .system_prompt
-            .contains("<tau_message> elements are committed extension-published message facts.")
+            .contains("<tau_message> elements are committed canonical external-message facts.")
     );
     assert!(projected_prompt.context.blocks.iter().any(|block| {
         matches!(

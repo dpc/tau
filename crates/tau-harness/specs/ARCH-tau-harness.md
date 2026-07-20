@@ -2,12 +2,12 @@
 
 ## Status
 
-The extension event intake described below still performs event-specific
-processing before ordinary publication.
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
-requires generic `Emit` publication followed by downstream committed-event
-processing. The current direct external-message-fact path remains in force
-until that migration completes.
+The external-message slice now uses generic `Emit` publication, an authenticated
+internal publisher snapshot, declared bridge authority, and downstream
+canonicalization as required by
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
+The general protocol-level authenticated publisher envelope and other peer event
+families remain to be migrated.
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,
@@ -47,15 +47,17 @@ extension instance uses its configured name to own one workdir namespace and
 publishes context from committed metadata; exact behavior is
 [SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
 
-## Extension-published message facts
+## External-message reports and canonical facts
 
-Extensions publish the six immutable `message.*` fact types through ordinary
-`Emit`. Intake unconditionally stamps the authenticated extension's stable
-configured name, ignores the transient bit, persists the exact fact in the
-target agent journal (or the session fallback journal for unknown targets), and
-only then broadcasts it. Consumers cannot reject, replace, or mutate a committed
-fact. The harness owns no transport registration, admission, ordering,
-deduplication, native routing, reply state, or send-completion protocol.
+Extensions publish six transient `message.*_reported` events through generic
+`Emit` publication and interception. A downstream post-commit consumer stamps
+the authenticated extension's stable configured name and publishes the
+corresponding immutable, must-pass canonical `message.*` fact. Canonical commit
+persists the fact in the target agent journal (or session fallback journal for
+unknown targets) before broadcast. Consumers cannot reject, replace, or mutate
+a committed canonical fact. The harness owns no transport registration,
+admission, ordering, deduplication, native routing, reply state, or
+send-completion protocol.
 
 The post-commit prompt consumer validates universal fields, projects valid
 incoming facts as ordinary user context, and requests one live activation after
@@ -66,7 +68,7 @@ but never wakes the agent, resends transport traffic, or rebuilds
 extension-private authority. Invalid or unavailable targets remain committed and
 visible to subscribers even when no prompt projection is possible.
 The complete schema, persistence, and projection contract is
-[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

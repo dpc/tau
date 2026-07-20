@@ -15,6 +15,7 @@ fn extension_reader_waits_for_initialized_ack() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "test-extension".into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         }))
         .expect("write hello");
     writer.flush().expect("flush hello");

@@ -1,7 +1,7 @@
 # ARCH-tau-ext-telegram: tau-ext-telegram architecture
 
 Single-stream locking, webhook contention, stale-generation handling, and
-publication are specified by
+report submission are specified by
 [SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).
 The optional shared-token gateway contract is
 [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md).
@@ -24,7 +24,7 @@ that stream identity changes, the extension resets the offset and drains the new
 stream before routing messages. The first poll after lazy startup uses
 non-long-poll requests to drain Telegram's existing backlog until it receives an
 empty batch, so pre-registration messages are not published as fresh
-`message.delivered` facts.
+`message.delivered_reported` reports.
 Poll responses captured under an older configuration generation are discarded
 instead of advancing offsets, marking the new stream drained, or routing old
 updates.
@@ -51,7 +51,7 @@ fails closed with the same behavior.
 ## Harness boundary
 
 After local allowlist, chat, command, and target selection, incoming Telegram
-text is emitted directly as `message.delivered`. Numeric user/chat and update
+text is emitted directly as `message.delivered_reported`. Numeric user/chat and update
 identities remain transport-local inputs to stateless opaque sender/message
 references; native conversation IDs remain durable fact/UI provenance but are
 not projected into model context. The original body is published without a
@@ -59,8 +59,8 @@ transport prefix. The harness stamps publisher provenance and performs ordinary
 durable fact projection according to
 [DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
-Successful `telegram_send` calls emit `message.sent` before returning their
-ordinary terminal tool result. The sent fact uses the original body and a
+Successful `telegram_send` calls emit `message.sent_reported` before returning their
+ordinary terminal tool result. The sent report uses the original body and a
 bounded ID derived from the unique tool call and extension-owned destination;
 remote routing remains local.
 
@@ -92,6 +92,8 @@ so agents must explicitly re-register before sending replies into the new chat.
 
 ## Testing strategy
 
+The canonical scoped strategy is [testing.md](../testing.md).
+
 Unit tests use a fake Telegram client and in-memory harness channels. They cover
 config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
@@ -109,7 +111,7 @@ unregister pruning, gateway restart reannouncement hints, command routing,
 chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
 socket delivery response shape, and CLI/env parsing. Gateway-client sidecar
 tests use fake Unix sockets and in-memory harness channels to cover no-poll
-registration, inbound fact publication, gateway-client outbound send forwarding,
+registration, inbound report submission, gateway-client outbound send forwarding,
 and stale-delivery filtering. Outbound-send tests use fake gateway clients rather
 than live Telegram.
 

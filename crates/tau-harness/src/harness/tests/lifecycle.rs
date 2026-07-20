@@ -100,6 +100,7 @@ fn connect_supervised_test_process(
             instance_id: 700.into(),
             connection_id: connection_id.clone(),
             kind,
+            peer_capabilities: Default::default(),
             require: config.require,
             respawn_allowed: true,
             pid: Some(child_pid),
@@ -376,6 +377,7 @@ fn connect_handshaking_extension(
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind,
+            peer_capabilities: Default::default(),
             require: true,
             respawn_allowed: true,
             pid: None,
@@ -411,6 +413,7 @@ fn insert_extension_entry_with_meter(
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind: tau_proto::ClientKind::Tool,
+            peer_capabilities: Default::default(),
             require: true,
             respawn_allowed: true,
             pid: None,
@@ -540,6 +543,7 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "std-shell".into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         })),
     )
     .expect("extension hello");
@@ -732,6 +736,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "tau-ext-pim".into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         })),
     )
     .expect("hello");
@@ -779,6 +784,7 @@ fn configure_includes_only_resolved_extension_secrets() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "tau-ext-pim".into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         })),
     )
     .expect("hello");
@@ -853,10 +859,10 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     )));
 }
 
-/// Message fact intake overwrites claimed provenance with a configured name
-/// distinct from the connection identity and ignores transient emit metadata.
+/// A committed bridge report produces a durable canonical fact with
+/// authenticated configured-name provenance.
 #[test]
-fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
+fn extension_message_report_produces_stamped_durable_fact() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let conn_id = "bridge-main";
@@ -865,7 +871,19 @@ fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
     let entry = h.extensions.entries.get_mut(conn_id).expect("extension");
     entry.state = ExtensionState::Ready;
     entry.name = configured_name.to_owned();
-    let fact = tau_proto::MessageDelivered {
+    entry
+        .peer_capabilities
+        .insert(tau_proto::PeerCapability::MessageBridge);
+    let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "observer",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("message.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+    let report = tau_proto::MessageDelivered {
         publisher_extension_id: tau_proto::MessagePublisherId::new("forged"),
         agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
         message_id: tau_proto::MessageFactId::new("m1"),
@@ -879,21 +897,21 @@ fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
         extension_data: tau_proto::MessageExtensionData::default(),
     };
 
-    let prepared = h
-        .prepare_extension_message_fact(conn_id, Event::MessageDelivered(fact.clone()))
+    let canonical = Event::MessageDeliveredReported(report.clone())
+        .into_stamped_canonical_message_fact(tau_proto::MessagePublisherId::new(configured_name))
         .expect("authenticated message fact");
     assert!(matches!(
-        prepared,
+        canonical,
         Event::MessageDelivered(prepared)
             if prepared.publisher_extension_id.as_str() == configured_name
     ));
 
     h.handle_extension_event_inner_with_transient(
         conn_id,
-        Event::MessageDelivered(fact),
+        Event::MessageDeliveredReported(report),
         Some(true),
     )
-    .expect("fact intake");
+    .expect("report intake");
 
     assert!(matches!(
         h.store
@@ -901,24 +919,107 @@ fn extension_message_fact_provenance_is_stamped_and_persisted_durably() {
             .expect("durable fallback journal")
             .as_slice(),
         [tau_core::PersistedSessionEvent {
+            source: Some(source),
             event: Event::MessageDelivered(fact),
             ..
-        }] if fact.publisher_extension_id.as_str() == configured_name
+        }] if source.as_str() == HARNESS_CONNECTION_ID
+            && fact.publisher_extension_id.as_str() == configured_name
     ));
     assert!(event_log_contains_source_event(
         &h,
-        conn_id,
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::MessageDelivered(fact)
                 if fact.publisher_extension_id.as_str() == configured_name
         )
     ));
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(
+            event,
+            Event::MessageDeliveredReported(report)
+                if report.publisher_extension_id.as_str() == "forged"
+        )
+    }));
+    let events = event_log_events(&h);
+    let report_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::MessageDeliveredReported(report)
+                    if report.publisher_extension_id.as_str() == "forged"
+            )
+        })
+        .expect("committed report");
+    let canonical_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::MessageDelivered(fact)
+                    if fact.publisher_extension_id.as_str() == configured_name
+            )
+        })
+        .expect("canonical fact");
+    assert!(report_index < canonical_index);
+    let live_names = observer
+        .lock()
+        .expect("observer")
+        .iter()
+        .filter_map(|frame| peel_inner_event(&frame.frame).map(|event| event.name()))
+        .filter(|name| name.category() == &tau_proto::EventCategory::Message)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live_names,
+        [
+            tau_proto::EventName::MESSAGE_DELIVERED_REPORTED,
+            tau_proto::EventName::MESSAGE_DELIVERED,
+        ]
+    );
 }
 
-/// A socket client cannot claim extension message-fact publication authority.
+/// A configured extension cannot bypass report processing by directly emitting
+/// a harness-owned canonical message fact.
 #[test]
-fn socket_client_cannot_emit_message_fact() {
+fn extension_cannot_emit_canonical_message_fact() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
+    let canonical = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::MessageAgentTarget::new("missing-agent"),
+        tau_proto::MessageFactId::new("m1"),
+        tau_proto::MessageParty {
+            stable_id: "u1".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "hello",
+    ));
+
+    h.handle_extension_event_inner_with_transient("bridge", canonical, Some(false))
+        .expect("extension intake");
+
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("fallback journal")
+            .is_empty()
+    );
+    assert!(event_log_events(&h).iter().all(|event| {
+        !matches!(
+            event,
+            Event::MessageDelivered(fact) if fact.message_id.as_str() == "m1"
+        )
+    }));
+}
+
+/// A socket client cannot claim report or canonical message publication
+/// authority.
+#[test]
+fn socket_client_cannot_emit_message_reports_or_canonical_facts() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let client_id = "ui";
@@ -939,10 +1040,71 @@ fn socket_client_cannot_emit_message_fact() {
 
     h.handle_client_event_inner(client_id, fact)
         .expect("client intake");
+    h.handle_client_event_inner(
+        client_id,
+        Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("forged"),
+            tau_proto::MessageAgentTarget::new("missing-agent"),
+            tau_proto::MessageFactId::new("m2"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+                sender_auth: None,
+            },
+            None,
+            "hello",
+        )),
+    )
+    .expect("client report intake");
 
     assert!(!event_log_contains_source_event(&h, client_id, |event| {
-        matches!(event, Event::MessageDelivered(_))
+        matches!(
+            event,
+            Event::MessageDelivered(_) | Event::MessageDeliveredReported(_)
+        )
     }));
+}
+
+/// A configured extension needs the declared message-bridge capability before
+/// it can submit a report.
+#[test]
+fn ordinary_tool_and_provider_extensions_cannot_emit_message_reports() {
+    for (connection_id, kind) in [
+        ("tool", tau_proto::ClientKind::Tool),
+        ("provider", tau_proto::ClientKind::Provider),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        connect_handshaking_extension(&mut h, connection_id, kind);
+        h.extensions
+            .entries
+            .get_mut(connection_id)
+            .expect("extension")
+            .state = ExtensionState::Ready;
+        h.handle_extension_event_inner_with_transient(
+            connection_id,
+            Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
+                tau_proto::MessagePublisherId::new("forged"),
+                tau_proto::MessageAgentTarget::new("missing-agent"),
+                tau_proto::MessageFactId::new("m1"),
+                tau_proto::MessageParty {
+                    stable_id: "u1".to_owned(),
+                    display_name: None,
+                    sender_auth: None,
+                },
+                None,
+                "hello",
+            )),
+            Some(true),
+        )
+        .expect("report intake");
+        assert!(event_log_events(&h).iter().all(|event| {
+            !matches!(
+                event,
+                Event::MessageDelivered(_) | Event::MessageDeliveredReported(_)
+            )
+        }));
+    }
 }
 
 /// Extensions cannot skip the Hello/Configure gate by declaring capabilities
@@ -1586,6 +1748,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: connection_id.to_owned().into(),
                 client_kind: tau_proto::ClientKind::Tool,
+                capabilities: Default::default(),
             }),
         )
         .expect("hello");
@@ -1996,6 +2159,7 @@ fn optional_mismatched_protocol_is_disabled_but_required_mismatch_is_fatal() {
             protocol_version: tau_proto::PROTOCOL_VERSION + 1,
             client_name: name.to_owned().into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         })
     };
 
@@ -4565,6 +4729,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: "late-tool".into(),
                     client_kind: tau_proto::ClientKind::Tool,
+                    capabilities: Default::default(),
                 },
             )))
             .map_err(|e| e.to_string())?;
@@ -4605,6 +4770,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             instance_id: 999.into(),
             connection_id: conn_id.clone(),
             kind: tau_proto::ClientKind::Tool,
+            peer_capabilities: Default::default(),
             pid: Some(std::process::id()),
             in_process_thread: Some(spawned.thread),
             supervised_config: None,
@@ -5935,6 +6101,7 @@ fn hello_protocol_version_mismatch_is_rejected() {
         protocol_version: tau_proto::PROTOCOL_VERSION + 1,
         client_name: "future-client".into(),
         client_kind: tau_proto::ClientKind::Tool,
+        capabilities: Default::default(),
     };
 
     let error = validate_protocol_version(&hello).expect_err("reject mismatched protocol");
@@ -5943,6 +6110,35 @@ fn hello_protocol_version_mismatch_is_rejected() {
             .to_string()
             .contains("unsupported protocol version from future-client"),
         "unexpected error: {error}"
+    );
+}
+
+/// Extension handshake stores declared bridge authority on the configured
+/// connection entry used by event admission.
+#[test]
+fn extension_hello_installs_declared_peer_capabilities() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    connect_handshaking_tool(&mut h, "bridge");
+    h.extensions
+        .entries
+        .get_mut("bridge")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
+    h.handle_extension_message(
+        "bridge",
+        TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: "bridge".into(),
+            client_kind: tau_proto::ClientKind::Tool,
+            capabilities: vec![tau_proto::PeerCapability::MessageBridge],
+        }),
+    )
+    .expect("hello");
+    assert!(
+        h.extensions.entries["bridge"]
+            .peer_capabilities
+            .contains(&tau_proto::PeerCapability::MessageBridge)
     );
 }
 
@@ -6020,6 +6216,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
                 protocol_version: tau_proto::PROTOCOL_VERSION + 1,
                 client_name: "stale-ui".into(),
                 client_kind: tau_proto::ClientKind::Ui,
+                capabilities: Default::default(),
             })),
         )
         .expect("mismatched ui hello should not fail harness");

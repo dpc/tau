@@ -340,7 +340,8 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     /// Current local Tau session observed from `session.started`.
     /// Gateway-client mode never announces agent routes until this is
-    /// known, and delivery records must match it before local fact publication.
+    /// known, and delivery records must match it before local report
+    /// submission.
     current_session_id: Option<tau_proto::SessionId>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
     learned_chat: Option<LinkedChat>,
@@ -351,7 +352,8 @@ struct State {
     next_update_offset: Option<i64>,
 }
 
-/// Publish all gateway delivery records that target the current local session.
+/// Submit reports for all gateway delivery records targeting the current
+/// session.
 fn emit_gateway_deliveries(
     state: &SharedState,
     output: &Output,
@@ -383,7 +385,7 @@ fn emit_gateway_deliveries(
             );
             continue;
         };
-        output.emit(Event::MessageDelivered(MessageDelivered::new(
+        output.emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
             MessagePublisherId::default(),
             MessageAgentTarget::new(agent_id.as_ref()),
             telegram_message_ref(&delivery.conversation_id, &delivery.message_id),
@@ -566,6 +568,13 @@ impl Output {
 
     fn emit(&self, event: Event) {
         self.send(HarnessInputMessage::emit(event));
+    }
+
+    /// Emit one transient external-message report for downstream
+    /// canonicalization.
+    fn emit_message_report(&self, event: Event) {
+        debug_assert!(event.is_message_report());
+        self.send(HarnessInputMessage::emit_with_transient(event, true));
     }
 }
 
@@ -1066,7 +1075,12 @@ impl Extension {
             match gateway.send_message(session_id.as_ref(), invoke.agent_id.as_ref(), &message) {
                 Ok(response) => {
                     self.apply_gateway_response(response);
-                    self.emit_sent_fact(&invoke.agent_id, invoke.call_id.as_str(), None, &message);
+                    self.emit_sent_report(
+                        &invoke.agent_id,
+                        invoke.call_id.as_str(),
+                        None,
+                        &message,
+                    );
                     tool_result(invoke, "sent Telegram message through gateway")
                 }
                 Err(message) => tool_error(invoke, message),
@@ -1101,7 +1115,7 @@ impl Extension {
             let text = format!("[{}] {message}", invoke.agent_id.as_ref());
             match self.client.send_message(&cfg, chat_id, &text) {
                 Ok(()) => {
-                    self.emit_sent_fact(
+                    self.emit_sent_report(
                         &invoke.agent_id,
                         invoke.call_id.as_str(),
                         Some(chat_id),
@@ -1480,7 +1494,7 @@ impl Extension {
             return;
         }
         self.output
-            .emit(Event::MessageDelivered(MessageDelivered::new(
+            .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
                 MessagePublisherId::default(),
                 MessageAgentTarget::new(agent_id.as_ref()),
                 telegram_message_ref(&message.chat_id.to_string(), &update_id.to_string()),
@@ -1498,24 +1512,31 @@ impl Extension {
             )));
     }
 
-    /// Publish remote Telegram send success before returning the terminal tool
-    /// result through the same serialized extension writer.
-    fn emit_sent_fact(&self, agent_id: &AgentId, call_id: &str, chat_id: Option<i64>, text: &str) {
+    /// Submit a remote Telegram send-success report before returning the
+    /// terminal tool result through the same serialized extension writer.
+    fn emit_sent_report(
+        &self,
+        agent_id: &AgentId,
+        call_id: &str,
+        chat_id: Option<i64>,
+        text: &str,
+    ) {
         let destination = chat_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "gateway".to_owned());
-        self.output.emit(Event::MessageSent(MessageSent::new(
-            MessagePublisherId::default(),
-            MessageAgentTarget::new(agent_id.as_ref()),
-            generated_send_message_id(call_id, &destination),
-            None,
-            chat_id.map(|id| MessageConversation {
-                stable_id: id.to_string(),
-                display_name: None,
-                alias: None,
-            }),
-            text,
-        )));
+        self.output
+            .emit_message_report(Event::MessageSentReported(MessageSent::new(
+                MessagePublisherId::default(),
+                MessageAgentTarget::new(agent_id.as_ref()),
+                generated_send_message_id(call_id, &destination),
+                None,
+                chat_id.map(|id| MessageConversation {
+                    stable_id: id.to_string(),
+                    display_name: None,
+                    alias: None,
+                }),
+                text,
+            )));
     }
 }
 
@@ -1829,7 +1850,7 @@ impl TauExtension for TelegramExtension {
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         // This manual loop owns polling and gateway side channels. Generic
         // tau-client scope helpers still own all structural tool naming.
-        let _ = builder;
+        builder.message_bridge();
     }
 }
 

@@ -1150,6 +1150,7 @@ fn connect_daemon_helper(
         protocol_version: PROTOCOL_VERSION,
         client_name: client_name.into(),
         client_kind: ClientKind::Ui,
+        capabilities: Default::default(),
     }))?;
     Ok(peer)
 }

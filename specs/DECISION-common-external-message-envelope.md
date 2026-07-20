@@ -14,4 +14,4 @@ claims. A shared XML form was chosen over transport-specific prose or redundant
 nested wrappers because it is compact, readable, and keeps authenticated
 provenance distinct from untrusted content. Exact fields and projection behavior
 are specified by
-[SPEC-extension-published-message-facts](SPEC-extension-published-message-facts.md).
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).

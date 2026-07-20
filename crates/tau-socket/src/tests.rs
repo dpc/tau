@@ -71,6 +71,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
                     protocol_version: PROTOCOL_VERSION,
                     client_name: "client".into(),
                     client_kind: ClientKind::Ui,
+                    capabilities: Default::default(),
                 }))
                 .expect("client hello should send");
             client
@@ -90,6 +91,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
             protocol_version: PROTOCOL_VERSION,
             client_name: "client".into(),
             client_kind: ClientKind::Ui,
+            capabilities: Default::default(),
         })
     );
     accepted

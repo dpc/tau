@@ -128,10 +128,10 @@ fn invalid_agent_text_fails_before_installation_preflight() {
     assert!(!ext.state.lock().expect("state").config_frozen);
 }
 
-/// Proactive calls publish the sent fact before the correlated
+/// Proactive calls submit the sent report before the correlated
 /// ordinary tool result without a special harness messaging handshake.
 #[test]
-fn proactive_send_publishes_fact_before_tool_result() {
+fn proactive_send_submits_report_before_tool_result() {
     let (ext, rx, client) = extension();
     apply_test_config(&ext, proactive_cfg());
     let event = ext.handle_send(tool(
@@ -142,14 +142,15 @@ fn proactive_send_publishes_fact_before_tool_result() {
         ),
     ));
     assert!(event.is_none());
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("sent fact") else {
-        panic!("expected sent fact");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("sent report") else {
+        panic!("expected sent report");
     };
-    let Event::MessageSent(fact) = *emit.event else {
-        panic!("expected sent fact");
+    assert!(emit.transient);
+    let Event::MessageSentReported(report) = *emit.event else {
+        panic!("expected sent report");
     };
-    assert_eq!(fact.text, "update");
-    assert_eq!(fact.publisher_extension_id.as_str(), "std-slack");
+    assert_eq!(report.text, "update");
+    assert_eq!(report.publisher_extension_id.as_str(), "std-slack");
     assert!(matches!(
         rx.recv().expect("tool result"),
         HarnessInputMessage::Emit(emit)
@@ -159,7 +160,7 @@ fn proactive_send_publishes_fact_before_tool_result() {
 }
 
 /// Replaying a completed send returns its stable ordinary tool result without
-/// posting or publishing another sent fact.
+/// posting or submitting another sent report.
 #[test]
 fn accepted_proactive_replay_returns_stable_result_without_reposting() {
     let (ext, rx, client) = extension();
@@ -172,7 +173,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         ),
     );
     assert!(ext.handle_send(invoke.clone()).is_none());
-    let _fact = rx.recv().expect("sent fact");
+    let _report = rx.recv().expect("sent report");
     let HarnessInputMessage::Emit(first) = rx.recv().expect("first result") else {
         panic!("expected result emission");
     };

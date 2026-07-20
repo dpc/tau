@@ -57,9 +57,9 @@ pub(crate) struct PendingIntercept {
     /// Whether the original publisher requested transient delivery.
     /// Carried so the eventual commit honours the call site's intent.
     pub(crate) transient: bool,
-    /// Original source connection id from the publish call (for log
-    /// persistence + bus broadcast).
-    pub(crate) source: Option<String>,
+    /// Immutable source envelope captured when publication entered the generic
+    /// queue.
+    source: PublicationSource,
     /// If `true`, an interceptor returning `Drop` is overridden:
     /// `tracing::warn!` and continue with the original event.
     pub(crate) must_pass: bool,
@@ -75,36 +75,40 @@ pub(crate) struct PendingIntercept {
     pub(crate) cursor: InterceptorCursor,
 }
 
+/// Immutable authenticated metadata carried beside one generic peer publish.
+#[derive(Clone, Default)]
+pub(crate) struct PeerPublicationContext {
+    /// Stable configured message publisher, when captured from an authenticated
+    /// extension connection.
+    pub(crate) message_publisher: Option<tau_proto::MessagePublisherId>,
+}
+
+/// Source envelope retained through generic interception and commit.
+struct PublicationSource {
+    /// Original connection for persistence and bus delivery metadata.
+    connection_id: Option<String>,
+    /// Immutable authenticated identity captured at admission.
+    peer_context: PeerPublicationContext,
+}
+
 /// A publish that arrived while another publish was in interception limbo.
-pub(crate) enum DeferredPublish {
-    /// Ordinary publish that resumes at the start of its interception chain.
-    Interceptable {
-        /// Original source connection id for persistence and delivery.
-        source: Option<String>,
-        /// Event waiting behind the currently intercepted publish.
-        event: Event,
-        /// Whether ordinary semantic persistence should be skipped.
-        transient: bool,
-        /// Whether an interceptor drop must preserve the original event.
-        must_pass: bool,
-        /// Conversation cursor synchronized after an ordinary transcript fold.
-        sync_head_for: Option<ConversationHeadSync>,
-    },
-    /// Canonical message fact that bypasses interception after the FIFO wait.
-    MessageFact {
-        /// Authenticated extension source connection.
-        source: String,
-        /// Stamped fact awaiting raw append.
-        event: Event,
-    },
+pub(crate) struct DeferredPublish {
+    /// Immutable source envelope captured at queue admission.
+    source: PublicationSource,
+    /// Event waiting behind the currently intercepted publish.
+    event: Event,
+    /// Whether ordinary semantic persistence should be skipped.
+    transient: bool,
+    /// Whether an interceptor drop must preserve the original event.
+    must_pass: bool,
+    /// Conversation cursor synchronized after an ordinary transcript fold.
+    sync_head_for: Option<ConversationHeadSync>,
 }
 
 impl DeferredPublish {
     /// Borrow the event independent of its eventual commit path.
     fn event(&self) -> &Event {
-        match self {
-            Self::Interceptable { event, .. } | Self::MessageFact { event, .. } => event,
-        }
+        &self.event
     }
 }
 
@@ -160,6 +164,12 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_STARTED,
     EventName::AGENT_MESSAGE_SENT,
     EventName::AGENT_MESSAGE_RECEIVED,
+    EventName::MESSAGE_DELIVERED,
+    EventName::MESSAGE_EDITED,
+    EventName::MESSAGE_DELETED,
+    EventName::MESSAGE_REACTION_ADDED,
+    EventName::MESSAGE_REACTION_REMOVED,
+    EventName::MESSAGE_SENT,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -249,6 +259,12 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentUserInteractionRecorded(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
+            | Event::MessageDelivered(_)
+            | Event::MessageEdited(_)
+            | Event::MessageDeleted(_)
+            | Event::MessageReactionAdded(_)
+            | Event::MessageReactionRemoved(_)
+            | Event::MessageSent(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
@@ -705,25 +721,29 @@ impl Harness {
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        let peer_context = PeerPublicationContext {
+            message_publisher: source.and_then(|source_id| {
+                self.extensions
+                    .entries
+                    .get(source_id)
+                    .map(|entry| tau_proto::MessagePublisherId::new(entry.name.clone()))
+            }),
+        };
+        let source = PublicationSource {
+            connection_id: source.map(str::to_owned),
+            peer_context,
+        };
         if self.pending_intercept.is_some() {
-            self.deferred_publishes
-                .push_back(DeferredPublish::Interceptable {
-                    source: source.map(str::to_owned),
-                    event,
-                    transient,
-                    must_pass,
-                    sync_head_for,
-                });
+            self.deferred_publishes.push_back(DeferredPublish {
+                source,
+                event,
+                transient,
+                must_pass,
+                sync_head_for,
+            });
             return;
         }
-        self.dispatch_publish_step(
-            source.map(str::to_owned),
-            event,
-            transient,
-            must_pass,
-            sync_head_for,
-            None,
-        );
+        self.dispatch_publish_step(source, event, transient, must_pass, sync_head_for, None);
     }
 
     /// One step through the interception chain for a single publish.
@@ -739,7 +759,7 @@ impl Harness {
     /// further interceptor matches, the event commits.
     fn dispatch_publish_step(
         &mut self,
-        source: Option<String>,
+        source: PublicationSource,
         event: Event,
         transient: bool,
         must_pass: bool,
@@ -749,7 +769,13 @@ impl Harness {
         loop {
             let Some(interceptor_match) = self.interceptors.next_for(&event, cursor.as_ref())
             else {
-                self.commit_event(source.as_deref(), event, transient, sync_head_for);
+                self.commit_event(
+                    source.connection_id.as_deref(),
+                    &source.peer_context,
+                    event,
+                    transient,
+                    sync_head_for,
+                );
                 return;
             };
             let interceptor = interceptor_match.registration;
@@ -981,25 +1007,14 @@ impl Harness {
             let Some(deferred) = self.deferred_publishes.pop_front() else {
                 break;
             };
-            match deferred {
-                DeferredPublish::MessageFact { source, event } => {
-                    self.commit_message_fact(Some(&source), event);
-                }
-                DeferredPublish::Interceptable {
-                    source,
-                    event,
-                    transient,
-                    must_pass,
-                    sync_head_for,
-                } => self.dispatch_publish_step(
-                    source,
-                    event,
-                    transient,
-                    must_pass,
-                    sync_head_for,
-                    None,
-                ),
-            }
+            let DeferredPublish {
+                source,
+                event,
+                transient,
+                must_pass,
+                sync_head_for,
+            } = deferred;
+            self.dispatch_publish_step(source, event, transient, must_pass, sync_head_for, None);
         }
     }
 

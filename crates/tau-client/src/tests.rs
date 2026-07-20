@@ -736,6 +736,21 @@ impl TauExtension for StaticStartupDeclarationExtension {
     }
 }
 
+/// Minimal extension proving that bridge authority is carried in `Hello`.
+struct MessageBridgeExtension;
+
+impl TauExtension for MessageBridgeExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "message-bridge"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.message_bridge();
+    }
+}
+
 struct ConfigureDeclarationExtension {
     reject: bool,
 }
@@ -1119,6 +1134,19 @@ fn startup_frame_order_is_stable() {
     assert!(matches!(frames[4], HarnessInputMessage::Emit(_)));
     assert!(matches!(frames[5], HarnessInputMessage::Ready(_)));
     assert_eq!(frames.len(), 6);
+}
+
+/// A bridge builder declaration must become authenticated handshake metadata.
+#[test]
+fn message_bridge_capability_is_declared_in_hello() {
+    let (_, frames) = run_messages(MessageBridgeExtension, (), &[]);
+    let HarnessInputMessage::Hello(hello) = &frames[0] else {
+        panic!("first frame must be Hello");
+    };
+    assert_eq!(
+        hello.capabilities,
+        [tau_proto::PeerCapability::MessageBridge]
+    );
 }
 
 /// Ensures typed configuration parse failures are reported as `ConfigError`.

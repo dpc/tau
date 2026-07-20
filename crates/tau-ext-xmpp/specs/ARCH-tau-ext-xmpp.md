@@ -73,7 +73,7 @@ event-driven: async worker paths wait on notification instead of periodic
 polling, while synchronous paths keep a cheap requested-state check.
 
 After XMPP allowlist, room-membership, target, history, and own-message checks,
-incoming text is emitted directly as `message.delivered`. Accepted direct bare
+incoming text is emitted directly as `message.delivered_reported`. Accepted direct bare
 JIDs or MUC real/occupant identities feed stateless opaque sender references; the
 direct peer or room remains fact provenance but is not projected as a native
 identifier into model context; it remains durable fact/UI provenance. Native
@@ -82,16 +82,16 @@ process-unique local identity. The original stanza body is published without a
 transport prefix according to
 [DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
-Successful `xmpp_send` calls emit `message.sent` before their ordinary terminal
-tool result. The fact uses the original body and a bounded identity derived from
+Successful `xmpp_send` calls emit `message.sent_reported` before their ordinary terminal
+tool result. The sent report uses the original body and a bounded identity derived from
 the unique tool call and locally authoritative conversation. Full-resource
 routes, membership proof, and send authorization remain extension-local. Each
 outbound stanza body is at most 4096 UTF-8 bytes; larger accepted tool messages
 are split at character boundaries and carry visible part numbering so deployed
 clients cannot silently discard the suffix. Multipart delivery is sequential
 and non-atomic: a later failure leaves earlier parts visible, reports failed,
-total, and completed part counts, and emits no `message.sent`. All-part success
-emits one `message.sent` fact containing the original unsplit tool text.
+total, and completed part counts, and emits no `message.sent_reported`. All-part success
+emits one `message.sent_reported` report containing the original unsplit tool text.
 
 - The built-in extension is disabled by default and requires an explicit
   password secret plus a non-empty `allowed_jids` allowlist.
@@ -125,7 +125,7 @@ emits one `message.sent` fact containing the original unsplit tool text.
   If two rendered room names ever collide in one process, registration fails
   closed instead of overwriting the existing room route.
 - Text is treated as untrusted external input and published as the original body
-  in a transport-neutral `message.delivered` fact. Sender/conversation metadata
+  in a transport-neutral `message.delivered_reported` report. Sender/conversation metadata
   describes provenance without exposing actionable routes, membership proof,
   Tau session IDs, or Tau agent IDs.
 - Tau sends unavailable presence for MUC rooms on unregister and session

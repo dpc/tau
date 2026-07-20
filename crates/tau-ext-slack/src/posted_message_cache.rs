@@ -30,7 +30,8 @@ impl PostedMessageKey {
 pub(super) struct PostedMessageOwner {
     /// Registered agent that created the post through `slack_send`.
     pub(super) agent_id: AgentId,
-    /// Publisher-scoped identifier used by mutation facts.
+    /// Publisher-scoped identifier used by mutation reports and report
+    /// references.
     pub(super) message_id: MessageFactId,
     /// Optional authenticated outbound-request thread root.
     pub(super) thread_ts: Option<String>,

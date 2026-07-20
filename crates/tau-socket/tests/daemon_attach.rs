@@ -65,6 +65,7 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
             protocol_version: PROTOCOL_VERSION,
             client_name: "denied-client".into(),
             client_kind: ClientKind::Ui,
+            capabilities: Default::default(),
         }))
         .expect("hello should send");
     denied_client

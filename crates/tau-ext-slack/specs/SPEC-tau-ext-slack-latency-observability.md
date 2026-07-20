@@ -16,5 +16,5 @@ Retention is bounded and ordinals are never metric labels.
 
 The closed stage set is frame receipt, envelope decode, pre-ACK reservation, ACK
 attempt, ACK completion, FIFO dequeue, identity start, identity completion,
-local-post start, local-post completion, and direct fact publication. The closed
+local-post start, local-post completion, and report submission. The closed
 ordinal classes are connection, occurrence, and request.

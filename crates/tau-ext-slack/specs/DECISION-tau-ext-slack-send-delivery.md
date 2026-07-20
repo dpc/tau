@@ -8,5 +8,5 @@ restart idempotency, or exactly-once claim. Remote success, fact commit, and too
 completion are not one transaction.
 
 This bounds duplicate ambiguity while preserving useful transient recovery.
-Exact reservation, retry, ordering, retirement, publication, and error behavior
+Exact reservation, retry, ordering, retirement, report submission, and error behavior
 is [SPEC-tau-ext-slack-send-delivery](SPEC-tau-ext-slack-send-delivery.md).

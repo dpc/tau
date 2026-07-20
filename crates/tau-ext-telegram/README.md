@@ -100,7 +100,7 @@ opens a private local status socket.
 Allowlisted users can use `/start`, `/help`, `/status`, `/sessions`, `/agents`,
 `/select-session`, `/select`, `/to`, and `/where`. Session listings use
 gateway-local aliases instead of full session ids; selected or explicit routes
-queue inbound message-fact deliveries for the owning sidecar. Plain text routes only
+queue inbound delivery records for the owning sidecar. Plain text routes only
 when the selected target is live or exactly one agent is registered; ambiguous
 text gets a Telegram explanation instead of being guessed. Unconfigured
 group/supergroup chats are ignored instead of linked or replied to.
@@ -129,7 +129,8 @@ explicit unregister/goodbye or socket disconnect, and prunes them on lease expir
 `hello`/status responses include a gateway generation and reannouncement hint so
 sidecars reconnecting after a gateway restart know to re-send their current
 registrations. Heartbeat/register responses can include queued inbound delivery
-records for the sidecar to publish locally as `message.delivered`. `send_message`
+records for the sidecar to submit locally as transient
+`message.delivered_reported`. `send_message`
 responses report bounded operation errors without accepting any Telegram
 destination from the sidecar.
 
@@ -145,9 +146,13 @@ In this mode the sidecar does not need `bot_token_secret`, does not use
 token, allowlist, chat policy, polling, and update offset. The sidecar still
 publishes the same logical `telegram_register`/`telegram_send` tools (with the
 generic `tool_prefix` when configured), tracks the local session and registered agents, registers
-live `(session_id, agent_id)` routes with the gateway, and publishes queued inbound
-deliveries locally as `message.delivered`. Outbound
+live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
+deliveries locally as `message.delivered_reported`. Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram
 chat without accepting a model-supplied destination. A successful local or
-gateway send publishes `message.sent` before its ordinary tool result.
+gateway send submits `message.sent_reported` before its ordinary tool result.
+The harness intercepts committed reports and publishes the canonical durable
+facts downstream. Sidecar submission does not acknowledge canonical commit, so
+interception, append failure, or a crash may leave transport effects without a
+canonical fact.

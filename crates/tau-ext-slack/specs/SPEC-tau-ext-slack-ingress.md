@@ -7,7 +7,7 @@ allowlisting. Each occurrence uses live `users.info` with no positive cache.
 Wrapper team/bot identity must exact-match installed `auth.test` authority or one
 unambiguous authorization; top-level event/actor team fields are not authority.
 Missing, malformed, mixed, ambiguous, or conflicting evidence fails before
-identity lookup, local effects, or publication.
+identity lookup, local effects, or report submission.
 
 Verified U/W identity is authoritative. `users.info` response ID must exactly
 equal the requested U/W ID, and the user must be non-deleted, non-bot, and
@@ -29,7 +29,7 @@ reaction names, message text, and installation identifiers.
 Admission uses a 64-item successful-ACK FIFO with generation checks. Shutdown or
 config change invalidates late work; reconnect preserves queued authority.
 Mention-only/all-message triggers remain exact, and non-DM commands require a
-leading authenticated bot mention. Only successful fact publication installs a
+leading authenticated bot mention. Only successful report submission installs a
 source reply selector and never proactive authority.
 
 One process-lifetime Socket Mode worker owns at most one current WebSocket.
@@ -54,7 +54,7 @@ installed bot outside complete equal-length backtick spans. Escaped, labeled,
 partial, malformed, differently cased, lookalike, other, and literal orientation
 tokens do not classify. Routing/commands remove exactly one eligible leading
 mention; remaining eligible mentions normalize to `@slack_bridge` in create/edit
-text. Commands publish no fact; reactions/deletes carry no text. No native
+text. Commands submit no report; reactions/deletes carry no text. No native
 mention field or opaque data persists; replay sees only normalized text.
 Registration JSON never exposes bot/workspace IDs. Egress rejects raw native
 controls; authored `@slack_bridge` stays literal, and the safe source-mention

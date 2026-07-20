@@ -1,4 +1,4 @@
-//! Bounded terminal rendering for committed extension-published message facts.
+//! Bounded terminal rendering for committed canonical external-message facts.
 
 #[cfg(test)]
 #[path = "message_fact_render/tests.rs"]

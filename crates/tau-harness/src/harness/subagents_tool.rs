@@ -1977,6 +1977,7 @@ fn authenticate_external_agent_message_sender(
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
+        capabilities: Default::default(),
     }))
     .map_err(|err| format!("failed to send external auth hello: {err}"))?;
     check_peer_io_active(deadline, cancelled)?;
@@ -2058,6 +2059,7 @@ fn send_external_agent_message_request(
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
+        capabilities: Default::default(),
     }))
     .map_err(|err| format!("failed to send external message hello: {err}"))?;
     check_peer_io_active(deadline, cancelled)?;

@@ -189,7 +189,7 @@ pub enum AgentEntry {
 /// One committed context input waiting behind an open provider tool round.
 #[derive(Clone, Debug, PartialEq)]
 enum PendingContextInput {
-    /// Generic extension-published message fact projection.
+    /// Generic canonical external-message fact projection.
     MessageFact {
         /// Projected ordinary context message.
         item: Box<tau_proto::MessageItem>,

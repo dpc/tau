@@ -1,4 +1,5 @@
-//! Bounded publisher-defined data carried opaquely by message facts.
+//! Bounded publisher-defined data carried by message reports and canonical
+//! facts.
 
 #[cfg(test)]
 #[path = "message_extension_data/tests.rs"]
@@ -18,7 +19,8 @@ pub const MESSAGE_EXTENSION_DATA_MAX_DEPTH: usize = 16;
 /// Maximum aggregate scalar, container, map-key, map-value, and tag nodes.
 pub const MESSAGE_EXTENSION_DATA_MAX_NODES: usize = 4_096;
 
-/// Bounded publisher-defined data attached opaquely to a message fact.
+/// Bounded publisher-defined data attached opaquely to a message report or
+/// canonical fact.
 ///
 /// The data is not confidential: Tau persists it and exposes it to authorized
 /// event subscribers. Tau does not interpret it for routing or transcript

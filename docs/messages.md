@@ -20,22 +20,23 @@ harness to publish events with `emit`; the harness delivers events to peers with
 
 ## Message-fact publication
 
-The current protocol has no special transport-message RPC family. Bridges publish
-`message.delivered`, `message.edited`, `message.deleted`,
-`message.reaction_added`, `message.reaction_removed`, and `message.sent` through
-the ordinary `emit` message. The harness stamps the authenticated extension's
-required configured instance name as publisher, persists each fact, and delivers
-the committed record through ordinary `deliver`.
+The protocol has no special transport-message RPC family. Bridges publish
+transient `message.*_reported` events through ordinary `emit`. After a report
+commits and broadcasts, the harness stamps the authenticated extension's
+required configured instance name and publishes the corresponding canonical
+durable `message.delivered`, `message.edited`, `message.deleted`,
+`message.reaction_added`, `message.reaction_removed`, or `message.sent` fact.
 
 This keeps point-to-point protocol messages distinct from durable bus facts:
-`emit` is a request to publish, while the nested `message.*` event is the
-persisted semantic record. There is no message-specific result or synchronous
-commit acknowledgement. Transport admission, duplicate suppression, native
-routing, replies, proactive destinations, remote-send policy, and retries remain
-inside the bridge extension.
+`emit` is a request to publish the transient report; the later canonical
+`message.*` event is the persisted semantic record. There is no message-specific
+result or synchronous commit acknowledgement. Transport admission, duplicate
+suppression, native routing, replies, proactive destinations, remote-send
+policy, and retries remain inside the bridge extension.
 
-For a successful remote send, an extension normally emits `message.sent` before
-its ordinary `tool.result`. Remote acceptance, fact persistence, and tool
+For a successful remote send, an extension normally emits
+`message.sent_reported` before its ordinary `tool.result`. Remote acceptance,
+canonical fact persistence, and tool
 completion are not one transaction and the fact is not a generic delivery/read
 receipt.
 
@@ -51,9 +52,13 @@ sends `configure` for supervised extensions; the peer sends `ready` once setup
 is done.
 
 - **`hello`** *(peer → harness)* — A participant announces itself just after
-  connecting: protocol version, client name, and client kind (`provider` /
-  `tool` / `action` / `ui` / `core` / `external`). First message on every
-  connection.
+  connecting: protocol version, client name, client kind (`provider` / `tool` /
+  `action` / `ui` / `core` / `external`), and optional `capabilities`.
+  `message_bridge` lets an authenticated configured extension submit
+  `message.*_reported`; a socket/UI peer cannot acquire that authority merely by
+  claiming the capability. See
+  [SPEC-external-message-reports-and-facts](../specs/SPEC-external-message-reports-and-facts.md).
+  This is the first message on every connection.
 - **`subscribe`** *(peer → harness)* — A peer declares which historical events
   it wants replayed via `historical_selectors` and which future committed
   events it wants via `live_selectors` (exact name or prefix). Without a

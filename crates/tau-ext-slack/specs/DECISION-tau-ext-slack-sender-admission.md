@@ -12,4 +12,4 @@ bindings even in lax mode.
 Separating admission, trigger scope, and body trust lets operators widen one
 static ingress route without turning display or untrusted content into identity
 or control authority. Exact verification, FIFO, lifecycle, trigger, and
-publication behavior is [SPEC-tau-ext-slack-ingress](SPEC-tau-ext-slack-ingress.md).
+report-submission behavior is [SPEC-tau-ext-slack-ingress](SPEC-tau-ext-slack-ingress.md).

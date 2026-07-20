@@ -141,7 +141,7 @@ tool-call state retains whether the exact registered tool carried
 Semantic validation and prospective encoded-record validation run before result
 deduplication or generic success publication.
 
-## Extension-published message facts
+## Canonical external-message facts
 
 Committed `message.*` facts project as ordinary escaped context after universal
 field validation. Prompt assembly never adds reply routes or actionable

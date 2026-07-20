@@ -1,4 +1,4 @@
-//! Rendering tests for committed extension-published message facts.
+//! Rendering tests for committed canonical external-message facts.
 
 use tau_proto::{
     CborValue, MessageDeleted, MessageDelivered, MessageEdited, MessageExtensionData,

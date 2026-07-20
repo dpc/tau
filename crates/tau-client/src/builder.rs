@@ -20,6 +20,8 @@ pub struct ExtensionBuilder<State> {
     pub(crate) name: tau_proto::ExtensionName,
     /// Peer kind used in the startup `Hello` frame.
     pub(crate) kind: tau_proto::ClientKind,
+    /// Optional protocol authorities declared in the startup `Hello` frame.
+    pub(crate) peer_capabilities: Vec<tau_proto::PeerCapability>,
     /// Historical event selectors sent in the optional startup `Subscribe`.
     pub(crate) historical_selectors: Vec<tau_proto::EventSelector>,
     /// Live event selectors sent in the optional startup `Subscribe` frame.
@@ -73,6 +75,7 @@ impl<State> ExtensionBuilder<State> {
         Self {
             name: name.into(),
             kind,
+            peer_capabilities: Vec::new(),
             historical_selectors: Vec::new(),
             live_selectors: Vec::new(),
             force_subscribe: false,
@@ -88,6 +91,18 @@ impl<State> ExtensionBuilder<State> {
             intercept_handler: None,
             error: None,
         }
+    }
+
+    /// Declares that this extension publishes external-message reports.
+    pub fn message_bridge(&mut self) -> &mut Self {
+        if !self
+            .peer_capabilities
+            .contains(&tau_proto::PeerCapability::MessageBridge)
+        {
+            self.peer_capabilities
+                .push(tau_proto::PeerCapability::MessageBridge);
+        }
+        self
     }
 
     /// Adds exact event-name subscriptions to the startup `Subscribe` frame.

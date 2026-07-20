@@ -96,6 +96,7 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
         protocol_version: PROTOCOL_VERSION,
         client_name: "test-child".into(),
         client_kind: ClientKind::Tool,
+        capabilities: Default::default(),
     }))?;
     writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
         historical_selectors: Vec::new(),

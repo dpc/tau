@@ -20,7 +20,7 @@ pub enum EventCategory {
     Action,
     /// Global agent transcript and command events.
     Agent,
-    /// Immutable extension-published message facts.
+    /// Bridge reports and harness-authored canonical message facts.
     Message,
     /// Extension lifecycle and publication events.
     Extension,
@@ -235,20 +235,38 @@ impl EventName {
     pub const ACTION_RESULT: Self = Self::from_static(EventCategory::Action, "result");
     pub const ACTION_ERROR: Self = Self::from_static(EventCategory::Action, "error");
 
-    /// External message delivery reported by an extension publisher.
+    /// Canonical external message delivery published by the harness.
     pub const MESSAGE_DELIVERED: Self = Self::from_static(EventCategory::Message, "delivered");
-    /// External message edit reported by an extension publisher.
+    /// Extension report offering an external message delivery.
+    pub const MESSAGE_DELIVERED_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "delivered_reported");
+    /// Canonical external message edit published by the harness.
     pub const MESSAGE_EDITED: Self = Self::from_static(EventCategory::Message, "edited");
-    /// External message deletion reported by an extension publisher.
+    /// Extension report offering an external message edit.
+    pub const MESSAGE_EDITED_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "edited_reported");
+    /// Canonical external message deletion published by the harness.
     pub const MESSAGE_DELETED: Self = Self::from_static(EventCategory::Message, "deleted");
-    /// External reaction addition reported by an extension publisher.
+    /// Extension report offering an external message deletion.
+    pub const MESSAGE_DELETED_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "deleted_reported");
+    /// Canonical external reaction addition published by the harness.
     pub const MESSAGE_REACTION_ADDED: Self =
         Self::from_static(EventCategory::Message, "reaction_added");
-    /// External reaction removal reported by an extension publisher.
+    /// Extension report offering an external reaction addition.
+    pub const MESSAGE_REACTION_ADDED_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "reaction_added_reported");
+    /// Canonical external reaction removal published by the harness.
     pub const MESSAGE_REACTION_REMOVED: Self =
         Self::from_static(EventCategory::Message, "reaction_removed");
-    /// Remote send success reported by an extension publisher.
+    /// Extension report offering an external reaction removal.
+    pub const MESSAGE_REACTION_REMOVED_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "reaction_removed_reported");
+    /// Canonical remote send success published by the harness.
     pub const MESSAGE_SENT: Self = Self::from_static(EventCategory::Message, "sent");
+    /// Extension report offering a remote send success.
+    pub const MESSAGE_SENT_REPORTED: Self =
+        Self::from_static(EventCategory::Message, "sent_reported");
 
     pub const EXTENSION_STARTING: Self = Self::from_static(EventCategory::Extension, "starting");
     pub const EXTENSION_READY: Self = Self::from_static(EventCategory::Extension, "ready");

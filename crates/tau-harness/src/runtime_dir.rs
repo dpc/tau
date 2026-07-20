@@ -575,6 +575,7 @@ fn connect_probe_peer(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name,
             client_kind,
+            capabilities: Vec::new(),
         }))
         .ok()?;
         if cancelled.load(Ordering::Acquire) {

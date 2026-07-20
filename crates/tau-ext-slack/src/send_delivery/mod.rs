@@ -43,7 +43,7 @@ pub(super) struct FrozenSendAuthority {
 pub(super) enum SendAuthorization {
     /// Reply to one locally retained delivered-message route.
     Reply {
-        /// Published delivered-message identifier.
+        /// Submitted delivered-message identifier.
         message_id: MessageFactId,
     },
     /// Send to one operator-configured proactive alias.
@@ -111,8 +111,8 @@ pub(super) enum SendLedgerDisposition {
         /// Safe reason that authorized the retry.
         reason: SendFailureCategory,
     },
-    /// Slack accepted and the sent fact/result pair is being flushed.
-    Publishing,
+    /// Slack accepted and the sent report/result pair is being flushed.
+    Submitting,
     /// Terminal failure with no unresolved provider attempt.
     DefinitiveFailure {
         /// Safe failure category.
@@ -132,7 +132,7 @@ pub(super) enum SendLedgerDisposition {
         /// Stable remote copy range when cancellation won.
         copies: RemoteCopyPossibility,
     },
-    /// Slack published the outgoing fact and terminal tool result.
+    /// Slack submitted the outgoing report and terminal tool result.
     Completed {
         /// Stable tool result returned for an exact replay.
         result: Box<ToolResult>,
@@ -644,7 +644,7 @@ impl Extension {
                 );
                 SendReplay::Coalesced
             }
-            SendLedgerDisposition::Publishing => SendReplay::Coalesced,
+            SendLedgerDisposition::Submitting => SendReplay::Coalesced,
             SendLedgerDisposition::Completed { result, copies } => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -729,9 +729,9 @@ impl Extension {
 struct SendDeliveryWorker {
     /// Shared Slack lifecycle and delivery state.
     state: Arc<Mutex<State>>,
-    /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
+    /// Shared sent/delete confirmed-submission and lifecycle/fatal-output
     /// retirement barrier.
-    output_publication_gate: Arc<Mutex<()>>,
+    output_submission_gate: Arc<Mutex<()>>,
     /// Exact Slack API boundary.
     client: Arc<dyn SlackClient>,
     /// Confirmed protocol writer.
@@ -754,7 +754,7 @@ impl SendDeliveryWorker {
     fn from_extension(extension: &Extension) -> Self {
         Self {
             state: Arc::clone(&extension.state),
-            output_publication_gate: Arc::clone(&extension.output_publication_gate),
+            output_submission_gate: Arc::clone(&extension.output_submission_gate),
             client: Arc::clone(&extension.client),
             output: extension.output.clone(),
             wake: Arc::clone(&extension.send_wake),
@@ -1112,11 +1112,12 @@ impl SendDeliveryWorker {
         }
     }
 
-    /// Stop all later Slack effects after a confirmed fact/result write fails.
+    /// Stop all later Slack effects after a confirmed report/result write
+    /// fails.
     fn retire_after_output_failure(&self) {
         super::retire_after_output_failure(
             &self.state,
-            &self.output_publication_gate,
+            &self.output_submission_gate,
             &self.wake,
             &self.output_failed,
             &self.shutdown,
@@ -1142,7 +1143,7 @@ impl SendDeliveryWorker {
             }
             if matches!(
                 entry.disposition,
-                SendLedgerDisposition::Publishing
+                SendLedgerDisposition::Submitting
                     | SendLedgerDisposition::DefinitiveFailure {
                         category: _,
                         copies: _
@@ -1195,7 +1196,7 @@ impl SendDeliveryWorker {
             }
             if matches!(
                 entry.disposition,
-                SendLedgerDisposition::Publishing
+                SendLedgerDisposition::Submitting
                     | SendLedgerDisposition::DefinitiveFailure {
                         category: _,
                         copies: _
@@ -1223,7 +1224,7 @@ impl SendDeliveryWorker {
         }
     }
 
-    /// Publish a sent fact and then its ordinary terminal tool result.
+    /// Submit a sent report and then its ordinary terminal tool result.
     fn finish_send_success(
         &self,
         prepared: &PreparedSend,
@@ -1263,15 +1264,15 @@ impl SendDeliveryWorker {
                 }),
             ),
         ]);
-        let publication = self
-            .output_publication_gate
+        let submission = self
+            .output_submission_gate
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let fact = {
+        let report = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if !state.send_authority_is_current(prepared) {
                 drop(state);
-                drop(publication);
+                drop(submission);
                 self.finish_send_cancelled(prepared, copies);
                 return;
             }
@@ -1302,8 +1303,8 @@ impl SendDeliveryWorker {
             if entry.prepared.authority.token != prepared.authority.token {
                 return;
             }
-            entry.disposition = SendLedgerDisposition::Publishing;
-            Event::MessageSent(MessageSent::new(
+            entry.disposition = SendLedgerDisposition::Submitting;
+            Event::MessageSentReported(MessageSent::new(
                 MessagePublisherId::new(instance_name),
                 MessageAgentTarget::new(prepared.invoke.agent_id.to_string()),
                 message_id.clone(),
@@ -1312,8 +1313,10 @@ impl SendDeliveryWorker {
                 prepared.text.clone(),
             ))
         };
-        let fact_sent = self.output.send_confirmed(HarnessInputMessage::emit(fact));
-        let result_sent = fact_sent
+        let report_sent = self
+            .output
+            .send_confirmed(HarnessInputMessage::emit_with_transient(report, true));
+        let result_sent = report_sent
             && self
                 .output
                 .send_confirmed(HarnessInputMessage::emit(Event::ToolResult(result.clone())));
@@ -1355,7 +1358,7 @@ impl SendDeliveryWorker {
                 }
             }
         }
-        drop(publication);
+        drop(submission);
         if !result_sent {
             self.retire_after_output_failure();
         }

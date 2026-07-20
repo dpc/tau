@@ -1581,6 +1581,7 @@ fn delayed_skill_runner(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "delayed-skill".into(),
             client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
         }))
         .map_err(|error| error.to_string())?;
     writer

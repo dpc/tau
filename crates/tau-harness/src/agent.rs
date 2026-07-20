@@ -160,7 +160,7 @@ impl ActivationDispatchState {
 /// Typed source of one committed message activation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PendingMessageWakeSource {
-    /// Extension-published message fact activation.
+    /// Canonical external-message fact activation.
     MessageFact {
         /// Sequence of the canonical raw fact in the owning agent log.
         durable_event_seq: tau_core::PersistedAgentEventSeq,

@@ -1,14 +1,5 @@
 # SPEC-tau-proto-provider-data: Provider-visible data
 
-## Status
-
-The current protocol describes all six canonical `message.*` facts as directly
-extension-published.
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
-requires bridges to publish distinct transient reports and the harness to
-publish the canonical facts downstream. The canonical provider projection and
-content-safety rules in this specification remain unchanged.
-
 ## Provider-visible tool responses
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.
@@ -92,7 +83,7 @@ must synthesize replay from the typed fields.
 
 ## Provider-visible message facts
 
-The six extension-published `message.*` event types share one compact, valid
+The six harness-authored canonical `message.*` event types share one compact, valid
 `<tau_message event="…">` provider projection. Canonically ordered attributes
 carry the harness-stamped publisher plus applicable message, target, party, and
 conversation identifiers. Text-bearing facts use direct escaped text; delete and

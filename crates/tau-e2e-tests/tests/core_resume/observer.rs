@@ -61,6 +61,7 @@ impl SideObserver {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: "tau-e2e-side-observer".into(),
                 client_kind: ClientKind::Ui,
+                capabilities: Default::default(),
             }))?;
             let selectors = selectors();
             peer.send(&HarnessInputMessage::Subscribe(Subscribe {

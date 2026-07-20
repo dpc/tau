@@ -109,7 +109,7 @@ The following exact authority and wire-name mapping governs the migration:
 | `provider.prompt_submitted`, `provider.response_updated`, `provider.response_finished`, `provider.retry_prompt_result`, `provider.cache_miss_diagnostic` | Same suffix with `_reported` appended | Configured provider extension | Harness validates prompt ownership and publishes canonical provider facts or directed correlated outcomes |
 | `action.schema_published` | `action.schema_declared` | Configured action or core extension | Harness publishes canonical `action.schema_published` or a rejection diagnostic |
 | `action.result`, `action.error` | `action.result_reported`, `action.error_reported` | Configured action or core extension | Harness validates invocation ownership, sends the correlated outcome, and publishes a canonical fact only when shared observation is intended |
-| The six canonical `message.*` facts | Same name with `_reported` appended | Configured message-bridge extension | Harness stamps provenance and publishes the canonical durable fact |
+| The six canonical `message.*` facts | Same name with `_reported` appended | Configured extension declaring `PeerCapability::MessageBridge` | Harness stamps provenance and publishes the canonical durable fact |
 | `extension.skill_available`, `extension.agents_md_available`, context-provider registration/readiness, agent-context publication, and prompt-fragment publication | Existing names remain declarations, values, or acknowledgements | Configured extension or core component owning the declaration slot | Post-commit consumers update projections and publish derived state where needed |
 | `agent.start_request`, `extension.internal_prompt_submit_request` | Existing request names remain | Configured extension or core component | Harness publishes acceptance/rejection and canonical agent or prompt facts |
 | `agent.metadata_set`, `agent.metadata_unset` | `agent.metadata_set_request`, `agent.metadata_unset_request` | Configured extension or attached UI | Harness publishes canonical metadata facts or rejection outcomes |
@@ -191,6 +191,5 @@ value.
 
 This decision changes the extension interface and event sequencing under
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
-It transitions away from the direct-publication contract in
-[DECISION-extension-published-message-facts](DECISION-extension-published-message-facts.md)
-and [SPEC-extension-published-message-facts](SPEC-extension-published-message-facts.md).
+The external-message report-to-canonical flow is specified by
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).

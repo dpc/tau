@@ -137,6 +137,13 @@ impl Output {
     fn emit(&self, event: Event) {
         self.send(HarnessInputMessage::emit(event));
     }
+
+    /// Emit one transient external-message report for downstream
+    /// canonicalization.
+    fn emit_message_report(&self, event: Event) {
+        debug_assert!(event.is_message_report());
+        self.send(HarnessInputMessage::emit_with_transient(event, true));
+    }
 }
 
 /// Shared shutdown state that supports both synchronous checks and async
@@ -937,18 +944,19 @@ impl Extension {
                     return tool_error(invoke, error);
                 }
             }
-            self.output.emit(Event::MessageSent(MessageSent::new(
-                MessagePublisherId::default(),
-                MessageAgentTarget::new(invoke.agent_id.as_ref()),
-                generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
-                None,
-                Some(MessageConversation {
-                    stable_id: conversation,
-                    display_name: None,
-                    alias: None,
-                }),
-                &message,
-            )));
+            self.output
+                .emit_message_report(Event::MessageSentReported(MessageSent::new(
+                    MessagePublisherId::default(),
+                    MessageAgentTarget::new(invoke.agent_id.as_ref()),
+                    generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
+                    None,
+                    Some(MessageConversation {
+                        stable_id: conversation,
+                        display_name: None,
+                        alias: None,
+                    }),
+                    &message,
+                )));
             tool_result(invoke, "sent XMPP message")
         }
     }
@@ -1982,7 +1990,7 @@ impl WorkerState {
             return;
         }
         // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
-        // so delayed messages must not become fresh Tau fact publications.
+        // so delayed messages must not become fresh Tau report submissions.
         if has_delay_payload(&message) {
             return;
         }
@@ -2113,8 +2121,7 @@ impl WorkerState {
             })
     }
 
-    /// Publish an accepted XMPP message directly as an immutable delivered
-    /// fact.
+    /// Submit an accepted XMPP message as a transient delivered report.
     fn route(
         &self,
         agent_id: AgentId,
@@ -2124,7 +2131,7 @@ impl WorkerState {
         text: String,
     ) {
         self.output
-            .emit(Event::MessageDelivered(MessageDelivered::new(
+            .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
                 MessagePublisherId::default(),
                 MessageAgentTarget::new(agent_id.as_ref()),
                 message_id,
@@ -2466,6 +2473,7 @@ impl TauExtension for XmppExtension {
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
+            .message_bridge()
             .configure_raw(handle_configure)
             .scoped_tool(
                 tau_proto::ToolName::new(REGISTER_TOOL_NAME),

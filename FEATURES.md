@@ -124,10 +124,13 @@ policy rules, and the selected role. Event subscriptions use harness policy and
 approval. The harness injects only each extension's declared Tau secrets;
 configured extensions remain trusted local executables.
 
-Slack, Telegram, and XMPP publish immutable `message.*` facts directly. The harness stamps the
-configured extension publisher, commits each fact before consumers act, and
-projects valid facts as untrusted model context. Transport admission, native
-routing, replies, retries, and duplicate suppression remain bridge-local.
+Slack, Telegram, and XMPP submit transient `message.*_reported` events through
+ordinary interception. After a report commits, the harness stamps the configured
+extension publisher, commits an immutable canonical `message.*` fact, and
+projects valid facts as untrusted model context. Report submission does not
+acknowledge canonical commit; interception, append failure, or a crash may leave
+a transport effect without a canonical fact. Transport admission, native routing,
+replies, retries, and duplicate suppression remain bridge-local.
 
 See the [skills guide](docs/skills.md), [role guide](docs/agent-roles.md),
 [shell process lifecycle](crates/tau-ext-shell/specs/SPEC-tau-ext-shell-process-lifecycle.md),

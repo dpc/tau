@@ -25,12 +25,23 @@ use crate::{
 // Lifecycle messages
 // ---------------------------------------------------------------------------
 
+/// An authenticated peer's declared authority for optional protocol families.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerCapability {
+    /// Publish external-message reports for downstream canonicalization.
+    MessageBridge,
+}
+
 /// Announcement sent by a participant after connecting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol_version: u32,
     pub client_name: ExtensionName,
     pub client_kind: ClientKind,
+    /// Optional protocol authorities declared for this connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<PeerCapability>,
 }
 
 /// Subscription request describing which events a participant wants.

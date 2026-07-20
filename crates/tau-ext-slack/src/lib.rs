@@ -727,8 +727,8 @@ enum SenderPolicyStatus {
     LaxPermitted,
 }
 
-/// One direct immutable message fact selected after Slack-local admission.
-enum IngressFact {
+/// One transient message report selected after Slack-local admission.
+enum IngressReport {
     /// A newly delivered external message.
     Delivered {
         /// Publisher-scoped identifier derived from Slack native identity.
@@ -738,28 +738,28 @@ enum IngressFact {
     },
     /// Replacement text for one known delivered message.
     Edited {
-        /// Previously published delivered-message identifier.
+        /// Previously submitted delivered-message identifier.
         target: MessageFactId,
         /// Original normalized replacement body.
         text: String,
     },
     /// A reaction added to one known message.
     ReactionAdded {
-        /// Previously published base-message identifier.
+        /// Previously submitted base-message identifier.
         target: MessageFactId,
         /// Slack reaction name.
         reaction: String,
     },
     /// A reaction removed from one known message.
     ReactionRemoved {
-        /// Previously published base-message identifier.
+        /// Previously submitted base-message identifier.
         target: MessageFactId,
         /// Slack reaction name.
         reaction: String,
     },
 }
 
-/// Fully normalized Slack occurrence ready for direct fact publication.
+/// Fully normalized Slack occurrence ready for report submission.
 struct IngressSubmission {
     /// Exact currently authorized native conversation.
     conversation: SlackConversation,
@@ -767,8 +767,8 @@ struct IngressSubmission {
     agent_id: AgentId,
     /// Verified sender and policy.
     sender: IngressSender,
-    /// Immutable fact payload chosen by Slack.
-    fact: IngressFact,
+    /// Transient report payload chosen by Slack.
+    report: IngressReport,
     /// Native message timestamp used only for Slack-local route ownership.
     native_message_ts: Option<String>,
 }
@@ -850,7 +850,7 @@ impl SlackConversation {
     }
 }
 
-/// Build the inert conversation description included in published facts.
+/// Build the inert conversation description included in submitted reports.
 fn message_fact_conversation(conversation: &SlackConversation) -> MessageConversation {
     MessageConversation {
         stable_id: conversation.channel_id.clone(),
@@ -1070,7 +1070,7 @@ struct LinkedConversation {
     user_id: String,
 }
 
-/// Opaque source route installed after direct fact publication succeeds.
+/// Opaque source route installed after report submission succeeds.
 #[derive(Clone)]
 struct ReplyRoute {
     /// Agent allowed to use this route.
@@ -1087,12 +1087,13 @@ struct ReplyRoute {
     installation_team_id: String,
 }
 
-/// Locally written incoming Slack create eligible for later edit references.
+/// Locally submitted incoming Slack create report eligible for later edit
+/// references.
 #[derive(Clone, Eq, PartialEq)]
 struct IncomingMessageOwner {
     /// Agent that received the original create.
     agent_id: AgentId,
-    /// Publisher-scoped id of the original immutable create occurrence.
+    /// Publisher-scoped id of the original create report.
     message_id: MessageFactId,
     /// Exact source-bound conversation and thread.
     conversation: SlackConversation,
@@ -1136,9 +1137,9 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     /// Selected agent independently owned by each static route or dynamic DM.
     selected_agent_by_route: HashMap<SelectionRouteKey, AgentId>,
-    /// Published fact ids mapped to private Slack routes.
+    /// Submitted report ids mapped to private Slack routes.
     reply_routes: HashMap<MessageFactId, ReplyRoute>,
-    /// Oldest-first bound for published reply routes.
+    /// Oldest-first bound for submitted reply routes.
     reply_route_order: VecDeque<MessageFactId>,
     /// Bounded, non-evicting process/session ledger preventing replay reposts.
     send_ledger: HashMap<tau_proto::ToolCallId, SendLedgerEntry>,
@@ -1156,7 +1157,8 @@ struct State {
     /// Logical-call FIFO per native channel. The front call retains its turn
     /// through its sole retry and provider backoff.
     channel_send_queues: HashMap<String, VecDeque<SendQueueReservation>>,
-    /// Recent locally written incoming creates by native Slack identity.
+    /// Recent locally submitted incoming create reports by native Slack
+    /// identity.
     incoming_messages: HashMap<PostedMessageKey, IncomingMessageOwner>,
     /// Oldest-first bound for incoming create identities.
     incoming_message_order: VecDeque<PostedMessageKey>,
@@ -1260,7 +1262,8 @@ impl State {
         self.reactions.source_route_is_pinned(message_id)
     }
 
-    /// Insert or refresh one canonical route while evicting the oldest route.
+    /// Insert or refresh one private reply route while evicting the oldest
+    /// route.
     fn insert_reply_route(&mut self, message_id: MessageFactId, route: ReplyRoute) {
         self.reply_route_order.retain(|id| id != &message_id);
         self.reply_route_order.push_back(message_id.clone());
@@ -1279,7 +1282,7 @@ impl State {
         }
     }
 
-    /// Remove all canonical routes owned by one agent.
+    /// Remove all private reply routes owned by one agent.
     fn remove_agent_reply_routes(&mut self, agent_id: &AgentId) {
         self.reply_routes
             .retain(|_, route| &route.agent_id != agent_id);
@@ -1287,13 +1290,13 @@ impl State {
             .retain(|id| self.reply_routes.contains_key(id));
     }
 
-    /// Clear all private canonical routes.
+    /// Clear all private reply routes.
     fn clear_reply_routes(&mut self) {
         self.reply_routes.clear();
         self.reply_route_order.clear();
     }
 
-    /// Remember one locally written incoming create for immutable edit
+    /// Remember one locally submitted incoming create report for later edit
     /// references.
     fn insert_incoming_message(
         &mut self,
@@ -1315,7 +1318,8 @@ impl State {
         true
     }
 
-    /// Remove all locally written incoming identities owned by one agent.
+    /// Remove all locally submitted incoming report identities owned by one
+    /// agent.
     fn remove_agent_incoming_messages(&mut self, agent_id: &AgentId) {
         self.incoming_messages
             .retain(|_, owner| &owner.agent_id != agent_id);
@@ -1328,7 +1332,7 @@ impl State {
             .retain(|key| retained.contains(key));
     }
 
-    /// Clear all locally written incoming native identities.
+    /// Clear all locally submitted incoming report identities.
     fn clear_incoming_messages(&mut self) {
         self.incoming_messages.clear();
         self.incoming_message_order.clear();
@@ -1416,9 +1420,9 @@ impl Output {
 
 struct Extension {
     state: Arc<Mutex<State>>,
-    /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
+    /// Shared sent/delete confirmed-submission and lifecycle/fatal-output
     /// retirement barrier.
-    output_publication_gate: Arc<Mutex<()>>,
+    output_submission_gate: Arc<Mutex<()>>,
     /// Slack transport, identity, and message-posting operations.
     client: Arc<dyn SlackClient>,
     /// Separately injected outbound reaction API boundary.
@@ -1448,14 +1452,14 @@ struct BlockingTestHook {
     release: mpsc::Receiver<()>,
 }
 
-/// Test-only hooks for writer failure and delete-publication races.
+/// Test-only hooks for writer failure and delete-submission races.
 #[cfg(test)]
 #[derive(Default)]
 struct ExtensionTestHooks {
-    /// Runs after the failure latch is set but before publication-gate release.
+    /// Runs after the failure latch is set but before submission-gate release.
     output_failure_boundary: Mutex<Option<BlockingTestHook>>,
-    /// Runs immediately before deletion acquires the publication gate.
-    delete_publication_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Runs immediately before deletion acquires the submission gate.
+    delete_submission_boundary: Mutex<Option<BlockingTestHook>>,
 }
 
 /// Run and consume one installed test boundary.
@@ -1497,7 +1501,7 @@ impl Extension {
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
-            output_publication_gate: Arc::new(Mutex::new(())),
+            output_submission_gate: Arc::new(Mutex::new(())),
             client,
             reaction_client,
             output: output.into(),
@@ -1512,7 +1516,7 @@ impl Extension {
     }
 
     /// Build the Socket Mode worker view over the primary extension's shared
-    /// lifecycle state, sent/delete publication and retirement gate, and
+    /// lifecycle state, sent/delete submission and retirement gate, and
     /// cancellation wake.
     fn new_socket_worker_view(
         send_retirement: SendRetirement,
@@ -1522,13 +1526,13 @@ impl Extension {
     ) -> Self {
         let SendRetirement {
             state,
-            output_publication_gate,
+            output_submission_gate,
             wake,
             output_failed,
         } = send_retirement;
         Self {
             state,
-            output_publication_gate,
+            output_submission_gate,
             client,
             reaction_client: Arc::new(UnavailableReactionClient),
             output,
@@ -1596,7 +1600,7 @@ impl Extension {
     /// Retire all outbound send authority at the process/session transport
     /// boundary before waking background workers.
     fn retire_send_authority(&self) {
-        retire_send_state(&self.state, &self.output_publication_gate, &self.send_wake);
+        retire_send_state(&self.state, &self.output_submission_gate, &self.send_wake);
     }
 
     /// Synchronously retire every route and remote-effect authority after the
@@ -1604,7 +1608,7 @@ impl Extension {
     fn retire_after_output_failure(&self) {
         retire_after_output_failure(
             &self.state,
-            &self.output_publication_gate,
+            &self.output_submission_gate,
             &self.send_wake,
             &self.output_failed,
             &self.shutdown,
@@ -1942,7 +1946,7 @@ impl Extension {
         state.worker_connection_failure_reported = false;
         let send_retirement = SendRetirement {
             state: Arc::clone(&self.state),
-            output_publication_gate: Arc::clone(&self.output_publication_gate),
+            output_submission_gate: Arc::clone(&self.output_submission_gate),
             wake: Arc::clone(&self.send_wake),
             output_failed: Arc::clone(&self.output_failed),
         };
@@ -2003,8 +2007,8 @@ impl Extension {
         self.verified_human_traced(cfg, user_id, None).is_some()
     }
 
-    /// Verify one sender while emitting only bounded, payload-free latency
-    /// facts.
+    /// Verify one sender while emitting only a bounded, payload-free latency
+    /// trace.
     fn verified_human_traced(
         &self,
         cfg: &RuntimeConfig,
@@ -2220,12 +2224,12 @@ impl Extension {
                     display_name: identity.display_name,
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                fact: match reaction.event_type {
-                    ReactionKind::Added => IngressFact::ReactionAdded {
+                report: match reaction.event_type {
+                    ReactionKind::Added => IngressReport::ReactionAdded {
                         target: target_message_id.clone(),
                         reaction: reaction.reaction,
                     },
-                    ReactionKind::Removed => IngressFact::ReactionRemoved {
+                    ReactionKind::Removed => IngressReport::ReactionRemoved {
                         target: target_message_id,
                         reaction: reaction.reaction,
                     },
@@ -2236,11 +2240,11 @@ impl Extension {
         );
     }
 
-    /// Route a validated edit only when its original locally written create is
-    /// known.
+    /// Route a validated edit only when its original locally submitted create
+    /// report is known.
     ///
-    /// This locally written fact ownership lookup and its fail-closed rejection
-    /// path implement `SPEC-tau-ext-slack-message-mutations`.
+    /// This locally submitted report ownership lookup and its fail-closed
+    /// rejection path implement `SPEC-tau-ext-slack-message-mutations`.
     #[cfg(test)]
     fn process_slack_edit(&self, edit: SlackEdit) {
         self.process_slack_edit_admitted(edit, None);
@@ -2326,7 +2330,7 @@ impl Extension {
                     display_name: identity.display_name,
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                fact: IngressFact::Edited {
+                report: IngressReport::Edited {
                     target: owner.message_id,
                     text,
                 },
@@ -2336,13 +2340,15 @@ impl Extension {
         );
     }
 
-    /// Publish a deletion only for one locally retained delivered message.
+    /// Submit a deletion report only for one locally retained delivered
+    /// message.
     #[cfg(test)]
     fn process_slack_delete(&self, delete: SlackDelete) {
         self.process_slack_delete_admitted(delete, None);
     }
 
-    /// Publish a deletion only for one locally retained delivered message.
+    /// Submit a deletion report only for one locally retained delivered
+    /// message.
     fn process_slack_delete_admitted(
         &self,
         delete: SlackDelete,
@@ -2422,7 +2428,7 @@ impl Extension {
         let agent_id = owner.agent_id().clone();
         let message_id = owner.message_id().clone();
         let conversation = owner.conversation().clone();
-        let event = Event::MessageDeleted(MessageDeleted::new(
+        let event = Event::MessageDeletedReported(MessageDeleted::new(
             publisher.clone(),
             MessageAgentTarget::new(agent_id.to_string()),
             MessageFactRef {
@@ -2433,13 +2439,13 @@ impl Extension {
             Some(message_fact_conversation(&conversation)),
         ));
         // Revoke before the local write so a concurrently dispatched reply or
-        // reaction cannot begin after the deletion fact becomes visible. Writer
+        // reaction cannot begin after the deletion report becomes visible. Writer
         // failure keeps authority revoked because the remote deletion is already
         // known and restoring a stale route would violate fail-closed behavior.
         #[cfg(test)]
-        run_blocking_test_hook(&self.test_hooks.delete_publication_boundary);
-        let publication = self
-            .output_publication_gate
+        run_blocking_test_hook(&self.test_hooks.delete_submission_boundary);
+        let submission = self
+            .output_submission_gate
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -2480,13 +2486,15 @@ impl Extension {
         }
         state.revoke_message_authority(&message_id);
         drop(state);
-        let sent = self.output.send_confirmed(HarnessInputMessage::emit(event));
+        let sent = self
+            .output
+            .send_confirmed(HarnessInputMessage::emit_with_transient(event, true));
         if !sent {
             self.output_failed.store(true, Ordering::Release);
             #[cfg(test)]
             run_blocking_test_hook(&self.test_hooks.output_failure_boundary);
         }
-        drop(publication);
+        drop(submission);
         if !sent {
             self.retire_after_output_failure();
             return;
@@ -3201,7 +3209,7 @@ impl Extension {
                     display_name: identity.display_name.clone(),
                     identity_alias: cfg.sender_aliases.get(&identity.user_id).cloned(),
                 },
-                fact: IngressFact::Delivered {
+                report: IngressReport::Delivered {
                     message_id: slack_message_fact_id(
                         &message.channel_id,
                         message
@@ -3218,7 +3226,7 @@ impl Extension {
         );
     }
 
-    /// Publish one normalized Slack occurrence as a direct immutable fact.
+    /// Submit one normalized Slack occurrence as a transient message report.
     fn submit_ingress(
         &self,
         cfg: &RuntimeConfig,
@@ -3229,7 +3237,7 @@ impl Extension {
             conversation,
             agent_id,
             sender,
-            fact,
+            report,
             native_message_ts,
         } = submission;
         if !self.admission_authority_is_current(admission) {
@@ -3291,9 +3299,9 @@ impl Extension {
             }),
         };
         let fact_conversation = Some(message_fact_conversation(&conversation));
-        let (event, reply_message_id, original_key, reaction_message_ts) = match fact {
-            IngressFact::Delivered { message_id, text } => (
-                Event::MessageDelivered(MessageDelivered::new(
+        let (event, reply_message_id, original_key, reaction_message_ts) = match report {
+            IngressReport::Delivered { message_id, text } => (
+                Event::MessageDeliveredReported(MessageDelivered::new(
                     publisher.clone(),
                     target,
                     message_id.clone(),
@@ -3307,11 +3315,11 @@ impl Extension {
                     .map(|native| PostedMessageKey::new(&conversation.channel_id, native)),
                 native_message_ts,
             ),
-            IngressFact::Edited {
+            IngressReport::Edited {
                 target: message_id,
                 text,
             } => (
-                Event::MessageEdited(MessageEdited::new(
+                Event::MessageEditedReported(MessageEdited::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3326,11 +3334,11 @@ impl Extension {
                 None,
                 native_message_ts,
             ),
-            IngressFact::ReactionAdded {
+            IngressReport::ReactionAdded {
                 target: message_id,
                 reaction,
             } => (
-                Event::MessageReactionAdded(MessageReactionAdded::new(
+                Event::MessageReactionAddedReported(MessageReactionAdded::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3345,11 +3353,11 @@ impl Extension {
                 None,
                 None,
             ),
-            IngressFact::ReactionRemoved {
+            IngressReport::ReactionRemoved {
                 target: message_id,
                 reaction,
             } => (
-                Event::MessageReactionRemoved(MessageReactionRemoved::new(
+                Event::MessageReactionRemovedReported(MessageReactionRemoved::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3365,7 +3373,9 @@ impl Extension {
                 None,
             ),
         };
-        let sent = self.output.send_confirmed(HarnessInputMessage::emit(event));
+        let sent = self
+            .output
+            .send_confirmed(HarnessInputMessage::emit_with_transient(event, true));
         if !sent {
             self.retire_after_output_failure();
             if let Some(admission) = admission {
@@ -3434,7 +3444,7 @@ impl Extension {
                 identity_us = admission.identity_us.get(),
                 queue_wait_us = admission.queue_wait_us,
                 output_outcome = "flushed",
-                "slack.message_fact.published"
+                "slack.message_report.submitted"
             );
         }
     }
@@ -4606,9 +4616,9 @@ where
 struct SendRetirement {
     /// Shared Slack lifecycle and delivery state.
     state: Arc<Mutex<State>>,
-    /// Shared sent/delete confirmed-publication and lifecycle/fatal-output
+    /// Shared sent/delete confirmed-submission and lifecycle/fatal-output
     /// retirement barrier.
-    output_publication_gate: Arc<Mutex<()>>,
+    output_submission_gate: Arc<Mutex<()>>,
     /// Wakes delivery workers after authority retirement.
     wake: Arc<SendWake>,
     /// Early fail-closed protocol-output latch shared by every worker view.
@@ -4629,7 +4639,7 @@ impl SendReaderBoundary {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(SendRetirement {
             state: Arc::clone(&extension.state),
-            output_publication_gate: Arc::clone(&extension.output_publication_gate),
+            output_submission_gate: Arc::clone(&extension.output_submission_gate),
             wake: Arc::clone(&extension.send_wake),
             output_failed: Arc::clone(&extension.output_failed),
         });
@@ -4644,7 +4654,7 @@ impl SendReaderBoundary {
         if let Some(retirement) = retirement {
             retire_send_state(
                 &retirement.state,
-                &retirement.output_publication_gate,
+                &retirement.output_submission_gate,
                 &retirement.wake,
             );
         }
@@ -4669,10 +4679,10 @@ impl<R: Read> Read for RetiringReader<R> {
 
 fn retire_send_state(
     state: &Arc<Mutex<State>>,
-    output_publication_gate: &Mutex<()>,
+    output_submission_gate: &Mutex<()>,
     wake: &SendWake,
 ) {
-    let _publication = output_publication_gate
+    let _submission = output_submission_gate
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     {
@@ -4686,13 +4696,13 @@ fn retire_send_state(
 /// Enter the one fail-closed protocol-output retirement state before shutdown.
 fn retire_after_output_failure(
     state: &Arc<Mutex<State>>,
-    output_publication_gate: &Mutex<()>,
+    output_submission_gate: &Mutex<()>,
     wake: &SendWake,
     output_failed: &AtomicBool,
     shutdown: &ShutdownSignal,
 ) {
     output_failed.store(true, Ordering::Release);
-    let _publication = output_publication_gate
+    let _submission = output_submission_gate
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     {
@@ -4725,6 +4735,7 @@ impl TauExtension for SlackExtension {
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
+            .message_bridge()
             .configure_raw(handle_configure)
             .on_output_message(handle_output_message)
             .scoped_tool(
@@ -4917,10 +4928,10 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             cx.state.ext.unload_agent(&unloaded.agent_id);
         }
         Event::SessionShutdown(_) => {
-            let _publication = cx
+            let _submission = cx
                 .state
                 .ext
-                .output_publication_gate
+                .output_submission_gate
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -5020,7 +5031,7 @@ fn send_tool_spec() -> ToolSpec {
                 "message": { "type": "string" },
                 "reply_to": {
                     "type": "string",
-                    "description": "Tau-issued selector from a locally written Slack message fact; mutually exclusive with destination"
+                    "description": "Tau-issued selector from a locally submitted Slack message report; mutually exclusive with destination"
                 },
                 "destination": {
                     "type": "string",

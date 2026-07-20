@@ -2,9 +2,9 @@
 //!
 //! This module implements the single-owner gateway slice: stream locking,
 //! durable update offsets, Telegram allowlist/chat policy, help/status command
-//! handling, inbound routing commands, bounded live queued message-fact
-//! deliveries, and private local socket support for gateway-side sidecar
-//! heartbeat and registration-lease bookkeeping and outbound sends.
+//! handling, inbound routing commands, bounded live queued inbound delivery
+//! records, and private local socket support for gateway-side sidecar heartbeat
+//! and registration-lease bookkeeping and outbound sends.
 
 mod routing;
 
@@ -67,7 +67,7 @@ const SIDECAR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// Maximum time a registration remains live without a sidecar heartbeat.
 const REGISTRATION_LEASE_DURATION: Duration = Duration::from_secs(30);
 
-/// Maximum queued message-fact deliveries retained per sidecar connection.
+/// Maximum queued inbound delivery records retained per sidecar connection.
 const MAX_PENDING_DELIVERIES_PER_SIDECAR: usize = 32;
 
 /// Default environment variable carrying the bot token.
@@ -1082,8 +1082,7 @@ struct GatewaySocketState {
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
     generation: String,
-    /// Monotonic request id allocator for queued inbound message-fact
-    /// deliveries.
+    /// Monotonic request id allocator for queued inbound delivery records.
     next_delivery_id: AtomicU64,
 }
 
@@ -1180,7 +1179,7 @@ impl GatewaySocketState {
         registry.snapshot()
     }
 
-    /// Queue one inbound message-fact delivery for a registered sidecar.
+    /// Queue one inbound delivery record for a registered sidecar.
     fn enqueue_delivery(
         &self,
         target: &GatewayRegistrationKey,
@@ -1474,7 +1473,7 @@ impl GatewayRegistry {
         }
     }
 
-    /// Queue one message-fact delivery for the sidecar that owns `target`.
+    /// Queue one inbound delivery record for the sidecar that owns `target`.
     fn enqueue_delivery(
         &mut self,
         target: &GatewayRegistrationKey,
@@ -1512,7 +1511,7 @@ impl GatewayRegistry {
         Ok(())
     }
 
-    /// Drain message-fact deliveries queued for one sidecar connection.
+    /// Drain inbound delivery records queued for one sidecar connection.
     fn take_deliveries(&mut self, connection_id: u64) -> Vec<GatewayDelivery> {
         self.pending_deliveries
             .remove(&connection_id)

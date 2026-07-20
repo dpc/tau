@@ -132,6 +132,7 @@ fn write_startup(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "tau-strict-compaction-provider".into(),
             client_kind: tau_proto::ClientKind::Provider,
+            capabilities: Default::default(),
         },
     )))?;
     writer.write_frame(&TestProtocolItem::Message(TestMessage::Subscribe(

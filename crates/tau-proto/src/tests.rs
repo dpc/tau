@@ -417,7 +417,7 @@ fn action_schema_fixture() -> ActionSchema {
 }
 
 fn representative_events() -> Vec<Event> {
-    vec![
+    let mut events = vec![
         Event::ToolRegister(ToolRegister {
             tool: ToolSpec {
                 name: ToolName::new("echo"),
@@ -1242,7 +1242,23 @@ fn representative_events() -> Vec<Event> {
             exit_code: Some(0),
             cancelled: false,
         }),
-    ]
+    ];
+    let reports = events
+        .iter()
+        .filter_map(|event| match event.clone() {
+            Event::MessageDelivered(value) => Some(Event::MessageDeliveredReported(value)),
+            Event::MessageEdited(value) => Some(Event::MessageEditedReported(value)),
+            Event::MessageDeleted(value) => Some(Event::MessageDeletedReported(value)),
+            Event::MessageReactionAdded(value) => Some(Event::MessageReactionAddedReported(value)),
+            Event::MessageReactionRemoved(value) => {
+                Some(Event::MessageReactionRemovedReported(value))
+            }
+            Event::MessageSent(value) => Some(Event::MessageSentReported(value)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    events.extend(reports);
+    events
 }
 
 fn sample_session_started() -> Event {
@@ -1258,6 +1274,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             protocol_version: PROTOCOL_VERSION,
             client_name: "provider".into(),
             client_kind: ClientKind::Provider,
+            capabilities: Default::default(),
         }),
         HarnessInputMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
@@ -1478,7 +1495,7 @@ fn event_name_round_trips_from_string() {
 fn message_fact_events_have_distinct_required_v11_wire_shapes() {
     let facts = representative_events()
         .into_iter()
-        .filter(|event| event.name().category() == &EventCategory::Message)
+        .filter(|event| event.message_agent_target().is_some())
         .collect::<Vec<_>>();
     assert_eq!(facts.len(), 6);
     for fact in facts {
@@ -1537,6 +1554,32 @@ fn message_fact_events_have_distinct_required_v11_wire_shapes() {
     }
 }
 
+/// Message bridges publish transient report names while the harness alone
+/// converts those reports into the existing canonical fact names.
+#[test]
+fn message_reports_are_transient_and_convert_to_canonical_facts() {
+    let canonical = representative_events()
+        .into_iter()
+        .filter(|event| event.message_agent_target().is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(canonical.len(), 6);
+    for fact in canonical {
+        let report = match fact.clone() {
+            Event::MessageDelivered(value) => Event::MessageDeliveredReported(value),
+            Event::MessageEdited(value) => Event::MessageEditedReported(value),
+            Event::MessageDeleted(value) => Event::MessageDeletedReported(value),
+            Event::MessageReactionAdded(value) => Event::MessageReactionAddedReported(value),
+            Event::MessageReactionRemoved(value) => Event::MessageReactionRemovedReported(value),
+            Event::MessageSent(value) => Event::MessageSentReported(value),
+            _ => unreachable!("message fixture is canonical"),
+        };
+        assert!(report.is_message_report());
+        assert!(report.defaults_to_transient());
+        assert!(report.name().to_string().ends_with("_reported"));
+        assert_eq!(report.into_canonical_message_fact(), Some(fact));
+    }
+}
+
 /// Ensures every representative first-party event keeps its serde tag,
 /// `EventName` constant, `Event::name()` dispatch, and default durability in
 /// sync. Keep serialized event tags, parsed names, and `Event::name()`
@@ -1570,43 +1613,44 @@ fn first_party_event_wire_tags_match_event_names_and_transience() {
 }
 
 fn expected_default_transient(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::ToolCancelled(_)
-            | Event::ProviderResponseUpdated(_)
-            | Event::ProviderPromptSubmitted(_)
-            | Event::ProviderQuotaReplace(_)
-            | Event::ProviderQuotaPatch(_)
-            | Event::ProviderQuotaClear(_)
-            | Event::HarnessProviderQuotaChanged(_)
-            | Event::AgentWatchesUpdated(_)
-            | Event::AgentStatsUpdated(_)
-            | Event::AgentReplayComplete(_)
-            | Event::SessionReplayComplete(_)
-            | Event::ToolProgress(_)
-            | Event::ToolDelegateProgress(_)
-            | Event::ToolError(_)
-            | Event::ActionSchemaPublished(_)
-            | Event::ActionInvoke(_)
-            | Event::ActionResult(_)
-            | Event::ActionError(_)
-            | Event::ExtensionSessionContextReady(_)
-            | Event::ShellCommandProgress(_)
-            | Event::UiPromptSubmitted(_)
-            | Event::AgentPromptQueued(_)
-            | Event::AgentPromptRecalled(_)
-            | Event::AgentPromptCreated(_)
-            | Event::AgentPromptStarted(_)
-            | Event::AgentPromptTerminated(_)
-            | Event::AgentPromptPrewarmRequested(_)
-            | Event::AgentState(_)
-            | Event::UiCompactRequest(_)
-            | Event::UiCreateAgent(_)
-            | Event::UiPromptDraft(_)
-            | Event::UiFocusChanged(_)
-            | Event::UiSetAgentDisplayName(_)
-            | Event::UiDebugEventStatsRequest(_)
-    )
+    event.is_message_report()
+        || matches!(
+            event,
+            Event::ToolCancelled(_)
+                | Event::ProviderResponseUpdated(_)
+                | Event::ProviderPromptSubmitted(_)
+                | Event::ProviderQuotaReplace(_)
+                | Event::ProviderQuotaPatch(_)
+                | Event::ProviderQuotaClear(_)
+                | Event::HarnessProviderQuotaChanged(_)
+                | Event::AgentWatchesUpdated(_)
+                | Event::AgentStatsUpdated(_)
+                | Event::AgentReplayComplete(_)
+                | Event::SessionReplayComplete(_)
+                | Event::ToolProgress(_)
+                | Event::ToolDelegateProgress(_)
+                | Event::ToolError(_)
+                | Event::ActionSchemaPublished(_)
+                | Event::ActionInvoke(_)
+                | Event::ActionResult(_)
+                | Event::ActionError(_)
+                | Event::ExtensionSessionContextReady(_)
+                | Event::ShellCommandProgress(_)
+                | Event::UiPromptSubmitted(_)
+                | Event::AgentPromptQueued(_)
+                | Event::AgentPromptRecalled(_)
+                | Event::AgentPromptCreated(_)
+                | Event::AgentPromptStarted(_)
+                | Event::AgentPromptTerminated(_)
+                | Event::AgentPromptPrewarmRequested(_)
+                | Event::AgentState(_)
+                | Event::UiCompactRequest(_)
+                | Event::UiCreateAgent(_)
+                | Event::UiPromptDraft(_)
+                | Event::UiFocusChanged(_)
+                | Event::UiSetAgentDisplayName(_)
+                | Event::UiDebugEventStatsRequest(_)
+        )
 }
 
 fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
@@ -1669,11 +1713,17 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "harness.ui_dir",
         "harness.verbosities_available",
         "message.deleted",
+        "message.deleted_reported",
         "message.delivered",
+        "message.delivered_reported",
         "message.edited",
+        "message.edited_reported",
         "message.reaction_added",
+        "message.reaction_added_reported",
         "message.reaction_removed",
+        "message.reaction_removed_reported",
         "message.sent",
+        "message.sent_reported",
         "provider.cache_miss_diagnostic",
         "provider.models_updated",
         "provider.prompt_submitted",
@@ -2275,6 +2325,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
         protocol_version: PROTOCOL_VERSION,
         client_name: "provider".into(),
         client_kind: ClientKind::Provider,
+        capabilities: Default::default(),
     });
     let input_json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(input_json["message"], "hello");

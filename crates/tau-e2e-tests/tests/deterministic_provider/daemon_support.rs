@@ -187,6 +187,7 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: "tau-e2e-daemon".into(),
         client_kind: ClientKind::Ui,
+        capabilities: Default::default(),
     }))?;
     let selectors = [
         EventName::AGENT_PROMPT_CREATED,

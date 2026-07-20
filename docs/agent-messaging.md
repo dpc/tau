@@ -2,12 +2,12 @@
 
 ## External transport foundation
 
-Message bridges publish six immutable `message.*` facts through ordinary event
-emission: delivered, edited, deleted, reaction added, reaction removed, and sent.
-The harness stamps the authenticated configured publisher, commits each fact
-before any consumer acts, and then broadcasts the same record. Slack, Telegram,
-and XMPP all use this interface; bundled IM bridges have no legacy user-message
-prompt path.
+Message bridges publish six transient `message.*_reported` events through
+ordinary event emission: delivered, edited, deleted, reaction added, reaction
+removed, and sent. After each report commits, the harness stamps the
+authenticated configured publisher and publishes the corresponding immutable
+durable `message.*` fact. Slack, Telegram, and XMPP all use this interface;
+bundled IM bridges have no legacy user-message prompt path.
 
 Valid committed facts project to compact `<tau_message event="…">` provider
 context. External content and publisher-provided metadata remain untrusted data;

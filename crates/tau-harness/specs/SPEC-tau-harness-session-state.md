@@ -69,9 +69,9 @@ are rejected during live append and replay. Duplicate detection is global, while
 the known-call check remains branch-relative to the event's explicit fold parent
 rather than the mutable tree head.
 
-Unrouteable extension-published message facts share the session stream with
+Unrouteable canonical external-message facts share the session stream with
 membership records as specified by
-[SPEC-extension-published-message-facts](../../../specs/SPEC-extension-published-message-facts.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 The debug JSONL mirror is part of this boundary: content-bearing agent, prompt,
 provider, tool, shell, or delegation events for ephemeral agents must be

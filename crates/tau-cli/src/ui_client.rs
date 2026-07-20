@@ -159,6 +159,7 @@ pub(crate) fn hello_message(
         protocol_version: PROTOCOL_VERSION,
         client_name: client_name.into(),
         client_kind: ClientKind::Ui,
+        capabilities: Default::default(),
     })
 }
 

@@ -13,7 +13,7 @@ rejected. The deadline starts when the event loop registers the waiter.
 
 It completes when canonical input for that agent has passed its normal
 acceptance boundary and is queued with inference activation:
-user or extension prompts, internal/timer prompts, peer-agent messages and extension-published message facts, later model-visible watch notifications, loop-guard pivots,
+user or extension prompts, internal/timer prompts, peer-agent messages and canonical external-message facts, later model-visible watch notifications, loop-guard pivots,
 and unsuppressed activating background-completion prompts. Passive restore or
 background notices, progress, replay-only traffic, foreground sibling results,
 and input for another agent do not wake it. If its deadline is processed first,

@@ -1244,6 +1244,7 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: "tau-quiet-provider".into(),
                     client_kind: tau_proto::ClientKind::Provider,
+                    capabilities: Default::default(),
                 },
             )))?;
             writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsUpdated(
@@ -1351,6 +1352,9 @@ fn connect_ready_message_publisher(h: &mut Harness, connection_id: &str, name: &
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind: tau_proto::ClientKind::Tool,
+            peer_capabilities: [tau_proto::PeerCapability::MessageBridge]
+                .into_iter()
+                .collect(),
             require: true,
             respawn_allowed: true,
             pid: None,

@@ -3,7 +3,7 @@
 One local gateway exclusively owns a shared token, `getUpdates` cursor,
 webhook/conflict handling, stream lock, durable offset and recent-ID dedup state,
 allowlist/destination policy, and sends. Per-session sidecars own only live local
-registration and direct `message.delivered` publication; they never poll or
+registration and transient `message.delivered_reported` submission; they never poll or
 select raw chat IDs. The private bounded sanitized same-user socket is local
 coordination, not a sandbox or authentication boundary, and token-bearing data
 stays gateway-only.
@@ -12,16 +12,16 @@ Durable per-stream state contains offset, links/selections, recent IDs, and
 counters, never pending deliveries. Intentional handling or rejection advances
 state, but required reply failure does not advance the offset or later same-batch
 work. Enqueue counts as handled, so a crash after offset advance and before a
-sidecar drains its live queue may lose publication; there is no durable delivery
+sidecar drains its live queue may lose report submission; there is no durable delivery
 ACK or exactly-once guarantee.
 
 Live leases disappear on unregister, goodbye, disconnect, heartbeat expiry, or
 restart. Queued delivery drops when route/lifecycle authority disappears, and a
-sidecar rechecks current registration before publication. Sends require a live
+sidecar rechecks current registration before report submission. Sends require a live
 registration owned by that exact requesting sidecar and a gateway-selected
 configured or linked chat, never model coordinates.
 
-Harness replay performs no Telegram I/O or fact publication and reconstructs no
+Harness replay performs no Telegram I/O or report submission and reconstructs no
 live sidecar registration or routing authority. Gateway restart may recover its
 own durable offset, links/selections, and recent-ID state; that does not recreate
 a sidecar lease.
