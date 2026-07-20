@@ -1101,7 +1101,7 @@ fn representative_events() -> Vec<Event> {
                 standalone_compaction_threshold: None,
             }],
         }),
-        Event::ProviderQuotaReplace(ProviderQuotaReplace {
+        Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
             sequence: 1,
@@ -1109,7 +1109,7 @@ fn representative_events() -> Vec<Event> {
             windows: Vec::new(),
             route_bindings: Vec::new(),
         }),
-        Event::ProviderQuotaPatch(ProviderQuotaPatch {
+        Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
             sequence: 2,
@@ -1117,7 +1117,7 @@ fn representative_events() -> Vec<Event> {
             removed_window_keys: Vec::new(),
             route_bindings: Vec::new(),
         }),
-        Event::ProviderQuotaClear(ProviderQuotaClear {
+        Event::ProviderQuotaClearReported(ProviderQuotaClear {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
             sequence: 3,
@@ -1708,9 +1708,9 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ProviderModelsUpdated(_)
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderPromptSubmitted(_)
-                | Event::ProviderQuotaReplace(_)
-                | Event::ProviderQuotaPatch(_)
-                | Event::ProviderQuotaClear(_)
+                | Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
                 | Event::HarnessProviderQuotaChanged(_)
                 | Event::AgentWatchesUpdated(_)
                 | Event::AgentStatsUpdated(_)
@@ -1818,9 +1818,9 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "provider.models_declared",
         "provider.models_updated",
         "provider.prompt_submitted",
-        "provider.quota_clear",
-        "provider.quota_patch",
-        "provider.quota_replace",
+        "provider.quota_clear_reported",
+        "provider.quota_patch_reported",
+        "provider.quota_replace_reported",
         "provider.response_finished",
         "provider.response_updated",
         "provider.tool_error",

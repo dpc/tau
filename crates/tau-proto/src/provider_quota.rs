@@ -154,17 +154,17 @@ pub struct ProviderQuotaRouteBinding {
     pub provenance: ProviderQuotaBindingProvenance,
 }
 
-/// Atomic full provider quota snapshot.
+/// Full provider quota replacement observation awaiting harness validation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderQuotaReplace {
-    /// Provider namespace owning the state.
+    /// Provider namespace named by the report.
     pub provider: ProviderName,
     /// Opaque profile/account generation.
     pub profile_epoch: ProviderQuotaEpoch,
     /// Strictly increasing sequence within the epoch.
     pub sequence: u64,
-    /// Whether this event establishes a previously unseen epoch.
+    /// Whether this report proposes establishing a previously unseen epoch.
     pub establishes_new_epoch: bool,
     /// Complete bounded set of current windows.
     pub windows: Vec<ProviderQuotaWindow>,
@@ -172,11 +172,12 @@ pub struct ProviderQuotaReplace {
     pub route_bindings: Vec<ProviderQuotaRouteBinding>,
 }
 
-/// Sparse provider quota update containing complete records for changed keys.
+/// Sparse provider quota observation containing complete records for changed
+/// keys.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderQuotaPatch {
-    /// Provider namespace owning the state.
+    /// Provider namespace named by the report.
     pub provider: ProviderName,
     /// Opaque profile/account generation.
     pub profile_epoch: ProviderQuotaEpoch,
@@ -190,15 +191,15 @@ pub struct ProviderQuotaPatch {
     pub route_bindings: Vec<ProviderQuotaRouteBinding>,
 }
 
-/// Explicit removal of quota state for one provider epoch.
+/// Provider quota clear observation awaiting harness validation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderQuotaClear {
-    /// Provider namespace owning the state.
+    /// Provider namespace named by the report.
     pub provider: ProviderName,
-    /// Epoch removed by this clear.
+    /// Epoch targeted by this clear report.
     pub profile_epoch: ProviderQuotaEpoch,
-    /// Strictly increasing sequence within the cleared epoch.
+    /// Proposed strictly increasing sequence within the targeted epoch.
     pub sequence: u64,
 }
 

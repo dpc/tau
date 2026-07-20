@@ -325,12 +325,12 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "models_declared");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
-    pub const PROVIDER_QUOTA_REPLACE: Self =
-        Self::from_static(EventCategory::Provider, "quota_replace");
-    pub const PROVIDER_QUOTA_PATCH: Self =
-        Self::from_static(EventCategory::Provider, "quota_patch");
-    pub const PROVIDER_QUOTA_CLEAR: Self =
-        Self::from_static(EventCategory::Provider, "quota_clear");
+    pub const PROVIDER_QUOTA_REPLACE_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "quota_replace_reported");
+    pub const PROVIDER_QUOTA_PATCH_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "quota_patch_reported");
+    pub const PROVIDER_QUOTA_CLEAR_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "quota_clear_reported");
     pub const PROVIDER_TOOL_RESULT: Self =
         Self::from_static(EventCategory::Provider, "tool_result");
     pub const PROVIDER_TOOL_ERROR: Self = Self::from_static(EventCategory::Provider, "tool_error");

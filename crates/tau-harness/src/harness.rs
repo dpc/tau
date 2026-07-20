@@ -7311,7 +7311,10 @@ impl Harness {
                 .route_bindings
                 .retain(|binding| !changed_models.contains(&binding.model));
             let changed = current.snapshot.clone();
-            self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::HarnessProviderQuotaChanged(changed),
+            );
         }
     }
 
@@ -8371,6 +8374,32 @@ impl Harness {
             // mutable `provider.models_declared` input instead.
             return Ok(());
         }
+        if matches!(
+            event,
+            Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
+        ) {
+            // This is only declarative event-authority admission. Per
+            // `specs/DECISION-generic-peer-event-emission.md`, provider ownership,
+            // route bindings, bounds, and epoch/sequence validation run from the
+            // committed-event consumer. A configured Provider's unowned payload
+            // still commits as its report before downstream validation rejects it.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                entry.kind == ClientKind::Provider && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks provider quota report authority"
+                );
+                return Ok(());
+            }
+            self.handle_extension_fallback_event(source_id, event, transient_override);
+            return Ok(());
+        }
         if matches!(event, Event::ProviderModelsDeclared(_)) {
             // This is declarative source-aware admission, not provider-model
             // processing. `DECISION-generic-peer-event-emission` requires the
@@ -8465,6 +8494,15 @@ impl Harness {
             self.process_committed_tool_terminal_report(peer_context, event);
             return;
         }
+        if matches!(
+            event,
+            Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
+        ) {
+            self.process_committed_provider_quota_report(peer_context, event);
+            return;
+        }
         let Event::ProviderModelsDeclared(declaration) = event else {
             return;
         };
@@ -8514,6 +8552,53 @@ impl Harness {
         }
         if extension.activation_reservation.is_some() {
             self.finish_pending_provider_model_declaration(source_id.as_str());
+        }
+    }
+
+    /// Apply one committed provider-quota report from the still-current
+    /// captured provider generation.
+    ///
+    /// The report has already passed ordinary interception, commit, and
+    /// broadcast. Provider ownership, route bindings, bounds, and
+    /// epoch/sequence transitions intentionally remain downstream under
+    /// `DECISION-generic-peer-event-emission`.
+    fn process_committed_provider_quota_report(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| extension.kind == ClientKind::Provider)
+        else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.instance_id == extension.instance_id
+                        && entry.kind == ClientKind::Provider
+                        && entry.state != ExtensionState::Disconnected
+                });
+        if !source_is_current {
+            // A parked stale-generation report remains a committed observation,
+            // but it cannot mutate the replacement provider's current state.
+            return;
+        }
+        match event {
+            Event::ProviderQuotaReplaceReported(replace) => {
+                self.handle_provider_quota_replace(extension.source.as_str(), replace.clone());
+            }
+            Event::ProviderQuotaPatchReported(patch) => {
+                self.handle_provider_quota_patch(extension.source.as_str(), patch.clone());
+            }
+            Event::ProviderQuotaClearReported(clear) => {
+                self.handle_provider_quota_clear(extension.source.as_str(), clear.clone());
+            }
+            _ => unreachable!("caller filters provider quota reports"),
         }
     }
 
@@ -9292,18 +9377,6 @@ impl Harness {
                 } else {
                     self.publish_agents_md_available(source_id, agents);
                 }
-                Ok(None)
-            }
-            Event::ProviderQuotaReplace(replace) => {
-                self.handle_provider_quota_replace(source_id, replace);
-                Ok(None)
-            }
-            Event::ProviderQuotaPatch(patch) => {
-                self.handle_provider_quota_patch(source_id, patch);
-                Ok(None)
-            }
-            Event::ProviderQuotaClear(clear) => {
-                self.handle_provider_quota_clear(source_id, clear);
                 Ok(None)
             }
             Event::ExtensionContextProviderRegister(_) => {
@@ -12384,6 +12457,9 @@ impl Harness {
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
+                | Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
         )
     }
 
@@ -12442,6 +12518,7 @@ impl Harness {
                 | Event::ToolResult(_)
                 | Event::ToolError(_)
                 | Event::ToolCancelled(_)
+                | Event::HarnessProviderQuotaChanged(_)
         )
     }
 
@@ -14891,7 +14968,10 @@ impl Harness {
                 snapshot: changed.clone(),
             },
         );
-        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessProviderQuotaChanged(changed),
+        );
     }
 
     fn handle_provider_quota_patch(
@@ -14978,7 +15058,10 @@ impl Harness {
                 snapshot: changed.clone(),
             },
         );
-        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessProviderQuotaChanged(changed),
+        );
     }
 
     fn handle_provider_quota_clear(
@@ -15051,7 +15134,10 @@ impl Harness {
         };
         self.provider_quota_capabilities
             .insert(provider.clone(), changed.clone());
-        self.publish_event(None, Event::HarnessProviderQuotaChanged(changed));
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessProviderQuotaChanged(changed),
+        );
     }
 
     fn retire_provider_quota_epoch(

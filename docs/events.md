@@ -255,12 +255,16 @@ their selected models.
   modalities; omitted modality metadata means text-only. The harness then publishes
   `harness.models_available` and related role/model availability events. Current
   state replay regenerates only this canonical event, never the declaration.
-- **`provider.quota_replace`**, **`provider.quota_patch`**, and
-  **`provider.quota_clear`** — Transient provider-owned account-quota current
-  state. Replacements establish or reconcile an opaque profile epoch; patches
-  upsert complete stable-key records; clears remove only the matching epoch. The
-  harness verifies provider ownership, bounds, epoch, and sequence before
-  projecting `harness.provider_quota_changed`.
+- **`provider.quota_replace_reported`**,
+  **`provider.quota_patch_reported`**, and
+  **`provider.quota_clear_reported`** — Transient provider-authored account-quota
+  observations. Replacements establish or reconcile an opaque profile epoch;
+  patches upsert complete stable-key records; clears request removal of only the
+  matching epoch. Reports commit through ordinary interception before the
+  harness verifies provider/route ownership, bounds, epoch, and sequence.
+  Accepted reports derive the canonical current state defined under
+  [Harness general](#harness-general); late subscribers never receive raw
+  reports.
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Transient provider-owned live response update.

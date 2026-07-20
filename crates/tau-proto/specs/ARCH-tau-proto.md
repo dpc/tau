@@ -38,12 +38,15 @@ event persistence or the harness-extension interface require the separately
 reviewed, human-confirmed decision mandated by
 [DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
-Bounded provider quota records are transient current state. Provider
-replace/patch/clear events carry opaque profile epochs, strict sequences,
+Bounded provider quota reports are transient provider observations.
+`provider.quota_replace_reported`, `provider.quota_patch_reported`, and
+`provider.quota_clear_reported` carry opaque profile epochs, strict sequences,
 complete stable-key window records with independent usage/timing clocks, and
-exact `ModelId` route bindings. Harness projections are full current snapshots;
-none of these events are semantic transcript history. The trust and pacing
-contract is [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
+exact `ModelId` route bindings. Only the harness publishes protected
+`harness.provider_quota_changed` full current snapshots after downstream
+validation. None of these events are semantic transcript history. The trust and
+pacing contract is
+[SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
 `AgentId` wire decoding, serialization, durable parsing, equality, and display

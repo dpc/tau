@@ -2299,11 +2299,34 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     wait_for_runtime_frames(&output, |frames| {
         frames
             .iter()
-            .filter(|frame| matches!(input_event(frame), Some(Event::ProviderQuotaPatch(_))))
+            .filter(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderQuotaPatchReported(_))
+                )
+            })
             .count()
             == 2
     });
     let frames = decode_frames(&output.bytes());
+    assert!(
+        frames
+            .iter()
+            .filter_map(|frame| {
+                let HarnessInputMessage::Emit(emit) = frame else {
+                    return None;
+                };
+                matches!(
+                    emit.event.as_ref(),
+                    Event::ProviderQuotaReplaceReported(_)
+                        | Event::ProviderQuotaPatchReported(_)
+                        | Event::ProviderQuotaClearReported(_)
+                )
+                .then_some(emit.transient)
+            })
+            .all(std::convert::identity),
+        "first-party quota reports must set explicit transient metadata"
+    );
     let status = frames
         .iter()
         .find_map(|frame| match input_event(frame) {
@@ -2647,9 +2670,12 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
         })
     });
     wait_for_runtime_frames(&output, |frames| {
-        frames
-            .iter()
-            .any(|frame| matches!(input_event(frame), Some(Event::ProviderQuotaPatch(_))))
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderQuotaPatchReported(_))
+            )
+        })
     });
     let mut peer = prompt();
     peer.agent_prompt_id = "telemetry-peer".into();

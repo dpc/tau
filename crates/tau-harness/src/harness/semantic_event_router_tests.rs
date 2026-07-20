@@ -1,7 +1,8 @@
 use tau_proto::{
     AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderModelsDeclared,
-    ProviderModelsUpdated, SessionAgentLoaded, SessionAgentUnloaded, ToolCancelled, ToolError,
-    ToolName, ToolProgress, ToolResult, ToolResultKind, ToolType,
+    ProviderModelsUpdated, ProviderName, ProviderQuotaClear, ProviderQuotaEpoch,
+    ProviderQuotaPatch, ProviderQuotaReplace, SessionAgentLoaded, SessionAgentUnloaded,
+    ToolCancelled, ToolError, ToolName, ToolProgress, ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
@@ -16,6 +17,47 @@ fn provider_model_state_never_enters_semantic_history() {
         Event::ProviderModelsUpdated(ProviderModelsUpdated {
             publisher_extension_id: ExtensionName::from("provider"),
             models: Vec::new(),
+        }),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
+/// Provider quota observations and canonical current snapshots remain outside
+/// semantic history even when a peer incorrectly requests durable publication.
+#[test]
+fn provider_quota_state_never_enters_semantic_history() {
+    let provider = ProviderName::new("chatgpt");
+    let epoch = ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
+    for event in [
+        Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
+            provider: provider.clone(),
+            profile_epoch: epoch.clone(),
+            sequence: 1,
+            establishes_new_epoch: true,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
+        }),
+        Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
+            provider: provider.clone(),
+            profile_epoch: epoch.clone(),
+            sequence: 2,
+            windows: Vec::new(),
+            removed_window_keys: Vec::new(),
+            route_bindings: Vec::new(),
+        }),
+        Event::ProviderQuotaClearReported(ProviderQuotaClear {
+            provider: provider.clone(),
+            profile_epoch: epoch.clone(),
+            sequence: 3,
+        }),
+        Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
+            provider,
+            profile_epoch: epoch,
+            sequence: 3,
+            windows: Vec::new(),
+            route_bindings: Vec::new(),
         }),
     ] {
         assert!(!should_persist_event(&event, false));

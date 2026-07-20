@@ -2,8 +2,8 @@
 
 ## Status
 
-The external-message, provider-model, tool-lifecycle, tool-progress, and
-terminal-tool-outcome slices
+The external-message, provider-model, provider-quota, tool-lifecycle,
+tool-progress, and terminal-tool-outcome slices
 now use generic `Emit` publication, immutable authenticated internal publisher
 snapshots, source-aware admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
@@ -105,6 +105,14 @@ Subscribe-time current-state replay synthesizes canonical updates with that stab
 publisher and harness source metadata only; it never replays declarations or reruns
 their side-effects. The payload and event-name contract is documented in
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-model-declarations-and-canonical-state).
+
+Configured Provider peers publish explicitly transient
+`provider.quota_*_reported` observations through ordinary generic publication.
+Only the post-commit consumer revalidates the captured live generation,
+provider/route ownership, bounds, and epoch/sequence transition before mutating
+ephemeral current state and publishing protected harness-sourced
+`harness.provider_quota_changed`. See
+[SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

@@ -1930,7 +1930,10 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     let established = quota
         .ensure_profile(provider.clone(), 7)
         .expect("valid quota test value");
-    assert!(matches!(established, Event::ProviderQuotaReplace(_)));
+    assert!(matches!(
+        established,
+        Event::ProviderQuotaReplaceReported(_)
+    ));
     let (epoch, fetch_sequence) = quota
         .begin_fetch(&provider)
         .expect("valid quota test value");
@@ -1952,7 +1955,7 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     };
     assert!(matches!(
         quota.merge_rolling(model, 7, rolling, 2_000_000_000_000),
-        Some(Event::ProviderQuotaPatch(_))
+        Some(Event::ProviderQuotaPatchReported(_))
     ));
     let full = tau_provider_codex::FullQuotaSnapshot {
         windows: vec![tau_provider_codex::QuotaWindowObservation {
@@ -1966,7 +1969,7 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
             remaining_seconds: Some(500_000),
         }],
     };
-    let Event::ProviderQuotaReplace(replaced) = quota
+    let Event::ProviderQuotaReplaceReported(replaced) = quota
         .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_001_000)
         .expect("valid quota test value")
     else {
@@ -1974,6 +1977,42 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
     };
     assert_eq!(replaced.windows[0].used_basis_points, 6_000);
     assert_eq!(replaced.route_bindings.len(), 1);
+}
+
+/// First-party replace, patch, and coordinator-generated clear observations use
+/// their report variants with explicit transient Emit metadata.
+#[test]
+fn quota_report_messages_are_explicitly_transient_for_every_operation() {
+    let provider = ProviderName::new("chatgpt");
+    let mut quota = QuotaCoordinator::default();
+    let replace = quota
+        .ensure_profile(provider.clone(), 7)
+        .expect("establish quota profile");
+    let epoch = quota.profile_epoch(&provider).expect("profile epoch");
+    let patch = Event::ProviderQuotaPatchReported(tau_proto::ProviderQuotaPatch {
+        provider: provider.clone(),
+        profile_epoch: epoch,
+        sequence: 2,
+        windows: Vec::new(),
+        removed_window_keys: Vec::new(),
+        route_bindings: Vec::new(),
+    });
+    let clear = quota.clear_profile(&provider).expect("clear quota profile");
+
+    for (event, expected_name) in [
+        (
+            replace,
+            tau_proto::EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+        ),
+        (patch, tau_proto::EventName::PROVIDER_QUOTA_PATCH_REPORTED),
+        (clear, tau_proto::EventName::PROVIDER_QUOTA_CLEAR_REPORTED),
+    ] {
+        let HarnessInputMessage::Emit(emit) = quota_report_message(event) else {
+            panic!("quota helper must produce Emit");
+        };
+        assert!(emit.transient);
+        assert_eq!(emit.event.name(), expected_name);
+    }
 }
 
 /// The real two-pool account shape remains unbound after full reconciliation,
@@ -1997,7 +2036,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     let full = tau_provider_codex::FullQuotaSnapshot {
         windows: vec![window("codex", 4_400), window("codex_bengalfox", 0)],
     };
-    let Event::ProviderQuotaReplace(replaced) = quota
+    let Event::ProviderQuotaReplaceReported(replaced) = quota
         .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_000_000)
         .expect("full quota replacement")
     else {
@@ -2010,7 +2049,7 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
         r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":45,"window_minutes":10080,"reset_at":2100000000}}}"#,
     )
     .expect("official nameless turn event");
-    let Event::ProviderQuotaPatch(patch) = quota
+    let Event::ProviderQuotaPatchReported(patch) = quota
         .merge_rolling(model.clone(), 7, observation, 2_000_000_001_000)
         .expect("quota binding patch")
     else {

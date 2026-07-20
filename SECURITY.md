@@ -109,6 +109,15 @@ while existing provider/cancellation/background transcript persistence is
 unchanged. Ephemeral-agent classification suppresses raw reports and every
 projection from durable debug JSONL. See
 [`SPEC-terminal-tool-reports-and-canonical-outcomes`](specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Provider peers likewise submit transient
+`provider.quota_*_reported` observations before any account-state acceptance.
+Only the post-commit consumer may validate the captured live generation,
+provider/model-route ownership, bounded records, and epoch/sequence transition,
+then publish protected harness-sourced `harness.provider_quota_changed`.
+Unowned or stale reports may remain observable as committed observations but
+cannot mutate current quota state. Neither reports nor canonical snapshots enter
+semantic journals or cold replay; they contain no credentials or account IDs.
+See [SPEC-provider-quota-pacing](specs/SPEC-provider-quota-pacing.md).
 Committed terminal result reports may carry typed provider images for downstream
 validation, but every debug JSONL projection clears image bytes under
 [`SPEC-typed-image-tool-results`](specs/SPEC-typed-image-tool-results.md); only

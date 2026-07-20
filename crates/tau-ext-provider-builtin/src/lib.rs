@@ -282,7 +282,7 @@ impl QuotaCoordinator {
                 failure_attempt: 0,
             },
         );
-        Some(Event::ProviderQuotaReplace(
+        Some(Event::ProviderQuotaReplaceReported(
             tau_proto::ProviderQuotaReplace {
                 provider,
                 profile_epoch: epoch,
@@ -296,11 +296,13 @@ impl QuotaCoordinator {
 
     fn clear_profile(&mut self, provider: &ProviderName) -> Option<Event> {
         let current = self.profiles.remove(provider)?;
-        Some(Event::ProviderQuotaClear(tau_proto::ProviderQuotaClear {
-            provider: provider.clone(),
-            profile_epoch: current.epoch,
-            sequence: current.sequence.saturating_add(1),
-        }))
+        Some(Event::ProviderQuotaClearReported(
+            tau_proto::ProviderQuotaClear {
+                provider: provider.clone(),
+                profile_epoch: current.epoch,
+                sequence: current.sequence.saturating_add(1),
+            },
+        ))
     }
 
     fn refresh_delay(&self, provider: &ProviderName) -> Duration {
@@ -444,7 +446,7 @@ impl QuotaCoordinator {
         current.failure_attempt = 0;
         let sequence = current.sequence;
         current.windows = candidate;
-        Some(Event::ProviderQuotaReplace(
+        Some(Event::ProviderQuotaReplaceReported(
             tau_proto::ProviderQuotaReplace {
                 provider,
                 profile_epoch: epoch,
@@ -535,15 +537,29 @@ impl QuotaCoordinator {
         if windows.is_empty() && route_bindings.is_empty() {
             return None;
         }
-        Some(Event::ProviderQuotaPatch(tau_proto::ProviderQuotaPatch {
-            provider,
-            profile_epoch: current.epoch.clone(),
-            sequence,
-            windows,
-            removed_window_keys: Vec::new(),
-            route_bindings,
-        }))
+        Some(Event::ProviderQuotaPatchReported(
+            tau_proto::ProviderQuotaPatch {
+                provider,
+                profile_epoch: current.epoch.clone(),
+                sequence,
+                windows,
+                removed_window_keys: Vec::new(),
+                route_bindings,
+            },
+        ))
     }
+}
+
+/// Wrap one provider quota observation in explicitly transient publication
+/// metadata.
+fn quota_report_message(event: Event) -> HarnessInputMessage {
+    debug_assert!(matches!(
+        event,
+        Event::ProviderQuotaReplaceReported(_)
+            | Event::ProviderQuotaPatchReported(_)
+            | Event::ProviderQuotaClearReported(_)
+    ));
+    HarnessInputMessage::emit_with_transient(event, true)
 }
 
 fn quota_profile_identity(config: &ResolvedConfig) -> QuotaProfileIdentity {
@@ -1429,7 +1445,7 @@ where
         self.reconcile_prewarm_profile(provider, config);
         let identity = quota_profile_identity(config);
         if let Some(event) = self.quota.ensure_profile(provider.clone(), identity) {
-            handle.send(HarnessInputMessage::emit(event))?;
+            handle.send(quota_report_message(event))?;
         }
         Ok(self.start_quota_fetch_if_due(provider, config))
     }
@@ -1486,7 +1502,7 @@ where
         } else {
             self.clear_prewarm_profile(&model.provider);
             if let Some(event) = self.quota.clear_profile(&model.provider) {
-                handle.send(HarnessInputMessage::emit(event))?;
+                handle.send(quota_report_message(event))?;
             }
         }
         Ok(backend)
@@ -2045,7 +2061,7 @@ where
                         observation,
                         observed_at_unix_ms,
                     ) {
-                        handle.send(HarnessInputMessage::emit(event))?;
+                        handle.send(quota_report_message(event))?;
                     }
                 }
                 Ok(WorkerMessage::QuotaFetchFinished {
@@ -2065,7 +2081,7 @@ where
                             snapshot,
                             observed_at_unix_ms,
                         ) {
-                            handle.send(HarnessInputMessage::emit(event))?;
+                            handle.send(quota_report_message(event))?;
                             let delay = self.quota.refresh_delay(&refresh_provider);
                             self.schedule_quota_refresh(refresh_provider, refresh_epoch, delay);
                         } else if self.quota.epoch_matches(&refresh_provider, &refresh_epoch) {
@@ -2118,7 +2134,7 @@ where
                             }
                         } else if let Some(event) = self.quota.clear_profile(&provider) {
                             self.clear_prewarm_profile(&provider);
-                            handle.send(HarnessInputMessage::emit(event))?;
+                            handle.send(quota_report_message(event))?;
                         } else {
                             self.clear_prewarm_profile(&provider);
                         }

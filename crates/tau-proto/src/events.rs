@@ -4691,12 +4691,15 @@ pub enum Event {
     ProviderModelsDeclared(ProviderModelsDeclared),
     #[serde(rename = "provider.models_updated")]
     ProviderModelsUpdated(ProviderModelsUpdated),
-    #[serde(rename = "provider.quota_replace")]
-    ProviderQuotaReplace(ProviderQuotaReplace),
-    #[serde(rename = "provider.quota_patch")]
-    ProviderQuotaPatch(ProviderQuotaPatch),
-    #[serde(rename = "provider.quota_clear")]
-    ProviderQuotaClear(ProviderQuotaClear),
+    /// Provider-authored full quota observation awaiting harness validation.
+    #[serde(rename = "provider.quota_replace_reported")]
+    ProviderQuotaReplaceReported(ProviderQuotaReplace),
+    /// Provider-authored sparse quota observation awaiting harness validation.
+    #[serde(rename = "provider.quota_patch_reported")]
+    ProviderQuotaPatchReported(ProviderQuotaPatch),
+    /// Provider-authored quota-clear observation awaiting harness validation.
+    #[serde(rename = "provider.quota_clear_reported")]
+    ProviderQuotaClearReported(ProviderQuotaClear),
     #[serde(rename = "provider.tool_result")]
     ProviderToolResult(ToolResult),
     #[serde(rename = "provider.tool_error")]
@@ -5077,9 +5080,9 @@ impl Event {
         match self {
             Self::ProviderModelsDeclared(_) => EventName::PROVIDER_MODELS_DECLARED,
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
-            Self::ProviderQuotaReplace(_) => EventName::PROVIDER_QUOTA_REPLACE,
-            Self::ProviderQuotaPatch(_) => EventName::PROVIDER_QUOTA_PATCH,
-            Self::ProviderQuotaClear(_) => EventName::PROVIDER_QUOTA_CLEAR,
+            Self::ProviderQuotaReplaceReported(_) => EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+            Self::ProviderQuotaPatchReported(_) => EventName::PROVIDER_QUOTA_PATCH_REPORTED,
+            Self::ProviderQuotaClearReported(_) => EventName::PROVIDER_QUOTA_CLEAR_REPORTED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,
             _ => return None,
@@ -5237,9 +5240,9 @@ impl Event {
                 | Self::ProviderModelsDeclared(_)
                 | Self::ProviderModelsUpdated(_)
                 | Self::ProviderResponseUpdated(_)
-                | Self::ProviderQuotaReplace(_)
-                | Self::ProviderQuotaPatch(_)
-                | Self::ProviderQuotaClear(_)
+                | Self::ProviderQuotaReplaceReported(_)
+                | Self::ProviderQuotaPatchReported(_)
+                | Self::ProviderQuotaClearReported(_)
                 | Self::HarnessProviderQuotaChanged(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgressReported(_)

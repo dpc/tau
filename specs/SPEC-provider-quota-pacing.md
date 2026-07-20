@@ -1,5 +1,12 @@
 # SPEC-provider-quota-pacing: Provider quota pacing
 
+## Record justification
+
+Quota behavior spans provider acquisition/reconciliation, protocol DTOs,
+harness-owned current-state validation and replay, and CLI pacing presentation.
+No one implementation area can state the complete ownership, ordering,
+freshness, and applicability contract coherently.
+
 Provider quota is ephemeral bounded current state, not per-response token usage,
 retry policy, credits, spend control, or transcript state. Provider adapters
 normalize upstream quota; the built-in provider reconciles full and sparse
@@ -16,9 +23,23 @@ The governing choice is
 ChatGPT acquires a full account snapshot from authenticated `/wham/usage` and
 reconciles sparse in-band WebSocket `codex.rate_limits` events. The provider adapter owns upstream parsing and
 normalization. The built-in provider extension owns credentials, profile epochs,
-full-fetch coalescing, and sparse/full merging. The harness verifies that the
-sending connection owns the named provider, validates bounds and strict
-epoch/sequence order, and exposes only a complete current snapshot.
+full-fetch coalescing, and sparse/full merging. It submits explicitly transient
+`provider.quota_replace_reported`, `provider.quota_patch_reported`, and
+`provider.quota_clear_reported` events through ordinary generic `Emit`
+interception, commit, and broadcast. A committed report is the provider's
+observation, not accepted current state.
+
+Only the post-commit harness consumer verifies that the captured configured
+Provider generation is still current, the sending connection owns the named
+provider and routes, the payload is bounded, and the epoch/sequence transition
+is valid. Accepted reports update the ephemeral cache and produce a separate
+protected harness-sourced `harness.provider_quota_changed` full snapshot.
+Unowned, invalid, dropped, or stale-generation reports produce no state change
+or canonical snapshot. Reports and canonical snapshots stay out of semantic
+journals and cold replay; runtime debug records retain committed events. Late
+subscribers receive only harness-sourced canonical current state, including an
+empty capability snapshot after clear or route loss. This flow implements
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
 
 ## Applicability
 

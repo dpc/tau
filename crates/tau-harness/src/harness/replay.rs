@@ -617,7 +617,7 @@ impl Harness {
         for snapshot in quota_snapshots {
             let event = Event::HarnessProviderQuotaChanged(snapshot);
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some("harness"), event);
+                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), event);
             }
         }
 

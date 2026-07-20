@@ -50,6 +50,504 @@ fn quota_binding() -> tau_proto::ProviderQuotaRouteBinding {
     }
 }
 
+fn quota_replace_report(epoch: &str, used_basis_points: u16) -> Event {
+    Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
+        provider: tau_proto::ProviderName::new("chatgpt"),
+        profile_epoch: tau_proto::ProviderQuotaEpoch::parse(epoch).expect("epoch"),
+        sequence: 1,
+        establishes_new_epoch: true,
+        windows: vec![quota_window(used_basis_points)],
+        route_bindings: vec![quota_binding()],
+    })
+}
+
+fn committed_quota_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
+    let mut events = Vec::new();
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = harness.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if matches!(
+            entry.event,
+            Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
+                | Event::HarnessProviderQuotaChanged(_)
+        ) {
+            events.push((entry.source, entry.event));
+        }
+    }
+    events
+}
+
+/// A configured Provider's report commits before downstream validation and the
+/// separate harness-sourced canonical current-state snapshot.
+#[test]
+fn provider_quota_report_commits_before_canonical_snapshot() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let debug_path = harness
+        .enable_debug_log(&temp.path().join("debug"))
+        .expect("enable debug log");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-commit-order", 1_000),
+            Some(true),
+        )
+        .expect("submit quota report");
+
+    let events = committed_quota_events(&harness);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            (Some(report_source), Event::ProviderQuotaReplaceReported(_)),
+            (
+                Some(canonical_source),
+                Event::HarnessProviderQuotaChanged(_)
+            )
+        ] if report_source.as_str() == "quota-provider"
+            && canonical_source.as_str() == HARNESS_CONNECTION_ID
+    ));
+    assert_eq!(
+        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+            .snapshot
+            .windows[0]
+            .used_basis_points,
+        1_000
+    );
+    let debug_lines = std::fs::read_to_string(debug_path).expect("read debug log");
+    let quota_debug = debug_lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("debug JSON"))
+        .filter(|line| {
+            matches!(
+                line["event_name"].as_str(),
+                Some("provider.quota_replace_reported" | "harness.provider_quota_changed")
+            )
+        })
+        .map(|line| {
+            (
+                line["source"].as_str().map(str::to_owned),
+                line["event_name"]
+                    .as_str()
+                    .expect("quota debug event name")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        quota_debug,
+        [
+            (
+                Some("quota-provider".to_owned()),
+                "provider.quota_replace_reported".to_owned(),
+            ),
+            (
+                Some(HARNESS_CONNECTION_ID.to_owned()),
+                "harness.provider_quota_changed".to_owned(),
+            ),
+        ]
+    );
+}
+
+/// Replace, patch, and clear all traverse generic report commit before their
+/// respective downstream canonical current-state transitions.
+#[test]
+fn provider_quota_report_family_drives_state_end_to_end() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-family").expect("epoch");
+    let reports = [
+        Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch.clone(),
+            sequence: 1,
+            establishes_new_epoch: true,
+            windows: vec![quota_window(1_000)],
+            route_bindings: vec![quota_binding()],
+        }),
+        Event::ProviderQuotaPatchReported(tau_proto::ProviderQuotaPatch {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch.clone(),
+            sequence: 2,
+            windows: vec![quota_window(2_000)],
+            removed_window_keys: Vec::new(),
+            route_bindings: vec![quota_binding()],
+        }),
+        Event::ProviderQuotaClearReported(tau_proto::ProviderQuotaClear {
+            provider: tau_proto::ProviderName::new("chatgpt"),
+            profile_epoch: epoch,
+            sequence: 3,
+        }),
+    ];
+    for report in reports {
+        harness
+            .handle_extension_event_inner_with_transient("quota-provider", report, Some(true))
+            .expect("submit quota report");
+    }
+
+    assert!(harness.provider_quota.is_empty());
+    let events = committed_quota_events(&harness);
+    assert_eq!(events.len(), 6);
+    for pair in events.chunks_exact(2) {
+        assert!(matches!(
+            pair,
+            [
+                (Some(report_source), report),
+                (
+                    Some(canonical_source),
+                    Event::HarnessProviderQuotaChanged(_)
+                )
+            ] if report_source.as_str() == "quota-provider"
+                && canonical_source.as_str() == HARNESS_CONNECTION_ID
+                && matches!(
+                    report,
+                    Event::ProviderQuotaReplaceReported(_)
+                        | Event::ProviderQuotaPatchReported(_)
+                        | Event::ProviderQuotaClearReported(_)
+                )
+        ));
+    }
+}
+
+/// Payload ownership is downstream domain validation: a configured Provider's
+/// unowned report remains committed but cannot mutate state or derive a fact.
+#[test]
+fn provider_quota_unowned_report_commits_without_canonical_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-unowned", 1_000),
+            Some(false),
+        )
+        .expect("submit unowned quota report");
+
+    assert!(harness.provider_quota.is_empty());
+    assert!(matches!(
+        committed_quota_events(&harness).as_slice(),
+        [(Some(source), Event::ProviderQuotaReplaceReported(_))]
+            if source.as_str() == "quota-provider"
+    ));
+}
+
+/// Even a non-transient quota Emit remains runtime-only: cold resume restores
+/// neither raw reports nor canonical quota current state.
+#[test]
+fn provider_quota_reports_and_state_do_not_cold_replay() {
+    let temp = TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    {
+        let mut harness = quiet_provider_harness(&state).expect("harness");
+        connect_ready_configured_extension(
+            &mut harness,
+            "quota-provider",
+            "quota-provider",
+            tau_proto::ClientKind::Provider,
+        );
+        harness.set_provider_models("quota-provider", vec![quota_model()]);
+        harness
+            .handle_extension_event_inner_with_transient(
+                "quota-provider",
+                quota_replace_report("epoch-no-replay", 1_000),
+                Some(false),
+            )
+            .expect("submit non-transient quota report");
+        assert!(!harness.provider_quota.is_empty());
+        harness.shutdown().expect("shutdown harness");
+    }
+
+    let resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume harness");
+    assert!(resumed.provider_quota.is_empty());
+    assert!(
+        event_log_events(&resumed)
+            .into_iter()
+            .all(|event| !matches!(
+                event,
+                Event::ProviderQuotaReplaceReported(_)
+                    | Event::ProviderQuotaPatchReported(_)
+                    | Event::ProviderQuotaClearReported(_)
+                    | Event::HarnessProviderQuotaChanged(_)
+            ))
+    );
+}
+
+/// Quota report names are default-deny authority: configured wrong-kind,
+/// unconfigured kind-claiming, UI, and external socket peers cannot commit.
+#[test]
+fn provider_quota_report_rejects_non_provider_authority() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    for (source, kind) in [
+        ("tool-peer", tau_proto::ClientKind::Tool),
+        ("core-peer", tau_proto::ClientKind::Core),
+        ("action-peer", tau_proto::ClientKind::Action),
+    ] {
+        connect_ready_configured_extension(&mut harness, source, source, kind);
+        harness
+            .handle_extension_event_inner_with_transient(
+                source,
+                quota_replace_report("epoch-forbidden", 1_000),
+                Some(true),
+            )
+            .expect("reject configured wrong-kind quota report");
+    }
+    connect_test_client(
+        &mut harness,
+        "unconfigured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness
+        .handle_extension_event_inner_with_transient(
+            "unconfigured-provider",
+            quota_replace_report("epoch-forbidden", 1_000),
+            Some(true),
+        )
+        .expect("reject unconfigured provider claim");
+    for (source, kind) in [
+        ("ui-peer", tau_proto::ClientKind::Ui),
+        ("external-peer", tau_proto::ClientKind::External),
+    ] {
+        connect_test_client(&mut harness, source, kind);
+        harness
+            .handle_client_event_inner_with_transient(
+                source,
+                quota_replace_report("epoch-forbidden", 1_000),
+                Some(true),
+            )
+            .expect("reject client-path quota report");
+    }
+
+    assert!(committed_quota_events(&harness).is_empty());
+    assert!(harness.provider_quota.is_empty());
+}
+
+/// Exact interception may replace a mutable report; only the committed
+/// replacement drives downstream quota validation and state.
+#[test]
+fn provider_quota_report_replacement_drives_canonical_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-replaced", 1_000),
+            Some(true),
+        )
+        .expect("submit quota report");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(quota_replace_report(
+                    "epoch-replaced",
+                    4_000,
+                )))),
+            })),
+        )
+        .expect("replace quota report");
+
+    assert_eq!(
+        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+            .snapshot
+            .windows[0]
+            .used_basis_points,
+        4_000
+    );
+
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-invalid-replacement", 5_000),
+            Some(true),
+        )
+        .expect("submit second quota report");
+    let mut invalid_replacement = quota_replace_report("epoch-invalid-replacement", 6_000);
+    let Event::ProviderQuotaReplaceReported(replace) = &mut invalid_replacement else {
+        unreachable!("quota helper returns replacement report");
+    };
+    replace.provider = tau_proto::ProviderName::new("unowned");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(invalid_replacement))),
+            })),
+        )
+        .expect("replace with invalid quota report");
+
+    assert_eq!(
+        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+            .snapshot
+            .windows[0]
+            .used_basis_points,
+        4_000,
+        "the committed replacement must be revalidated downstream"
+    );
+    assert_eq!(
+        committed_quota_events(&harness)
+            .iter()
+            .filter(|(_, event)| matches!(event, Event::HarnessProviderQuotaChanged(_)))
+            .count(),
+        1
+    );
+}
+
+/// Dropping an intercepted quota report prevents both its commit and every
+/// downstream current-state effect.
+#[test]
+fn dropping_provider_quota_report_prevents_canonical_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-dropped", 1_000),
+            Some(true),
+        )
+        .expect("submit quota report");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("drop quota report");
+
+    assert!(committed_quota_events(&harness).is_empty());
+    assert!(harness.provider_quota.is_empty());
+}
+
+/// A report parked before same-source provider replacement still commits with
+/// its captured source, but captured-generation revalidation blocks mutation.
+#[test]
+fn parked_stale_provider_quota_report_cannot_mutate_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+    harness
+        .handle_extension_event_inner_with_transient(
+            "quota-provider",
+            quota_replace_report("epoch-stale", 1_000),
+            Some(true),
+        )
+        .expect("submit quota report");
+
+    harness.handle_disconnect("quota-provider");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness
+        .extensions
+        .entries
+        .get_mut("quota-provider")
+        .expect("replacement provider")
+        .instance_id = 43.into();
+    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("pass stale report");
+
+    assert!(harness.provider_quota.is_empty());
+    assert!(matches!(
+        committed_quota_events(&harness).as_slice(),
+        [(Some(source), Event::ProviderQuotaReplaceReported(_))]
+            if source.as_str() == "quota-provider"
+    ));
+}
+
 /// Replace/Patch enforce source ownership and strict upstream sequencing while
 /// applying complete records by stable key.
 #[test]
@@ -276,20 +774,35 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     harness
         .complete_subscription("late-quota-ui", selectors.clone(), selectors)
         .expect("subscribe to quota current state");
-    let observed = events
-        .lock()
-        .expect("events")
-        .iter()
-        .find_map(|routed| match &routed.frame {
-            HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
-                Event::HarnessProviderQuotaChanged(changed) => {
-                    Some(changed.windows[0].usage_observed_at_unix_ms)
-                }
-                _ => None,
-            },
+    let routed_events = events.lock().expect("events");
+    assert!(
+        routed_events.iter().all(|routed| !matches!(
+            &routed.frame,
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(
+                    delivery.event.as_ref(),
+                    Event::ProviderQuotaReplaceReported(_)
+                        | Event::ProviderQuotaPatchReported(_)
+                        | Event::ProviderQuotaClearReported(_)
+                )
+        )),
+        "late subscribers must never receive raw quota reports"
+    );
+    let observed = routed_events.iter().find_map(|routed| match &routed.frame {
+        HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
+            Event::HarnessProviderQuotaChanged(changed) => Some((
+                routed.source_id.clone(),
+                changed.windows[0].usage_observed_at_unix_ms,
+            )),
             _ => None,
-        });
-    assert_eq!(observed, Some(123_000));
+        },
+        _ => None,
+    });
+    assert_eq!(
+        observed,
+        Some((Some(HARNESS_CONNECTION_ID.into()), 123_000))
+    );
+    drop(routed_events);
     harness.apply_provider_models_snapshot("owner", Vec::new());
     assert!(harness.provider_quota.is_empty());
     let cleared_events = connect_test_client(
@@ -347,8 +860,8 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     );
 }
 
-/// Validated quota current state cannot be dropped or rewritten by an
-/// interceptor, keeping live delivery consistent with catch-up cache truth.
+/// Peers cannot author canonical quota state, while actual canonical
+/// publication overrides interceptor replacement and Drop.
 #[test]
 fn validated_quota_projection_is_must_pass_and_immutable() {
     let original = Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
@@ -371,6 +884,58 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
     assert!(
         super::super::interception::immutable_protected_fact_was_modified(&original, &replacement)
     );
+    assert!(Harness::is_peer_forbidden_harness_fact(&original));
+
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "quota-provider",
+        "quota-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    harness
+        .handle_extension_event_inner_with_transient("quota-provider", original.clone(), Some(true))
+        .expect("reject peer-authored canonical state");
+    assert!(committed_quota_events(&harness).is_empty());
+
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+
+    harness.publish_event(Some(HARNESS_CONNECTION_ID), original.clone());
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(replacement))),
+            })),
+        )
+        .expect("attempt canonical replacement");
+    harness.publish_event(Some(HARNESS_CONNECTION_ID), original.clone());
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("attempt canonical drop");
+
+    let canonical = committed_quota_events(&harness);
+    assert_eq!(canonical.len(), 2);
+    assert!(canonical.iter().all(|(source, event)| {
+        source.as_deref() == Some(HARNESS_CONNECTION_ID) && event == &original
+    }));
 }
 
 /// Explicit Clear retires its epoch at the provider's actual sequence and

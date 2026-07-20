@@ -66,20 +66,61 @@ fn state_validation_rejects_ambiguous_or_untrusted_shapes() {
     assert!(validate_provider_quota_state(&provider, &[window], &[mismatched]).is_err());
 }
 
-/// New quota events retain their tagged JSON names and are transient state
-/// without any field capable of carrying provider credentials.
+/// Every quota report retains its exact JSON/EventName tag, survives CBOR, and
+/// defaults to transient publication without credential-bearing fields.
 #[test]
-fn quota_event_round_trips_as_transient_wire_state() {
-    let event = crate::Event::ProviderQuotaClear(ProviderQuotaClear {
-        provider: ProviderName::new("chatgpt"),
-        profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("valid quota test value"),
-        sequence: 2,
-    });
-    let json = serde_json::to_string(&event).expect("valid quota test value");
-    assert!(json.contains("\"event\":\"provider.quota_clear\""));
-    assert_eq!(
-        serde_json::from_str::<crate::Event>(&json).expect("valid quota test value"),
-        event
-    );
-    assert!(event.defaults_to_transient());
+fn quota_report_family_round_trips_as_transient_wire_state() {
+    let provider = ProviderName::new("chatgpt");
+    let epoch = ProviderQuotaEpoch::parse("epoch-1").expect("valid quota test value");
+    for (event, tag, name) in [
+        (
+            crate::Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
+                provider: provider.clone(),
+                profile_epoch: epoch.clone(),
+                sequence: 1,
+                establishes_new_epoch: true,
+                windows: Vec::new(),
+                route_bindings: Vec::new(),
+            }),
+            "provider.quota_replace_reported",
+            crate::EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
+        ),
+        (
+            crate::Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
+                provider: provider.clone(),
+                profile_epoch: epoch.clone(),
+                sequence: 2,
+                windows: Vec::new(),
+                removed_window_keys: Vec::new(),
+                route_bindings: Vec::new(),
+            }),
+            "provider.quota_patch_reported",
+            crate::EventName::PROVIDER_QUOTA_PATCH_REPORTED,
+        ),
+        (
+            crate::Event::ProviderQuotaClearReported(ProviderQuotaClear {
+                provider: provider.clone(),
+                profile_epoch: epoch.clone(),
+                sequence: 3,
+            }),
+            "provider.quota_clear_reported",
+            crate::EventName::PROVIDER_QUOTA_CLEAR_REPORTED,
+        ),
+    ] {
+        let json = serde_json::to_string(&event).expect("encode quota report as JSON");
+        assert!(json.contains(&format!("\"event\":\"{tag}\"")));
+        assert_eq!(
+            serde_json::from_str::<crate::Event>(&json).expect("decode quota report from JSON"),
+            event
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode quota report as CBOR");
+        assert_eq!(
+            ciborium::from_reader::<crate::Event, _>(cbor.as_slice())
+                .expect("decode quota report from CBOR"),
+            event
+        );
+        assert_eq!(event.name(), name);
+        assert!(event.defaults_to_transient());
+    }
 }
