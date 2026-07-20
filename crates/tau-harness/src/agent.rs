@@ -382,7 +382,7 @@ pub(crate) enum PendingPromptSource {
 pub(crate) struct PendingPrompt {
     /// Prompt text to fold into the conversation.
     pub(crate) text: String,
-    /// Whether this queued prompt is visible user text or hidden internal text.
+    /// Whether this queued prompt is user text or internal model context.
     pub(crate) message_class: PromptMessageClass,
     /// Source marker for lifecycle decisions that must not confuse internal
     /// prompts.
@@ -457,7 +457,7 @@ impl PendingPrompt {
         }
     }
 
-    /// Create a hidden advisory prompt from a named context-size alert.
+    /// Create an internal advisory prompt from a named context-size alert.
     pub(crate) fn context_size_alert(text: String) -> Self {
         let mut prompt = Self::internal(text);
         prompt.source = PendingPromptSource::ContextSizeAlert;
@@ -544,7 +544,9 @@ impl PendingPrompt {
         self
     }
 
-    /// Whether this prompt should be hidden from user-facing UI and metadata.
+    /// Whether this prompt is excluded from user-prompt metadata.
+    ///
+    /// A separately typed internal prompt may still have a UI presentation.
     #[must_use]
     pub(crate) fn is_internal(&self) -> bool {
         self.message_class.is_internal()
@@ -581,6 +583,13 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_context_size_alert(&self) -> bool {
         self.source == PendingPromptSource::ContextSizeAlert
+    }
+
+    /// Durable internal-prompt subtype stamped when this prompt is delivered.
+    #[must_use]
+    pub(crate) fn internal_kind(&self) -> Option<tau_proto::InternalPromptKind> {
+        self.is_context_size_alert()
+            .then_some(tau_proto::InternalPromptKind::ContextSizeAlert)
     }
 
     /// Whether this prompt is a passive background-completion notice.

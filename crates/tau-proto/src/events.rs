@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, HarnessProviderQuotaChanged, MessageDeleted, MessageDelivered, MessageEdited,
-    MessagePhase, MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag,
-    PromptContext, PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
-    ProviderQuotaReplace, ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId,
-    ToolDefinition, ToolGroupName, ToolName, ToolTag,
+    ExtensionName, HarnessProviderQuotaChanged, InternalPromptKind, MessageDeleted,
+    MessageDelivered, MessageEdited, MessagePhase, MessageReactionAdded, MessageReactionRemoved,
+    MessageSent, ModelId, ModelTag, PromptContext, PromptFragment, PromptSubmissionSource,
+    ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace, ProviderTokenUsage,
+    ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
+    ToolTag,
 };
 
 fn default_true() -> bool {
@@ -2792,13 +2793,18 @@ pub enum PromptMessageClass {
     /// Default — visible user-authored prompt text.
     #[default]
     User,
-    /// Hidden control text that still belongs in model context.
+    /// Internal control text that still belongs in model context.
+    ///
+    /// UIs hide this by default; a durable event may carry a typed presentation
+    /// exception such as [`InternalPromptKind::ContextSizeAlert`].
     Internal,
 }
 
 impl PromptMessageClass {
-    /// Returns true for prompt text that should be hidden from user-facing UI
-    /// and latest-user-prompt metadata.
+    /// Returns true for internal prompt text excluded from user-prompt
+    /// metadata.
+    ///
+    /// UIs may still render a separately typed internal presentation.
     #[must_use]
     pub fn is_internal(self) -> bool {
         matches!(self, Self::Internal)
@@ -2821,8 +2827,7 @@ pub struct UiPromptSubmitted {
     /// Agent that should receive this prompt. Agent creation is explicit via
     /// [`UiCreateAgent`]; prompt submissions only target existing agents.
     pub agent_id: AgentId,
-    /// Whether this prompt text is user-authored or hidden internal control
-    /// text.
+    /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
     #[serde(default)]
@@ -3484,10 +3489,12 @@ pub struct AgentPromptSubmitted {
     pub inference_activation: bool,
     /// Prompt text.
     pub text: String,
-    /// Whether this prompt text is user-authored or hidden internal control
-    /// text.
+    /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
+    /// Harness-owned subtype for internal prompts with visible presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_kind: Option<InternalPromptKind>,
     /// Who initiated the prompt.
     #[serde(default)]
     pub originator: PromptOriginator,
@@ -3771,10 +3778,12 @@ pub struct AgentPromptSteered {
     pub inference_activation: bool,
     /// Prompt text appended to the in-flight turn.
     pub text: String,
-    /// Whether this prompt text is user-authored or hidden internal control
-    /// text.
+    /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
+    /// Harness-owned subtype for internal prompts with visible presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_kind: Option<InternalPromptKind>,
     /// Echo of the original queued prompt correlation id, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,

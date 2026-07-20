@@ -89,6 +89,7 @@ impl Harness {
         let notify_watchers = prompt.should_notify_watchers();
         let notification_text = notify_watchers.then(|| prompt.text.clone());
         let inference_activation = prompt.creates_inference_activation();
+        let internal_kind = prompt.internal_kind();
         self.publish_for_agent(
             agent_id,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -96,6 +97,7 @@ impl Harness {
                 agent_id: target_agent_id,
                 text: prompt.text,
                 message_class: prompt.message_class,
+                internal_kind,
                 originator,
                 submission_source: prompt.submission_source,
                 display_name: self.agent_display_name_for_cid(agent_id),

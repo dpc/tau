@@ -779,6 +779,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
             message_class: PromptMessageClass::User,
+            internal_kind: None,
             originator: PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -798,6 +799,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             text: "steer".to_owned(),
             message_class: PromptMessageClass::User,
+            internal_kind: None,
             ctx_id: None,
         }),
         Event::AgentCompactionTriggered(AgentCompactionTriggered {
@@ -2034,6 +2036,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "hello".to_owned(),
         message_class: PromptMessageClass::User,
+        internal_kind: None,
         originator: PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -2100,6 +2103,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "steered".to_owned(),
         message_class: PromptMessageClass::User,
+        internal_kind: None,
         ctx_id: Some("ctx-1".to_owned()),
     };
     let mut legacy = serde_json::to_value(&active_steered).expect("encode legacy base");
@@ -3205,6 +3209,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             agent_id: agent_id("worker"),
             text: "hi".to_owned(),
             message_class: PromptMessageClass::User,
+            internal_kind: None,
             originator: PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -3272,6 +3277,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     .expect("agent prompt decodes");
     assert_eq!(submitted.message_class, PromptMessageClass::User);
     assert_eq!(submitted.originator, PromptOriginator::User);
+    assert_eq!(submitted.internal_kind, None);
 
     let queued: AgentPromptQueued = serde_json::from_value(serde_json::json!({
         "agent_id": "worker",
@@ -3280,15 +3286,72 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     .expect("queued prompt decodes");
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
+    let legacy_steered: AgentPromptSteered = serde_json::from_value(serde_json::json!({
+        "agent_id": "worker",
+        "text": "steered"
+    }))
+    .expect("legacy steered prompt decodes");
+    assert_eq!(legacy_steered.internal_kind, None);
+
     let internal = serde_json::to_value(AgentPromptSteered {
         inference_activation: false,
         agent_id: agent_id("worker"),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         message_class: PromptMessageClass::Internal,
+        internal_kind: None,
         ctx_id: None,
     })
     .expect("serialize steered prompt");
     assert_eq!(internal["message_class"], serde_json::json!("internal"));
+    assert!(internal.get("internal_kind").is_none());
+}
+
+/// Context-size alerts keep a typed optional tag on both durable prompt shapes
+/// while untagged legacy payloads retain their absent-field compatibility.
+#[test]
+fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
+    let submitted = AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("worker"),
+        text: "compact soon".to_owned(),
+        message_class: PromptMessageClass::Internal,
+        internal_kind: Some(InternalPromptKind::ContextSizeAlert),
+        originator: PromptOriginator::User,
+        submission_source: PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+    };
+    let submitted_json = serde_json::to_value(&submitted).expect("serialize submitted alert");
+    assert_eq!(
+        submitted_json["internal_kind"],
+        serde_json::json!("context_size_alert")
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSubmitted>(submitted_json)
+            .expect("deserialize submitted alert")
+            .internal_kind,
+        Some(InternalPromptKind::ContextSizeAlert)
+    );
+
+    let steered = AgentPromptSteered {
+        inference_activation: true,
+        agent_id: agent_id("worker"),
+        text: "compact after tools".to_owned(),
+        message_class: PromptMessageClass::Internal,
+        internal_kind: Some(InternalPromptKind::ContextSizeAlert),
+        ctx_id: None,
+    };
+    let steered_json = serde_json::to_value(&steered).expect("serialize steered alert");
+    assert_eq!(
+        steered_json["internal_kind"],
+        serde_json::json!("context_size_alert")
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSteered>(steered_json)
+            .expect("deserialize steered alert")
+            .internal_kind,
+        Some(InternalPromptKind::ContextSizeAlert)
+    );
 }
 
 /// Ephemeral-agent markers must be backwards-compatible with peers that do not

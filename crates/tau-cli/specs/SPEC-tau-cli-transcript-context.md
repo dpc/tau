@@ -41,6 +41,15 @@ agent restores that agent's own transcript instead of adopting overview history.
 The original sender and recipient projections remain in their respective agent
 transcripts.
 
+Internal prompt facts remain hidden by default. The only context-size alert
+presentation comes from a durable `agent.prompt_submitted` or
+`agent.prompt_steered` fact tagged with
+`internal_kind=context_size_alert`; the UI renders its exact text at that
+fact's live or replay position as `[tau-internal]: <text>`. Missing tags,
+untagged internal prompts, `ctx_id`, and prompt text never imply this
+presentation. This behavior is confirmed by
+[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+
 The overview is renderer-local rather than a durable session index. It contains
 message projections observed by that CLI plus catch-up projections the harness
 replays for agents that are currently loaded when the CLI attaches. If both

@@ -1,3 +1,4 @@
+use super::dispatch::provider_text_response;
 use super::*;
 
 /// Append one framed CBOR record to a semantic-store test journal.
@@ -321,6 +322,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         agent_id: agent_id.clone(),
         text: "ephemeral history".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -1351,6 +1353,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: "before restart".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -1414,6 +1417,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                         agent_id: crate::parse_agent_id("orphan"),
                         text: "orphan prompt".to_owned(),
                         message_class: tau_proto::PromptMessageClass::User,
+                        internal_kind: None,
                         originator: tau_proto::PromptOriginator::User,
                         submission_source: Default::default(),
                         display_name: None,
@@ -1506,6 +1510,7 @@ fn seed_restored_tool_round_for_agent(
                 agent_id: crate::parse_agent_id(agent_id),
                 text: format!("before restart for {agent_id}"),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -2038,6 +2043,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
                 agent_id: agent_id.clone(),
                 text: "history before load".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -2981,6 +2987,171 @@ fn resumed_harness_replays_persisted_session_history() {
         "resumed prompt must include the new prompt: {serialized}",
     );
 
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Submitted and steered context-size alerts survive cold resume as the same
+/// tagged prompt facts at their original journal positions.
+#[test]
+fn resumed_harness_replays_context_size_alert_at_delivery_position() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let alert_text = "compact after the current task";
+    let steered_alert_text = "compact after the current tools";
+    let agent_id;
+
+    {
+        let mut h = echo_harness_for("s1", &state).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        h.available_roles
+            .get_mut(&h.selected_role)
+            .expect("selected role")
+            .context_size_alerts
+            .insert(
+                "compact-soon".to_owned(),
+                tau_config::settings::ContextSizeAlert {
+                    threshold: 100,
+                    enable: true,
+                    message: alert_text.to_owned(),
+                },
+            );
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish work".to_owned()))
+            .expect("dispatch work");
+        let work = read_nth_prompt_created(&h, 0);
+        agent_id = work.agent_id.clone();
+        let mut response =
+            provider_text_response(&work.agent_prompt_id, work.agent_id, "work finished");
+        response.usage = Some(tau_proto::ProviderTokenUsage {
+            model: None,
+            prompt_sent_tokens: 101,
+            prompt_cached_tokens: 0,
+            response_received_tokens: 2,
+            stats: Default::default(),
+        });
+        h.handle_provider_response_finished(response)
+            .expect("finish threshold-crossing response");
+
+        let alert = read_nth_prompt_created(&h, 1);
+        h.handle_provider_response_finished(provider_text_response(
+            &alert.agent_prompt_id,
+            alert.agent_id,
+            "alert acknowledged",
+        ))
+        .expect("finish alert response");
+
+        h.available_roles
+            .get_mut(&h.selected_role)
+            .expect("selected role")
+            .context_size_alerts
+            .insert(
+                "compact-after-tools".to_owned(),
+                tau_config::settings::ContextSizeAlert {
+                    threshold: 200,
+                    enable: true,
+                    message: steered_alert_text.to_owned(),
+                },
+            );
+        h.set_agent_turn_state(
+            &cid,
+            AgentTurnState::ToolsRunning {
+                remaining_calls: vec!["replay-alert-tool".into()],
+            },
+        );
+        let alerts = h.available_roles[&h.selected_role]
+            .context_size_alerts
+            .clone();
+        h.queue_crossed_context_size_alerts(&cid, Some(201), &alerts);
+        h.maybe_complete_agent_turn_for(&cid, "replay-alert-tool");
+
+        h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&state, "s1");
+    }
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let sink = connect_test_client(&mut resumed, "alert-replay-ui", tau_proto::ClientKind::Ui);
+    resumed
+        .handle_client_event(
+            "alert-replay-ui",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: vec![
+                    EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+                    EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_STEERED),
+                    EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+                ],
+                live_selectors: Vec::new(),
+            })),
+        )
+        .expect("subscribe to replay");
+
+    let replay = sink
+        .lock()
+        .expect("replay sink")
+        .iter()
+        .filter_map(|routed| {
+            peel_delivery(&routed.frame)
+                .filter(|delivery| delivery.is_replay())
+                .map(|delivery| delivery.event().clone())
+        })
+        .collect::<Vec<_>>();
+    let crossing_response = replay
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_id == agent_id
+                        && provider_response_contains_text(finished, "work finished")
+            )
+        })
+        .expect("replayed threshold-crossing response");
+    let alert_delivery = replay
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.agent_id == agent_id
+                        && submitted.text == alert_text
+                        && submitted.message_class == tau_proto::PromptMessageClass::Internal
+                        && submitted.internal_kind
+                            == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+            )
+        })
+        .expect("replayed tagged alert delivery");
+    let alert_response = replay
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_id == agent_id
+                        && provider_response_contains_text(finished, "alert acknowledged")
+            )
+        })
+        .expect("replayed alert response");
+    let steered_alert_delivery = replay
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptSteered(steered)
+                    if steered.agent_id == agent_id
+                        && steered.text == steered_alert_text
+                        && steered.message_class == tau_proto::PromptMessageClass::Internal
+                        && steered.internal_kind
+                            == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+            )
+        })
+        .expect("replayed tagged steered alert delivery");
+    assert!(
+        crossing_response < alert_delivery
+            && alert_delivery < alert_response
+            && alert_response < steered_alert_delivery,
+        "replay must preserve the alert fact's original journal position: {replay:?}"
+    );
     resumed.shutdown().expect("shutdown");
 }
 

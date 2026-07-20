@@ -148,6 +148,7 @@ fn prompt_event(agent_id: AgentId) -> Event {
         agent_id,
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -199,6 +200,7 @@ fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
             agent_id: agent_id(),
             text: text.to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -1567,6 +1569,7 @@ fn manual_completion_notification_lookup_is_branch_specific() {
             agent_id: agent_id(),
             text: text.to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
             inference_activation: false,
             ctx_id: None,
         })

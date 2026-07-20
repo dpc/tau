@@ -204,6 +204,7 @@ fn agent_prompt(agent_id: &str, text: &str) -> Event {
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         text: text.to_owned(),
         message_class: PromptMessageClass::User,
+        internal_kind: None,
         originator: PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,

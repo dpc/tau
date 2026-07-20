@@ -226,4 +226,10 @@ compaction responses do not create alert work, and any compaction boundary reset
 runtime crossing eligibility with the rest of context accounting. Their
 configured internal prompt does not itself authorize or initiate compaction. The
 default text asks the agent to use the separately authorized `compact` tool after
-finishing its current task.
+finishing its current task. When the prompt actually reaches the agent, its
+existing durable submitted or steered fact carries the
+`context_size_alert` internal kind. UIs render that fact in journal order as
+`[tau-internal]: <exact configured text>` during live delivery and replay.
+Crossing, queued-delivery, and one-shot suppression state remains runtime-only;
+cleared alerts do not gain synthetic history. This behavior is confirmed by
+[DECISION-context-size-alert-history](DECISION-context-size-alert-history.md).

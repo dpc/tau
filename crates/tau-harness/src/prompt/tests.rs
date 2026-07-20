@@ -92,6 +92,7 @@ fn user_prompt(text: &str) -> Event {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::default(),
         submission_source: Default::default(),
         display_name: None,

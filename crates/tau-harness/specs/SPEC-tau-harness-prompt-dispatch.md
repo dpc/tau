@@ -107,8 +107,10 @@ The effective alert map is prompt-owned, so a role change during inference canno
 alter response-time policy. Usage must strictly exceed the threshold. Failed,
 canceled, stale, duplicate, reactive-recovery, standalone-compaction, and
 inline-compacting responses do not create alert work. Each crossed alert queues
-its configured text as a hidden internal prompt after the current response; tool
-calls finish before the prompt continues the turn. Within one daemon lifetime,
+its configured text as an internal prompt after the current response; tool calls
+finish before the prompt continues the turn. When delivery commits, the existing
+`agent.prompt_submitted` or `agent.prompt_steered` fact carries
+`internal_kind=context_size_alert`. Within one daemon lifetime,
 an alert fires once while usage remains above its threshold and becomes eligible
 again after usage falls to or below the threshold or context accounting resets.
 An accounting reset also removes any still-queued alert prompts so a compaction
@@ -117,6 +119,10 @@ Crossing and queued-delivery state are intentionally runtime-only, like other
 advisory prompt scheduling: cold replay neither synthesizes missed alert work nor
 persists one-shot suppression, and a later successful response re-evaluates
 restored usage. Disabled alerts remain inherited config but never inject prompts.
+The tagged delivery fact itself remains ordinary durable transcript history and
+replays at its original position; no second notice or synthetic replay entry is
+created. This implements
+[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
 
 ## Prompt dispatch lifecycle split
 

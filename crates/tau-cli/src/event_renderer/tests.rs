@@ -310,6 +310,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
             agent_id: agent_id("agent-a"),
             text: "submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,

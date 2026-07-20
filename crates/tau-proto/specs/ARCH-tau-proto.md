@@ -58,6 +58,12 @@ represents acceptance of a visible UI interaction without duplicating prompt
 text. The summary projection contract is
 [DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
 
+Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
+optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
+which that harness-owned alert reaches model context; missing tags preserve
+legacy hidden-internal presentation. The contract is
+[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by

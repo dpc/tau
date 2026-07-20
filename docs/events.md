@@ -148,14 +148,18 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
   user/internal message class. Its harness-owned `inference_activation` flag
   distinguishes checkpoint-governed work from passive or legacy history;
-  steered and injected facts use the same default-false marker.
+  steered and injected facts use the same default-false marker. The optional
+  harness-owned `internal_kind=context_size_alert` marks an alert delivery for
+  exact-position live and replay UI history; missing tags retain legacy hidden
+  internal presentation.
 - **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
   queued instead of dispatched. Runtime UI state; not durable transcript truth.
 - **`agent.prompt_steered`** — A previously queued prompt folded into an
   in-flight continuation as a steering user message rather than a fresh turn.
   Its immutable harness-owned `inference_activation` marker is true for
   checkpoint-governed work; missing/default-false values are passive or legacy
-  and cannot independently wake replay.
+  and cannot independently wake replay. It carries the same optional
+  `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`.
 - **`agent.user_message_injected`** — Synthetic transcript context inserted by
   the harness (for example shell output or an AGENTS.md preamble) and folded
   like user input. It uses the same immutable harness-owned, default-false

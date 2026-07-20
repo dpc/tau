@@ -21,9 +21,12 @@ projections, terminal tool completion facts (`tool.result`, `tool.error`,
 `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
 `tool.background_result`, and `tool.background_error`), and selected response
 closure facts such as `provider.response_finished`. Prompt text facts are
-must-pass, but only their routing keys are immutable: interceptors may rewrite
-text on the sanctioned prompt-text events without changing agent id, message
-class, or originator. Mandatory `harness.notice` diagnostics (critical notices
+must-pass, but only their routing keys are generally immutable: interceptors
+may rewrite text on the sanctioned prompt-text events without changing agent
+id, message class, or originator. A submitted or steered prompt tagged
+`internal_kind=context_size_alert` additionally protects its tag and text so
+durable history retains the exact configured alert. Mandatory `harness.notice`
+diagnostics (critical notices
 and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.

@@ -4966,6 +4966,13 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_submitted(&mut self, prompt: &tau_proto::AgentPromptSubmitted) {
+        if self.handle_visible_internal_prompt(
+            prompt.message_class,
+            prompt.internal_kind,
+            &prompt.text,
+        ) {
+            return;
+        }
         if self.handle_timer_wakeup_prompt(
             prompt.message_class,
             prompt.ctx_id.as_deref(),
@@ -4988,6 +4995,25 @@ impl EventRenderer {
             // there is no safe prefix-based way to reclassify them.
             self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
         }
+    }
+
+    fn handle_visible_internal_prompt(
+        &mut self,
+        message_class: tau_proto::PromptMessageClass,
+        internal_kind: Option<tau_proto::InternalPromptKind>,
+        text: &str,
+    ) -> bool {
+        if !message_class.is_internal()
+            || internal_kind != Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+        {
+            return false;
+        }
+        let block = self.submitted_plain_block(
+            tau_themes::names::SYSTEM_INFO,
+            format!("[tau-internal]: {text}"),
+        );
+        self.handle.print_output("context-size-alert", block);
+        true
     }
 
     fn handle_timer_wakeup_prompt(
@@ -5082,6 +5108,13 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_steered(&mut self, steered: &tau_proto::AgentPromptSteered) {
+        if self.handle_visible_internal_prompt(
+            steered.message_class,
+            steered.internal_kind,
+            &steered.text,
+        ) {
+            return;
+        }
         if self.handle_timer_wakeup_prompt(
             steered.message_class,
             steered.ctx_id.as_deref(),

@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ExtensionName;
 
+/// Harness-owned subtype for internal prompts with distinct UI presentation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalPromptKind {
+    /// Advisory prompt delivered after a named context-size threshold crossing.
+    ContextSizeAlert,
+}
+
 /// Prompt submission provenance stamped by the harness boundary.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

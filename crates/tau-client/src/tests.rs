@@ -1165,6 +1165,7 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         text: text.to_owned(),
         message_class: PromptMessageClass::User,
+        internal_kind: None,
         originator: PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,

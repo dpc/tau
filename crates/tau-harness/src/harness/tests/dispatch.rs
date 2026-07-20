@@ -1157,6 +1157,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     agent_id: tau_proto::AgentId::parse("engineer_default").expect("agent id"),
                     text: "default prompt".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
+                    internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
                     submission_source: Default::default(),
                     display_name: None,
@@ -1173,6 +1174,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
                     text: "side steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
+                    internal_kind: None,
                     ctx_id: None,
                 }),
             )
@@ -1406,6 +1408,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: text.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -1453,6 +1456,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "usage prompt".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -1588,6 +1592,7 @@ fn seed_background_placeholder_for_agent(
                 agent_id: parsed_agent_id.clone(),
                 text: format!("run {tool_name}"),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -6827,6 +6832,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
             agent_id: agent_id.clone(),
             text: "internal prompt should not be listed".to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -8411,6 +8417,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
                 agent_id: agent_id.clone(),
                 text: "submitted activation".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -8433,6 +8440,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
                 agent_id,
                 text: "steered activation".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 ctx_id: Some("ctx-1".to_owned()),
             }),
         ),
@@ -8471,6 +8479,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             agent_id: agent_id.clone(),
             text: "passive submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -8487,6 +8496,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             agent_id,
             text: "passive steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
             ctx_id: None,
         }),
     ];
@@ -8547,6 +8557,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
@@ -8586,6 +8597,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             agent_id,
             text: "activation C".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -9127,9 +9139,9 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// Named context-size alerts fire as hidden prompts only after their thresholds
-/// are exceeded, remain one-shot while usage stays high, and become eligible
-/// again after usage falls back below the threshold.
+/// Named context-size alerts fire as internal prompts only after their
+/// thresholds are exceeded, remain one-shot while usage stays high, and become
+/// eligible again after usage falls back below the threshold.
 #[test]
 fn named_context_size_alerts_queue_once_per_usage_crossing() {
     let td = TempDir::new().expect("tempdir");
@@ -9230,12 +9242,45 @@ fn finished_response_injects_crossed_context_size_alert() {
     h.handle_provider_response_finished(response)
         .expect("finish response");
 
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptSubmitted(submitted)
-            if submitted.text == "compact after this task"
-                && submitted.message_class == tau_proto::PromptMessageClass::Internal
-    )));
+    let alert_prompt = read_nth_prompt_created(&h, 1);
+    let events = event_log_events(&h);
+    let response_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_prompt_id == prompt.agent_prompt_id
+            )
+        })
+        .expect("threshold-crossing response");
+    let alert_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.text == "compact after this task"
+                        && submitted.message_class == tau_proto::PromptMessageClass::Internal
+                        && submitted.internal_kind
+                            == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+            )
+        })
+        .expect("durable context-size alert");
+    let dispatch_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptCreated(created)
+                    if created.agent_prompt_id == alert_prompt.agent_prompt_id
+            )
+        })
+        .expect("alert provider dispatch");
+    assert!(
+        response_index < alert_index && alert_index < dispatch_index,
+        "alert delivery fact must land after the crossing response and before its provider dispatch"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -9506,6 +9551,8 @@ fn context_size_alert_waits_for_tool_round_completion() {
         Event::AgentPromptSteered(steered)
             if steered.text == "compact after tools"
                 && steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.internal_kind
+                    == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
     )));
     h.shutdown().expect("shutdown");
 }
@@ -10314,6 +10361,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             inference_activation: true,
             text: "owed activation".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -10450,6 +10498,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             inference_activation: true,
             text: "owed".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -10700,6 +10749,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             inference_activation: true,
             text: "owed".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -11131,6 +11181,7 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
             inference_activation: false,
             text: "suffix B".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -11613,6 +11664,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
             agent_id: crate::parse_agent_id(&agent_id),
             text: "activation B".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -11873,6 +11925,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             agent_id: crate::parse_agent_id(&agent_id),
             text: "prefix".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -12112,6 +12165,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             agent_id: crate::parse_agent_id(&agent_id),
             text: "reactive prefix".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -12257,6 +12311,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             agent_id: crate::parse_agent_id(&agent_id),
             text: "B".repeat(6_000),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -12332,6 +12387,7 @@ fn seed_historical_open_prefix_failure(
             agent_id: crate::parse_agent_id(&agent_id),
             text: "historical prefix".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -13123,6 +13179,68 @@ fn setup_manual_cross_compaction_test() -> (
     (td, h, caller_cid, target_cid, call, target_id)
 }
 
+/// Successful manual-compaction acceptance and start are ordinary informational
+/// notices, while a later transaction failure still completes through the
+/// canonical background-error path.
+#[test]
+fn manual_compaction_lifecycle_distinguishes_status_from_failure() {
+    let (_td, mut h, caller_cid, target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+
+    let events = event_log_events(&h);
+    let lifecycle = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::HarnessNotice(notice)
+                if notice.message.contains("accepted compaction request")
+                    || notice.message.contains("Starting compaction request") =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifecycle.len(), 2, "{lifecycle:?}");
+    assert!(lifecycle.iter().all(|notice| {
+        notice.kind == tau_proto::notice_kind::HARNESS_NOTICE
+            && notice.level == tau_proto::NoticeLevel::Info
+            && !notice.always_show
+            && notice.message.contains("unrelated-target")
+            && notice.message.contains("cr-")
+    }));
+
+    let started = events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) if started.agent_id == target_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("compaction transaction started");
+    h.publish_for_agent(
+        &target_cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: started.agent_id,
+            transaction_id: started.transaction_id,
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+        }),
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error) if error.call_id == call.id
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Possession of the cross-agent capability authorizes an unrelated loaded
 /// agent without ancestry, watch, or message relationships.
 #[test]
@@ -13531,6 +13649,7 @@ fn start_background_tool_and_finish_placeholder_turn(
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("run {tool_name}"),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: Default::default(),
             display_name: None,
@@ -22609,6 +22728,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: None,
@@ -22625,6 +22745,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             ctx_id: None,
         }),
     ] {
@@ -22669,6 +22790,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             agent_id: agent_id.clone(),
             text: "forged submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
             submission_source: tau_proto::PromptSubmissionSource::HumanUi,
             display_name: None,
@@ -22685,6 +22807,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             agent_id,
             text: "forged steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             ctx_id: None,
         }),
     ];

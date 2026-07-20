@@ -34,6 +34,8 @@ fn cli_test_theme() -> tau_themes::Theme {
                 "watching.name": { fg: "dark_yellow" },
                 "tool.status.success": { fg: "green" },
                 "tool.status.error": { fg: "red" },
+                "system.info": { fg: "blue" },
+                "system.info.important": { fg: "red" },
                 "status.agents": { fg: "cyan" },
                 "diff.added": { fg: "dark_green" },
                 "diff.removed": { fg: "dark_red" },
@@ -77,9 +79,9 @@ fn agent_id(value: &str) -> tau_proto::AgentId {
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, cache_hit_percent,
     format_turn_stats_line, render_action_error_block, render_action_output_block,
-    render_compaction_block, render_diff_tool_block, render_multi_diff_tool_block,
-    render_shell_block, render_tool_block, render_tool_use_state, render_turn_stats_block,
-    streaming_block, synthesize_fallback_display,
+    render_compaction_block, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -1517,6 +1519,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         agent_id: agent_id("engineer_abc12345"),
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -1563,6 +1566,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -1594,12 +1598,152 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
         ctx_id: Some("timer:wake:2".to_owned()),
     }));
     sync(&handle);
 
     assert!(vt.screen_contains(100, "Timer `wake` woke this agent: stand up"));
     assert!(!vt.screen_contains(100, "woke this agent: Timer `wake` fired"));
+}
+
+/// A tagged fresh-turn context-size alert renders exactly once in journal
+/// order, while an otherwise identical untagged internal prompt stays hidden.
+#[test]
+fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    let visible_prompt = |text: &str| {
+        Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id("engineer_abc12345"),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    renderer.handle(&visible_prompt("before submitted alert"));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "untagged internal prompt".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "Use the `compact` tool after finishing your current task.".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+    }));
+    renderer.handle(&visible_prompt("after submitted alert"));
+    sync(&handle);
+
+    let relevant_lines = visible_lines(&vt, 100)
+        .into_iter()
+        .map(|line| line.trim_end().to_owned())
+        .filter(|line| line.contains("submitted alert") || line.contains("[tau-internal]:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relevant_lines,
+        [
+            "> before submitted alert",
+            "> [tau-internal]: Use the `compact` tool after finishing your current task.",
+            "> after submitted alert",
+        ]
+    );
+    assert!(!vt.screen_contains(100, "untagged internal prompt"));
+}
+
+/// A context-size alert folded after tools uses the same exact, ordered history
+/// presentation as a fresh-turn delivery.
+#[test]
+fn context_size_alert_prompt_steered_renders_internal_history_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    let visible_prompt = |text: &str| {
+        Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id("engineer_abc12345"),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    renderer.handle(&visible_prompt("before steered alert"));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        inference_activation: true,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "compact after tools".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+        ctx_id: None,
+    }));
+    renderer.handle(&visible_prompt("after steered alert"));
+    sync(&handle);
+
+    let relevant_lines = visible_lines(&vt, 100)
+        .into_iter()
+        .map(|line| line.trim_end().to_owned())
+        .filter(|line| line.contains("steered alert") || line.contains("[tau-internal]:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relevant_lines,
+        [
+            "> before steered alert",
+            "> [tau-internal]: compact after tools",
+            "> after steered alert",
+        ]
+    );
+}
+
+/// Successful compaction lifecycle text uses ordinary status styling.
+#[test]
+fn compaction_lifecycle_notice_uses_info_style() {
+    let theme = cli_test_theme();
+    let lifecycle = render_harness_notice(
+        &theme,
+        &tau_proto::HarnessNotice::new(
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            "Starting compaction request cr-35-0 for reviewer-sOqj (ct-35)",
+            tau_proto::NoticeLevel::Info,
+        ),
+    );
+
+    assert_eq!(lifecycle.content.spans()[0].style.fg, Some(Color::Blue));
 }
 
 #[test]
@@ -3181,6 +3325,7 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
         agent_id: agent_id("worker-1"),
         text: "follow up".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: Default::default(),
         display_name: None,
@@ -3397,6 +3542,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         agent_id: agent_id("worker-1"),
         text: "side task".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
             query_id: "q-worker".to_owned(),
@@ -3847,6 +3993,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
             agent_id: agent_id("worker-1"),
             text: "side task".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
             originator: originator.clone(),
             submission_source: Default::default(),
             display_name: None,
@@ -7208,6 +7355,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         text: "folded queued prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         ctx_id: None,
     }));
     sync(&handle);
@@ -7262,6 +7410,7 @@ fn internal_prompt_events_are_hidden() {
         text: "[tau-internal] Tool call `steered` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
         ctx_id: None,
     }));
     sync(&handle);

@@ -251,12 +251,18 @@ prompt. Canceled, stale, duplicate, failed, and compaction responses create no
 alert work. Alert messages grant no tool authority: `compact` remains separately
 controlled by effective tool policy.
 
-Crossing suppression and queued alert delivery are daemon-local best-effort
-state, not durable recovery obligations. A crash can lose a queued alert, and a
-later successful response after cold replay can evaluate restored high usage
-again. Warm-process regressions cover threshold crossings, failure exclusion,
-tool-round deferral, accounting resets (including stale queued-alert removal),
-and prompt-owned role policy.
+Crossing suppression and still-queued alert delivery are daemon-local
+best-effort state, not durable recovery obligations. A crash can lose an
+uncommitted queued alert, and a later successful response after cold replay can
+evaluate restored high usage again. Once delivery commits, the submitted or
+steered prompt fact is durable and cold replay preserves its journal position.
+Its harness-owned `internal_kind=context_size_alert` tag and exact configured
+text are protected against interceptor addition, removal, or rewrite; missing
+tags remain hidden, and neither `ctx_id` nor text can infer the tag. Tau creates
+no synthetic replay event. Warm-process regressions cover threshold crossings,
+failure exclusion, tool-round deferral, accounting resets (including stale
+queued-alert removal), and prompt-owned role policy; cold-resume regressions
+cover both submitted and steered tagged delivery facts.
 
 ## Release build resource reliability
 

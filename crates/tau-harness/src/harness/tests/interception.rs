@@ -1833,6 +1833,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                     agent_id: agent_id.clone(),
                     text: "submitted".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
+                    internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
                     submission_source: tau_proto::PromptSubmissionSource::HumanUi,
                     display_name: None,
@@ -1855,6 +1856,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                     agent_id,
                     text: "steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
+                    internal_kind: None,
                     ctx_id: None,
                 }),
             ),
@@ -1900,6 +1902,139 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
             assert!(events.contains(&original));
             assert!(!events.contains(&replacement));
         }
+    }
+}
+
+/// Interceptors cannot add or remove the harness-owned context-alert tag, and a
+/// tagged alert keeps its configured text on both durable prompt shapes.
+#[test]
+fn interception_preserves_context_alert_tag_and_text() {
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let tagged_cases = [
+        (
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: "configured submitted alert".to_owned(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+                display_name: None,
+                ctx_id: None,
+            }),
+        ),
+        (
+            tau_proto::EventName::AGENT_PROMPT_STEERED,
+            Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                inference_activation: true,
+                agent_id,
+                text: "configured steered alert".to_owned(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+                ctx_id: None,
+            }),
+        ),
+    ];
+
+    for (event_name, tagged) in tagged_cases {
+        let mut removed_tag = tagged.clone();
+        let mut rewritten_text = tagged.clone();
+        let mut untagged = tagged.clone();
+        match &mut removed_tag {
+            Event::AgentPromptSubmitted(prompt) => prompt.internal_kind = None,
+            Event::AgentPromptSteered(prompt) => prompt.internal_kind = None,
+            _ => unreachable!(),
+        }
+        match &mut rewritten_text {
+            Event::AgentPromptSubmitted(prompt) => prompt.text = "rewritten alert".to_owned(),
+            Event::AgentPromptSteered(prompt) => prompt.text = "rewritten alert".to_owned(),
+            _ => unreachable!(),
+        }
+        match &mut untagged {
+            Event::AgentPromptSubmitted(prompt) => prompt.internal_kind = None,
+            Event::AgentPromptSteered(prompt) => prompt.internal_kind = None,
+            _ => unreachable!(),
+        }
+        let mut rewritten_untagged = untagged.clone();
+        match &mut rewritten_untagged {
+            Event::AgentPromptSubmitted(prompt) => {
+                prompt.text = "rewritten untagged prompt".to_owned();
+            }
+            Event::AgentPromptSteered(prompt) => {
+                prompt.text = "rewritten untagged prompt".to_owned();
+            }
+            _ => unreachable!(),
+        }
+        let mut forged_tag = untagged.clone();
+        match &mut forged_tag {
+            Event::AgentPromptSubmitted(prompt) => {
+                prompt.internal_kind = Some(tau_proto::InternalPromptKind::ContextSizeAlert);
+            }
+            Event::AgentPromptSteered(prompt) => {
+                prompt.internal_kind = Some(tau_proto::InternalPromptKind::ContextSizeAlert);
+            }
+            _ => unreachable!(),
+        }
+
+        for (original, replacement) in [
+            (tagged.clone(), removed_tag),
+            (tagged.clone(), rewritten_text),
+            (untagged.clone(), forged_tag),
+        ] {
+            let tmp = TempDir::new().expect("tempdir");
+            let mut h = echo_harness(tmp.path()).expect("harness");
+            let cid = ensure_test_user_agent(&mut h);
+            let _interceptor = connect_test_tool(&mut h, "context-alert-rewriter");
+            h.handle_extension_event(
+                "context-alert-rewriter",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(event_name.clone())],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("intercept registration");
+
+            h.publish_for_agent(&cid, original.clone());
+            h.handle_extension_event(
+                "context-alert-rewriter",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(Some(Box::new(replacement.clone()))),
+                })),
+            )
+            .expect("intercept reply");
+
+            let events = event_log_events(&h);
+            assert!(events.contains(&original));
+            assert!(!events.contains(&replacement));
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(tmp.path()).expect("harness");
+        let cid = ensure_test_user_agent(&mut h);
+        let _interceptor = connect_test_tool(&mut h, "ordinary-prompt-rewriter");
+        h.handle_extension_event(
+            "ordinary-prompt-rewriter",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(event_name)],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("intercept registration");
+
+        h.publish_for_agent(&cid, untagged.clone());
+        h.handle_extension_event(
+            "ordinary-prompt-rewriter",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(rewritten_untagged.clone()))),
+            })),
+        )
+        .expect("intercept reply");
+
+        let events = event_log_events(&h);
+        assert!(!events.contains(&untagged));
+        assert!(events.contains(&rewritten_untagged));
     }
 }
 
@@ -2667,6 +2802,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
@@ -3539,6 +3675,7 @@ fn interception_mutating_prompt_reaches_agent() {
         agent_id: crate::parse_agent_id(&agent_id),
         text: "I love Tau".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,

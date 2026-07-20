@@ -338,12 +338,15 @@ pub(super) fn event_must_pass_by_default(name: &EventName) -> bool {
     MUST_PASS_BY_DEFAULT.contains(name)
 }
 
-fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &Event) -> bool {
+fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) -> bool {
     match (original, replacement) {
         (Event::AgentPromptSubmitted(original), Event::AgentPromptSubmitted(replacement)) => {
             original.agent_id != replacement.agent_id
                 || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
+                || original.internal_kind != replacement.internal_kind
+                || (original.internal_kind == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+                    && original.text != replacement.text)
                 || original.originator != replacement.originator
                 || original.submission_source != replacement.submission_source
         }
@@ -359,6 +362,9 @@ fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &
             original.agent_id != replacement.agent_id
                 || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
+                || original.internal_kind != replacement.internal_kind
+                || (original.internal_kind == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+                    && original.text != replacement.text)
         }
         _ => false,
     }
@@ -1032,11 +1038,11 @@ impl Harness {
                     sanitize_harness_notice_replacement(&original_event, &mut new_event);
                     preserve_agent_metadata_mutation_id(&original_event, &mut new_event);
                     preserve_shell_command_identity(&original_event, &mut new_event);
-                    if mutable_prompt_routing_identity_was_modified(&original_event, &new_event) {
+                    if protected_prompt_fields_were_modified(&original_event, &new_event) {
                         tracing::warn!(
                             target: "tau_harness::interception",
                             event = %event_name,
-                            "interceptor tried to modify protected prompt routing identity; \
+                            "interceptor tried to modify protected prompt fields; \
                              publishing original instead",
                         );
                         Some(original_event)

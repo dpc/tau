@@ -14010,7 +14010,7 @@ impl Harness {
             ]),
         );
         self.on_tool_call_foreground_complete(call.id.as_str());
-        self.emit_info_important(&format!(
+        self.emit_info(&format!(
             "Agent {caller_public_id} accepted compaction request for {target_public_id} ({request_id})"
         ));
         if !self_request {
@@ -14142,7 +14142,7 @@ impl Harness {
         if let Some(target) = self.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
-        self.emit_info_important(&format!(
+        self.emit_info(&format!(
             "Starting compaction request {request_id} for {target_public_id} ({transaction_id})"
         ));
         self.accepted_manual_compaction_tools.remove(request_id);
@@ -21161,6 +21161,7 @@ impl Harness {
             let notify_watchers = prompt.should_notify_watchers();
             let notification_text = notify_watchers.then(|| prompt.text.clone());
             let inference_activation = prompt.creates_inference_activation();
+            let internal_kind = prompt.internal_kind();
             self.publish_for_agent(
                 cid,
                 Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
@@ -21168,6 +21169,7 @@ impl Harness {
                     agent_id: crate::parse_agent_id(&agent_id),
                     text: prompt.text,
                     message_class: prompt.message_class,
+                    internal_kind,
                     ctx_id: prompt.ctx_id,
                 }),
             );
@@ -21883,6 +21885,7 @@ impl Harness {
                 agent_id: crate::parse_agent_id(&agent_id),
                 text: user_message.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
                 submission_source: Default::default(),
                 display_name: None,
