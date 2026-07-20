@@ -21,7 +21,8 @@ use crate::agent_navigation::AgentNavigation;
 use crate::build_banner;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
-    MarkdownStreamCache, markdown_block, markdown_prompt_block, markdown_streaming_block,
+    MarkdownStreamCache, markdown_block, markdown_prefixed_block,
+    markdown_prefixed_streaming_block, markdown_prompt_block, markdown_streaming_block,
 };
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
@@ -41,6 +42,8 @@ const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
+const COMPLETED_AGENT_RESPONSE_PREFIX: &str = "◆ ";
+const STREAMING_AGENT_RESPONSE_PREFIX: &str = "◇ ";
 /// Maximum rendered terminal columns for a supplemental agent message name.
 const AGENT_MESSAGE_NAME_MAX_COLUMNS: usize = 48;
 /// Maximum rendered UTF-8 bytes for a supplemental agent message name.
@@ -5055,9 +5058,11 @@ impl EventRenderer {
                 self.last_user_block = Some((id, text));
             }
         }
-        let block = self.submitted_prompt_block(
+        let block = markdown_prompt_block(
+            &self.theme,
             names::USER_PROMPT_QUEUED,
-            format!("{} (queued)", queued.text),
+            format!("{} ", self.prompt_symbol),
+            &format!("{} (queued)", queued.text),
         );
         let queued_id = self.handle.new_block("user-prompt-queued", block);
         self.handle.push_above_sticky(queued_id);
@@ -5284,7 +5289,11 @@ impl EventRenderer {
             state.missing_response_prefix = true;
             state.missing_thinking_prefix = true;
         }
-        let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
+        let block = streaming_block(
+            &self.theme,
+            names::AGENT_PENDING,
+            STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
+        );
         let id = self
             .handle
             .new_block(format!("agent-response-live:{spid}"), block);
@@ -5504,13 +5513,14 @@ impl EventRenderer {
                 streaming_block_with_indicator_suffix(
                     &self.theme,
                     names::AGENT_PENDING,
-                    "",
+                    STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
                     response_stats_indicator_for_prompt(state),
                 )
             } else {
-                markdown_streaming_block(
+                markdown_prefixed_streaming_block(
                     &self.theme,
                     names::AGENT_RESPONSE,
+                    STREAMING_AGENT_RESPONSE_PREFIX,
                     text,
                     &mut state.response_markdown_cache,
                 )
@@ -5688,7 +5698,12 @@ impl EventRenderer {
 
         self.handle.print_output(
             "agent-response-placeholder",
-            markdown_block(&self.theme, names::AGENT_RESPONSE, text),
+            markdown_prefixed_block(
+                &self.theme,
+                names::AGENT_RESPONSE,
+                COMPLETED_AGENT_RESPONSE_PREFIX,
+                text,
+            ),
         );
     }
 
@@ -5780,7 +5795,12 @@ impl EventRenderer {
                 if let Some(text) = assistant_text_from_message_item(message) {
                     self.handle.print_output(
                         "agent-response",
-                        markdown_block(&self.theme, names::AGENT_RESPONSE, &text),
+                        markdown_prefixed_block(
+                            &self.theme,
+                            names::AGENT_RESPONSE,
+                            COMPLETED_AGENT_RESPONSE_PREFIX,
+                            &text,
+                        ),
                     );
                 }
             }

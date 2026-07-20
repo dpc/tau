@@ -37,6 +37,12 @@ reasoning/thinking text. Tool calls, tool payloads/results, shell output,
 status/progress lines, and agent-to-agent message debug displays must stay on
 their existing renderers unless there is a separate product decision.
 
+Transcript state markers distinguish message lifecycle at a glance. By default,
+submitted user prompts use `⬤`, while queued prompts and the currently composed
+prompt use `◯`; configured submitted and prompt symbols replace those respective
+defaults. Completed agent responses use `◆`, while responses still streaming
+use `◇`.
+
 Provider response stats are a standalone live-indicator status line. The CLI may
 remember the latest `provider.response_updated.response_stats` sample for an
 in-flight prompt only to repaint the transient ellipsis block, and derives

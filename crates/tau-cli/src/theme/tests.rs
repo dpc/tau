@@ -1,5 +1,20 @@
 use super::*;
 
+/// The active composer must use the configured hollow prompt-state marker.
+#[test]
+fn active_prompt_uses_composing_marker() {
+    let theme = select_theme(
+        &tau_config::settings::TauDirs::default(),
+        CliTheme::default(),
+    )
+    .expect("default theme loads");
+    let settings = tau_config::settings::CliSettings::built_in();
+
+    let prompt = active_prompt_marker(&theme, &settings.prompt_symbol, None);
+
+    assert_eq!(prompt.spans()[0].text, "◯ ");
+}
+
 /// Ensures CLI and environment theme names share the same normalization path,
 /// including external names that must not be rejected during parsing.
 #[test]

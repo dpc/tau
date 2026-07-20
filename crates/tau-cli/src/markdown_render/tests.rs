@@ -93,6 +93,41 @@ fn final_render_applies_markdown_styles() {
     assert!(strikethrough.style.strikethrough);
 }
 
+/// Response state markers must stay outside Markdown parsing so a first-column
+/// heading keeps its structural styling in both final and streaming blocks.
+#[test]
+fn response_prefix_preserves_first_column_markdown_structure() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let blocks = [
+        markdown_prefixed_block(&theme, names::AGENT_RESPONSE, "◆ ", "# heading"),
+        markdown_prefixed_streaming_block(
+            &theme,
+            names::AGENT_RESPONSE,
+            "◇ ",
+            "# heading\n",
+            &mut cache,
+        ),
+    ];
+
+    for (block, marker) in blocks.iter().zip(["◆ ", "◇ "]) {
+        let spans = block.content.spans();
+        let marker = spans
+            .iter()
+            .find(|span| span.text == marker)
+            .expect("response state marker");
+        assert!(!marker.style.bold);
+        assert!(!marker.style.underline);
+
+        let heading = spans
+            .iter()
+            .find(|span| span.text == "# heading")
+            .expect("first-column Markdown heading");
+        assert!(heading.style.bold);
+        assert!(heading.style.underline);
+    }
+}
+
 /// Ensures reported emphasis forms map to italic and combined bold+italic
 /// styling without stripping Markdown delimiters.
 #[test]

@@ -208,17 +208,33 @@ pub(crate) fn markdown_block(
     base_style_name: &str,
     text: &str,
 ) -> tau_cli_term::StyledBlock {
+    markdown_prefixed_block(theme, base_style_name, "", text)
+}
+
+/// Render final/static transcript text with a base-styled state marker before
+/// the Markdown-lite body.
+pub(crate) fn markdown_prefixed_block(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    prefix_text: &str,
+    text: &str,
+) -> tau_cli_term::StyledBlock {
+    let prefix = [MarkdownRun {
+        text: prefix_text.to_owned(),
+        style: MarkdownStyle::Base,
+    }];
     let mut in_fence = None;
     styled_block_from_runs(
         theme,
         base_style_name,
-        &[],
+        &prefix,
         &parse_markdown_with_state(text, &mut in_fence),
         false,
     )
 }
 
-/// Render a submitted prompt marker followed by Markdown-lite prompt text.
+/// Render a configured prompt-state marker followed by Markdown-lite prompt
+/// text.
 pub(crate) fn markdown_prompt_block(
     theme: &tau_themes::Theme,
     base_style_name: &str,
@@ -248,6 +264,18 @@ pub(crate) fn markdown_streaming_block(
     text: &str,
     cache: &mut MarkdownStreamCache,
 ) -> tau_cli_term::StyledBlock {
+    markdown_prefixed_streaming_block(theme, base_style_name, "", text, cache)
+}
+
+/// Render live append-only text with a stable base-styled state marker before
+/// the incrementally formatted Markdown-lite body.
+pub(crate) fn markdown_prefixed_streaming_block(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    prefix_text: &str,
+    text: &str,
+    cache: &mut MarkdownStreamCache,
+) -> tau_cli_term::StyledBlock {
     if !text.starts_with(&cache.source) {
         cache.reset_for_replacement();
     }
@@ -270,7 +298,11 @@ pub(crate) fn markdown_streaming_block(
             style: MarkdownStyle::Base,
         });
     }
-    styled_block_from_runs(theme, base_style_name, &[], &runs, true)
+    let prefix = [MarkdownRun {
+        text: prefix_text.to_owned(),
+        style: MarkdownStyle::Base,
+    }];
+    styled_block_from_runs(theme, base_style_name, &prefix, &runs, true)
 }
 
 fn styled_block_from_runs(

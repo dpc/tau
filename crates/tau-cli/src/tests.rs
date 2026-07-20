@@ -57,6 +57,20 @@ fn cli_test_theme() -> tau_themes::Theme {
     .expect("CLI test theme parses")
 }
 
+/// Build a renderer with the built-in lifecycle markers rather than the terse
+/// legacy test markers used by [`EventRenderer::new`].
+fn marker_test_renderer(handle: TermHandle) -> EventRenderer {
+    EventRenderer::new_with_state(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+        tau_config::settings::CliState::default(),
+        tau_config::settings::TauDirs::default(),
+        "◯".to_owned(),
+        "⬤".to_owned(),
+    )
+}
+
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
@@ -1769,6 +1783,70 @@ fn response_delta_updates_append_live_text() {
 
     assert!(vt.screen_contains(80, "Hello"));
     assert!(!vt.screen_contains(80, "HelHel"));
+}
+
+/// Queued prompts remain pending user input and must therefore use the same
+/// hollow marker as the currently composed prompt, not the submitted marker.
+#[test]
+fn queued_prompt_uses_composing_marker() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "queued marker check".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "◯ queued marker check (queued)"));
+    assert!(!vt.screen_contains(80, "⬤ queued marker check (queued)"));
+
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "queued marker check".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "⬤ queued marker check"));
+    assert!(!vt.screen_contains(80, "◯ queued marker check"));
+}
+
+/// An assistant response must visibly transition from the hollow streaming
+/// marker to the solid completed marker when its final event replaces the live
+/// block.
+#[test]
+fn agent_response_marker_tracks_streaming_and_completed_states() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-marker",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-marker",
+            "marker answer",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "◇ marker answer"));
+    assert!(!vt.screen_contains(80, "◆ marker answer"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-marker",
+        vec![assistant_message_item("marker answer")],
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "◆ marker answer"));
+    assert!(!vt.screen_contains(80, "◇ marker answer"));
 }
 
 /// Ensures streaming Markdown styles are applied as each line completes, so a
