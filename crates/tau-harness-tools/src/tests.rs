@@ -1273,14 +1273,15 @@ fn agent_watch_spec_documents_initial_and_transition_context_semantics() {
     assert!(description.contains("later transitions are delivered separately"));
 }
 
-/// Ensures both compaction capabilities remain absent unless policy explicitly
-/// opts in, and that each advertises instant-background completion semantics.
+/// Ensures self-compaction is available by default, cross-agent compaction
+/// still requires explicit policy, and both advertise instant-background
+/// completion.
 #[test]
-fn compaction_specs_are_independently_disabled_and_backgrounded() {
+fn compaction_specs_have_independent_defaults_and_are_backgrounded() {
     let compact = compact_tool_spec();
     let cross = agent_compact_tool_spec();
 
-    assert!(!compact.enabled_by_default);
+    assert!(compact.enabled_by_default);
     assert!(!cross.enabled_by_default);
     assert_eq!(
         compact.background_support,

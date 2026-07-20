@@ -12,7 +12,7 @@ away like any other input fact. This behavior is confirmed by
 ## Recovery authority
 
 The CLI `/compact` command is human/UI authority. The model-callable `compact`
-tool is a separate, disabled-by-default self-compaction authority, while
+tool is a separate, enabled-by-default self-compaction authority, while
 `agent_compact` is an independently opted-in authority over any *other loaded
 agent in the same harness session*. Enabling either tool never enables the
 other. Agent ancestry, watches, message capability, role names, and knowledge
@@ -97,12 +97,13 @@ chosen action (`terminal` or `reactive_compaction_planned`).
 ## Tool and telemetry trust boundary
 
 Internal registration places `compact` in `compaction` and `agent_compact` in
-`cross_agent_compaction`; both are disabled by default. Runtime caller identity
-comes from committed tool ownership, never arguments. Cross-agent possession
-authorizes any other loaded agent, but self, unavailable, stopped, unloaded,
-and cross-session targets are rejected without state enumeration. Watches,
-messages, ancestry, and automatic-compaction role settings are not substitutes
-for explicit tool presence.
+`cross_agent_compaction`; self-compaction is enabled by default and cross-agent
+compaction is disabled by default. Runtime caller identity comes from committed
+tool ownership, never arguments. Cross-agent possession authorizes any other
+loaded agent, but self, unavailable, stopped, unloaded, and cross-session targets
+are rejected without state enumeration. Watches, messages, ancestry, and
+automatic-compaction role settings are not substitutes for explicit tool
+presence.
 
 The harness, not providers, owns the durable context-limit diagnostic attached
 to terminal responses. Provider-supplied values are discarded. The schema is

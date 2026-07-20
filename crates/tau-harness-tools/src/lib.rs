@@ -2019,7 +2019,7 @@ fn compact_tool_spec() -> ToolSpec {
         parameters: Some(serde_json::json!({"type":"object","properties":{},"additionalProperties":false})),
         format: None,
         tags: vec![tau_proto::ToolTag::new("harness:compaction"), tau_proto::ToolTag::new("harness:compaction:self")],
-        enabled_by_default: false,
+        enabled_by_default: true,
         background_support: Some(BackgroundSupport::Instant),
         examples: Vec::new(),
     }

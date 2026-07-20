@@ -128,14 +128,16 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
             },
         );
     }
-    for (name, group, tags) in [
+    for (name, enabled_by_default, group, tags) in [
         (
             "compact",
+            true,
             "compaction",
             &["harness:compaction", "harness:compaction:self"][..],
         ),
         (
             "agent_compact",
+            false,
             "cross_agent_compaction",
             &[
                 "harness:compaction",
@@ -147,7 +149,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         harness.registry.register_with_prompt_fragment(
             "harness",
             ToolRegister {
-                tool: tagged_tool(name, false, tags),
+                tool: tagged_tool(name, enabled_by_default, tags),
                 tool_group: Some(ToolGroup {
                     name: ToolGroupName::new(group),
                     prompt_fragment: None,
@@ -218,24 +220,24 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .collect()
 }
 
-/// Compaction capabilities are absent by default and each independent role
-/// group exposes only its own tool.
+/// Self-compaction is present by default, can be disabled independently, and
+/// enabling cross-agent compaction does not alter either default.
 #[test]
-fn compaction_groups_are_disabled_and_independent() {
+fn compaction_defaults_and_groups_are_independent() {
     let default = policy_harness(&[], AgentRole::default());
     let tools = effective_tool_names(&default.harness);
-    assert!(!tools.contains(&"compact".to_owned()));
+    assert!(tools.contains(&"compact".to_owned()));
     assert!(!tools.contains(&"agent_compact".to_owned()));
 
-    let self_only = policy_harness(
+    let self_disabled = policy_harness(
         &[],
         AgentRole {
-            enable_tool_groups: vec![ToolGroupName::new("compaction")],
+            disable_tool_groups: vec![ToolGroupName::new("compaction")],
             ..AgentRole::default()
         },
     );
-    let tools = effective_tool_names(&self_only.harness);
-    assert!(tools.contains(&"compact".to_owned()));
+    let tools = effective_tool_names(&self_disabled.harness);
+    assert!(!tools.contains(&"compact".to_owned()));
     assert!(!tools.contains(&"agent_compact".to_owned()));
 
     let cross_only = policy_harness(
@@ -246,7 +248,7 @@ fn compaction_groups_are_disabled_and_independent() {
         },
     );
     let tools = effective_tool_names(&cross_only.harness);
-    assert!(!tools.contains(&"compact".to_owned()));
+    assert!(tools.contains(&"compact".to_owned()));
     assert!(tools.contains(&"agent_compact".to_owned()));
 }
 
@@ -432,7 +434,7 @@ fn disable_tool_groups_runs_before_enable_tools() {
     let policy = policy_harness(&["shell:chatgpt"], role);
     let tools = effective_tool_names(&policy.harness);
 
-    assert_eq!(tools, vec!["apply_patch".to_owned()]);
+    assert_eq!(tools, vec!["apply_patch".to_owned(), "compact".to_owned()]);
 }
 
 /// Ensures a keyed user override can disable the built-in ChatGPT shell policy
@@ -476,7 +478,7 @@ fn custom_policy_rule_disables_and_enables_tool_tags() {
 
     let tools = effective_tool_names(&policy.harness);
 
-    assert_eq!(tools, vec!["workdir".to_owned()]);
+    assert_eq!(tools, vec!["compact".to_owned(), "workdir".to_owned()]);
 }
 
 /// Ensures role-level tag operations run after global policy and before
@@ -493,7 +495,7 @@ fn role_tool_tags_run_after_policy_before_groups_and_tools() {
     let policy = policy_harness(&["shell:chatgpt"], role);
     let tools = effective_tool_names(&policy.harness);
 
-    assert_eq!(tools, vec!["workdir".to_owned()]);
+    assert_eq!(tools, vec!["compact".to_owned(), "workdir".to_owned()]);
 }
 
 /// Ensures prompt-owned tool lookup uses the advertised snapshot rather than

@@ -94,7 +94,7 @@ any tool calls. Failed and compaction responses do not fire alerts. During one
 running Tau daemon, each alert fires once until usage falls back to or below its
 threshold or context accounting resets. Alert crossing and queued-delivery state
 is advisory runtime state and is not reconstructed after a restart. Alerts only
-advise the model; the `compact` tool must still be enabled separately.
+advise the model; they do not grant `compact` if role policy disables the tool.
 
 Roles opt into bare inter-session messages with ordinary inherited capabilities.
 `inter_session_receiver` allows a role's agents to receive them, while
@@ -239,18 +239,21 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 Runtime role changes are not persisted. Startup is controlled by `agents.default_role` and `agents.role_groups` order, and durable role changes should be made in `harness.yaml`.
 
 Prompt fragment priorities sort ascending. Use priorities below `100` for role/persona instructions that should appear before generated context sections such as skills and AGENTS.md. Use high priorities for epilogue context; Tau's built-in current-working-directory fragment uses `900` so it stays at the end of the prompt.
-## Compaction tool opt-in
+## Compaction tool policy
 
-Both tools are disabled by default and configured independently:
+Self-compaction is enabled by default. Disable it for a role by group or exact
+tool name:
 
 ```yaml
-enable_tool_groups: [compaction]              # only compact {}
-enable_tool_groups: [cross_agent_compaction]  # only agent_compact {agent_id}
+disable_tool_groups: [compaction]
+# or: disable_tools: [compact]
 ```
 
-Exact `enable_tools` entries may be used instead. `RoleCompaction::Disabled`
-controls automatic compaction and does not override an explicit tool opt-in.
-The cross-agent tool authorizes any other loaded same-session agent; ancestry,
+Cross-agent compaction remains disabled by default and requires an explicit
+`enable_tool_groups: [cross_agent_compaction]` or
+`enable_tools: [agent_compact]`. `RoleCompaction::Disabled` controls automatic
+compaction and does not disable the model-callable `compact` tool. The
+cross-agent tool authorizes any other loaded same-session agent; ancestry,
 watching, and messaging are irrelevant to that explicit capability.
 
 ## Discovery tool opt-in

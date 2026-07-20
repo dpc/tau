@@ -375,10 +375,10 @@ repair and retry classification.
 Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
 ### Model-callable standalone compaction
 
-The disabled-by-default `compact` and `agent_compact` tools require the exact
-selected model and live route to advertise standalone compaction. They never
-fall back to legacy inline compaction. Acceptance is asynchronous; the
-original tool call receives a `tool.background_result` or
+The enabled-by-default `compact` tool and disabled-by-default `agent_compact`
+tool require the exact selected model and live route to advertise standalone
+compaction. They never fall back to legacy inline compaction. Acceptance is
+asynchronous; the original tool call receives a `tool.background_result` or
 `tool.background_error`, which may be consumed through `wait`.
 ## Manual delayed retries
 

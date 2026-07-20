@@ -92,9 +92,9 @@ thread so the harness event loop is not blocked.
 Embedded helpers such as `run_embedded_message` do not create a daemon socket. They construct a harness in-process, run one interaction, and shut it down. Socket activation and runtime-dir attach discovery do not apply to embedded one-shot runs.
 ## Manual compaction tools
 
-When explicitly enabled for the effective role, `compact {}` durably compacts
-the calling agent after its complete tool round. The separately enabled
-`agent_compact {agent_id}` capability may compact any other loaded agent.
-Both return background acceptance and can be awaited with `wait`. `/compact`
-remains a distinct human/UI command; watches, messages, and ancestry do not
-grant either model tool.
+The enabled-by-default `compact {}` tool durably compacts the calling agent
+after its complete tool round. Role policy can disable it. The separately
+enabled `agent_compact {agent_id}` capability may compact any other loaded
+agent. Both return background acceptance and can be awaited with `wait`.
+`/compact` remains a distinct human/UI command; watches, messages, and ancestry
+do not grant either model tool.

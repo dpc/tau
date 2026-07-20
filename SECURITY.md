@@ -195,6 +195,13 @@ blocked. Core validation and warm/cold replay regressions enforce these rules.
 Revisit them when adding any explicit abandon/rewind operation or changing
 compaction replay ownership.
 
+The model-callable self `compact` capability is enabled by default and can act
+only on the calling agent. Effective role policy may revoke it by exact tool
+name, compaction group, or matching tag. The cross-agent `agent_compact`
+capability remains independently disabled by default; explicitly granting it
+authorizes compaction of another loaded same-session agent but does not alter
+self-compaction policy.
+
 Ordinary-inference cancellation may release only the exact matching warm-process
 `DispatchUncertain` owner so later work on that agent can proceed. Its transient
 terminal and late-response rejection do not establish crash-exact cancellation
