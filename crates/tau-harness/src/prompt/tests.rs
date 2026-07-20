@@ -5,10 +5,10 @@ use tau_proto::{
 
 use super::*;
 
-/// Tool-result provider summaries cover every tagged state without model-input
-/// framing or provider-authored text.
+/// Provider summaries cover every tagged state, while long-delay summaries and
+/// live model-visible notifications share readable, provider-content-free text.
 #[test]
-fn watch_provider_status_summaries_are_concise_and_safe() {
+fn watch_provider_status_text_is_concise_readable_and_safe() {
     for (state, expected) in [
         (
             tau_proto::AgentWatchProviderState::Retrying {
@@ -17,6 +17,14 @@ fn watch_provider_status_summaries_are_concise_and_safe() {
                 next_retry_delay_secs: 3,
             },
             "retrying (throttle, attempt 2, next retry about 3s)",
+        ),
+        (
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::UsageWindow,
+                attempt: 1,
+                next_retry_delay_secs: 419_322,
+            },
+            "retrying (usage_window, attempt 1, next retry about 4d 20h)",
         ),
         (
             tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 2 },
@@ -46,6 +54,25 @@ fn watch_provider_status_summaries_are_concise_and_safe() {
         assert_eq!(summary, expected);
         assert!(!summary.contains("[tau-internal]"));
     }
+
+    let status = tau_proto::AgentWatchProviderStatusNotification {
+        session_id: "session".into(),
+        subscription_id: "watch".to_owned(),
+        turn_generation: 1,
+        agent_prompt_id: "prompt".into(),
+        state: tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::UsageWindow,
+            attempt: 1,
+            next_retry_delay_secs: 419_322,
+        },
+        initial: false,
+    };
+    let text = watch_provider_status_text("worker", &status);
+    assert_eq!(
+        text,
+        "[tau-internal]: Watched agent worker provider status: retrying (usage_window, attempt 1, next retry about 4d 20h)"
+    );
+    assert!(!text.contains("419322s"));
 }
 use crate::discovery::DiscoveredAgentsFile;
 fn assistant_message(text: &str) -> ContextItem {

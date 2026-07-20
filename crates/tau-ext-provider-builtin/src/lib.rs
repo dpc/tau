@@ -3604,10 +3604,11 @@ fn emit_retry_status(
     handle: &ClientHandle,
 ) -> ClientResult<()> {
     let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
+    let delay_text = tau_proto::format_approximate_duration_secs(delay.as_secs());
     let text = format!(
-        "{}; next attempt in about {}s (attempt {}). Tau will keep trying; cancel the prompt to stop.",
+        "{}; next attempt in about {} (attempt {}). Tau will keep trying; cancel the prompt to stop.",
         class.public_reason(),
-        delay.as_secs(),
+        delay_text,
         job.retry_state.attempts,
     );
     handle.send(HarnessInputMessage::emit(Event::ProviderResponseUpdated(

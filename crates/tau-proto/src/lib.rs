@@ -16,6 +16,7 @@
 
 mod context;
 mod diff;
+mod duration_format;
 mod event_name;
 mod events;
 mod interception;
@@ -36,6 +37,7 @@ use std::marker::PhantomData;
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
+pub use duration_format::format_approximate_duration_secs;
 pub use event_name::*;
 pub use events::*;
 pub use interception::*;

@@ -682,12 +682,14 @@ pub(crate) fn watch_provider_status_text(
             category,
             attempt,
             next_retry_delay_secs,
-        } => format!(
-            "[tau-internal]: Watched agent {sender_label} provider status: retrying ({category}, attempt {}, next retry about {}s)",
-            attempt,
-            next_retry_delay_secs,
-            category = category.as_str(),
-        ),
+        } => {
+            let delay =
+                tau_proto::format_approximate_duration_secs(u64::from(next_retry_delay_secs));
+            format!(
+                "[tau-internal]: Watched agent {sender_label} provider status: retrying ({category}, attempt {attempt}, next retry about {delay})",
+                category = category.as_str(),
+            )
+        }
         tau_proto::AgentWatchProviderState::RecoveringContext { .. } => format!(
             "[tau-internal]: Watched agent {sender_label} provider status: recovering_context (context_window)"
         ),
@@ -713,10 +715,14 @@ pub(crate) fn watch_provider_status_summary(state: &tau_proto::AgentWatchProvide
             category,
             attempt,
             next_retry_delay_secs,
-        } => format!(
-            "retrying ({}, attempt {attempt}, next retry about {next_retry_delay_secs}s)",
-            category.as_str()
-        ),
+        } => {
+            let delay =
+                tau_proto::format_approximate_duration_secs(u64::from(*next_retry_delay_secs));
+            format!(
+                "retrying ({}, attempt {attempt}, next retry about {delay})",
+                category.as_str()
+            )
+        }
         tau_proto::AgentWatchProviderState::RecoveringContext { .. } => {
             "recovering context".to_owned()
         }

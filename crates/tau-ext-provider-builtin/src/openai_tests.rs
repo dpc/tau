@@ -2278,6 +2278,15 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             .count()
             == 2
     });
+    assert!(decode_frames(&output.bytes()).iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.agent_prompt_id.as_str() == "probe"
+                && update.status.as_ref().is_some_and(|status| {
+                    status.text.contains("next attempt in about 5d")
+                        && !status.text.contains("432000s")
+                })
+    )));
     assert_eq!(calls.lock().expect("call log").as_slice(), ["probe"]);
 
     let mut peer_one = prompt();

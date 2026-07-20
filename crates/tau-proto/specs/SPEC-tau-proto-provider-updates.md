@@ -18,6 +18,9 @@ and replay source.
 ## Structured watched provider status
 
 Transient retry updates may carry `ProviderRetryStatus`: a closed work category, saturating attempt number, and approximate whole-second delay. Human status text remains UI presentation and is not an authority for harness decisions. `AgentWatchProviderStatusNotification` is the harness-authored cross-agent projection and contains only bounded facts, prompt/turn correlation, watch subscription identity, and a nested serde-tagged `state`. The `phase` discriminator selects `retrying`, `recovering_context`, `blocked`, `dispatch_uncertain`, or `terminal_error`; each variant owns exactly the category, attempt, delay, or failure fields valid for that phase, so contradictory option combinations are neither constructible nor decodable. `recovering_context` represents active harness-authorized reactive compaction; retrying, recovery, blocked-compaction, restored dispatch-uncertain, and terminal-error projections are emitted according to current work state.
+Retry presentation keeps exact seconds for waits below one hour, then uses a
+rounded two-unit minute/hour/day form so a legitimate distant reset remains
+readable without changing the underlying whole-second fact.
 
 ### Reactive context recovery correlation
 

@@ -17,8 +17,9 @@ transport/overload/throttle and at most thirty minutes for persistent usage,
 account, auth, and unknown failures. Trusted `Retry-After` or structured reset
 hints are lower bounds and may be later than that generated ceiling. Prompts
 using one provider profile share limit cooldowns, while cancellation remains
-prompt-scoped. Mutable profiles and credentials are reloaded when delayed work
-becomes due.
+prompt-scoped. Visible retry status renders long trusted delays in compact
+minute/hour/day units while scheduling retains the whole-second deadline.
+Mutable profiles and credentials are reloaded when delayed work becomes due.
 
 Retry state is memory-only. Cold restart intentionally does not replay an
 ambiguously accepted request because doing so can duplicate output, cost, tools,
