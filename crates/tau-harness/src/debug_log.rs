@@ -152,7 +152,9 @@ fn debug_event_json(event: &Event) -> serde_json::Value {
 
 fn redact_event_binary_content(event: &mut Event) {
     match event {
-        Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+        Event::ToolResultReported(result)
+        | Event::ToolResult(result)
+        | Event::ProviderToolResult(result) => {
             for part in &mut result.provider_content {
                 let tau_proto::ToolResultContentPart::Image(image) = part;
                 image.data = std::sync::Arc::from([]);

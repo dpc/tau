@@ -1,7 +1,7 @@
 use tau_proto::{
     AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderModelsDeclared,
-    ProviderModelsUpdated, SessionAgentLoaded, SessionAgentUnloaded, ToolError, ToolName,
-    ToolProgress, ToolResult, ToolResultKind, ToolType,
+    ProviderModelsUpdated, SessionAgentLoaded, SessionAgentUnloaded, ToolCancelled, ToolError,
+    ToolName, ToolProgress, ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
@@ -108,7 +108,7 @@ fn transient_non_tool_event_is_not_persisted() {
 /// provider-owned counterparts are the durable transcript facts.
 #[test]
 fn raw_tool_terminal_events_are_not_persisted() {
-    let result = Event::ToolResult(ToolResult {
+    let result = ToolResult {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -117,8 +117,8 @@ fn raw_tool_terminal_events_are_not_persisted() {
         kind: ToolResultKind::Final,
         display: None,
         originator: PromptOriginator::User,
-    });
-    let event = Event::ToolError(ToolError {
+    };
+    let error = ToolError {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -126,12 +126,36 @@ fn raw_tool_terminal_events_are_not_persisted() {
         details: None,
         display: None,
         originator: PromptOriginator::User,
-    });
+    };
+    let cancelled = ToolCancelled {
+        call_id: "call-1".into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+    };
 
-    assert!(!should_persist_event(&result, false));
-    assert!(!should_persist_event(&result, true));
-    assert!(!should_persist_event(&event, false));
-    assert!(!should_persist_event(&event, true));
+    for event in [
+        Event::ToolResultReported(result.clone()),
+        Event::ToolResult(result),
+        Event::ToolErrorReported(error.clone()),
+        Event::ToolError(error),
+        Event::ToolCancelledReported(cancelled),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
+/// Canonical cancellation retains its existing semantic transcript/replay
+/// behavior even though the peer report that caused it is never persisted.
+#[test]
+fn canonical_tool_cancellation_remains_persisted() {
+    let event = Event::ToolCancelled(ToolCancelled {
+        call_id: "call-1".into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+    });
+    assert!(should_persist_event(&event, false));
+    assert!(should_persist_event(&event, true));
 }
 
 /// Ensures transient durable tool completions still reach the agent store for

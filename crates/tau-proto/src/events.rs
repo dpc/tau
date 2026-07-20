@@ -1429,6 +1429,9 @@ pub enum ToolResultKind {
 /// backgrounded calls, a result with [`ToolResultKind::BackgroundPlaceholder`]
 /// closes only the provider-visible foreground turn; the later
 /// [`ToolBackgroundResult`] carries the real output.
+/// Tool/Core peers submit this payload as [`Event::ToolResultReported`]; the
+/// harness uses [`Event::ToolResult`] and [`Event::ProviderToolResult`] for
+/// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Stable id of the completed tool call.
@@ -1474,6 +1477,9 @@ pub struct ToolResult {
 /// emitted a [`ToolResultKind::BackgroundPlaceholder`] must report their later
 /// failure as [`ToolBackgroundError`] instead, so provider state is not closed
 /// twice.
+/// Tool/Core peers submit this payload as [`Event::ToolErrorReported`]; the
+/// harness uses [`Event::ToolError`] and [`Event::ProviderToolError`] for
+/// canonical projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolError {
     /// Stable id of the failed tool call.
@@ -1830,10 +1836,18 @@ pub struct ToolCancelRequest {
     pub target_call_id: ToolCallId,
 }
 
+/// Tool-provider observation or harness fact that one call was cancelled.
+///
+/// Tool/Core peers submit this payload as [`Event::ToolCancelledReported`].
+/// The harness publishes [`Event::ToolCancelled`] only for accepted foreground
+/// cancellation; backgrounded cancellation becomes [`ToolBackgroundError`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelled {
+    /// Stable id of the cancelled tool call.
     pub call_id: ToolCallId,
+    /// Tool name associated with the cancelled call.
     pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
 }
 
@@ -4554,8 +4568,16 @@ pub enum Event {
     ToolStarted(ToolStarted),
     #[serde(rename = "tool.rejected")]
     ToolRejected(ToolRejected),
+    /// Peer-authored successful completion awaiting routed-call validation.
+    #[serde(rename = "tool.result_reported")]
+    ToolResultReported(ToolResult),
+    /// Harness-authored canonical successful completion.
     #[serde(rename = "tool.result")]
     ToolResult(ToolResult),
+    /// Peer-authored failed completion awaiting routed-call validation.
+    #[serde(rename = "tool.error_reported")]
+    ToolErrorReported(ToolError),
+    /// Harness-authored canonical failed completion.
     #[serde(rename = "tool.error")]
     ToolError(ToolError),
     #[serde(rename = "tool.background_result")]
@@ -4570,6 +4592,10 @@ pub enum Event {
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel_request")]
     ToolCancelRequest(ToolCancelRequest),
+    /// Peer-authored cancellation awaiting routed-call validation.
+    #[serde(rename = "tool.cancelled_reported")]
+    ToolCancelledReported(ToolCancelled),
+    /// Harness-authored canonical foreground cancellation.
     #[serde(rename = "tool.cancelled")]
     ToolCancelled(ToolCancelled),
     #[serde(rename = "tool.delegate_progress")]
@@ -4960,13 +4986,16 @@ impl Event {
             Self::ToolRequest(_) => EventName::TOOL_REQUEST,
             Self::ToolStarted(_) => EventName::TOOL_STARTED,
             Self::ToolRejected(_) => EventName::TOOL_REJECTED,
+            Self::ToolResultReported(_) => EventName::TOOL_RESULT_REPORTED,
             Self::ToolResult(_) => EventName::TOOL_RESULT,
+            Self::ToolErrorReported(_) => EventName::TOOL_ERROR_REPORTED,
             Self::ToolError(_) => EventName::TOOL_ERROR,
             Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolProgressReported(_) => EventName::TOOL_PROGRESS_REPORTED,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
+            Self::ToolCancelledReported(_) => EventName::TOOL_CANCELLED_REPORTED,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
             Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
             _ => return None,
@@ -5186,6 +5215,9 @@ impl Event {
                 | Self::ToolUnregistrationDeclared(_)
                 | Self::ToolRegister(_)
                 | Self::ToolUnregister(_)
+                | Self::ToolResultReported(_)
+                | Self::ToolErrorReported(_)
+                | Self::ToolCancelledReported(_)
                 | Self::ToolCancelled(_)
                 | Self::MessageDeliveredReported(_)
                 | Self::MessageEditedReported(_)

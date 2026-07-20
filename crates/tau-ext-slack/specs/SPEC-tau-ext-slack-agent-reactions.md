@@ -9,9 +9,10 @@ sends, never reaction occurrences, help/control output, failed or unsubmitted
 reports, or arbitrary Slack objects. A successful local report write/flush happens
 before target activation; it is not a harness commit ACK and local authority may
 exist without a later canonical fact. A successful send submits
-`message.sent_reported` before its ordinary result. Unknown, stale, evicted,
-cross-agent, cross-instance, or cross-route refs fail generically before I/O. The
-exact item timestamp is the mutation target while its immutable authenticated
+`message.sent_reported` before transient `tool.result_reported`; the harness
+derives canonical facts downstream. Unknown, stale, evicted, cross-agent,
+cross-instance, or cross-route refs fail generically before I/O. The exact item
+timestamp is the mutation target while its immutable authenticated
 conversation/thread root remains separate routing authority.
 
 Source-reply targets revoke on unregister; proactive targets do not. Agent

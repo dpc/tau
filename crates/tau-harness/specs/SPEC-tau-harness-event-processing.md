@@ -58,6 +58,17 @@ or the event default. Tool lifecycle/terminal facts and harness-owned lifecycle,
 membership, transcript, and status facts must not be accepted through client
 fallback.
 
+Configured Tool/Core peers publish terminal outcomes only as transient
+`tool.result_reported`, `tool.error_reported`, or
+`tool.cancelled_reported` observations. They commit through ordinary
+interception before the downstream consumer validates the captured exact route
+and live configured generation. Canonical terminal/provider/background
+projections use the harness source and retain the immutable must-pass policy
+described above. Reports and raw renderer result/error projections do not enter
+semantic history; provider and cancellation/background facts retain their
+existing persistence and replay behavior. See
+[SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+
 UI debug/status commands that inspect local transport counters are direct live
 responses to the requesting UI, not ordinary publish/replay traffic. Extension
 protocol-I/O stats are exposed only through the `ui.debug_event_stats_request`

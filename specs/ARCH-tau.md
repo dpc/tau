@@ -10,6 +10,10 @@ They submit transient progress observations separately; the harness validates
 committed routed-call ownership and publishes protected canonical progress as
 specified by
 [SPEC-tool-progress-reports-and-canonical-facts](SPEC-tool-progress-reports-and-canonical-facts.md).
+Terminal result, error, and cancellation observations follow the same
+commit-before-validation boundary. The harness alone publishes protected
+terminal and provider transcript projections as specified by
+[SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 

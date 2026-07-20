@@ -304,6 +304,50 @@ impl TauExtension for MultiToolExtension {
     }
 }
 
+/// Emits deliberately mis-correlated DTOs to exercise contextual rebinding.
+struct CorrelatedTerminalReportsExtension;
+
+impl TauExtension for CorrelatedTerminalReportsExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "correlated-terminal-reports"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("correlated_tool"), |cx| {
+            let wrong_originator = PromptOriginator::Extension {
+                name: "wrong-extension".into(),
+                query_id: "wrong-query".to_owned(),
+            };
+            cx.report_result(tau_proto::ToolResult {
+                call_id: "wrong-result-call".into(),
+                tool_name: ToolName::new("wrong_result_tool"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("ok".to_owned()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: wrong_originator.clone(),
+            })?;
+            cx.report_error(tau_proto::ToolError {
+                call_id: "wrong-error-call".into(),
+                tool_name: ToolName::new("wrong_error_tool"),
+                tool_type: ToolType::Function,
+                message: "failed".to_owned(),
+                details: None,
+                display: None,
+                originator: wrong_originator,
+            })?;
+            cx.report_cancelled(tau_proto::ToolCancelled {
+                call_id: "wrong-cancelled-call".into(),
+                tool_name: ToolName::new("wrong_cancelled_tool"),
+                tool_type: ToolType::Function,
+            })
+        });
+    }
+}
+
 struct ActionExtension;
 
 impl TauExtension for ActionExtension {
@@ -3488,6 +3532,114 @@ fn client_handle_submits_transient_tool_progress_report() {
                     Event::ToolProgressReported(progress)
                         if progress.call_id.as_str() == "progress-call"
                 )
+    ));
+}
+
+/// Terminal tool helpers must submit explicitly transient report names rather
+/// than peer-authoring protected canonical facts.
+#[test]
+fn client_handle_submits_transient_terminal_tool_reports() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.finish_startup().expect("finish test startup");
+    handle
+        .report_tool_result(tau_proto::ToolResult {
+            call_id: "result-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: tau_proto::CborValue::Text("ok".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("submit result report");
+    handle
+        .report_tool_error(tau_proto::ToolError {
+            call_id: "error-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("submit error report");
+    handle
+        .report_tool_cancelled(tau_proto::ToolCancelled {
+            call_id: "cancelled-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        })
+        .expect("submit cancellation report");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [
+            HarnessInputMessage::Emit(result),
+            HarnessInputMessage::Emit(error),
+            HarnessInputMessage::Emit(cancelled),
+        ] if result.transient
+            && error.transient
+            && cancelled.transient
+            && matches!(result.event.as_ref(), Event::ToolResultReported(_))
+            && matches!(error.event.as_ref(), Event::ToolErrorReported(_))
+            && matches!(cancelled.event.as_ref(), Event::ToolCancelledReported(_))
+    ));
+}
+
+/// Contextual terminal helpers must replace caller-supplied correlation fields
+/// with the routed `tool.started` identity.
+#[test]
+fn tool_context_binds_terminal_report_correlation() {
+    let (_state, frames) = run_messages(
+        CorrelatedTerminalReportsExtension,
+        (),
+        &[tool_started("correlated_tool")],
+    );
+    let reports = frames
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolResultReported(_)
+                        | Event::ToolErrorReported(_)
+                        | Event::ToolCancelledReported(_)
+                ) =>
+            {
+                Some(*emit.event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(reports.len(), 3);
+    assert!(matches!(
+        &reports[0],
+        Event::ToolResultReported(result)
+            if result.call_id.as_str() == "call-correlated_tool"
+                && result.tool_name.as_str() == "correlated_tool"
+                && result.originator == PromptOriginator::User
+    ));
+    assert!(matches!(
+        &reports[1],
+        Event::ToolErrorReported(error)
+            if error.call_id.as_str() == "call-correlated_tool"
+                && error.tool_name.as_str() == "correlated_tool"
+                && error.originator == PromptOriginator::User
+    ));
+    assert!(matches!(
+        &reports[2],
+        Event::ToolCancelledReported(cancelled)
+            if cancelled.call_id.as_str() == "call-correlated_tool"
+                && cancelled.tool_name.as_str() == "correlated_tool"
     ));
 }
 

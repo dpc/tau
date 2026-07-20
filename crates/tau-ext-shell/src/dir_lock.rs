@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolError,
-    ToolProgress, ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, ToolCallId, ToolCancelled, ToolError, ToolProgress, ToolResult,
+    ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
 };
 
 use self::fs::{
@@ -1720,7 +1720,7 @@ fn cancelled_event(invoke: ToolStarted) -> Event {
 }
 
 fn send_event(tx: &Output, event: Event) {
-    let _ = tx.send(HarnessInputMessage::emit(event));
+    let _ = tx.report_tool_terminal(event);
 }
 
 #[cfg(test)]

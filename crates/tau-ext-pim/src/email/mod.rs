@@ -170,13 +170,15 @@ fn register_tools_with_prompt_fragment(
             local_invoke.tool_name = cx.local_tool_name().clone();
             cx.handle
                 .report_tool_progress(initial_progress(cx.invoke, cx.local_tool_name()))?;
-            let mut event = cx.state.dispatch(local_invoke);
-            match &mut event {
-                Event::ToolResult(result) => result.tool_name = wire_tool_name,
-                Event::ToolError(error) => error.tool_name = wire_tool_name,
-                _ => debug_assert!(false, "email dispatch must return a terminal tool event"),
-            }
-            cx.handle.emit(event)
+            let mut outcome =
+                tau_client::ToolTerminalOutcome::try_from(cx.state.dispatch(local_invoke))
+                    .map_err(|_| {
+                        tau_client::ClientError::handler(
+                            "email dispatch returned a non-terminal tool event",
+                        )
+                    })?;
+            *outcome.tool_name_mut() = wire_tool_name;
+            cx.handle.report_tool_terminal(outcome)
         });
     }
 }

@@ -120,9 +120,10 @@ byte-identical retry after bounded Retry-After or an ambiguous outcome. This is
 at-least-once notification delivery: an ambiguous first attempt followed by
 success may leave one or two Slack copies; two ambiguous outcomes can leave
 zero, one, or two. Successful retry results report
-`delivery_copies: one_or_two_possible`. After remote success Slack publishes
-`message.sent` and then the ordinary `tool.result` through one serialized local
-write-and-flush gate. Same-id/same-argument replay returns only the stable result
+`delivery_copies: one_or_two_possible`. After remote success Slack writes
+transient `message.sent_reported` and then transient `tool.result_reported`
+observations through one serialized local write-and-flush gate; the harness later
+derives canonical facts. Same-id/same-argument replay returns only the stable result
 without reposting or republishing; conflicting reuse errors and a new call id is
 new intent. Unregister, unload, route/config/session changes, and shutdown cancel
 retry and stale publication authority. The ledger clears on

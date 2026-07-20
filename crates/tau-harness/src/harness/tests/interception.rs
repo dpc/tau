@@ -1,5 +1,6 @@
 mod tool_lifecycle;
 mod tool_progress;
+mod tool_terminal;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
@@ -2518,16 +2519,10 @@ fn interception_defers_subsequent_publishes_until_reply() {
     ));
 }
 
+/// Regresses a rostra session failure where a parked unrelated event caused
+/// routed-call tracking to clear before a deferred terminal report committed.
 #[test]
-fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
-    // Regression for a real rostra session failure. A tool result can
-    // arrive while an unrelated event is parked in interception. The
-    // result publish is deferred, but the intake path still completes
-    // the call immediately and clears `tool_agents`. The
-    // eventual deferred commit must persist to the conversation's
-    // session from the publish snapshot, not from now-missing call
-    // tracking; otherwise the next LLM prompt contains a tool_use
-    // without its matching tool_result and the provider rejects it.
+fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
@@ -2548,6 +2543,14 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             tool_type: tau_proto::ToolType::Function,
             allows_provider_image: false,
         },
+    );
+    h.pending_tool_providers
+        .insert(call_id.clone(), "tool-provider".into());
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "tool-provider",
+        "configured-tool-provider",
+        tau_proto::ClientKind::Tool,
     );
     h.publish_for_agent(
         &cid,
@@ -2594,7 +2597,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
 
     h.handle_extension_event(
         "tool-provider",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
@@ -2608,8 +2611,8 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     )
     .expect("defer tool result");
     assert!(
-        !h.tool_agents.contains_key(&call_id),
-        "tool call tracking is cleared before the deferred publish commits"
+        h.tool_agents.contains_key(&call_id),
+        "tool call tracking must remain until the deferred report commits"
     );
 
     h.handle_extension_event(
@@ -2619,6 +2622,10 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
         })),
     )
     .expect("intercept reply");
+    assert!(
+        !h.tool_agents.contains_key(&call_id),
+        "post-commit terminal processing clears routed-call tracking"
+    );
 
     let has_result = default_agent_branch(&h).iter().any(|entry| {
         matches!(

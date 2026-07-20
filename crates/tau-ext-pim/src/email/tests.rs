@@ -769,8 +769,8 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
             }
             HarnessInputMessage::Emit(emit) => match *emit.event {
                 Event::ToolProgressReported(_) => progress += 1,
-                Event::ToolResult(result) => break Event::ToolResult(result),
-                Event::ToolError(error) => break Event::ToolError(error),
+                Event::ToolResultReported(result) => break Event::ToolResult(result),
+                Event::ToolErrorReported(error) => break Event::ToolError(error),
                 _ => {}
             },
             _ => {}
@@ -826,7 +826,7 @@ fn email_run_dispatches_prefixed_split_tool_by_logical_name() {
                         if let HarnessInputMessage::Emit(emit) = next
                             && matches!(
                                 emit.event.as_ref(),
-                                Event::ToolResult(_) | Event::ToolError(_)
+                                Event::ToolResultReported(_) | Event::ToolErrorReported(_)
                             )
                         {
                             break *emit.event;
@@ -834,7 +834,7 @@ fn email_run_dispatches_prefixed_split_tool_by_logical_name() {
                     };
                     break (progress.tool_name, terminal);
                 }
-                Event::ToolResult(_) | Event::ToolError(_) => {
+                Event::ToolResultReported(_) | Event::ToolErrorReported(_) => {
                     panic!("terminal email event arrived before required progress")
                 }
                 _ => {}
@@ -848,10 +848,10 @@ fn email_run_dispatches_prefixed_split_tool_by_logical_name() {
 
     assert_eq!(progress_name.as_str(), "work_email_list_recent");
     match terminal {
-        Event::ToolResult(result) => {
+        Event::ToolResultReported(result) => {
             assert_eq!(result.tool_name.as_str(), "work_email_list_recent");
         }
-        Event::ToolError(error) => {
+        Event::ToolErrorReported(error) => {
             assert_eq!(error.tool_name.as_str(), "work_email_list_recent");
             assert!(!error.message.contains("command envelope"));
         }
@@ -892,8 +892,8 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
         match pair.reader.read_message().expect("read").expect("frame") {
             HarnessInputMessage::ConfigError(error) => config_errors.push(error.message),
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ToolResult(result) => break Event::ToolResult(result),
-                Event::ToolError(error) => break Event::ToolError(error),
+                Event::ToolResultReported(result) => break Event::ToolResult(result),
+                Event::ToolErrorReported(error) => break Event::ToolError(error),
                 _ => {}
             },
             _ => {}

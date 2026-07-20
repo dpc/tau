@@ -300,7 +300,7 @@ fn expect_successful_send(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageSe
     let HarnessInputMessage::Emit(emit) = result else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolResult(_)));
+    assert!(matches!(*emit.event, Event::ToolResultReported(_)));
     report
 }
 
@@ -310,7 +310,7 @@ fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     error.message
@@ -985,7 +985,7 @@ fn telegram_send_fails_before_registration() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("telegram_register"));
@@ -1048,7 +1048,7 @@ fn telegram_register_fails_when_update_stream_lock_is_held() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(
@@ -1715,7 +1715,7 @@ fn telegram_send_rejects_unknown_chat_id_argument() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("unknown argument"));
@@ -1957,7 +1957,7 @@ fn reconfigured_chat_id_requires_reregistration_before_send() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
 
@@ -2233,7 +2233,7 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
     let mut saw_unregistered_error = false;
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame
-            && let Event::ToolError(error) = emit.event.as_ref()
+            && let Event::ToolErrorReported(error) = emit.event.as_ref()
             && error.tool_name.as_str() == SEND_TOOL_NAME
             && error.message.contains("telegram_register")
         {
@@ -2343,7 +2343,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
                 {
                     saw_send_tool = true;
                 }
-                Event::ToolResult(result)
+                Event::ToolResultReported(result)
                     if result.tool_name.as_str() == "work_telegram_register" =>
                 {
                     saw_register_result = true;
@@ -2408,10 +2408,10 @@ fn run_ignores_unrelated_tool_started_events() {
                 {
                     panic!("unrelated tool should not receive Telegram progress");
                 }
-                Event::ToolError(error) if error.tool_name.as_str() == "other_tool" => {
+                Event::ToolErrorReported(error) if error.tool_name.as_str() == "other_tool" => {
                     panic!("unrelated tool should not receive Telegram error");
                 }
-                Event::ToolResult(result) if result.tool_name.as_str() == "other_tool" => {
+                Event::ToolResultReported(result) if result.tool_name.as_str() == "other_tool" => {
                     panic!("unrelated tool should not receive Telegram result");
                 }
                 _ => {}
@@ -2484,7 +2484,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
                 saw_config_error = true;
             }
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ToolError(error) = emit.event.as_ref()
+                if let Event::ToolErrorReported(error) = emit.event.as_ref()
                     && error.tool_name.as_str() == SEND_TOOL_NAME
                     && error.message.contains("telegram_register")
                 {
@@ -2567,7 +2567,7 @@ fn run_legacy_tool_namespace_is_rejected() {
                 saw_config_error = true;
             }
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ToolError(error) = emit.event.as_ref()
+                if let Event::ToolErrorReported(error) = emit.event.as_ref()
                     && error.tool_name.as_str() == SEND_TOOL_NAME
                     && error.message.contains("telegram_register")
                 {
@@ -2929,7 +2929,7 @@ fn invalid_reconfiguration_clears_active_bridge_state() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("telegram_register"));

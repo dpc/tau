@@ -2,7 +2,8 @@
 
 ## Status
 
-The external-message, provider-model, tool-lifecycle, and tool-progress slices
+The external-message, provider-model, tool-lifecycle, tool-progress, and
+terminal-tool-outcome slices
 now use generic `Emit` publication, immutable authenticated internal publisher
 snapshots, source-aware admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
@@ -48,6 +49,12 @@ ordinary generic publication. Only the post-commit consumer validates the
 captured live routed-call owner and background state, then publishes protected
 harness-sourced `tool.progress`; see
 [SPEC-tool-progress-reports-and-canonical-facts](../../../specs/SPEC-tool-progress-reports-and-canonical-facts.md).
+They submit terminal result, error, and cancellation reports through the same
+generic commit boundary. The post-commit consumer revalidates the captured live
+generation and exact routed-call owner before applying existing terminal
+processing and publishing protected harness-sourced terminal, provider, or
+background projections; see
+[SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 For each prompt, the harness alone resolves the effective
 post-policy/provider-filtered tool snapshot used for definitions,
 authorization, capabilities, and diagnostics, as specified by

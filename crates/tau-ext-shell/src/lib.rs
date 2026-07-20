@@ -96,21 +96,28 @@ impl Output {
         }
     }
 
-    fn send(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+    fn scope_tool_name(&self, tool_name: &mut tau_proto::ToolName) {
         if let Some((local, wire)) = &self.tool_name_scope
-            && let HarnessInputMessage::Emit(emit) = &mut message
+            && tool_name == local
         {
+            *tool_name = wire.clone();
+        }
+    }
+
+    fn send(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+        if let HarnessInputMessage::Emit(emit) = &mut message {
             let tool_name = match emit.event.as_mut() {
                 Event::ToolProgressReported(event) => Some(&mut event.tool_name),
+                Event::ToolResultReported(event) => Some(&mut event.tool_name),
                 Event::ToolResult(event) => Some(&mut event.tool_name),
+                Event::ToolErrorReported(event) => Some(&mut event.tool_name),
                 Event::ToolError(event) => Some(&mut event.tool_name),
+                Event::ToolCancelledReported(event) => Some(&mut event.tool_name),
                 Event::ToolCancelled(event) => Some(&mut event.tool_name),
                 _ => None,
             };
-            if let Some(tool_name) = tool_name
-                && tool_name == local
-            {
-                *tool_name = wire.clone();
+            if let Some(tool_name) = tool_name {
+                self.scope_tool_name(tool_name);
             }
         }
         match &self.inner {
@@ -131,6 +138,27 @@ impl Output {
             Event::ToolProgressReported(progress),
             true,
         ))
+    }
+
+    /// Submit one terminal tool outcome through the typed client report helper.
+    fn report_tool_terminal(&self, event: Event) -> tau_client::ClientResult<()> {
+        let mut outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
+            tau_client::ClientError::handler(format!(
+                "terminal report helper received {}",
+                event.name()
+            ))
+        })?;
+        self.scope_tool_name(outcome.tool_name_mut());
+        match &self.inner {
+            OutputInner::Client(handle) => handle.report_tool_terminal_detached(outcome),
+            #[cfg(test)]
+            OutputInner::Channel(tx) => tx
+                .send(HarnessInputMessage::emit_with_transient(
+                    outcome.into_reported_event(),
+                    true,
+                ))
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+        }
     }
 
     fn register_local_tool(
@@ -1578,13 +1606,11 @@ fn dispatch_locked_tool_invoke(
             return;
         }
         Err(crate::dir_lock::LockAcquireError::Cancelled) => {
-            let _ = tx.send(HarnessInputMessage::emit(Event::ToolCancelled(
-                ToolCancelled {
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    tool_type: tau_proto::ToolType::Function,
-                },
-            )));
+            let _ = tx.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
+            }));
             return;
         }
         Err(crate::dir_lock::LockAcquireError::Abandoned(lock)) => {
@@ -1655,17 +1681,15 @@ fn send_tool_failure(
         details,
         display,
     } = failure;
-    let _ = tx.send(HarnessInputMessage::emit(Event::ToolError(
-        tau_proto::ToolError {
-            call_id: invoke.call_id,
-            tool_name: invoke.tool_name,
-            tool_type: tau_proto::ToolType::Function,
-            message,
-            details: details.map(|details| *details),
-            display: Some(*display),
-            originator: invoke.originator,
-        },
-    )));
+    let _ = tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        message,
+        details: details.map(|details| *details),
+        display: Some(*display),
+        originator: invoke.originator,
+    }));
 }
 
 fn reported_lock_wait_duration_seconds(elapsed: Duration) -> Option<u64> {
@@ -1757,7 +1781,7 @@ fn dispatch_tool_invoke(
                 WorkdirSnapshot::Invalid => None,
                 WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
             });
-            let _ = tx.send(HarnessInputMessage::emit(Event::ToolResult(ToolResult {
+            let _ = tx.report_tool_terminal(Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
@@ -1766,7 +1790,7 @@ fn dispatch_tool_invoke(
                 kind: ToolResultKind::Final,
                 display: Some(output.display),
                 originator: invoke.originator,
-            })));
+            }));
             return;
         }
         let agent_id = invoke.agent_id.clone();
@@ -1816,7 +1840,7 @@ fn dispatch_tool_invoke(
                 originator: invoke.originator.clone(),
             });
             let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-            let _ = tx.send(HarnessInputMessage::emit(event));
+            let _ = tx.report_tool_terminal(event);
             return;
         }
     };
@@ -1859,7 +1883,7 @@ fn dispatch_tool_invoke(
     let events = execute_tool(invoke, world);
     for event in events {
         let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-        let _ = tx.send(HarnessInputMessage::emit(event));
+        let _ = tx.report_tool_terminal(event);
     }
 }
 
@@ -1899,7 +1923,7 @@ fn dispatch_cancellable_non_shell_tool(
         crate::tools::CancellableToolOutcome::Finished(events) => {
             for event in events {
                 let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-                let _ = tx.send(HarnessInputMessage::emit(event));
+                let _ = tx.report_tool_terminal(event);
             }
         }
         crate::tools::CancellableToolOutcome::Cancelled => {
@@ -1909,7 +1933,7 @@ fn dispatch_cancellable_non_shell_tool(
                 tool_type: tau_proto::ToolType::Function,
             });
             let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-            let _ = tx.send(HarnessInputMessage::emit(event));
+            let _ = tx.report_tool_terminal(event);
         }
     }
 }
@@ -2036,7 +2060,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         .remove(&invoke.call_id);
     trace!(call_id = %invoke.call_id, "removed shell call from cancellation registry");
     let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-    if tx.send(HarnessInputMessage::emit(event)).is_err() {
+    if tx.report_tool_terminal(event).is_err() {
         debug!(call_id = %invoke.call_id, "failed to send terminal shell event to harness");
     }
 }

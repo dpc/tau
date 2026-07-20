@@ -299,6 +299,19 @@ impl<R: std::io::Read> EventReader<R> {
                     {
                         continue;
                     }
+                    // Most ext-shell tests exercise tool payload semantics rather
+                    // than the peer/canonical wire split. Normalize reports back
+                    // to their canonical payload shape here; focused protocol
+                    // tests inspect `read_raw_message` instead.
+                    Event::ToolResultReported(result) => {
+                        return Ok(Some(Event::ToolResult(result)));
+                    }
+                    Event::ToolErrorReported(error) => {
+                        return Ok(Some(Event::ToolError(error)));
+                    }
+                    Event::ToolCancelledReported(cancelled) => {
+                        return Ok(Some(Event::ToolCancelled(cancelled)));
+                    }
                     event => return Ok(Some(event)),
                 },
                 Some(_) => continue,
@@ -1495,8 +1508,9 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
         panic!("expected emit");
     };
-    let Event::ToolCancelled(cancelled) = *emit.event else {
-        panic!("expected ToolCancelled");
+    assert!(emit.transient);
+    let Event::ToolCancelledReported(cancelled) = *emit.event else {
+        panic!("expected ToolCancelledReported");
     };
     assert_eq!(cancelled.call_id, call_id);
     assert_eq!(fs::read_to_string(&edit_path).expect("file"), "old\n");

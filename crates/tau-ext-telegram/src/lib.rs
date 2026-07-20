@@ -577,6 +577,29 @@ impl Output {
         ));
     }
 
+    /// Submit one terminal tool report through the typed client helper or the
+    /// equivalent explicit transient channel frame.
+    fn report_tool_terminal(&self, event: Event) {
+        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
+            Ok(outcome) => outcome,
+            Err(event) => {
+                tracing::error!(event = %event.name(), "telegram tool returned non-terminal event");
+                return;
+            }
+        };
+        match self {
+            Self::Client(handle) => {
+                let _ = handle.report_tool_terminal_detached(outcome);
+            }
+            Self::Channel(tx) => {
+                let _ = tx.send(HarnessInputMessage::emit_with_transient(
+                    outcome.into_reported_event(),
+                    true,
+                ));
+            }
+        }
+    }
+
     /// Emit one transient external-message report for downstream
     /// canonicalization.
     fn emit_message_report(&self, event: Event) {
@@ -807,7 +830,7 @@ impl Extension {
             name if name == self.tool_names.send.as_str() => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown telegram tool".to_owned()),
         };
-        self.output.emit(event);
+        self.output.report_tool_terminal(event);
     }
 
     fn handles_tool(&self, tool_name: &str) -> bool {

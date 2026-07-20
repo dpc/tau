@@ -114,8 +114,8 @@ success can leave one or two Slack copies. There is no durable outbox,
 `client_msg_id`, restart guarantee, remote/local transaction, or exactly-once
 claim.
 
-After Slack reports success, the extension writes `message.sent_reported` and then the
-ordinary `tool.result` through one serialized local write-and-flush gate. This
+After Slack reports success, the extension writes `message.sent_reported` and then
+`tool.result_reported` through one serialized local write-and-flush gate. This
 preserves frame order but does not acknowledge a harness commit. The result's
 `message_ref` becomes local reaction authority keyed to the sent report's ID. Its
 documented `slack-message:<opaque-digest>` representation exposes no native

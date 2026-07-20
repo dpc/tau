@@ -154,7 +154,8 @@ fn proactive_send_submits_report_before_tool_result() {
     assert!(matches!(
         rx.recv().expect("tool result"),
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::ToolResult(_))
+            if emit.transient
+                && matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
     assert_eq!(client.sent_pairs().len(), 1);
 }
@@ -177,10 +178,16 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
     let HarnessInputMessage::Emit(first) = rx.recv().expect("first result") else {
         panic!("expected result emission");
     };
+    let Event::ToolResultReported(first_result) = first.event.as_ref() else {
+        panic!("expected result report");
+    };
     let Some(replay) = ext.handle_send(invoke.clone()) else {
         panic!("completed replay must return a result");
     };
-    assert_eq!(format!("{:?}", first.event), format!("{replay:?}"));
+    let Event::ToolResult(replay_result) = replay else {
+        panic!("completed replay must return an internal result");
+    };
+    assert_eq!(first_result, &replay_result);
     assert!(rx.try_recv().is_err());
     assert_eq!(client.sent_pairs().len(), 1);
 }

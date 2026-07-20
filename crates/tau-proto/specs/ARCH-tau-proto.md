@@ -25,6 +25,13 @@ distinguish a committed peer report from the canonical harness fact. The
 enclosing `HarnessInputMessage::Emit` is the peer's private submission message;
 see
 [SPEC-tool-progress-reports-and-canonical-facts](../../../specs/SPEC-tool-progress-reports-and-canonical-facts.md).
+Terminal tool outcomes likewise use transient peer
+`tool.result_reported`, `tool.error_reported`, and
+`tool.cancelled_reported` inputs, distinct from protected harness-authored
+canonical terminal and provider projections. Reports and canonical facts reuse
+the existing terminal payload DTOs; the event names establish authorship and
+commit stage. See
+[SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately

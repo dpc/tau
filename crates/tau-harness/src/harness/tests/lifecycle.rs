@@ -706,7 +706,7 @@ fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> b
 }
 
 fn test_tool_result(call_id: &str, tool_name: &str) -> Event {
-    Event::ToolResult(ToolResult {
+    Event::ToolResultReported(ToolResult {
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
@@ -2805,7 +2805,12 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let blocking_sink = connect_test_tool(&mut h, "conn-blocking-tool");
+    let blocking_sink = connect_ready_configured_extension(
+        &mut h,
+        "conn-blocking-tool",
+        "configured-blocking-tool",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry
         .register("conn-blocking-tool", staged_tool_spec("blocking_tool"));
     let old_provider = connect_test_tool(&mut h, "conn-old-staged-tool");
@@ -6372,7 +6377,7 @@ fn duplicate_tool_result_is_discarded() {
     // Fabricate a tool result for a call_id with no pending runtime metadata.
     let result = h.handle_extension_event(
         "fake-ext",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: "orphan-call".into(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -6534,6 +6539,12 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    connect_ready_configured_extension(
+        &mut h,
+        "owner-ext",
+        "configured-owner",
+        tau_proto::ClientKind::Tool,
+    );
     let cid = ensure_test_user_agent(&mut h);
     let owner_agent_id = durable_agent_id_for_conversation(&h, &cid);
     let call_id: ToolCallId = "shared-call".into();
@@ -6622,7 +6633,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
 
     h.handle_extension_event(
         "owner-ext",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: call_id.clone(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,

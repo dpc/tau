@@ -11,9 +11,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use tau_proto::{
-    AgentId, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolName, ToolType,
-};
+use tau_proto::{AgentId, Event, ToolCallId, ToolCancelled, ToolName, ToolType};
 use tracing::warn;
 
 use crate::Output;
@@ -220,13 +218,11 @@ impl WorkScheduler {
             let _ = self
                 .inner
                 .tx
-                .send(HarnessInputMessage::emit(Event::ToolCancelled(
-                    ToolCancelled {
-                        call_id,
-                        tool_name,
-                        tool_type: ToolType::Function,
-                    },
-                )));
+                .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                    call_id,
+                    tool_name,
+                    tool_type: ToolType::Function,
+                }));
         }
         true
     }
@@ -410,6 +406,8 @@ fn worker_loop(inner: Arc<Inner>, kind: WorkerKind) {
 
 #[cfg(test)]
 mod tests {
+    use tau_proto::HarnessInputMessage;
+
     use super::*;
 
     fn test_meta(call_id: &str) -> WorkMeta {
@@ -472,8 +470,9 @@ mod tests {
         let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
             panic!("expected emit");
         };
-        let Event::ToolCancelled(cancelled) = *emit.event else {
-            panic!("expected ToolCancelled");
+        assert!(emit.transient);
+        let Event::ToolCancelledReported(cancelled) = *emit.event else {
+            panic!("expected ToolCancelledReported");
         };
         assert_eq!(cancelled.call_id.as_str(), "call-a");
     }

@@ -607,7 +607,7 @@ fn xmpp_send_fails_before_registration() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("registration tool"));
@@ -663,7 +663,7 @@ fn invalid_configure_before_start_clears_stale_config() {
         HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),
-                Event::ToolError(error)
+                Event::ToolErrorReported(error)
                     if error.tool_name.as_str() == REGISTER_TOOL_NAME
                         && error.message.contains("not configured")
             )
@@ -744,7 +744,7 @@ fn run_replayed_session_started_enables_later_register() {
         HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),
-                Event::ToolResult(result)
+                Event::ToolResultReported(result)
                     if result.tool_name.as_str() == REGISTER_TOOL_NAME
             )
     )));
@@ -845,7 +845,7 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("within 30s"));
@@ -873,7 +873,7 @@ fn xmpp_register_requires_active_session_before_starting_bridge() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("active Tau session"));
@@ -926,7 +926,7 @@ fn xmpp_register_rejects_unknown_arguments() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("destination"));
@@ -966,7 +966,7 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolResult(_)));
+    assert!(matches!(*emit.event, Event::ToolResultReported(_)));
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
 }
@@ -994,7 +994,7 @@ fn xmpp_send_keeps_exact_outbound_body_limit_in_one_message() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolResult(_)));
+    assert!(matches!(*emit.event, Event::ToolResultReported(_)));
 
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent.len(), 1);
@@ -1025,7 +1025,7 @@ fn xmpp_send_numbers_message_beyond_outbound_body_limit() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("send result") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolResult(_)));
+    assert!(matches!(*emit.event, Event::ToolResultReported(_)));
 
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent.len(), 2);
@@ -1103,7 +1103,7 @@ fn xmpp_send_reports_partial_multipart_failure_without_sent_report() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("tool error") else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert_eq!(
@@ -1144,7 +1144,7 @@ fn xmpp_send_transport_failure_does_not_submit_sent_report() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("tool error") else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert_eq!(error.message, "xmpp transport failed");
@@ -1187,7 +1187,7 @@ fn xmpp_send_waits_for_online_readiness_after_registration() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolResult(_)));
+    assert!(matches!(*emit.event, Event::ToolResultReported(_)));
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
 }
@@ -1252,7 +1252,7 @@ fn xmpp_send_rejects_unknown_destination_argument() {
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    let Event::ToolError(error) = *emit.event else {
+    let Event::ToolErrorReported(error) = *emit.event else {
         panic!("tool error")
     };
     assert!(error.message.contains("destination"));
@@ -1612,7 +1612,7 @@ fn actual_room_template_metadata_is_validated_before_bridge_start() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
         panic!("emit")
     };
-    assert!(matches!(*emit.event, Event::ToolError(_)));
+    assert!(matches!(*emit.event, Event::ToolErrorReported(_)));
     assert_eq!(*bridge.started.lock().expect("lock"), 0);
 }
 

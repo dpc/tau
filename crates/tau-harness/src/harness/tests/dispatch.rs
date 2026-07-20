@@ -1820,7 +1820,9 @@ fn scheduled_test_tool_spec(
     }
 }
 
-fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harness) {
+/// Builds a harness with one configured owner and an in-flight routed tool
+/// call.
+pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harness) {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3600,7 +3602,9 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.shutdown().expect("shutdown");
 }
 
-fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
+/// Builds a final successful result fixture for dispatch and interception
+/// tests.
+pub(super) fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
     ToolResult {
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -3634,7 +3638,8 @@ fn wait_input_call(call_id: &str) -> AgentToolCall {
     }
 }
 
-fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
+/// Builds a terminal error fixture for dispatch and interception tests.
+pub(super) fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
@@ -3827,7 +3832,12 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let tool_events = connect_test_tool(&mut h, "conn-bg-result-drain");
+    let tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-bg-result-drain",
+        "configured-conn-bg-result-drain",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-bg-result-drain",
         scheduled_test_tool_spec("bg_update", tau_proto::BackgroundSupport::Instant),
@@ -3887,7 +3897,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
 
     h.handle_extension_event_inner(
         "conn-bg-result-drain",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             "bg-update-running",
             "bg_update",
             "background output",
@@ -3918,7 +3928,12 @@ fn background_error_clears_actual_running_call() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let tool_events = connect_test_tool(&mut h, "conn-bg-error-drain");
+    let tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-bg-error-drain",
+        "configured-conn-bg-error-drain",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-bg-error-drain",
         scheduled_test_tool_spec("bg_exclusive", tau_proto::BackgroundSupport::Instant),
@@ -3984,7 +3999,7 @@ fn background_error_clears_actual_running_call() {
 
     h.handle_extension_event_inner(
         "conn-bg-error-drain",
-        Event::ToolError(tool_error(
+        Event::ToolErrorReported(tool_error(
             "bg-exclusive-running",
             "bg_exclusive",
             "background failure",
@@ -4024,7 +4039,12 @@ fn background_cancel_clears_actual_running_call() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let tool_events = connect_test_tool(&mut h, "conn-bg-cancel-drain");
+    let tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-bg-cancel-drain",
+        "configured-conn-bg-cancel-drain",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-bg-cancel-drain",
         scheduled_test_tool_spec("bg_exclusive_cancel", tau_proto::BackgroundSupport::Instant),
@@ -4096,7 +4116,7 @@ fn background_cancel_clears_actual_running_call() {
 
     h.handle_extension_event_inner(
         "conn-bg-cancel-drain",
-        Event::ToolCancelled(tau_proto::ToolCancelled {
+        Event::ToolCancelledReported(tau_proto::ToolCancelled {
             call_id: "bg-exclusive-cancel-running".into(),
             tool_name: ToolName::new("bg_exclusive_cancel"),
             tool_type: tau_proto::ToolType::Function,
@@ -4488,7 +4508,7 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
 
     h.handle_extension_event_inner(
         "conn-wrong",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             "owner-result-call",
             "owned_tool",
             "spoofed output",
@@ -4503,14 +4523,14 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
             .map(|provider_id| provider_id.as_str()),
         Some("conn-owner")
     );
-    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+    assert!(event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
-        Event::ToolResult(result) if result.call_id.as_str() == "owner-result-call"
+        Event::ToolResultReported(result) if result.call_id.as_str() == "owner-result-call"
     )));
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             "owner-result-call",
             "owned_tool",
             "real output",
@@ -4520,12 +4540,16 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
 
     assert!(!h.tool_agents.contains_key("owner-result-call"));
     assert!(!h.pending_tool_providers.contains_key("owner-result-call"));
-    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "owner-result-call"
-                && matches!(&result.result, CborValue::Text(text) if text == "real output")
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "owner-result-call"
+                    && matches!(&result.result, CborValue::Text(text) if text == "real output")
+        )
+    ));
 
     h.shutdown().expect("shutdown");
 }
@@ -4538,7 +4562,7 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
 
     h.handle_extension_event_inner(
         "conn-wrong",
-        Event::ToolError(tool_error(
+        Event::ToolErrorReported(tool_error(
             "owner-error-call",
             "owned_tool",
             "spoofed failure",
@@ -4553,24 +4577,28 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
             .map(|provider_id| provider_id.as_str()),
         Some("conn-owner")
     );
-    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+    assert!(event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
-        Event::ToolError(error) if error.call_id.as_str() == "owner-error-call"
+        Event::ToolErrorReported(error) if error.call_id.as_str() == "owner-error-call"
     )));
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolError(tool_error("owner-error-call", "owned_tool", "real failure")),
+        Event::ToolErrorReported(tool_error("owner-error-call", "owned_tool", "real failure")),
     )
     .expect("owner error accepted");
 
     assert!(!h.tool_agents.contains_key("owner-error-call"));
     assert!(!h.pending_tool_providers.contains_key("owner-error-call"));
-    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
-        event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "owner-error-call" && error.message == "real failure"
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolError(error)
+                if error.call_id.as_str() == "owner-error-call" && error.message == "real failure"
+        )
+    ));
 
     h.shutdown().expect("shutdown");
 }
@@ -4631,7 +4659,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
 
     h.handle_extension_event_inner(
         "conn-wrong",
-        Event::ToolCancelled(tau_proto::ToolCancelled {
+        Event::ToolCancelledReported(tau_proto::ToolCancelled {
             call_id: "owner-cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -4640,14 +4668,15 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     .expect("wrong cancellation ignored");
 
     assert!(h.tool_agents.contains_key("owner-cancelled-call"));
-    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+    assert!(event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
-        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "owner-cancelled-call"
+        Event::ToolCancelledReported(cancelled)
+            if cancelled.call_id.as_str() == "owner-cancelled-call"
     )));
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             "owner-cancelled-call",
             "owned_tool",
             "real output",
@@ -4656,12 +4685,16 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     .expect("owner result accepted");
 
     assert!(!h.tool_agents.contains_key("owner-cancelled-call"));
-    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "owner-cancelled-call"
-                && matches!(&result.result, CborValue::Text(text) if text == "real output")
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "owner-cancelled-call"
+                    && matches!(&result.result, CborValue::Text(text) if text == "real output")
+        )
+    ));
 
     h.shutdown().expect("shutdown");
 }
@@ -4821,7 +4854,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             "late-progress-call",
             "owned_tool",
             "real output",
@@ -13625,7 +13658,12 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _tool_events = connect_test_tool(&mut h, "conn-bg-any-before");
+    let _tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-bg-any-before",
+        "configured-conn-bg-any-before",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-bg-any-before",
         instant_background_test_tool_spec("slow_any_before"),
@@ -13645,7 +13683,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
         .expect("start no-arg wait");
     h.handle_extension_event_inner(
         "conn-bg-any-before",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             call_id.as_str(),
             "slow_any_before",
             "background done",
@@ -13814,7 +13852,12 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _tool_events = connect_test_tool(&mut h, "conn-queued-wait");
+    let _tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-queued-wait",
+        "configured-conn-queued-wait",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-queued-wait",
         instant_background_test_tool_spec("slow_queued_wait"),
@@ -13859,7 +13902,7 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
 
     h.handle_extension_event_inner(
         "conn-queued-wait",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             background_call_id.as_str(),
             "slow_queued_wait",
             "background done after interrupt",
@@ -13887,7 +13930,12 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _tool_events = connect_test_tool(&mut h, "conn-queued-message-wait");
+    let _tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-queued-message-wait",
+        "configured-conn-queued-message-wait",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-queued-message-wait",
         instant_background_test_tool_spec("slow_queued_message_wait"),
@@ -13933,7 +13981,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
 
     h.handle_extension_event_inner(
         "conn-queued-message-wait",
-        Event::ToolResult(final_tool_result(
+        Event::ToolResultReported(final_tool_result(
             background_call_id.as_str(),
             "slow_queued_message_wait",
             "background done after message interrupt",
@@ -15944,7 +15992,12 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             examples: Vec::new(),
         },
     );
-    let _ = connect_test_tool(&mut h, "conn-slow");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-slow",
+        "configured-conn-slow",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-slow",
         ToolSpec {
@@ -16096,7 +16149,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
 
     h.handle_extension_event_inner(
         "conn-slow",
-        Event::ToolResult(ToolResult {
+        Event::ToolResultReported(ToolResult {
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -16110,12 +16163,16 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     )
     .expect("late tool result");
 
-    assert!(event_log_contains(&h, "conn-slow", |event| matches!(
-        event,
-        Event::ToolBackgroundResult(result)
-            if result.call_id.as_str() == "slow-call"
-                && matches!(&result.result, CborValue::Text(text) if text == "real output")
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolBackgroundResult(result)
+                if result.call_id.as_str() == "slow-call"
+                    && matches!(&result.result, CborValue::Text(text) if text == "real output")
+        )
+    ));
     let parent = h
         .agents
         .get(&parent_cid)
@@ -16146,7 +16203,12 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.selected_model = Some("test/model".into());
 
     let _ = connect_test_tool(&mut h, "conn-agent");
-    let _ = connect_test_tool(&mut h, "conn-slow");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-slow",
+        "configured-conn-slow",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-slow",
         ToolSpec {
@@ -16222,7 +16284,12 @@ fn canceled_side_conversation_drops_inner_background_completion() {
             examples: Vec::new(),
         },
     );
-    let _ = connect_test_tool(&mut h, "conn-slow");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-slow",
+        "configured-conn-slow",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-slow",
         ToolSpec {
@@ -16343,7 +16410,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
 
     h.handle_extension_event_inner(
         "conn-slow",
-        Event::ToolResult(ToolResult {
+        Event::ToolResultReported(ToolResult {
             call_id: "slow-call-cancel".into(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -16379,7 +16446,12 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _ = connect_test_tool(&mut h, "conn-fail");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-fail",
+        "configured-conn-fail",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-fail",
         ToolSpec {
@@ -16440,7 +16512,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.suppress_background_completion_prompt("fail-call".into());
     h.handle_extension_event_inner(
         "conn-fail",
-        Event::ToolError(tau_proto::ToolError {
+        Event::ToolErrorReported(tau_proto::ToolError {
             call_id: "fail-call".into(),
             tool_name: ToolName::new("fail"),
             tool_type: tau_proto::ToolType::Function,
@@ -16453,15 +16525,23 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     )
     .expect("late tool error");
 
-    assert!(event_log_contains(&h, "conn-fail", |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.call_id.as_str() == "fail-call" && error.message == "late failure"
-    )));
-    assert!(!event_log_contains(&h, "conn-fail", |event| matches!(
-        event,
-        Event::ToolError(error) if error.call_id.as_str() == "fail-call"
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolBackgroundError(error)
+                if error.call_id.as_str() == "fail-call" && error.message == "late failure"
+        )
+    ));
+    assert!(!event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolError(error) if error.call_id.as_str() == "fail-call"
+        )
+    ));
     let conv = h.agents.get(&cid).expect("conversation remains live");
     assert!(
         conv.pending_prompts
@@ -19567,9 +19647,15 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
     // The delegate extension would route the nested StartAgentResult
     // back as a ToolResult — simulate that here.
+    mark_connected_test_extension_configured(
+        &mut h,
+        "conn-delegate",
+        "configured-delegate",
+        tau_proto::ClientKind::Tool,
+    );
     h.handle_extension_event(
         "conn-delegate",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
@@ -19948,9 +20034,15 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     })
     .expect("side final");
 
+    mark_connected_test_extension_configured(
+        &mut h,
+        "conn-delegate",
+        "configured-delegate",
+        tau_proto::ClientKind::Tool,
+    );
     h.handle_extension_event(
         "conn-delegate",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,

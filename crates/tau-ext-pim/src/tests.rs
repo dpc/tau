@@ -83,9 +83,10 @@ fn rejected_reconfigure_clears_previous_module_state() {
     let local_tool_name = invoke.tool_name.clone();
     let event = runtime
         .dispatch_tool(invoke, &local_tool_name)
+        .expect("email dispatch succeeds")
         .expect("email tool is handled by PIM");
 
-    let Event::ToolError(error) = event else {
+    let tau_client::ToolTerminalOutcome::Failure(error) = event else {
         panic!("rejected email module should return a tool error")
     };
     assert!(
@@ -106,9 +107,10 @@ fn rejected_reconfigure_clears_previous_module_state() {
     let local_tool_name = invoke.tool_name.clone();
     let event = runtime
         .dispatch_tool(invoke, &local_tool_name)
+        .expect("calendar dispatch succeeds")
         .expect("calendar tool is handled by PIM");
 
-    let Event::ToolError(error) = event else {
+    let tau_client::ToolTerminalOutcome::Failure(error) = event else {
         panic!("rejected calendar module should return a tool error")
     };
     assert!(
@@ -155,9 +157,10 @@ fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
     let local_tool_name = invoke.tool_name.clone();
     let event = runtime
         .dispatch_tool(invoke, &local_tool_name)
+        .expect("calendar dispatch succeeds")
         .expect("calendar tool is handled by PIM");
 
-    let Event::ToolError(error) = event else {
+    let tau_client::ToolTerminalOutcome::Failure(error) = event else {
         panic!("rejected calendar module should return a tool error")
     };
     assert!(
@@ -573,7 +576,12 @@ fn ignores_tool_started_for_tools_owned_by_other_extensions() {
         };
 
         let local_tool_name = invoke.tool_name.clone();
-        assert!(runtime.dispatch_tool(invoke, &local_tool_name).is_none());
+        assert!(
+            runtime
+                .dispatch_tool(invoke, &local_tool_name)
+                .expect("unknown dispatch succeeds")
+                .is_none()
+        );
     }
 }
 
@@ -892,11 +900,11 @@ fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
                 assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
                 progress = true;
             }
-            Event::ToolResult(event) if event.call_id.as_str() == "prefixed-calendar" => {
+            Event::ToolResultReported(event) if event.call_id.as_str() == "prefixed-calendar" => {
                 assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
                 terminal = true;
             }
-            Event::ToolError(event) if event.call_id.as_str() == "prefixed-calendar" => {
+            Event::ToolErrorReported(event) if event.call_id.as_str() == "prefixed-calendar" => {
                 assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
                 terminal = true;
             }

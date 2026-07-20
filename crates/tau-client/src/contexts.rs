@@ -44,6 +44,53 @@ impl<'a, State> ToolContext<'a, State> {
         self.handle.emit(event)
     }
 
+    /// Submit a transient successful completion for this routed tool call.
+    ///
+    /// This contextual helper binds the routed call id, final wire tool name,
+    /// and originator from [`Self::invoke`]. The caller still supplies the
+    /// result payload, tool type, provider content, kind, and display
+    /// metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_result(&self, mut result: tau_proto::ToolResult) -> ClientResult<()> {
+        result.call_id = self.invoke.call_id.clone();
+        result.tool_name = self.invoke.tool_name.clone();
+        result.originator = self.invoke.originator.clone();
+        self.handle.report_tool_result(result)
+    }
+
+    /// Submit a transient failed completion for this routed tool call.
+    ///
+    /// This contextual helper binds the routed call id, final wire tool name,
+    /// and originator from [`Self::invoke`]. The caller still supplies the
+    /// failure payload, tool type, and display metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_error(&self, mut error: tau_proto::ToolError) -> ClientResult<()> {
+        error.call_id = self.invoke.call_id.clone();
+        error.tool_name = self.invoke.tool_name.clone();
+        error.originator = self.invoke.originator.clone();
+        self.handle.report_tool_error(error)
+    }
+
+    /// Submit a transient cancellation for this routed tool call.
+    ///
+    /// This contextual helper binds the routed call id and final wire tool name
+    /// from [`Self::invoke`]. The caller still supplies the tool type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_cancelled(&self, mut cancelled: tau_proto::ToolCancelled) -> ClientResult<()> {
+        cancelled.call_id = self.invoke.call_id.clone();
+        cancelled.tool_name = self.invoke.tool_name.clone();
+        self.handle.report_tool_cancelled(cancelled)
+    }
+
     /// Requests that the runner stop after the current message is handled.
     pub fn request_stop(&mut self) {
         *self.stop_requested = true;

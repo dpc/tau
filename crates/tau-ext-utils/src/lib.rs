@@ -565,7 +565,7 @@ fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
     let result = cx.state.handle_live_tool(cx.invoke, now);
     let display_args = timer_display_args(&cx.invoke.arguments, cx.invoke.call_id.as_str());
     match result {
-        Ok(result) => cx.emit(Event::ToolResult(ToolResult {
+        Ok(result) => cx.report_result(ToolResult {
             call_id: cx.invoke.call_id.clone(),
             tool_name: cx.invoke.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -574,8 +574,8 @@ fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
             kind: ToolResultKind::Final,
             display: Some(ok_display(display_args)),
             originator: cx.invoke.originator.clone(),
-        })),
-        Err(message) => cx.emit(Event::ToolError(ToolError {
+        }),
+        Err(message) => cx.report_error(ToolError {
             call_id: cx.invoke.call_id.clone(),
             tool_name: cx.invoke.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -583,7 +583,7 @@ fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
             details: None,
             display: Some(error_display(display_args)),
             originator: cx.invoke.originator.clone(),
-        })),
+        }),
     }
 }
 

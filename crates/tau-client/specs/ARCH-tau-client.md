@@ -33,6 +33,17 @@ acknowledges local writer admission/flush; interception and downstream
 routed-call validation determine whether the harness later publishes canonical
 progress. See
 [SPEC-tool-progress-reports-and-canonical-facts](../../../specs/SPEC-tool-progress-reports-and-canonical-facts.md).
+Terminal Tool/Core producers use the typed result, error, and cancellation
+report helpers. `ToolTerminalOutcome` centralizes conversion from pure
+canonical-shaped dispatch outcomes to `tool.*_reported` wire events so
+production handles and test-channel adapters cannot drift. Contextual tool
+helpers bind the routed call id, final wire name, and originator where present;
+raw `ClientHandle` helpers deliberately perform no correlation or name scoping.
+All report helpers set explicit transient metadata. Generic `emit` remains
+wire-mechanical and does not rewrite canonical names. Local flush or queue
+admission does not acknowledge report commit, routed-call validation, or
+canonical completion. See
+[SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 Configure-derived declarations are buffered while handlers run so they override
 same-name static defaults without becoming visible before configuration is
 accepted. Rejection emits `ConfigError`, discards buffered declarations, and

@@ -220,6 +220,44 @@ fn nested_provider_image_bytes_are_redacted_before_debug_json() {
     );
 }
 
+/// Ensures committed terminal result reports remain observable in debug JSON
+/// while their typed provider-image bytes are cleared before serialization.
+#[test]
+fn tool_result_report_image_bytes_are_redacted_before_debug_json() {
+    let event = Event::ToolResultReported(tau_proto::ToolResult {
+        call_id: "call-image-report".into(),
+        tool_name: tau_proto::ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("safe image metadata".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: b"\x89PNG\r\n\x1a\nreport-image-sentinel".to_vec().into(),
+                width: 640,
+                height: 480,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    });
+
+    let json = debug_event_json(&event);
+    let rendered = serde_json::to_string(&json).expect("render debug JSON");
+    assert!(rendered.contains("tool.result_reported"));
+    assert!(rendered.contains("safe image metadata"));
+    assert!(!rendered.contains("report-image-sentinel"));
+    assert_eq!(
+        json["payload"]["provider_content"][0]["content"]["data"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json["payload"]["provider_content"][0]["content"]["width"],
+        640
+    );
+}
+
 /// Ensures interceptor replies cannot bypass incoming-frame image redaction by
 /// nesting a replacement event outside `HarnessInputMessage::Emit`.
 #[test]

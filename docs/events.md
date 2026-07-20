@@ -348,18 +348,28 @@ agent requests, and harness dispatch. The registration lifecycle contract is
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
   call rejection.
-- **`tool.result`** *(extension/harness)* — Successful logical runtime tool
-  completion, by call id, with tool-owned `result` plus optional UI
-  `display` metadata, optional typed provider content, and echoed originator.
-  This event is renderer-facing. Only an explicitly image-capable tool on an
-  image-capable selected provider route may submit typed image content. The
-  harness validates such content before deduplication or success publication,
-  persists the provider-facing terminal fact, and clears image bytes from
-  generic live delivery, wait results, and all replay. Provider-only terminal
-  completions use `provider.tool_result` instead.
-- **`tool.error`** *(extension)* — Logical tool failure with a message and
-  optional structured details. Operational only; transient. Provider-only
-  terminal failures use `provider.tool_error` instead.
+- **`tool.result_reported`** *(Tool/Core extension)* — Transient peer
+  observation of successful completion. It commits through ordinary
+  interception before the harness validates the captured configured generation,
+  exact routed-call owner, tool-call state, media safety, and foreground or
+  background policy. Reports may submit optional typed provider content. Only an
+  explicitly image-capable tool on an image-capable selected provider route may
+  submit typed image content. A committed report is not itself accepted
+  completion.
+- **`tool.result`** *(harness)* — Protected canonical renderer-facing successful
+  logical runtime tool completion, by call id, with tool-owned `result`, optional
+  UI `display` metadata, and echoed originator. Canonical `tool.result` always
+  omits `provider_content`; the protected `provider.tool_result` transcript fact
+  retains validated typed provider content. Debug projections clear provider
+  image bytes. The canonical event uses the harness source and cannot be
+  rewritten or dropped.
+- **`tool.error_reported`** *(Tool/Core extension)* — Transient peer
+  observation of logical failure. It has the same generic commit and downstream
+  route/generation validation boundary as `tool.result_reported`.
+- **`tool.error`** *(harness)* — Protected canonical renderer-facing failure
+  with a message and optional structured details. Provider transcript failures
+  use `provider.tool_error`. The raw renderer fact remains outside semantic
+  history.
 - **`tool.background_result`** / **`tool.background_error`** *(harness)* —
   Logical notification that a backgrounded tool later completed for real.
   The earlier synthetic placeholder is provider-facing only and is not
@@ -383,10 +393,14 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   dropped.
 - **`tool.cancel_request`** *(harness)* — The harness asks an extension to cancel an
   in-flight call.
-- **`tool.cancelled`** *(extension/harness)* — A non-backgrounded call was
-  cancelled and its foreground transcript tool round is terminal. Operational
-  only; transient. Backgrounded calls that already emitted a placeholder must
-  use `tool.background_error` for cancellation instead.
+- **`tool.cancelled_reported`** *(Tool/Core extension)* — Transient peer
+  cancellation observation. It commits before downstream generation, route, and
+  call-state validation.
+- **`tool.cancelled`** *(harness)* — Protected canonical fact that a
+  non-backgrounded call was cancelled and its foreground transcript tool round
+  is terminal. Backgrounded calls that already emitted a placeholder instead
+  derive `tool.background_error`. The canonical event uses the harness source
+  and cannot be rewritten or dropped.
 
 ## Actions
 

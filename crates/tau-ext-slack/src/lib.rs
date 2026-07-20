@@ -1424,6 +1424,42 @@ impl Output {
             true,
         ));
     }
+
+    /// Submit one terminal tool report through the typed client helper or the
+    /// equivalent explicit transient channel frame.
+    fn report_tool_terminal(&self, event: Event) {
+        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
+            Ok(outcome) => outcome,
+            Err(event) => {
+                tracing::error!(event = %event.name(), "Slack tool returned non-terminal event");
+                return;
+            }
+        };
+        match self {
+            Self::Client(handle) => {
+                let _ = handle.report_tool_terminal_detached(outcome);
+            }
+            Self::Channel(tx) => {
+                let _ = tx.send(HarnessInputMessage::emit_with_transient(
+                    outcome.into_reported_event(),
+                    true,
+                ));
+            }
+        }
+    }
+
+    /// Write and flush one successful terminal report before returning.
+    fn report_tool_result_confirmed(&self, result: ToolResult) -> bool {
+        match self {
+            Self::Channel(tx) => tx
+                .send(HarnessInputMessage::emit_with_transient(
+                    Event::ToolResultReported(result),
+                    true,
+                ))
+                .is_ok(),
+            Self::Client(handle) => handle.report_tool_result(result).is_ok(),
+        }
+    }
 }
 
 struct Extension {
@@ -1680,7 +1716,7 @@ impl Extension {
             if let Event::ToolProgressReported(progress) = event {
                 self.output.report_tool_progress(progress);
             } else {
-                self.output.emit(event);
+                self.output.report_tool_terminal(event);
             }
         }
     }

@@ -20,8 +20,9 @@ The first lazy local poll drains backlog without long polling and publishes none
 of the old updates. A stale-generation response cannot advance offset, mark the
 backlog drained, or route work. Reconfigure invalidates registrations,
 selections, links, offsets, and in-flight responses. Accepted original bodies
-submit `message.delivered_reported`; successful sends submit `message.sent_reported` before the
-ordinary result.
+submit `message.delivered_reported`; successful sends submit
+`message.sent_reported` before transient `tool.result_reported`, from which the
+harness derives canonical facts.
 
 Harness replay performs no Telegram I/O or report submission and reconstructs no live
 registration, route, link, or stream ownership. This is distinct from gateway

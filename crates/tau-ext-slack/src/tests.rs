@@ -2556,7 +2556,7 @@ fn successful_send_uses_local_reply_selector() {
                 Event::MessageSentReported(report) => {
                     sent_report = Some(report);
                 }
-                Event::ToolResult(_) => break,
+                Event::ToolResultReported(_) => break,
                 _ => {}
             }
         }
@@ -3433,7 +3433,7 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
             HarnessInputMessage::Emit(emit)
                 if matches!(
                      emit.event.as_ref(),
-                     Event::ToolError(error)
+                     Event::ToolErrorReported(error)
                          if error.tool_name.as_str() == REGISTER_TOOL_NAME
                             && error.message.contains("not configured")
                  )
@@ -3551,7 +3551,7 @@ fn run_malformed_post_start_config_preserves_active_state() {
         HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),
-                Event::ToolError(error)
+                Event::ToolErrorReported(error)
                     if error.tool_name.as_str() == SEND_TOOL_NAME
                         && error.message.contains("unknown or stale")
             )
@@ -3592,7 +3592,7 @@ fn run_replayed_lifecycle_event_does_not_clear_registration() {
         HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),
-                Event::ToolError(error)
+                Event::ToolErrorReported(error)
                     if error.tool_name.as_str() == SEND_TOOL_NAME
                         && error.message.contains("unknown or stale")
             )
@@ -3630,7 +3630,7 @@ fn run_bad_tool_args_do_not_stop_runner() {
             HarnessInputMessage::Emit(emit)
                 if matches!(
                     emit.event.as_ref(),
-                    Event::ToolError(error)
+                    Event::ToolErrorReported(error)
                         if error.tool_name.as_str() == SEND_TOOL_NAME
                             && error.message.contains("unknown argument")
                 )
@@ -3643,7 +3643,7 @@ fn run_bad_tool_args_do_not_stop_runner() {
             HarnessInputMessage::Emit(emit)
                 if matches!(
                     emit.event.as_ref(),
-                    Event::ToolResult(result)
+                    Event::ToolResultReported(result)
                         if result.tool_name.as_str() == REGISTER_TOOL_NAME
                 )
         )),

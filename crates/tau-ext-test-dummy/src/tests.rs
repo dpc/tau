@@ -127,7 +127,7 @@ fn restart_tool_can_return_error() {
         Some("test")
     );
     assert!(matches!(frames[4], HarnessInputMessage::Ready(_)));
-    let Some(Event::ToolError(error)) = frames.get(5).and_then(emitted_event) else {
+    let Some(Event::ToolErrorReported(error)) = frames.get(5).and_then(emitted_event) else {
         panic!("expected tool error");
     };
     assert_eq!(error.message, "restarting failed");
@@ -158,7 +158,7 @@ fn restart_tool_can_exit_without_reply() {
     assert!(
         frames.iter().all(|frame| !matches!(
             emitted_event(frame),
-            Some(Event::ToolError(_)) | Some(Event::ToolResult(_))
+            Some(Event::ToolErrorReported(_)) | Some(Event::ToolResultReported(_))
         )),
         "no tool reply frame should appear in the random-exit branch"
     );
@@ -174,7 +174,7 @@ fn restart_tool_config_success_returns_tool_result() {
     let result = frames
         .iter()
         .find_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(result),
+            Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
         })
         .expect("configured success should return a tool result");
@@ -187,7 +187,7 @@ fn restart_tool_config_success_returns_tool_result() {
     assert!(
         frames
             .iter()
-            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolError(_))))
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolErrorReported(_))))
     );
 }
 
@@ -201,7 +201,7 @@ fn restart_tool_config_error_overrides_random_exit() {
     let error = frames
         .iter()
         .find_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolError(error)) => Some(error),
+            Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
         })
         .expect("configured error should return a tool error");
@@ -210,7 +210,7 @@ fn restart_tool_config_error_overrides_random_exit() {
     assert!(
         frames
             .iter()
-            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResult(_))))
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
     );
 }
 
@@ -224,7 +224,7 @@ fn restart_tool_config_exit_overrides_random_error() {
     assert_eq!(frames.len(), 5);
     assert!(frames.iter().all(|frame| !matches!(
         emitted_event(frame),
-        Some(Event::ToolError(_)) | Some(Event::ToolResult(_))
+        Some(Event::ToolErrorReported(_)) | Some(Event::ToolResultReported(_))
     )));
 }
 
@@ -258,7 +258,7 @@ fn restart_tool_result_preserves_originator() {
     let result = frames
         .iter()
         .find_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(result),
+            Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
         })
         .expect("configured success should return a tool result");
@@ -277,7 +277,7 @@ fn restart_tool_error_preserves_originator() {
     let error = frames
         .iter()
         .find_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolError(error)) => Some(error),
+            Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
         })
         .expect("configured error should return a tool error");
@@ -292,7 +292,7 @@ fn replayed_restart_tool_is_ignored() {
 
     assert!(frames.iter().all(|frame| !matches!(
         emitted_event(frame),
-        Some(Event::ToolError(_)) | Some(Event::ToolResult(_))
+        Some(Event::ToolErrorReported(_)) | Some(Event::ToolResultReported(_))
     )));
     assert_eq!(frames.len(), 5);
 }
@@ -313,7 +313,7 @@ fn replayed_exit_restart_does_not_prevent_later_live_tool_result() {
     let results = frames
         .iter()
         .filter_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(result),
+            Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
         })
         .collect::<Vec<_>>();

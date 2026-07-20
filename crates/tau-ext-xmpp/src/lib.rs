@@ -133,17 +133,35 @@ impl Output {
         }
     }
 
-    /// Emits one event through the harness output channel.
-    fn emit(&self, event: Event) {
-        self.send(HarnessInputMessage::emit(event));
-    }
-
     /// Submit one transient tool progress observation.
     fn report_tool_progress(&self, progress: ToolProgress) {
         self.send(HarnessInputMessage::emit_with_transient(
             Event::ToolProgressReported(progress),
             true,
         ));
+    }
+
+    /// Submit one terminal tool report through the typed client helper or the
+    /// equivalent explicit transient channel frame.
+    fn report_tool_terminal(&self, event: Event) {
+        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
+            Ok(outcome) => outcome,
+            Err(event) => {
+                tracing::error!(event = %event.name(), "XMPP tool returned non-terminal event");
+                return;
+            }
+        };
+        match self {
+            Self::Client(handle) => {
+                let _ = handle.report_tool_terminal_detached(outcome);
+            }
+            Self::Channel(tx) => {
+                let _ = tx.send(HarnessInputMessage::emit_with_transient(
+                    outcome.into_reported_event(),
+                    true,
+                ));
+            }
+        }
     }
 
     /// Emit one transient external-message report for downstream
@@ -796,7 +814,7 @@ impl Extension {
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown xmpp tool".to_owned()),
         };
-        self.output.emit(event);
+        self.output.report_tool_terminal(event);
     }
 
     #[cfg(test)]

@@ -98,6 +98,22 @@ calls, and publish immutable harness-sourced `tool.progress`. Parked reports
 retain their original configured identity, and stale generations cannot produce
 canonical progress. See
 [`SPEC-tool-progress-reports-and-canonical-facts`](specs/SPEC-tool-progress-reports-and-canonical-facts.md).
+Terminal Tool/Core reports use the same captured configured-generation
+boundary. Mutable `tool.result_reported`, `tool.error_reported`, and
+`tool.cancelled_reported` observations commit before exact routed-call
+authorization and terminal state changes. Valid reports produce only immutable
+harness-sourced terminal/provider/background facts; stale generations,
+non-owners, completed calls, and direct canonical spoofs cannot close a call.
+Reports and raw canonical result/error facts stay out of semantic journals,
+while existing provider/cancellation/background transcript persistence is
+unchanged. Ephemeral-agent classification suppresses raw reports and every
+projection from durable debug JSONL. See
+[`SPEC-terminal-tool-reports-and-canonical-outcomes`](specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Committed terminal result reports may carry typed provider images for downstream
+validation, but every debug JSONL projection clears image bytes under
+[`SPEC-typed-image-tool-results`](specs/SPEC-typed-image-tool-results.md); only
+validated provider transcript storage and directed provider prompts retain
+canonical bytes.
 Generic configured-extension spawn diagnostics treat the configured instance
 name, resolved executable, and explicitly configured cwd as non-secret metadata;
 do not place credentials or tokens in those fields. Diagnostics bound and escape

@@ -35,10 +35,10 @@ suppression, native routing, replies, proactive destinations, remote-send
 policy, and retries remain inside the bridge extension.
 
 For a successful remote send, an extension normally emits
-`message.sent_reported` before its ordinary `tool.result`. Remote acceptance,
-canonical fact persistence, and tool
-completion are not one transaction and the fact is not a generic delivery/read
-receipt.
+`message.sent_reported` before its transient `tool.result_reported`; the harness
+later derives both canonical facts. Remote acceptance, canonical fact
+persistence, and tool completion are not one transaction and the fact is not a
+generic delivery/read receipt.
 
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For

@@ -392,10 +392,13 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
             );
         });
     } else {
-        cx.handle().emit_detached(tool_error(
-            invoke,
-            "websearch is busy; too many searches are already running".to_owned(),
-        ))?;
+        report_terminal_detached(
+            &cx.handle(),
+            tool_error(
+                invoke,
+                "websearch is busy; too many searches are already running".to_owned(),
+            ),
+        )?;
     }
     Ok(())
 }
@@ -437,7 +440,16 @@ fn dispatch_tool_invoke(
             originator: invoke.originator,
         }),
     };
-    let _ = handle.emit_detached(event);
+    let _ = report_terminal_detached(handle, event);
+}
+
+/// Submit one internally constructed terminal outcome through the typed report
+/// helpers while retaining `Event` as the pure dispatch/test return type.
+fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult<()> {
+    let outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|_| {
+        tau_client::ClientError::handler("websearch dispatch returned a non-terminal tool event")
+    })?;
+    handle.report_tool_terminal_detached(outcome)
 }
 
 fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<ToolUseState> {

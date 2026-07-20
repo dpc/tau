@@ -329,7 +329,7 @@ fn prefixed_exa_invocation_dispatches_by_logical_name() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("result");
-    let Event::ToolResult(result) = event else {
+    let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
     assert_eq!(result.tool_name.as_str(), "work_websearch_exa");
@@ -462,7 +462,7 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolResult(result) = event else {
+    let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
     assert_eq!(result.call_id.as_str(), "call-1");
@@ -509,7 +509,7 @@ fn defaults_num_results_when_omitted() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    assert!(matches!(event, Event::ToolResult(_)));
+    assert!(matches!(event, Event::ToolResultReported(_)));
     assert_eq!(
         searcher.calls.lock().expect("lock")[0].1,
         DEFAULT_NUM_RESULTS,
@@ -536,7 +536,7 @@ fn replayed_tool_started_is_ignored_before_live_search() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolResult(result) = event else {
+    let Event::ToolResultReported(result) = event else {
         panic!("expected live ToolResult, got {event:?}");
     };
     assert_eq!(result.call_id.as_str(), "live-call");
@@ -566,7 +566,7 @@ fn missing_query_returns_tool_error() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(err.message.contains("query"), "message: {}", err.message);
@@ -598,7 +598,7 @@ fn searcher_error_surfaces_as_tool_error() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert_eq!(err.message, "upstream timed out");
@@ -664,7 +664,7 @@ fn rejects_num_results_out_of_range() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(err.message.contains(">= 1"), "message: {}", err.message);
@@ -694,7 +694,7 @@ fn returns_busy_error_when_in_flight_limit_is_full() {
     writer.flush().expect("flush busy");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         searcher.release();
         panic!("expected ToolError, got {event:?}");
     };
@@ -703,7 +703,10 @@ fn returns_busy_error_when_in_flight_limit_is_full() {
     searcher.release();
     for _ in 0..MAX_IN_FLIGHT {
         let event = reader.read_event().expect("read").expect("event");
-        assert!(matches!(event, Event::ToolResult(_)), "event: {event:?}");
+        assert!(
+            matches!(event, Event::ToolResultReported(_)),
+            "event: {event:?}"
+        );
     }
 }
 
@@ -933,7 +936,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolResult(result) = event else {
+    let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
     assert_eq!(result.call_id.as_str(), "call-6");
@@ -978,7 +981,7 @@ fn forwards_parallel_fetch_to_web_fetch() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolResult(result) = event else {
+    let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
     assert_eq!(
@@ -1016,7 +1019,7 @@ fn parallel_missing_required_argument_is_rejected_before_forwarding() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(err.message.contains("query"), "message: {}", err.message);
@@ -1047,7 +1050,7 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
     writer.flush().expect("flush");
 
     let event = reader.read_event().expect("read").expect("event");
-    let Event::ToolError(err) = event else {
+    let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(

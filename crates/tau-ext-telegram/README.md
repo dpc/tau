@@ -151,8 +151,8 @@ deliveries locally as `message.delivered_reported`. Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram
 chat without accepting a model-supplied destination. A successful local or
-gateway send submits `message.sent_reported` before its ordinary tool result.
-The harness intercepts committed reports and publishes the canonical durable
-facts downstream. Sidecar submission does not acknowledge canonical commit, so
+gateway send submits `message.sent_reported` before transient
+`tool.result_reported`. The harness intercepts committed reports and publishes
+the canonical durable facts downstream. Sidecar submission does not acknowledge canonical commit, so
 interception, append failure, or a crash may leave transport effects without a
 canonical fact.

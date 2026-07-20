@@ -1816,6 +1816,10 @@ pub struct Harness {
     /// state. Used for same-session known-id collection; owner-scoped
     /// cancellation diagnostics use `completed_tool_agents`.
     pub(crate) completed_tool_calls: std::collections::HashSet<ToolCallId>,
+    /// Completed tool calls that targeted ephemeral agents. Retained for the
+    /// session so duplicate or late reports remain excluded from durable debug
+    /// logs after live call tracking and the runtime agent are removed.
+    completed_ephemeral_tool_calls: std::collections::HashSet<ToolCallId>,
     /// `call_id` → owning agent for completed tool calls whose owner was known
     /// at completion time. Used by internal tools to keep completion
     /// diagnostics scoped to the caller's conversation.
@@ -2645,6 +2649,7 @@ impl Harness {
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
             completed_tool_calls: HashSet::new(),
+            completed_ephemeral_tool_calls: HashSet::new(),
             completed_tool_agents: HashMap::new(),
             pending_tool_providers: HashMap::new(),
             pending_ui_shell_commands: HashMap::new(),
@@ -4039,12 +4044,12 @@ impl Harness {
         self.record_wait_background_error(error);
     }
 
-    /// Like [`publish_for_agent`] but lets the caller record an
-    /// originating connection on the persisted record (for `tool.result`
-    /// / `tool.error` arriving from extensions). The snap-to-`cid`-head
-    /// step is what keeps cross-conversation tool activity from folding
-    /// onto the wrong tree branch — without it, a sibling side conv that
-    /// just navigated `tree.head` would steal the parent of the next
+    /// Like [`publish_for_agent`] but lets the caller record source metadata on
+    /// the persisted record. Peer reports retain their authenticated extension
+    /// source; derived canonical terminal facts use the harness source. The
+    /// snap-to-`cid`-head step keeps cross-conversation tool activity from
+    /// folding onto the wrong tree branch — without it, a sibling side conv
+    /// that just navigated `tree.head` would steal the parent of the next
     /// tree-folding event.
     fn publish_for_agent_from(&mut self, cid: &AgentId, source: Option<&str>, event: Event) {
         // Stamp the publish with `cid`. The fold reads the
@@ -5827,10 +5832,16 @@ impl Harness {
             Event::ToolProgress(progress) | Event::ToolProgressReported(progress) => {
                 self.tool_call_targets_ephemeral_agent(&progress.call_id)
             }
+            Event::ToolResultReported(result) => {
+                self.tool_call_targets_ephemeral_agent(&result.call_id)
+            }
+            Event::ToolErrorReported(error) => {
+                self.tool_call_targets_ephemeral_agent(&error.call_id)
+            }
             Event::ToolCancelRequest(cancel) => {
                 self.tool_call_targets_ephemeral_agent(&cancel.target_call_id)
             }
-            Event::ToolCancelled(cancelled) => {
+            Event::ToolCancelled(cancelled) | Event::ToolCancelledReported(cancelled) => {
                 self.tool_call_targets_ephemeral_agent(&cancelled.call_id)
             }
             Event::ToolDelegateProgress(progress) => {
@@ -5857,10 +5868,12 @@ impl Harness {
     }
 
     fn tool_call_targets_ephemeral_agent(&self, call_id: &tau_proto::ToolCallId) -> bool {
-        self.tool_agents
-            .get(call_id)
-            .and_then(|cid| self.agents.get(cid))
-            .is_some_and(|agent| agent.persistence.is_ephemeral())
+        self.completed_ephemeral_tool_calls.contains(call_id)
+            || self
+                .tool_agents
+                .get(call_id)
+                .and_then(|cid| self.agents.get(cid))
+                .is_some_and(|agent| agent.persistence.is_ephemeral())
     }
 
     pub(crate) fn agent_display_name_for_cid(&self, cid: &AgentId) -> Option<String> {
@@ -8283,6 +8296,16 @@ impl Harness {
             // publish `tool.progress_reported` observations instead.
             return Ok(());
         }
+        if source_id != HARNESS_CONNECTION_ID
+            && matches!(
+                event,
+                Event::ToolResult(_) | Event::ToolError(_) | Event::ToolCancelled(_)
+            )
+        {
+            // Peer terminal outcomes use reports. Harness-owned internal tools
+            // retain their direct canonical completion path.
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
@@ -8315,7 +8338,13 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
-        if matches!(event, Event::ToolProgressReported(_)) {
+        if matches!(
+            event,
+            Event::ToolProgressReported(_)
+                | Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
+        ) {
             // This is only declarative event-authority admission. Per
             // `specs/DECISION-generic-peer-event-emission.md`, routed-call
             // validation, background suppression, and canonical publication run
@@ -8330,7 +8359,7 @@ impl Harness {
                     target: "tau_harness",
                     connection_id = source_id,
                     event = %event_name,
-                    "extension lacks tool progress report authority"
+                    "extension lacks tool report authority"
                 );
                 return Ok(());
             }
@@ -8425,6 +8454,15 @@ impl Harness {
         }
         if let Event::ToolProgressReported(progress) = event {
             self.process_committed_tool_progress_report(peer_context, progress);
+            return;
+        }
+        if matches!(
+            event,
+            Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
+        ) {
+            self.process_committed_tool_terminal_report(peer_context, event);
             return;
         }
         let Event::ProviderModelsDeclared(declaration) = event else {
@@ -8526,6 +8564,64 @@ impl Harness {
             true,
             None,
         );
+    }
+
+    /// Validate one committed peer terminal report and apply the existing
+    /// terminal completion path.
+    ///
+    /// The report has already passed generic interception and commit. This
+    /// method revalidates the immutable captured extension generation and
+    /// exact current routed-call owner before any terminal state mutation
+    /// or canonical publication. Same-name interception replacements
+    /// therefore rerun the full validation.
+    fn process_committed_tool_terminal_report(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
+        else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                        && entry.state != ExtensionState::Disconnected
+                });
+        let call_id = match event {
+            Event::ToolResultReported(result) => &result.call_id,
+            Event::ToolErrorReported(error) => &error.call_id,
+            Event::ToolCancelledReported(cancelled) => &cancelled.call_id,
+            _ => unreachable!("caller filters terminal tool reports"),
+        };
+        let source_owns_route = self
+            .pending_tool_providers
+            .get(call_id)
+            .is_some_and(|source| source == &extension.source);
+        if !source_is_current || !self.tool_agents.contains_key(call_id) || !source_owns_route {
+            return;
+        }
+        let source_id = extension.source.as_str();
+        match event {
+            Event::ToolResultReported(result) => {
+                self.handle_extension_tool_result(source_id, result.clone());
+            }
+            Event::ToolErrorReported(error) => {
+                self.handle_extension_tool_error(source_id, error.clone());
+            }
+            Event::ToolCancelledReported(cancelled) => {
+                self.handle_extension_tool_cancelled(source_id, cancelled.clone());
+            }
+            _ => unreachable!("caller filters terminal tool reports"),
+        }
     }
 
     /// Validate and apply one committed tool lifecycle declaration.
@@ -8927,22 +9023,25 @@ impl Harness {
         event: Event,
     ) -> Option<Event> {
         match event {
-            Event::ToolResult(result) => {
+            Event::ToolResult(result) if source_id == HARNESS_CONNECTION_ID => {
                 self.handle_extension_tool_result(source_id, result);
                 None
             }
-            Event::ToolError(error) => {
+            Event::ToolError(error) if source_id == HARNESS_CONNECTION_ID => {
                 self.handle_extension_tool_error(source_id, error);
                 None
             }
-            Event::ToolCancelled(cancelled) => {
+            Event::ToolCancelled(cancelled) if source_id == HARNESS_CONNECTION_ID => {
                 self.handle_extension_tool_cancelled(source_id, cancelled);
                 None
             }
             // Keep this peer-authored event rejection in sync with
             // `is_peer_forbidden_harness_fact` and the immutable/must-pass
             // classifications in `harness/interception.rs`.
-            Event::ProviderToolResult(_)
+            Event::ToolResult(_)
+            | Event::ToolError(_)
+            | Event::ToolCancelled(_)
+            | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
@@ -8965,7 +9064,7 @@ impl Harness {
             return;
         }
         if self.tool_turn.is_backgrounded(&result.call_id) {
-            self.handle_background_tool_result(source_id, result);
+            self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
             let call_id = result.call_id.to_string();
             let mut allows_provider_image = false;
@@ -8993,7 +9092,7 @@ impl Harness {
                         self.agent_store
                             .validate_agent_event_at(
                                 &agent_id,
-                                Some(source_id.into()),
+                                Some(HARNESS_CONNECTION_ID.into()),
                                 parent,
                                 &Event::ProviderToolResult(result.clone()),
                                 tau_proto::UnixMicros::now(),
@@ -9010,7 +9109,7 @@ impl Harness {
                 );
                 self.publish_terminal_tool_error(
                     Some(&cid),
-                    None,
+                    Some(HARNESS_CONNECTION_ID),
                     ToolError {
                         call_id: result.call_id,
                         tool_name: result.tool_name,
@@ -9038,7 +9137,7 @@ impl Harness {
             // (during its teardown) leaves `tree.head` on the *parent* branch —
             // folding the result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
-            self.publish_terminal_tool_result(Some(&cid), Some(source_id), result);
+            self.publish_terminal_tool_result(Some(&cid), Some(HARNESS_CONNECTION_ID), result);
             self.on_tool_call_complete(&call_id);
             self.clear_tool_call_tracking(&call_id);
         } else {
@@ -9054,7 +9153,7 @@ impl Harness {
             return;
         }
         if self.tool_turn.is_backgrounded(&error.call_id) {
-            self.handle_background_tool_error(Some(source_id), error);
+            self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
         } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
             let call_id = error.call_id.to_string();
             if let Some(tool) = self.pending_tools.get(&error.call_id) {
@@ -9062,7 +9161,7 @@ impl Harness {
                 error.tool_type = tool.tool_type;
             }
             self.dedup_tool_error(&cid, &mut error);
-            self.publish_terminal_tool_error(Some(&cid), Some(source_id), error);
+            self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
             self.on_tool_call_complete(&call_id);
             self.clear_tool_call_tracking(&call_id);
         } else {
@@ -9078,14 +9177,18 @@ impl Harness {
             return;
         }
         if self.tool_turn.is_backgrounded(&cancelled.call_id) {
-            self.handle_background_tool_cancelled(source_id, cancelled);
+            self.handle_background_tool_cancelled(HARNESS_CONNECTION_ID, cancelled);
         } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
             let call_id = cancelled.call_id.to_string();
             if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
                 cancelled.tool_name = tool.name.clone();
                 cancelled.tool_type = tool.tool_type;
             }
-            self.publish_for_agent_from(&cid, Some(source_id), Event::ToolCancelled(cancelled));
+            self.publish_for_agent_from(
+                &cid,
+                Some(HARNESS_CONNECTION_ID),
+                Event::ToolCancelled(cancelled),
+            );
             self.on_tool_call_complete(&call_id);
             self.clear_tool_call_tracking(&call_id);
         }
@@ -12232,6 +12335,13 @@ impl Harness {
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
         let owner = self.tool_agents.get(call_id).cloned();
+        if owner
+            .as_ref()
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| agent.persistence.is_ephemeral())
+        {
+            self.completed_ephemeral_tool_calls.insert(call_id.into());
+        }
         self.completed_tool_calls.insert(call_id.into());
         if let Some(owner) = owner {
             self.completed_tool_agents.insert(call_id.into(), owner);
@@ -12271,6 +12381,9 @@ impl Harness {
                 | Event::MessageReactionRemovedReported(_)
                 | Event::MessageSentReported(_)
                 | Event::ToolProgressReported(_)
+                | Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
         )
     }
 
@@ -12296,9 +12409,12 @@ impl Harness {
             event,
             Event::ToolResult(_)
                 | Event::ToolError(_)
+                | Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
                 | Event::ProviderToolResult(_)
                 | Event::ProviderToolError(_)
                 | Event::ToolCancelled(_)
+                | Event::ToolCancelledReported(_)
                 | Event::ToolBackgroundResult(_)
                 | Event::ToolBackgroundError(_)
         )
@@ -12323,6 +12439,9 @@ impl Harness {
                 | Event::ToolRegister(_)
                 | Event::ToolUnregister(_)
                 | Event::ToolProgress(_)
+                | Event::ToolResult(_)
+                | Event::ToolError(_)
+                | Event::ToolCancelled(_)
         )
     }
 
@@ -15383,6 +15502,7 @@ impl Harness {
         self.tool_agents.clear();
         self.pending_tools.clear();
         self.completed_tool_calls.clear();
+        self.completed_ephemeral_tool_calls.clear();
         self.completed_tool_agents.clear();
         self.pending_tool_providers.clear();
         self.pending_action_invocations.clear();
@@ -21586,12 +21706,12 @@ impl Harness {
         // unit tests via `submit_user_prompt` / manual turn-state setup.
         self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
 
-        let progress_observer_id = tau_proto::ConnectionId::from("__embedded_progress_observer");
+        let progress_observer_id = tau_proto::ConnectionId::from("__embedded_committed_observer");
         let (progress_tx, progress_rx) = mpsc::channel();
         self.bus.connect(Connection::new(
             ConnectionMetadata {
                 id: progress_observer_id.clone(),
-                name: "embedded progress observer".to_owned(),
+                name: "embedded committed-event observer".to_owned(),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::InMemory,
             },
@@ -21600,7 +21720,10 @@ impl Harness {
         if let Err(error) = self.bus.set_subscriptions(
             progress_observer_id.as_str(),
             Vec::new(),
-            vec![EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS)],
+            vec![
+                EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS),
+                EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+            ],
         ) {
             self.bus.disconnect(progress_observer_id.as_str());
             return Err(HarnessError::Route(error));
@@ -21646,9 +21769,6 @@ impl Harness {
                     if let Some(Event::ProviderResponseFinished(response)) = event {
                         record_embedded_tool_calls(&response.output_items, &mut tool_calls);
                     }
-                    if let Some(Event::ToolResult(result)) = event {
-                        tool_results.push(byte_free_embedded_tool_result(result));
-                    }
                     let is_final = matches!(
                         event,
                         Some(Event::ProviderResponseFinished(r))
@@ -21665,10 +21785,16 @@ impl Harness {
                         break 'interaction Err(error);
                     }
                     while let Ok(WriterCommand::Message(message)) = progress_rx.try_recv() {
-                        if let HarnessOutputMessage::Deliver(delivery) = message
-                            && let Event::ToolProgress(progress) = delivery.event()
-                        {
-                            progress_messages.push(format_tool_progress(progress));
+                        if let HarnessOutputMessage::Deliver(delivery) = message {
+                            match delivery.event() {
+                                Event::ToolProgress(progress) => {
+                                    progress_messages.push(format_tool_progress(progress));
+                                }
+                                Event::ToolResult(result) => {
+                                    tool_results.push(byte_free_embedded_tool_result(result));
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     if is_final {
@@ -21954,7 +22080,9 @@ fn prompt_context_without_image_bytes(
 fn event_without_provider_image_bytes(event: &Event) -> Event {
     let mut event = event.clone();
     match &mut event {
-        Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+        Event::ToolResultReported(result)
+        | Event::ToolResult(result)
+        | Event::ProviderToolResult(result) => {
             for part in &mut result.provider_content {
                 let tau_proto::ToolResultContentPart::Image(image) = part;
                 image.data = std::sync::Arc::from([]);

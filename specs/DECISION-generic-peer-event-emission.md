@@ -197,3 +197,5 @@ The tool declaration-to-canonical-state flow is specified by
 [SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).
 The tool progress report-to-canonical-fact flow is specified by
 [SPEC-tool-progress-reports-and-canonical-facts](SPEC-tool-progress-reports-and-canonical-facts.md).
+The terminal tool report-to-canonical-outcome flow is specified by
+[SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).

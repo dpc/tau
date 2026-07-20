@@ -221,7 +221,12 @@ impl EventName {
     pub const TOOL_REQUEST: Self = Self::from_static(EventCategory::Tool, "request");
     pub const TOOL_STARTED: Self = Self::from_static(EventCategory::Tool, "started");
     pub const TOOL_REJECTED: Self = Self::from_static(EventCategory::Tool, "rejected");
+    /// Tool-provider success observation submitted for downstream validation.
+    pub const TOOL_RESULT_REPORTED: Self =
+        Self::from_static(EventCategory::Tool, "result_reported");
     pub const TOOL_RESULT: Self = Self::from_static(EventCategory::Tool, "result");
+    /// Tool-provider error observation submitted for downstream validation.
+    pub const TOOL_ERROR_REPORTED: Self = Self::from_static(EventCategory::Tool, "error_reported");
     pub const TOOL_ERROR: Self = Self::from_static(EventCategory::Tool, "error");
     pub const TOOL_BACKGROUND_RESULT: Self =
         Self::from_static(EventCategory::Tool, "background_result");
@@ -233,6 +238,10 @@ impl EventName {
     /// Harness-validated canonical tool progress.
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL_REQUEST: Self = Self::from_static(EventCategory::Tool, "cancel_request");
+    /// Tool-provider cancellation observation submitted for downstream
+    /// validation.
+    pub const TOOL_CANCELLED_REPORTED: Self =
+        Self::from_static(EventCategory::Tool, "cancelled_reported");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
     pub const TOOL_DELEGATE_PROGRESS: Self =
         Self::from_static(EventCategory::Tool, "delegate_progress");

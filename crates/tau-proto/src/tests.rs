@@ -504,6 +504,16 @@ fn representative_events() -> Vec<Event> {
             message: "no provider".to_owned(),
             originator: PromptOriginator::User,
         }),
+        Event::ToolResultReported(ToolResult {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("echo"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("reported hello".to_owned()),
+            provider_content: Vec::new(),
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
         Event::ToolResult(ToolResult {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -511,6 +521,15 @@ fn representative_events() -> Vec<Event> {
             result: CborValue::Text("hello".to_owned()),
             provider_content: Vec::new(),
             kind: ToolResultKind::Final,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolErrorReported(ToolError {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("missing_tool"),
+            tool_type: ToolType::Function,
+            message: "reported failure".to_owned(),
+            details: None,
             display: None,
             originator: PromptOriginator::User,
         }),
@@ -559,6 +578,11 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ToolCancelRequest(ToolCancelRequest {
             target_call_id: "call-1".into(),
+        }),
+        Event::ToolCancelledReported(ToolCancelled {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
         }),
         Event::ToolCancelled(ToolCancelled {
             call_id: "call-1".into(),
@@ -1674,6 +1698,9 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ToolUnregistrationDeclared(_)
                 | Event::ToolRegister(_)
                 | Event::ToolUnregister(_)
+                | Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
                 | Event::ToolCancelled(_)
                 | Event::ProviderModelsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
@@ -1809,8 +1836,10 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.background_result",
         "tool.cancel_request",
         "tool.cancelled",
+        "tool.cancelled_reported",
         "tool.delegate_progress",
         "tool.error",
+        "tool.error_reported",
         "tool.progress",
         "tool.progress_reported",
         "tool.registration_declared",
@@ -1818,6 +1847,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.rejected",
         "tool.request",
         "tool.result",
+        "tool.result_reported",
         "tool.started",
         "tool.unregistration_declared",
         "tool.unregister",
@@ -2585,6 +2615,61 @@ fn tool_progress_report_and_canonical_fact_have_distinct_wire_names() {
         assert_eq!(json["event"], expected);
         assert_eq!(
             serde_json::from_value::<Event>(json).expect("decode progress event"),
+            event
+        );
+    }
+}
+
+/// Terminal tool reports and canonical facts retain distinct wire names while
+/// reusing the exact payload DTOs.
+#[test]
+fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
+    let result = ToolResult {
+        call_id: "result-call".into(),
+        tool_name: ToolName::new("owned_tool"),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    };
+    let error = ToolError {
+        call_id: "error-call".into(),
+        tool_name: ToolName::new("owned_tool"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    };
+    let cancelled = ToolCancelled {
+        call_id: "cancelled-call".into(),
+        tool_name: ToolName::new("owned_tool"),
+        tool_type: ToolType::Function,
+    };
+    for (event, expected) in [
+        (
+            Event::ToolResultReported(result.clone()),
+            "tool.result_reported",
+        ),
+        (Event::ToolResult(result), "tool.result"),
+        (
+            Event::ToolErrorReported(error.clone()),
+            "tool.error_reported",
+        ),
+        (Event::ToolError(error), "tool.error"),
+        (
+            Event::ToolCancelledReported(cancelled.clone()),
+            "tool.cancelled_reported",
+        ),
+        (Event::ToolCancelled(cancelled), "tool.cancelled"),
+    ] {
+        assert_eq!(event.name().to_string(), expected);
+        let json = serde_json::to_value(&event).expect("serialize terminal event");
+        assert_eq!(json["event"], expected);
+        assert_eq!(
+            serde_json::from_value::<Event>(json).expect("decode terminal event"),
             event
         );
     }

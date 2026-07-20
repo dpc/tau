@@ -136,7 +136,7 @@ Blocked ext-shell calls submit `tool.progress_reported` with a live
 directory or directories being awaited. Terminal `dir_lock` success and failure
 displays include the relevant directory when known. Normal foreground and
 auto-background behavior still applies because the harness sees the tool call as
-running until ext-shell emits a terminal event.
+running until ext-shell submits a terminal `tool.*_reported` event.
 
 ## Security and precision boundaries
 

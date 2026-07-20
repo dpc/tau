@@ -275,6 +275,16 @@ impl Output {
         self.send(HarnessInputMessage::emit_with_transient(event, transient));
     }
 
+    /// Enqueue one successful terminal tool report.
+    fn report_tool_result(&self, result: ToolResult) {
+        let _ = self.handle.report_tool_result_detached(result);
+    }
+
+    /// Enqueue one failed terminal tool report.
+    fn report_tool_error(&self, error: ToolError) {
+        let _ = self.handle.report_tool_error_detached(error);
+    }
+
     /// Sends one intercept reply frame.
     fn intercept_reply(&self, action: InterceptAction) {
         self.send(HarnessInputMessage::InterceptReply(
@@ -1475,34 +1485,28 @@ fn pending_call_from_started(started: &ToolStarted) -> PendingToolCall {
 }
 
 fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: CborValue) {
-    output.emit(
-        Event::ToolResult(ToolResult {
-            call_id: call.call_id.clone(),
-            tool_name: call.tool_name.clone(),
-            tool_type: call.tool_type,
-            result,
-            provider_content: Vec::new(),
-            kind: ToolResultKind::Final,
-            display: None,
-            originator: call.originator.clone(),
-        }),
-        false,
-    );
+    output.report_tool_result(ToolResult {
+        call_id: call.call_id.clone(),
+        tool_name: call.tool_name.clone(),
+        tool_type: call.tool_type,
+        result,
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: call.originator.clone(),
+    });
 }
 
 fn emit_pending_tool_error(output: &Output, call: &PendingToolCall, message: String) {
-    output.emit(
-        Event::ToolError(ToolError {
-            call_id: call.call_id.clone(),
-            tool_name: call.tool_name.clone(),
-            tool_type: call.tool_type,
-            message,
-            details: None,
-            display: None,
-            originator: call.originator.clone(),
-        }),
-        false,
-    );
+    output.report_tool_error(ToolError {
+        call_id: call.call_id.clone(),
+        tool_name: call.tool_name.clone(),
+        tool_type: call.tool_type,
+        message,
+        details: None,
+        display: None,
+        originator: call.originator.clone(),
+    });
 }
 
 fn tool_call_json(started: &ToolStarted) -> serde_json::Value {

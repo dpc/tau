@@ -153,7 +153,7 @@ fn emitted_transient(message: &HarnessInputMessage) -> Option<bool> {
 
 fn tool_result_output(frames: &[HarnessInputMessage]) -> &str {
     for frame in frames {
-        let Some(Event::ToolResult(result)) = emitted_event(frame) else {
+        let Some(Event::ToolResultReported(result)) = emitted_event(frame) else {
             continue;
         };
         let CborValue::Map(fields) = &result.result else {
@@ -171,7 +171,7 @@ fn tool_result_output(frames: &[HarnessInputMessage]) -> &str {
 }
 
 fn tool_result_has_output(frame: &HarnessInputMessage, expected: &str) -> bool {
-    let Some(Event::ToolResult(result)) = emitted_event(frame) else {
+    let Some(Event::ToolResultReported(result)) = emitted_event(frame) else {
         return false;
     };
     let CborValue::Map(fields) = &result.result else {
@@ -877,7 +877,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     let results: Vec<_> = frames
         .iter()
         .filter_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(result),
+            Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
         })
         .collect();
@@ -934,11 +934,11 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
     assert!(
         frames
             .iter()
-            .any(|frame| matches!(emitted_event(frame), Some(Event::ToolError(_))))
+            .any(|frame| matches!(emitted_event(frame), Some(Event::ToolErrorReported(_))))
     );
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolResult(result)) if result.result == CborValue::Text("ok".to_owned())
+        Some(Event::ToolResultReported(result)) if result.result == CborValue::Text("ok".to_owned())
     )));
 }
 
@@ -970,7 +970,7 @@ fn shell_job_returned_by_tool_defers_until_completion_callback() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolResult(result)) if result.result == CborValue::Text("shell-ok".to_owned())
+        Some(Event::ToolResultReported(result)) if result.result == CborValue::Text("shell-ok".to_owned())
     )));
 }
 
@@ -1122,7 +1122,7 @@ fn shell_completion_callback_throw_emits_tool_error() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolError(error)) if error.message.contains("callback boom")
+        Some(Event::ToolErrorReported(error)) if error.message.contains("callback boom")
     )));
 }
 
@@ -1185,7 +1185,7 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
     let results: Vec<_> = frames
         .iter()
         .filter_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(&result.result),
+            Some(Event::ToolResultReported(result)) => Some(&result.result),
             _ => None,
         })
         .collect();
@@ -1266,7 +1266,7 @@ fn oversized_shell_timeout_is_rejected_before_pending_job_is_inserted() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolError(error)) if error.message.contains("timeout must be at most")
+        Some(Event::ToolErrorReported(error)) if error.message.contains("timeout must be at most")
     )));
 }
 
@@ -1422,7 +1422,7 @@ fn shell_timeout_kills_process_group_and_returns_result() {
     let result = frames
         .iter()
         .find_map(|frame| match emitted_event(frame) {
-            Some(Event::ToolResult(result)) => Some(&result.result),
+            Some(Event::ToolResultReported(result)) => Some(&result.result),
             _ => None,
         })
         .expect("tool result");
@@ -1465,6 +1465,6 @@ fn shell_spawn_admission_cap_fails_deterministically() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolError(error)) if error.message.contains("too many pending shell jobs")
+        Some(Event::ToolErrorReported(error)) if error.message.contains("too many pending shell jobs")
     )));
 }

@@ -60,7 +60,7 @@ durable fact projection according to
 [DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
 Successful `telegram_send` calls emit `message.sent_reported` before returning their
-ordinary terminal tool result. The sent report uses the original body and a
+transient `tool.result_reported`. The sent report uses the original body and a
 bounded ID derived from the unique tool call and extension-owned destination;
 remote routing remains local.
 

@@ -1348,6 +1348,17 @@ fn connect_ready_configured_extension(
     kind: tau_proto::ClientKind,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, connection_id, kind.clone());
+    mark_connected_test_extension_configured(h, connection_id, name, kind);
+    sink
+}
+
+/// Attach configured-extension identity to an already connected test peer.
+fn mark_connected_test_extension_configured(
+    h: &mut Harness,
+    connection_id: &str,
+    name: &str,
+    kind: tau_proto::ClientKind,
+) {
     let connection_id: tau_proto::ConnectionId = connection_id.into();
     h.extensions.entries.insert(
         connection_id.clone(),
@@ -1370,7 +1381,6 @@ fn connect_ready_configured_extension(
         },
     );
     h.extensions.order.push(connection_id);
-    sink
 }
 
 /// Connect one ready tool extension with a stable configured publisher name.
@@ -1554,8 +1564,12 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             } => {
                 let is_target = match message.as_ref() {
                     HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                        Event::ToolResult(r) => r.call_id.as_str() == target_call_id,
-                        Event::ToolError(e) => e.call_id.as_str() == target_call_id,
+                        Event::ToolResultReported(r) | Event::ToolResult(r) => {
+                            r.call_id.as_str() == target_call_id
+                        }
+                        Event::ToolErrorReported(e) | Event::ToolError(e) => {
+                            e.call_id.as_str() == target_call_id
+                        }
                         _ => false,
                     },
                     _ => false,

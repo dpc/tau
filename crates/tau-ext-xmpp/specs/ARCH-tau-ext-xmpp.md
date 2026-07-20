@@ -82,8 +82,8 @@ process-unique local identity. The original stanza body is published without a
 transport prefix according to
 [DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
 
-Successful `xmpp_send` calls emit `message.sent_reported` before their ordinary terminal
-tool result. The sent report uses the original body and a bounded identity derived from
+Successful `xmpp_send` calls emit `message.sent_reported` before their transient
+`tool.result_reported`. The sent report uses the original body and a bounded identity derived from
 the unique tool call and locally authoritative conversation. Full-resource
 routes, membership proof, and send authorization remain extension-local. Each
 outbound stanza body is at most 4096 UTF-8 bytes; larger accepted tool messages

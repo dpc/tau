@@ -52,6 +52,8 @@ fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowe
             allows_provider_image: allowed,
         },
     );
+    h.pending_tool_providers
+        .insert(call_id.into(), "shell".into());
 }
 
 /// Exercises image authorization and media validation through the real
@@ -62,6 +64,12 @@ fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowe
 fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_bytes() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
+    let _shell = connect_ready_configured_extension(
+        &mut h,
+        "shell",
+        "configured-shell",
+        tau_proto::ClientKind::Tool,
+    );
     let cid = ensure_test_user_agent(&mut h);
     let live = connect_test_tool(&mut h, "image-live");
     h.complete_subscription(
@@ -83,7 +91,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
         ),
     ] {
         track_image_call(&mut h, &cid, call_id, allowed);
-        let event = Event::ToolResult(image_result(call_id, bytes));
+        let event = Event::ToolResultReported(image_result(call_id, bytes));
         h.handle_extension_event("shell", TestProtocolItem::Event(event.clone()))
             .expect("reject unsafe image result");
         h.handle_extension_event("shell", TestProtocolItem::Event(event))
@@ -121,7 +129,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
     track_image_call(&mut h, &cid, "image-valid", true);
     h.handle_extension_event(
         "shell",
-        TestProtocolItem::Event(Event::ToolResult(image_result(
+        TestProtocolItem::Event(Event::ToolResultReported(image_result(
             "image-valid",
             valid_bytes.clone(),
         ))),
@@ -231,6 +239,14 @@ fn run_tool_result(
     tool_name: &str,
     result: CborValue,
 ) -> ToolResultItem {
+    if !h.extensions.entries.contains_key("shell") {
+        let _shell = connect_ready_configured_extension(
+            h,
+            "shell",
+            "configured-shell",
+            tau_proto::ClientKind::Tool,
+        );
+    }
     let call_id_typed: ToolCallId = call_id.into();
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
@@ -245,9 +261,11 @@ fn run_tool_result(
             allows_provider_image: false,
         },
     );
+    h.pending_tool_providers
+        .insert(call_id_typed.clone(), "shell".into());
     h.handle_extension_event(
         "shell",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,
@@ -290,6 +308,14 @@ fn run_tool_error(
     message: String,
     details: Option<CborValue>,
 ) -> ToolResultItem {
+    if !h.extensions.entries.contains_key("shell") {
+        let _shell = connect_ready_configured_extension(
+            h,
+            "shell",
+            "configured-shell",
+            tau_proto::ClientKind::Tool,
+        );
+    }
     let call_id_typed: ToolCallId = call_id.into();
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
@@ -304,9 +330,11 @@ fn run_tool_error(
             allows_provider_image: false,
         },
     );
+    h.pending_tool_providers
+        .insert(call_id_typed.clone(), "shell".into());
     h.handle_extension_event(
         "shell",
-        TestProtocolItem::Event(Event::ToolError(tau_proto::ToolError {
+        TestProtocolItem::Event(Event::ToolErrorReported(tau_proto::ToolError {
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,

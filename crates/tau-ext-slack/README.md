@@ -118,8 +118,12 @@ or two Slack copies may exist; two ambiguous outcomes can leave zero, one, or
 two. Successful retry results include `delivery_copies: one_or_two_possible`.
 A live per-channel FIFO holds each logical call through provider I/O and its
 possible retry; unrelated channels remain independent. After remote success,
-Slack writes transient `message.sent_reported` and then the ordinary `tool.result` through one
-serialized write-and-flush gate; any confirmed writer failure latches output failure, retires the entire Slack session and all receive/send/reaction authority, wakes workers, and requests shutdown. Same-`ToolCallId` replay within the retained session returns its
+Slack writes transient `message.sent_reported` and then transient
+`tool.result_reported` observations through one serialized write-and-flush gate;
+the harness later derives canonical facts. Any confirmed writer failure latches
+output failure, retires the entire Slack session and all receive/send/reaction
+authority, wakes workers, and requests shutdown. Same-`ToolCallId` replay within
+the retained session returns its
 stable completed result/error without reposting or submitting a duplicate report;
 a new call id is new intent.
 Writer flush does not acknowledge the downstream harness-authored canonical

@@ -134,19 +134,22 @@ fn write_echo_result(
     writer: &mut PeerOutputWriter<impl Write>,
     invoke: ToolStarted,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit(Event::ToolResult(ToolResult {
-        call_id: invoke.call_id,
-        tool_name: invoke.tool_name,
-        tool_type: tau_proto::ToolType::Function,
-        result: match invoke.arguments {
-            CborValue::Null => CborValue::Text("null".to_owned()),
-            value => value,
-        },
-        provider_content: Vec::new(),
-        kind: tau_proto::ToolResultKind::Final,
-        display: None,
-        originator: tau_proto::PromptOriginator::User,
-    })))?;
+    writer.write_message(&HarnessInputMessage::emit_with_transient(
+        Event::ToolResultReported(ToolResult {
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
+            result: match invoke.arguments {
+                CborValue::Null => CborValue::Text("null".to_owned()),
+                value => value,
+            },
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        true,
+    ))?;
     writer.flush()?;
     Ok(())
 }

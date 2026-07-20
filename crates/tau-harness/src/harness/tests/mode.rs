@@ -358,19 +358,25 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     });
     h.handle_extension_event_inner(progress_owner, progress_report)
         .expect("commit ephemeral tool progress report");
-    h.publish_event(
-        None,
-        Event::ToolResult(ToolResult {
-            call_id: tool_call_id,
-            tool_name: ToolName::new("debug_secret_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            result: CborValue::Text("tool-result-debug-secret".to_owned()),
-            provider_content: Vec::new(),
-            kind: tau_proto::ToolResultKind::Final,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        }),
-    );
+    let terminal_report = Event::ToolResultReported(ToolResult {
+        call_id: tool_call_id,
+        tool_name: ToolName::new("debug_secret_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("tool-result-debug-secret".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: progress_owner.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+            terminal_report.clone(),
+            true,
+        )),
+    });
+    h.handle_extension_event_inner(progress_owner, terminal_report)
+        .expect("commit ephemeral terminal tool report");
     let message_fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::new("configured-bridge"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
@@ -388,6 +394,28 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
         message: Box::new(tau_proto::HarnessInputMessage::emit(message_fact.clone())),
     });
     h.commit_message_fact(Some("bridge-connection"), message_fact);
+    h.agents
+        .remove(&cid)
+        .expect("remove completed ephemeral runtime agent");
+    let duplicate_terminal_report = Event::ToolResultReported(ToolResult {
+        call_id: ToolCallId::from("ephemeral-debug-tool-call"),
+        tool_name: ToolName::new("debug_secret_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("duplicate-terminal-debug-secret".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: progress_owner.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+            duplicate_terminal_report.clone(),
+            true,
+        )),
+    });
+    h.handle_extension_event_inner(progress_owner, duplicate_terminal_report)
+        .expect("commit duplicate terminal report after ephemeral agent removal");
 
     let jsonl = std::fs::read_to_string(
         tau_config::settings::sessions_dir_of(&sp)
@@ -408,8 +436,12 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
         "ephemeral prompt lifecycle metadata must not be mirrored into debug JSONL"
     );
     assert!(
-        !jsonl.contains("tool-result-debug-secret"),
-        "tool results owned by an ephemeral agent must not be mirrored into debug JSONL"
+        !jsonl.contains("tool-result-debug-secret")
+            && !jsonl.contains("duplicate-terminal-debug-secret")
+            && !jsonl.contains("tool.result_reported")
+            && !jsonl.contains("\"tool.result\"")
+            && !jsonl.contains("provider.tool_result"),
+        "raw, committed, and canonical ephemeral terminal results must not be mirrored into debug JSONL"
     );
     assert!(
         !jsonl.contains("tool-progress-debug-secret")

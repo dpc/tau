@@ -27,10 +27,11 @@ cache drops recent Slack repeats; it has no restart or cross-agent guarantee.
   retry must begin within the 60-second logical-call horizon. Exact
   lifecycle/config/route authority is revalidated before each attempt and
    report submission; disconnect/EOF retires authority before workers are woken.
-  A successful remote post writes transient `message.sent_reported` and then its ordinary
-  `tool.result` through one serialized write-and-flush gate; any confirmed writer failure
-  latches output failure, retires the entire Slack session and all receive/send/reaction
-  authority, wakes workers, and requests shutdown. Replay
+  A successful remote post writes transient `message.sent_reported` and then
+  transient `tool.result_reported` observations through one serialized
+  write-and-flush gate; the harness later derives canonical facts. Any confirmed
+  writer failure latches output failure, retires the entire Slack session and all
+  receive/send/reaction authority, wakes workers, and requests shutdown. Replay
   coalesces per call id and returns the retained stable result without reposting.
   Awaiting-submission, completed, definitive, cumulative
   ambiguity/copy range, and cancellation states are retained. Full capacity

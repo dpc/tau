@@ -247,13 +247,13 @@ where
             cx.request_stop();
             Ok(())
         }
-        RestartMode::Random | RestartMode::Error => cx.emit(restart_error(invoke)),
-        RestartMode::Success => cx.emit(restart_success(invoke)),
+        RestartMode::Random | RestartMode::Error => cx.report_error(restart_error(invoke)),
+        RestartMode::Success => cx.report_result(restart_success(invoke)),
     }
 }
 
-fn restart_success(invoke: tau_proto::ToolStarted) -> Event {
-    Event::ToolResult(ToolResult {
+fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
+    ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -262,11 +262,11 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> Event {
         kind: ToolResultKind::Final,
         display: None,
         originator: invoke.originator,
-    })
+    }
 }
 
-fn restart_error(invoke: tau_proto::ToolStarted) -> Event {
-    Event::ToolError(ToolError {
+fn restart_error(invoke: tau_proto::ToolStarted) -> ToolError {
+    ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -274,7 +274,7 @@ fn restart_error(invoke: tau_proto::ToolStarted) -> Event {
         details: None,
         display: None,
         originator: invoke.originator,
-    })
+    }
 }
 
 #[cfg(test)]

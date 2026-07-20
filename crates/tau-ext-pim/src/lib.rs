@@ -185,7 +185,7 @@ impl RuntimeState {
         &mut self,
         invoke: tau_proto::ToolStarted,
         local_tool_name: &tau_proto::ToolName,
-    ) -> Option<Event> {
+    ) -> tau_client::ClientResult<Option<tau_client::ToolTerminalOutcome>> {
         let wire_tool_name = invoke.tool_name.clone();
         let mut local_invoke = invoke;
         local_invoke.tool_name = local_tool_name.clone();
@@ -194,14 +194,14 @@ impl RuntimeState {
             name if calendar::is_tool_name(name) => Some(self.calendar.dispatch(local_invoke)),
             _ => None,
         };
-        event.map(|mut event| {
-            match &mut event {
-                Event::ToolResult(result) => result.tool_name = wire_tool_name,
-                Event::ToolError(error) => error.tool_name = wire_tool_name,
-                _ => {}
-            }
-            event
-        })
+        let Some(event) = event else {
+            return Ok(None);
+        };
+        let mut outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|_| {
+            tau_client::ClientError::handler("PIM tool dispatch returned a non-terminal event")
+        })?;
+        *outcome.tool_name_mut() = wire_tool_name;
+        Ok(Some(outcome))
     }
 
     fn dispatch_action(&mut self, invoke: tau_proto::ActionInvoke) -> Event {
@@ -335,8 +335,11 @@ fn register_tools_with_prompt_fragment(
                 {
                     cx.handle.report_tool_progress(progress)?;
                 }
-                if let Some(event) = cx.state.dispatch_tool(cx.invoke.clone(), &local_tool_name) {
-                    cx.handle.emit(event)?;
+                if let Some(outcome) = cx
+                    .state
+                    .dispatch_tool(cx.invoke.clone(), &local_tool_name)?
+                {
+                    cx.handle.report_tool_terminal(outcome)?;
                 }
                 Ok(())
             },

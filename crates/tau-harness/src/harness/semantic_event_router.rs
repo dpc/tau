@@ -19,6 +19,9 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ToolUnregister(_)
                 | Event::ToolProgressReported(_)
                 | Event::ToolProgress(_)
+                | Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
         )
         || is_raw_tool_terminal_event(event)
     {

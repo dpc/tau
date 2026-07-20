@@ -33,6 +33,7 @@ mod manual_runtime;
 mod protocol_io;
 mod runner;
 mod tool_name_scope;
+mod tool_terminal_outcome;
 mod writer_thread;
 
 pub use builder::ExtensionBuilder;
@@ -59,6 +60,7 @@ pub use protocol_io::{
 };
 pub use runner::TauExtensionRunner;
 pub use tool_name_scope::ToolNameScope;
+pub use tool_terminal_outcome::ToolTerminalOutcome;
 
 #[cfg(test)]
 mod tests;

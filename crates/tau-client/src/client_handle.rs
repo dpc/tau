@@ -157,6 +157,138 @@ impl ClientHandle {
         self.emit_transient_detached(tau_proto::Event::ToolProgressReported(progress))
     }
 
+    /// Submit a transient successful tool completion for downstream validation.
+    ///
+    /// Success acknowledges only local protocol output. The harness commits the
+    /// mutable report through ordinary interception, validates the captured
+    /// routed-call owner, and may then publish protected canonical
+    /// `tool.result` and `provider.tool_result` facts.
+    ///
+    /// This wire-level helper performs no routed-call correlation or logical
+    /// tool-name scoping. Callers must preserve the exact call id, final wire
+    /// name, and originator from the routed [`tau_proto::ToolStarted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_tool_result(&self, result: tau_proto::ToolResult) -> ClientResult<()> {
+        self.report_tool_terminal(result.into())
+    }
+
+    /// Enqueue a transient successful tool completion without waiting for
+    /// flush.
+    ///
+    /// Queue admission does not acknowledge report commit or canonical
+    /// completion. This wire-level helper performs no routed-call correlation
+    /// or logical tool-name scoping; callers must preserve the exact routed
+    /// [`tau_proto::ToolStarted`] fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn report_tool_result_detached(&self, result: tau_proto::ToolResult) -> ClientResult<()> {
+        self.report_tool_terminal_detached(result.into())
+    }
+
+    /// Submit a transient failed tool completion for downstream validation.
+    ///
+    /// Success acknowledges only local protocol output. The harness may publish
+    /// protected canonical `tool.error` and `provider.tool_error` facts after
+    /// the report commits and its routed-call ownership validates.
+    ///
+    /// This wire-level helper performs no routed-call correlation or logical
+    /// tool-name scoping. Callers must preserve the exact call id, final wire
+    /// name, and originator from the routed [`tau_proto::ToolStarted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_tool_error(&self, error: tau_proto::ToolError) -> ClientResult<()> {
+        self.report_tool_terminal(error.into())
+    }
+
+    /// Enqueue a transient failed tool completion without waiting for flush.
+    ///
+    /// Queue admission does not acknowledge report commit or canonical
+    /// completion. This wire-level helper performs no routed-call correlation
+    /// or logical tool-name scoping; callers must preserve the exact routed
+    /// [`tau_proto::ToolStarted`] fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn report_tool_error_detached(&self, error: tau_proto::ToolError) -> ClientResult<()> {
+        self.report_tool_terminal_detached(error.into())
+    }
+
+    /// Submit a transient tool cancellation for downstream validation.
+    ///
+    /// The harness publishes canonical `tool.cancelled` for an accepted
+    /// foreground cancellation, or preserves the existing background completion
+    /// behavior when the call already runs in the background.
+    ///
+    /// This wire-level helper performs no routed-call correlation or logical
+    /// tool-name scoping. Callers must preserve the exact call id and final
+    /// wire name from the routed [`tau_proto::ToolStarted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_tool_cancelled(&self, cancelled: tau_proto::ToolCancelled) -> ClientResult<()> {
+        self.report_tool_terminal(cancelled.into())
+    }
+
+    /// Enqueue a transient tool cancellation without waiting for flush.
+    ///
+    /// Queue admission does not acknowledge report commit or canonical
+    /// completion. This wire-level helper performs no routed-call correlation
+    /// or logical tool-name scoping; callers must preserve the exact routed
+    /// [`tau_proto::ToolStarted`] fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn report_tool_cancelled_detached(
+        &self,
+        cancelled: tau_proto::ToolCancelled,
+    ) -> ClientResult<()> {
+        self.report_tool_terminal_detached(cancelled.into())
+    }
+
+    /// Submit one typed terminal outcome as a transient peer report.
+    ///
+    /// This wire-level helper performs no routed-call correlation or logical
+    /// tool-name scoping. Callers must preserve the exact routed
+    /// [`tau_proto::ToolStarted`] fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_tool_terminal(&self, outcome: crate::ToolTerminalOutcome) -> ClientResult<()> {
+        self.emit_transient(outcome.into_reported_event())
+    }
+
+    /// Enqueue one typed terminal outcome as a transient peer report.
+    ///
+    /// Queue admission does not acknowledge report commit or canonical
+    /// completion. This wire-level helper performs no routed-call correlation
+    /// or logical tool-name scoping; callers must preserve the exact routed
+    /// [`tau_proto::ToolStarted`] fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn report_tool_terminal_detached(
+        &self,
+        outcome: crate::ToolTerminalOutcome,
+    ) -> ClientResult<()> {
+        self.emit_transient_detached(outcome.into_reported_event())
+    }
+
     /// Sends one raw peer-to-harness message and normally waits until it is
     /// flushed.
     ///

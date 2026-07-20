@@ -326,12 +326,10 @@ impl ShellRuntime {
                     originator: pending_workdir.invoke.originator,
                 })
             };
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit(with_lock_wait_duration(
-                    event,
-                    pending_workdir.lock_wait_duration_seconds,
-                )));
+            let _ = self.tx.report_tool_terminal(with_lock_wait_duration(
+                event,
+                pending_workdir.lock_wait_duration_seconds,
+            ));
         }
     }
 
@@ -415,7 +413,7 @@ impl ShellRuntime {
                 originator: pending.invoke.originator,
             })
         };
-        let _ = self.tx.send(HarnessInputMessage::emit(event));
+        let _ = self.tx.report_tool_terminal(event);
     }
 
     fn publish_ready_if_pending(&self, agent_id: tau_proto::AgentId) {
@@ -960,7 +958,8 @@ mod tests {
                 .filter(|message| matches!(
                     message,
                     HarnessInputMessage::Emit(emit)
-                        if matches!(emit.event.as_ref(), Event::ToolCancelled(cancelled)
+                        if emit.transient
+                            && matches!(emit.event.as_ref(), Event::ToolCancelledReported(cancelled)
                             if cancelled.call_id.as_str() == "cancel-setter")
                 ))
                 .count(),

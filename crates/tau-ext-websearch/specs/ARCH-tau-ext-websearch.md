@@ -7,8 +7,9 @@ the same component but disabled by default for explicit role opt-in and to avoid
 two default tools named `web_search`.
 
 All three successful paths project provider text at the extension boundary as
-one escaped `<tau_web_content>` string, then publish that string as the ordinary
-invocation-correlated `ToolResult`. The existing transcript, replay, compaction,
+one escaped `<tau_web_content>` string, then submit that string in an
+invocation-correlated `tool.result_reported`. The harness publishes the canonical
+terminal/provider projections, so existing transcript, replay, compaction,
 Chat Completions, and Codex/Responses paths therefore retain their normal
 semantics without a websearch-specific protocol or persistence representation.
 

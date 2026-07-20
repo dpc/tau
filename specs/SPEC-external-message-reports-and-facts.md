@@ -423,8 +423,9 @@ may use opaque data. There is no generic harness message-tracing layer; genuinel
 event-log instrumentation requires its own approved decision.
 
 After a successful remote send, the sending extension emits
-`message.sent_reported` and then its ordinary terminal `ToolResult` through its
-serialized writer. Normal
+`message.sent_reported` and then transient `tool.result_reported` through its
+serialized writer; the harness derives canonical `message.sent` and `tool.result`
+facts downstream. Normal
 same-connection ordering usually commits the fact first when both writes and
 persistence succeed. There is deliberately no transaction or special
 sent-fact-before-tool-success guarantee: crashes, disconnection, or persistence

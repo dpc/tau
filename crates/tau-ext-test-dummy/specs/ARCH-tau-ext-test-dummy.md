@@ -20,7 +20,8 @@ The `restart_mode` config exists to make harness tests deterministic:
 `random` preserves the historical random exit-or-error behavior, while
 `success`, `error`, and `exit` force the corresponding outcome.
 
-Restart replies (`success` `ToolResult` and `error` `ToolError`) must echo the
+Restart replies (`success` `tool.result_reported` and error
+`tool.error_reported`) must echo the
 incoming `ToolStarted.originator`; they must not synthesize
 `PromptOriginator::User`, because extension-originated invocations rely on the
 originator for correct routing/classification.

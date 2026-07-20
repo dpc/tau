@@ -436,16 +436,19 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     let result = expect_message(&mut child, "tool result");
     assert_eq!(
         result,
-        HarnessInputMessage::emit(Event::ToolResult(tau_proto::ToolResult {
-            call_id: "call-1".into(),
-            tool_name: tau_proto::ToolName::new("echo"),
-            tool_type: tau_proto::ToolType::Function,
-            result: CborValue::Text("hello".to_owned()),
-            provider_content: Vec::new(),
-            kind: tau_proto::ToolResultKind::Final,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        }))
+        HarnessInputMessage::emit_with_transient(
+            Event::ToolResultReported(tau_proto::ToolResult {
+                call_id: "call-1".into(),
+                tool_name: tau_proto::ToolName::new("echo"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("hello".to_owned()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            true,
+        )
     );
 
     disconnect_child(&mut child, "done");
