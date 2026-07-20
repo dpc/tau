@@ -291,14 +291,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     let read_image_tool = ToolSpec {
         name: tau_proto::ToolName::new(READ_IMAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some(
-            "Read one local PNG, JPEG, or WebP image for visual inspection. The image is \
-             decoded under strict byte, dimension, pixel, and memory limits, normalized \
-             without source metadata, optionally cropped in EXIF-oriented source coordinates, \
-             resized with the high profile by default or the experimental bounded overview \
-             profile, and returned as native typed image content rather than base64 text."
-                .to_owned(),
-        ),
+        description: Some("Read one local image for visual inspection.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -961,7 +954,8 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Acquire or release an ext-shell directory update lock. Disabled by default; set ext-shell config `dir_lock.enable` to true to opt in. Commands are `update` and `unlock`, and `directory` must be an existing directory. `unlock` normally releases the caller's lock; pass `owner_agent_id` to release an abandoned lock held by another agent."
+            "Lock or unlock a directory and its contents for updates. Waits for the lock when \
+             necessary."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -997,7 +991,10 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
                     example_field("command", example_text("update")),
                     example_field("directory", example_text(".")),
                 ]),
-                note: Some("Acquire before making file changes when directory locking is enabled.".to_owned()),
+                note: Some(
+                    "Acquire before making file changes when directory locking is enabled."
+                        .to_owned(),
+                ),
                 subcommand: Some(ToolExampleSelector {
                     path: vec!["command".to_owned()],
                     value: example_text("update"),

@@ -926,6 +926,10 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
         }
         if register.tool.name == READ_IMAGE_TOOL_NAME {
             assert_eq!(
+                register.tool.description.as_deref(),
+                Some("Read one local image for visual inspection.")
+            );
+            assert_eq!(
                 register.tool.background_support,
                 Some(tau_proto::BackgroundSupport::Never)
             );
@@ -1533,6 +1537,19 @@ fn dir_lock_tool_can_be_disabled_by_config() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+/// Keeps the concise model-facing purpose text separate from configuration and
+/// argument details recorded elsewhere in the schema.
+#[test]
+fn dir_lock_tool_has_concise_model_facing_description() {
+    assert_eq!(
+        dir_lock_tool_spec(false).description.as_deref(),
+        Some(
+            "Lock or unlock a directory and its contents for updates. Waits for the lock when \
+             necessary."
+        )
+    );
 }
 
 #[test]

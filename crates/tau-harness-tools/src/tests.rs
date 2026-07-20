@@ -181,13 +181,11 @@ fn agent_start_spec_advertises_only_current_tool_name() {
     let description = agent_start_tool_spec()
         .description
         .expect("agent_start description");
-    assert!(description.contains("delivered asynchronously via session-local `agent_watch`"));
-    assert!(description.contains("until the caller disables the watch or the session ends"));
-    assert!(
-        description.contains("internal steering and tool-completion notices are not forwarded")
+    assert_eq!(
+        description,
+        "Start a sub-task with a `prompt`. The new agent is watched automatically, as if \
+         `agent_watch` had been called. Returns the new agent's ID."
     );
-    assert!(description.contains("metadata"));
-    assert!(!description.contains("return its final response"));
 }
 
 #[test]
@@ -206,13 +204,10 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
     let description = agent_watch_tool_spec()
         .description
         .expect("agent_watch description");
-    assert!(description.contains("session-local async notifications"));
-    assert!(description.contains("automatically enables a watch"));
-    assert!(description.contains("Watched agent <agent-id> emitted a response"));
-    assert!(description.contains("internal steering and tool-completion notices"));
-    assert!(description.contains("enable: false"));
-    assert!(description.contains("edges that would make the current-session watch graph cyclic"));
-    assert!(description.contains("rejection leaves watch state unchanged"));
+    assert_eq!(
+        description,
+        "Enable or disable notifications for an agent's responses and important events."
+    );
     assert_eq!(
         params
             .pointer("/properties/agent_id/maxLength")
@@ -1258,19 +1253,6 @@ fn skill_query_rejects_whitespace_without_echoing_raw_input() {
     assert_eq!(err, "query must include at least one non-empty term");
     assert!(!err.contains('\n'));
     assert!(!err.contains('\t'));
-}
-
-/// The model-visible watch contract must distinguish client-only initial state
-/// from later transition prompts so agents do not act on the enable snapshot.
-#[test]
-fn agent_watch_spec_documents_initial_and_transition_context_semantics() {
-    let description = agent_watch_tool_spec()
-        .description
-        .expect("agent_watch description");
-
-    assert!(description.contains("client-visible current model-turn state"));
-    assert!(description.contains("initial status is not injected"));
-    assert!(description.contains("later transitions are delivered separately"));
 }
 
 /// Ensures self-compaction is available by default, cross-agent compaction

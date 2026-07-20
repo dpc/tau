@@ -1946,7 +1946,7 @@ fn skill_tool_spec() -> ToolSpec {
 }
 
 fn agent_start_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_START_TOOL_NAME), model_visible_name: None, description: Some("Start a self-contained sub-task in a new sub-agent. The `prompt` must contain all information the sub-agent needs to complete the task. The sub-agent's final responses and user prompts are delivered asynchronously via session-local `agent_watch` notifications until the caller disables the watch or the session ends; internal steering and tool-completion notices are not forwarded. The immediate result includes `self_agent_id` and `sub_agent_id` metadata.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(AGENT_START_TOOL_NAME), model_visible_name: None, description: Some("Start a sub-task with a `prompt`. The new agent is watched automatically, as if `agent_watch` had been called. Returns the new agent's ID.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn message_tool_spec() -> ToolSpec {
@@ -1954,7 +1954,23 @@ fn message_tool_spec() -> ToolSpec {
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications for another agent's model-turn starts/stops, final responses, and received user prompts. Enabling rejects self-watches and edges that would make the current-session watch graph cyclic; rejection leaves watch state unchanged. Enabling reports client-visible current model-turn state; that initial status is not injected into this agent's model context. Meaningful later transitions are delivered separately regardless of what triggered the watched turn. Content notifications remain clearly labeled `Watched agent <agent-id> emitted a response` or `Watched agent <agent-id> received a user prompt`. internal steering and tool-completion notices, explicit messages, and their content are not forwarded as content notifications. `agent_start` automatically enables a watch for the started sub-agent; use `enable: false` to stop watching. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec {
+        name: ToolName::new(AGENT_WATCH_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Enable or disable notifications for an agent's responses and important events."
+                .to_owned(),
+        ),
+        tool_type: ToolType::Function,
+        parameters: Some(
+            serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false}),
+        ),
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
 }
 
 fn session_list_tool_spec() -> ToolSpec {
