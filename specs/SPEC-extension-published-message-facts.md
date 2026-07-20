@@ -1,5 +1,18 @@
 # SPEC-extension-published-message-facts: Extension-published message facts
 
+## Status
+
+The current implementation follows this specification's direct canonical
+`message.*` `Emit` path. [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+requires migration to generic transient bridge report events followed by
+harness-authored canonical message facts. During migration, this specification
+continues to govern the canonical fact schema, target-journal selection,
+projection, replay, diagnostics, and extension-local transport authority.
+
+Its requirements that a bridge directly emit the canonical fact, that intake
+stamp that same event, bypass interception, and ignore `Emit.transient` remain
+current behavior only until the report-to-canonical path replaces them.
+
 Architectural or externally meaningful functional changes are governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
 The underlying choice is recorded by

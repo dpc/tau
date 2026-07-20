@@ -1,5 +1,14 @@
 # ARCH-external-message-boundary: External message boundary
 
+## Status
+
+The current implementation uses direct bridge publication of canonical
+`message.*` facts as described below.
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+requires a transition to generic bridge report events and downstream
+harness-authored canonical facts. Transport authority, canonical fact
+projection, and the external-content trust boundary remain unchanged.
+
 External-message bridges publish immutable `message.*` facts through ordinary
 extension event emission. The harness stamps the authenticated extension's
 stable configured publisher ID, persists each fact before any consumer acts, and

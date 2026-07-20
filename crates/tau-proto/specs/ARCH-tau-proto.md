@@ -1,5 +1,16 @@
 # ARCH-tau-proto: tau-proto architecture
 
+## Status
+
+The current protocol lets extensions directly emit the six canonical
+`message.*` facts and does not carry authenticated publisher metadata in the
+generic event delivery envelope.
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+requires distinct bridge report events, harness-authored canonical facts, and
+an immutable publisher envelope across interception, live delivery, persistence,
+and replay. The current wire contract remains in force until that migration
+completes.
+
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately
 reviewed, human-confirmed decision mandated by

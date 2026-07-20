@@ -2,6 +2,19 @@
 
 Authority: confirmed, 2026-07-17, dpc
 
+## Status
+
+The current implementation still follows this record's direct canonical
+`message.*` publication, publisher stamping, interception bypass, and forced
+durability rules. [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+replaces those rules with generic transient bridge reports followed by
+harness-authored canonical message facts. Until that migration completes, the
+direct-publication clauses here remain the current contract.
+
+The transport-neutral schema and extension-local ownership of transport
+authentication, admission, deduplication, native routing, replies, retries, and
+capabilities remain authoritative during and after the migration.
+
 Immutable external-message facts use ordinary extension `Emit` and the normal
 persist-before-consume event path. Prompt projection, UI, bridge publishers, and
 other extensions are peer consumers of the same committed facts; no consumer

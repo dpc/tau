@@ -1,5 +1,14 @@
 # ARCH-tau-harness: tau-harness architecture
 
+## Status
+
+The extension event intake described below still performs event-specific
+processing before ordinary publication.
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+requires generic `Emit` publication followed by downstream committed-event
+processing. The current direct external-message-fact path remains in force
+until that migration completes.
+
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,
 human-confirmed decision mandated by
