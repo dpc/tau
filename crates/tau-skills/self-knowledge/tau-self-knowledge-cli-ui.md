@@ -114,6 +114,10 @@ to opt into fuzzy git path completion for `./<partial>`.
 It does not resubmit prompt text; if the provider no longer has that prompt
 parked, Tau reports that it may already be running.
 
+Explicit targets in `/agent switch`, `/agent suspend`, `/agent resume`, `/agent
+auto`, and `/agent name` accept either `agent-id` or `@agent-id`. Completion
+accepts either spelling and inserts the canonical bare id.
+
 ## Shared agent navigation modes
 
 Navigation classification is shared by UIs attached to the same daemon. Use

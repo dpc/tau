@@ -30,6 +30,15 @@ prompt routing. `/agent switch` completions list effectively active agents and
 `none`; mentions, cycling, and suspend completion use the same effective set.
 Resume completion lists loaded ineffective agents, including idle
 `active-auto` agents. Explicitly typing a known hidden id still selects it.
+Every `/agent` argument that refers to an agent accepts either canonical
+`agent-id` text or the user-facing `@agent-id` spelling. Parsing removes exactly
+one optional `@` before lookup and emits only the canonical id in protocol
+events. A bare `@`, repeated prefix, or otherwise malformed id is rejected.
+The strict durable/reference parsing boundary is recorded in
+[ARCH-tau-proto](../../tau-proto/specs/ARCH-tau-proto.md).
+Completion matches both input spellings but inserts the existing canonical bare
+id and does not duplicate candidates; after an `@`, the special switch target
+`none` is not offered as though it were an agent reference.
 Accepted input preserves the mode. `/agent resume` or `/resume` requests
 unconditional `active`, `/agent suspend` requests `suspended`, and `/agent auto`
 requests `active-auto`.

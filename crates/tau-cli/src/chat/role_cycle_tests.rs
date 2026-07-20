@@ -248,12 +248,10 @@ fn agent_completer_filters_active_and_suspended_agents() {
     assert_eq!(resume_values, vec!["helper"]);
 }
 
+/// Complete explicit-agent commands normalize one optional `@` before their
+/// command-specific effect, as specified by SPEC-tau-cli-slash-commands.
 #[test]
-fn agent_switch_accepts_explicit_suspended_agent_id() {
-    // Explicit `/agent switch <agent_id>` is intentional routing by id. This
-    // command path must select a known suspended agent and notify the renderer
-    // without printing the resume-only local error that completions are meant to
-    // avoid.
+fn agent_commands_accept_prefixed_references_in_canonical_effects() {
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
     let live = Arc::new(Mutex::new(std::collections::HashSet::from([
         "helper".to_owned(),
@@ -263,21 +261,77 @@ fn agent_switch_accepts_explicit_suspended_agent_id() {
         "helper".to_owned()
     ])));
     let routing = routing_state(known, live, suspended);
-    let (renderer_tx, renderer_rx) = mpsc::channel();
-    let messages = Arc::new(Mutex::new(Vec::new()));
 
-    handle_agent_switch_command(&routing, &renderer_tx, Some("helper"), &|message| {
-        messages
-            .lock()
-            .expect("messages lock poisoned")
-            .push(message.to_owned());
-    });
+    for command in ["/agent switch helper", "/agent switch @helper"] {
+        assert_eq!(
+            agent_command_effect(command, &routing).expect("switch effect"),
+            AgentCommandEffect::Switch(Some("helper".to_owned()))
+        );
+    }
+    for command in ["/agent suspend worker", "/agent suspend @worker"] {
+        assert_eq!(
+            agent_command_effect(command, &routing).expect("suspend effect"),
+            AgentCommandEffect::SetNavigation {
+                agent_id: tau_proto::AgentId::parse("worker").expect("agent id"),
+                action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
+            }
+        );
+    }
+    for command in ["/agent resume helper", "/agent resume @helper"] {
+        assert_eq!(
+            agent_command_effect(command, &routing).expect("resume effect"),
+            AgentCommandEffect::SetNavigation {
+                agent_id: tau_proto::AgentId::parse("helper").expect("agent id"),
+                action: tau_proto::UiAgentNavigationModeAction::SetActive,
+            }
+        );
+    }
+    for command in ["/agent auto worker", "/agent auto @worker"] {
+        assert_eq!(
+            agent_command_effect(command, &routing).expect("auto effect"),
+            AgentCommandEffect::SetNavigation {
+                agent_id: tau_proto::AgentId::parse("worker").expect("agent id"),
+                action: tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
+            }
+        );
+    }
+    for command in [
+        "/agent name worker Worker name",
+        "/agent name @worker Worker name",
+        "/agent name\t@worker Worker name",
+    ] {
+        assert_eq!(
+            agent_command_effect(command, &routing).expect("name effect"),
+            AgentCommandEffect::SetDisplayName(AgentDisplayNameRequest {
+                agent_id: tau_proto::AgentId::parse("worker").expect("agent id"),
+                display_name: "Worker name".to_owned(),
+            })
+        );
+    }
+}
 
-    assert!(messages.lock().expect("messages lock poisoned").is_empty());
-    assert_eq!(routing.selected_agent_id().as_deref(), Some("helper"));
-    match renderer_rx.try_recv().expect("renderer command") {
-        RendererCmd::SwitchAgent { agent_id } => assert_eq!(agent_id, "helper"),
-        _ => panic!("expected switch renderer command"),
+/// Malformed prefixed references fail at the complete command/effect boundary,
+/// so the input loop can emit the error without applying any renderer or
+/// protocol effect.
+#[test]
+fn agent_commands_reject_malformed_prefixed_references() {
+    let routing = routing_state(
+        Arc::new(Mutex::new(vec!["worker".to_owned()])),
+        Arc::new(Mutex::new(std::collections::HashSet::from([
+            "worker".to_owned()
+        ]))),
+        Arc::new(Mutex::new(Default::default())),
+    );
+
+    for command in [
+        "/agent switch @",
+        "/agent suspend @@worker",
+        "/agent resume @bad/id",
+        "/agent auto @",
+        "/agent name @@worker Worker",
+    ] {
+        let error = agent_command_effect(command, &routing).expect_err("command must be rejected");
+        assert!(error.starts_with("invalid agent id `@"), "{error}");
     }
 }
 
@@ -345,6 +399,33 @@ fn agent_completer_uses_display_names_as_descriptions() {
 
     assert_eq!(completions[0].value, "worker");
     assert_eq!(completions[0].description, "Investigate worker");
+}
+
+/// Typing an optional `@` filters the same agent set and completes back to the
+/// existing canonical bare-id command text without duplicate or `none` entries.
+#[test]
+fn agent_completer_accepts_prefixed_needles_and_returns_canonical_ids() {
+    let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
+    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+        "helper".to_owned(),
+        "worker".to_owned(),
+    ])));
+    let completer = build_agent_arg_completer(
+        routing_state(known, live, Arc::new(Mutex::new(Default::default()))),
+        Arc::new(Mutex::new(HashMap::new())),
+    );
+
+    let values: Vec<_> = completer(&["switch", "@work"])
+        .into_iter()
+        .map(|item| item.value)
+        .collect();
+    assert_eq!(values, vec!["worker"]);
+
+    let values: Vec<_> = completer(&["switch", "@"])
+        .into_iter()
+        .map(|item| item.value)
+        .collect();
+    assert_eq!(values, vec!["helper", "worker"]);
 }
 
 fn groups() -> Vec<tau_proto::HarnessRoleGroup> {

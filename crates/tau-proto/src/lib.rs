@@ -167,6 +167,16 @@ impl AgentId {
         s.as_ref().parse()
     }
 
+    /// Parse a user-entered agent reference with an optional leading `@`.
+    ///
+    /// The returned identifier always uses its canonical, unsigiled form. Wire
+    /// decoding and durable identifier parsing remain strict through
+    /// [`Self::parse`].
+    pub fn parse_reference(s: impl AsRef<str>) -> Result<Self, AgentIdParseError> {
+        let value = s.as_ref();
+        Self::parse(value.strip_prefix('@').unwrap_or(value))
+    }
+
     /// Borrow this identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0

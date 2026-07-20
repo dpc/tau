@@ -39,6 +39,11 @@ none of these events are semantic transcript history. The trust and pacing
 contract is [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
+`AgentId` wire decoding, serialization, durable parsing, equality, and display
+use only the canonical unsigiled identifier. User-input parsers may call the
+separate reference parser, which removes exactly one optional leading `@`
+before applying the canonical grammar; it does not widen accepted wire or
+stored values.
 
 Agent lifecycle includes the content-free
 `agent.user_interaction_recorded` durable fact. Its persisted-record timestamp

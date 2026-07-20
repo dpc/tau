@@ -1503,6 +1503,34 @@ impl InputRoutingState {
             .unwrap_or(false)
     }
 
+    fn known_agent_reference(&self, reference: &str) -> Result<tau_proto::AgentId, String> {
+        let agent_id = tau_proto::AgentId::parse_reference(reference)
+            .map_err(|error| format!("invalid agent id `{reference}`: {error}"))?;
+        if !self.agent_is_known(agent_id.as_str()) {
+            return Err(format!("unknown agent: {agent_id}"));
+        }
+        Ok(agent_id)
+    }
+
+    fn resolve_agent_command_target(
+        &self,
+        target: Option<&str>,
+        fallback: Option<String>,
+    ) -> Result<Option<tau_proto::AgentId>, String> {
+        target
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(|target| self.known_agent_reference(target))
+            .transpose()
+            .map(|target| {
+                target.or_else(|| {
+                    fallback.map(|agent_id| {
+                        tau_proto::AgentId::parse(agent_id).expect("UI stores valid agent ids")
+                    })
+                })
+            })
+    }
+
     fn agent_switch_target(&self, target: Option<&str>) -> Result<Option<String>, String> {
         let Some(arg) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
             return Err("/agent switch <agent_id|none>".to_owned());
@@ -1510,10 +1538,9 @@ impl InputRoutingState {
         if arg == "none" {
             return Ok(None);
         }
-        if !self.agent_is_known(arg) {
-            return Err(format!("unknown agent: {arg}"));
-        }
-        Ok(Some(arg.to_owned()))
+        self.known_agent_reference(arg)
+            .map(tau_proto::AgentId::into_string)
+            .map(Some)
     }
 
     fn next_agent_cycle_selection(&self, delta: isize) -> Option<String> {
@@ -1536,20 +1563,18 @@ fn handle_agent_suspend_command(
     routing: &InputRoutingState,
     target: Option<&str>,
     print_local: &impl Fn(&str),
-) -> Option<String> {
-    let target = target
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| routing.selected_agent_id());
+) -> Option<tau_proto::AgentId> {
+    let target = match routing.resolve_agent_command_target(target, routing.selected_agent_id()) {
+        Ok(target) => target,
+        Err(message) => {
+            print_local(&message);
+            return None;
+        }
+    };
     let Some(agent_id) = target else {
         print_local("/agent suspend <agent_id>");
         return None;
     };
-    if !routing.agent_is_known(&agent_id) {
-        print_local(&format!("unknown agent: {agent_id}"));
-        return None;
-    }
     Some(agent_id)
 }
 
@@ -1557,54 +1582,22 @@ fn handle_agent_resume_command(
     routing: &InputRoutingState,
     target: Option<&str>,
     print_local: &impl Fn(&str),
-) -> Option<String> {
-    let target = target
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            routing
-                .selected_agent_id()
-                .filter(|agent_id| !routing.agent_is_active(agent_id))
-        });
+) -> Option<tau_proto::AgentId> {
+    let fallback = routing
+        .selected_agent_id()
+        .filter(|agent_id| !routing.agent_is_active(agent_id));
+    let target = match routing.resolve_agent_command_target(target, fallback) {
+        Ok(target) => target,
+        Err(message) => {
+            print_local(&message);
+            return None;
+        }
+    };
     let Some(agent_id) = target else {
         print_local("/agent resume <agent_id>");
         return None;
     };
-    if !routing.agent_is_known(&agent_id) {
-        print_local(&format!("unknown agent: {agent_id}"));
-        return None;
-    }
     Some(agent_id)
-}
-
-enum AgentSwitchCommandAction {
-    ClearedSelection,
-    SwitchedAgent,
-}
-
-fn handle_agent_switch_command(
-    routing: &InputRoutingState,
-    renderer_tx: &mpsc::Sender<RendererCmd>,
-    target: Option<&str>,
-    print_local: &impl Fn(&str),
-) -> Option<AgentSwitchCommandAction> {
-    match routing.agent_switch_target(target) {
-        Ok(None) => {
-            routing.set_selected_agent(None);
-            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent);
-            Some(AgentSwitchCommandAction::ClearedSelection)
-        }
-        Ok(Some(agent_id)) => {
-            routing.set_selected_agent(Some(agent_id.clone()));
-            let _ = renderer_tx.send(RendererCmd::SwitchAgent { agent_id });
-            Some(AgentSwitchCommandAction::SwitchedAgent)
-        }
-        Err(message) => {
-            print_local(&message);
-            None
-        }
-    }
 }
 
 /// Local UI output used by the input thread while it holds `&mut HighTerm`.
@@ -1829,6 +1822,26 @@ struct AgentDisplayNameRequest {
 }
 
 impl AgentDisplayNameRequest {
+    fn from_agent_command(rest: &str, routing: &InputRoutingState) -> Result<Self, String> {
+        let usage = "/agent name <agent_id> <display_name>";
+        let rest = rest
+            .strip_prefix("name")
+            .ok_or_else(|| usage.to_owned())?
+            .trim();
+        let (agent_id, display_name) = rest
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| usage.to_owned())?;
+        let agent_id = agent_id.trim();
+        let display_name = display_name.trim();
+        if agent_id.is_empty() || display_name.is_empty() {
+            return Err(usage.to_owned());
+        }
+        Ok(Self {
+            agent_id: routing.known_agent_reference(agent_id)?,
+            display_name: display_name.to_owned(),
+        })
+    }
+
     fn event(&self, session_id: &str) -> Event {
         crate::ui_events::set_agent_display_name(
             session_id,
@@ -2397,87 +2410,30 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_agent_command(&mut self, text: &str) {
-        let rest = text.strip_prefix("/agent").unwrap_or("").trim();
-        if rest.is_empty() {
-            let current = self
-                .ctx
-                .routing
-                .selected_agent_id()
-                .unwrap_or_else(|| "none".to_owned());
-            let known_agents = self.ctx.routing.known_agents();
-            let active_count = self.ctx.routing.active_count();
-            self.output.system_info(&format!(
-                "/agent <new|switch|suspend|resume|auto|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
-                known_agents.join(", ")
-            ));
-            return;
-        }
-
-        let mut parts = rest.split_whitespace();
-        let Some(subcommand) = parts.next() else {
-            return;
-        };
-        let target = parts.next();
-        if subcommand == "name" {
-            self.handle_agent_name(rest);
-            return;
-        }
-        if parts.next().is_some() {
-            self.output.system_info(
-                "/agent: too many arguments (use /agent <new|switch|suspend|resume|auto|name> [agent_id])",
-            );
-            return;
-        }
-        match subcommand {
-            "new" => {
-                if target.is_some() {
-                    self.output.system_info("/agent new");
-                } else {
-                    self.handle_agent_new(None);
-                }
+        match agent_command_effect(text, &self.ctx.routing) {
+            Ok(AgentCommandEffect::ShowStatus) => {
+                let current = self
+                    .ctx
+                    .routing
+                    .selected_agent_id()
+                    .unwrap_or_else(|| "none".to_owned());
+                let known_agents = self.ctx.routing.known_agents();
+                let active_count = self.ctx.routing.active_count();
+                self.output.system_info(&format!(
+                    "/agent <new|switch|suspend|resume|auto|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
+                    known_agents.join(", ")
+                ));
             }
-            "switch" => self.handle_agent_switch(target),
-            "suspend" => self.handle_agent_suspend(target),
-            "resume" => self.handle_agent_resume(target),
-            "auto" => self.handle_agent_navigation_mode(
-                target,
-                tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
-                "/agent auto <agent_id>",
-            ),
-            _ => self.output.system_info(
-                "/agent <new|switch|suspend|resume|auto|name> [agent_id]; use /agent switch <agent_id>",
-            ),
+            Ok(AgentCommandEffect::New) => self.handle_agent_new(None),
+            Ok(AgentCommandEffect::Switch(target)) => self.apply_agent_switch(target),
+            Ok(AgentCommandEffect::SetNavigation { agent_id, action }) => {
+                self.send_agent_navigation_mode_request(agent_id, action);
+            }
+            Ok(AgentCommandEffect::SetDisplayName(request)) => {
+                self.send_agent_display_name_request(request);
+            }
+            Err(message) => self.output.system_info(&message),
         }
-    }
-
-    fn handle_agent_name(&self, rest: &str) {
-        let Some(rest) = rest.strip_prefix("name") else {
-            self.output
-                .system_info("/agent name <agent_id> <display_name>");
-            return;
-        };
-        let rest = rest.trim();
-        let Some((agent_id, display_name)) = rest.split_once(char::is_whitespace) else {
-            self.output
-                .system_info("/agent name <agent_id> <display_name>");
-            return;
-        };
-        let agent_id = agent_id.trim();
-        let display_name = display_name.trim();
-        if agent_id.is_empty() || display_name.is_empty() {
-            self.output
-                .system_info("/agent name <agent_id> <display_name>");
-            return;
-        }
-        if !self.agent_is_known(agent_id) {
-            self.output
-                .system_info(&format!("unknown agent: {agent_id}"));
-            return;
-        }
-        self.send_agent_display_name_request(AgentDisplayNameRequest {
-            agent_id: tau_proto::AgentId::parse(agent_id).expect("known agent id is valid"),
-            display_name: display_name.to_owned(),
-        });
     }
 
     fn handle_name_alias(&self, text: &str) {
@@ -2549,24 +2505,24 @@ impl<'a> TerminalInputSession<'a> {
         let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
     }
 
-    fn handle_agent_switch(&mut self, target: Option<&str>) {
-        let action = handle_agent_switch_command(
-            &self.ctx.routing,
-            &self.ctx.renderer_tx,
-            target,
-            &|message| self.output.system_info(message),
-        );
-        match action {
-            Some(AgentSwitchCommandAction::ClearedSelection) => {
+    fn apply_agent_switch(&mut self, target: Option<String>) {
+        match target {
+            None => {
+                self.ctx.routing.set_selected_agent(None);
+                let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
-            Some(AgentSwitchCommandAction::SwitchedAgent) => {
+            Some(agent_id) => {
+                self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+                let _ = self
+                    .ctx
+                    .renderer_tx
+                    .send(RendererCmd::SwitchAgent { agent_id });
                 self.pending_new_agent_options.clear();
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
-            None => {}
         }
     }
 
@@ -2594,35 +2550,11 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn handle_agent_navigation_mode(
-        &self,
-        target: Option<&str>,
-        action: tau_proto::UiAgentNavigationModeAction,
-        usage: &str,
-    ) {
-        let target = target
-            .map(str::trim)
-            .filter(|target| !target.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| self.selected_agent_id());
-        let Some(agent_id) = target else {
-            self.output.system_info(usage);
-            return;
-        };
-        if !self.agent_is_known(&agent_id) {
-            self.output
-                .system_info(&format!("unknown agent: {agent_id}"));
-            return;
-        }
-        self.send_agent_navigation_mode_request(agent_id, action);
-    }
-
     fn send_agent_navigation_mode_request(
         &self,
-        agent_id: String,
+        agent_id: tau_proto::AgentId,
         action: tau_proto::UiAgentNavigationModeAction,
     ) {
-        let agent_id = tau_proto::AgentId::parse(agent_id).expect("known agent id is valid");
         let event = crate::ui_events::set_agent_navigation_mode(self.session_id, agent_id, action);
         let _ = send_event(self.writer, &event);
     }
@@ -3006,6 +2938,96 @@ impl<'a> TerminalInputSession<'a> {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum AgentCommandEffect {
+    ShowStatus,
+    New,
+    Switch(Option<String>),
+    SetNavigation {
+        agent_id: tau_proto::AgentId,
+        action: tau_proto::UiAgentNavigationModeAction,
+    },
+    SetDisplayName(AgentDisplayNameRequest),
+}
+
+fn agent_command_effect(
+    text: &str,
+    routing: &InputRoutingState,
+) -> Result<AgentCommandEffect, String> {
+    let rest = text.strip_prefix("/agent").unwrap_or("").trim();
+    if rest.is_empty() {
+        return Ok(AgentCommandEffect::ShowStatus);
+    }
+    if rest
+        .strip_prefix("name")
+        .is_some_and(|suffix| suffix.chars().next().is_none_or(char::is_whitespace))
+    {
+        return AgentDisplayNameRequest::from_agent_command(rest, routing)
+            .map(AgentCommandEffect::SetDisplayName);
+    }
+
+    let mut parts = rest.split_whitespace();
+    let Some(subcommand) = parts.next() else {
+        return Ok(AgentCommandEffect::ShowStatus);
+    };
+    let target = parts.next();
+    if parts.next().is_some() {
+        return Err(
+            "/agent: too many arguments (use /agent <new|switch|suspend|resume|auto|name> [agent_id])"
+                .to_owned(),
+        );
+    }
+    match subcommand {
+        "new" => target
+            .is_none()
+            .then_some(AgentCommandEffect::New)
+            .ok_or_else(|| "/agent new".to_owned()),
+        "switch" => routing
+            .agent_switch_target(target)
+            .map(AgentCommandEffect::Switch),
+        "suspend" => agent_navigation_command_effect(
+            routing,
+            target,
+            routing.selected_agent_id(),
+            tau_proto::UiAgentNavigationModeAction::SetSuspended,
+            "/agent suspend <agent_id>",
+        ),
+        "resume" => agent_navigation_command_effect(
+            routing,
+            target,
+            routing
+                .selected_agent_id()
+                .filter(|agent_id| !routing.agent_is_active(agent_id)),
+            tau_proto::UiAgentNavigationModeAction::SetActive,
+            "/agent resume <agent_id>",
+        ),
+        "auto" => agent_navigation_command_effect(
+            routing,
+            target,
+            routing.selected_agent_id(),
+            tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
+            "/agent auto <agent_id>",
+        ),
+        _ => Err(
+            "/agent <new|switch|suspend|resume|auto|name> [agent_id]; use /agent switch <agent_id>"
+                .to_owned(),
+        ),
+    }
+}
+
+fn agent_navigation_command_effect(
+    routing: &InputRoutingState,
+    target: Option<&str>,
+    fallback: Option<String>,
+    action: tau_proto::UiAgentNavigationModeAction,
+    usage: &str,
+) -> Result<AgentCommandEffect, String> {
+    let agent_id = routing
+        .resolve_agent_command_target(target, fallback)?
+        .ok_or_else(|| usage.to_owned())?;
+    Ok(AgentCommandEffect::SetNavigation { agent_id, action })
+}
+
 /// Terminal-local outcome from one complete agent picker interaction.
 #[derive(Debug, Eq, PartialEq)]
 enum AgentPickerResolution {
@@ -3254,10 +3276,15 @@ fn build_agent_arg_completer(
                 .unwrap_or_default();
             let active = routing.active_agents();
             let live = routing.live_agents();
-            let needle = args[1].to_lowercase();
+            let raw_needle = args[1].to_lowercase();
+            let (needle, prefixed) = match raw_needle.strip_prefix('@') {
+                Some(needle) => (needle, true),
+                None => (raw_needle.as_str(), false),
+            };
             agent_completion_candidates(args[0], known, live, active)
                 .into_iter()
-                .filter(|agent| completion_matches(agent, &needle))
+                .filter(|agent| !prefixed || agent != "none")
+                .filter(|agent| completion_matches(agent, needle))
                 .map(|agent| {
                     let description = display_names
                         .get(&agent)

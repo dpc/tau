@@ -1,5 +1,38 @@
 use super::*;
 
+/// User-entered references may carry one convenience sigil, while canonical
+/// parsing, storage, and serialization remain unsigiled and strict.
+#[test]
+fn agent_id_reference_parsing_normalizes_one_optional_at_prefix() {
+    let bare = AgentId::parse_reference("worker-1").expect("bare reference");
+    let prefixed = AgentId::parse_reference("@worker-1").expect("prefixed reference");
+
+    assert_eq!(bare, prefixed);
+    assert_eq!(prefixed.as_str(), "worker-1");
+    assert_eq!(
+        serde_json::to_string(&prefixed).expect("serialize agent id"),
+        "\"worker-1\""
+    );
+    assert!(AgentId::parse("@worker-1").is_err());
+    assert!(serde_json::from_str::<AgentId>("\"@worker-1\"").is_err());
+}
+
+/// Reference parsing must not turn empty, multiply sigiled, malformed, or
+/// overlong user input into a valid durable identity.
+#[test]
+fn agent_id_reference_parsing_preserves_identifier_validation() {
+    for invalid in ["", "@", "@@worker", "@bad/id", "@bad id"] {
+        assert!(
+            AgentId::parse_reference(invalid).is_err(),
+            "{invalid:?} must be rejected"
+        );
+    }
+
+    let longest = "a".repeat(AGENT_ID_MAX_LEN);
+    assert!(AgentId::parse_reference(format!("@{longest}")).is_ok());
+    assert!(AgentId::parse_reference(format!("@{longest}a")).is_err());
+}
+
 /// Metadata mutation ids enforce their byte bound at construction and serde
 /// boundaries so a committed correlation cannot be silently rejected later.
 #[test]
