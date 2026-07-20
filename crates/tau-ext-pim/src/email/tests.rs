@@ -768,7 +768,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
                 )
             }
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ToolProgress(_) => progress += 1,
+                Event::ToolProgressReported(_) => progress += 1,
                 Event::ToolResult(result) => break Event::ToolResult(result),
                 Event::ToolError(error) => break Event::ToolError(error),
                 _ => {}
@@ -812,7 +812,7 @@ fn email_run_dispatches_prefixed_split_tool_by_logical_name() {
         let frame = pair.reader.read_message().expect("read").expect("frame");
         match frame {
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ToolProgress(progress) => {
+                Event::ToolProgressReported(progress) => {
                     assert_eq!(progress.tool_name.as_str(), "work_email_list_recent");
                     assert_eq!(
                         progress

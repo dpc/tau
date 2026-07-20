@@ -91,6 +91,13 @@ semantic journals. Security review must revisit this boundary when changing the
 authority matrix, interception replacement/drop behavior, activation accounting,
 disconnect/respawn identity checks, or persistence classification. See
 [`SPEC-tool-declarations-and-canonical-state`](specs/SPEC-tool-declarations-and-canonical-state.md).
+The same configured-peer boundary admits transient `tool.progress_reported`
+observations. The report commits before routed-call authorization; only the
+downstream consumer may validate the captured live source, suppress backgrounded
+calls, and publish immutable harness-sourced `tool.progress`. Parked reports
+retain their original configured identity, and stale generations cannot produce
+canonical progress. See
+[`SPEC-tool-progress-reports-and-canonical-facts`](specs/SPEC-tool-progress-reports-and-canonical-facts.md).
 Generic configured-extension spawn diagnostics treat the configured instance
 name, resolved executable, and explicitly configured cwd as non-secret metadata;
 do not place credentials or tokens in those fields. Diagnostics bound and escape

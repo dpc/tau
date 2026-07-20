@@ -1759,7 +1759,11 @@ pub struct ProgressUpdate {
     pub total: Option<u64>,
 }
 
-/// Live progress update emitted by a tool provider for one in-flight call.
+/// Progress payload shared by peer reports and harness-validated canonical
+/// facts.
+///
+/// Tool/Core peers submit this payload as [`Event::ToolProgressReported`].
+/// Subscribers consume it as the harness-authored [`Event::ToolProgress`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolProgress {
     /// Tool call id this progress update belongs to.
@@ -4558,6 +4562,10 @@ pub enum Event {
     ToolBackgroundResult(ToolBackgroundResult),
     #[serde(rename = "tool.background_error")]
     ToolBackgroundError(ToolBackgroundError),
+    /// Peer-authored observation awaiting routed-call validation.
+    #[serde(rename = "tool.progress_reported")]
+    ToolProgressReported(ToolProgress),
+    /// Harness-authored canonical progress fact.
     #[serde(rename = "tool.progress")]
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel_request")]
@@ -4956,6 +4964,7 @@ impl Event {
             Self::ToolError(_) => EventName::TOOL_ERROR,
             Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
+            Self::ToolProgressReported(_) => EventName::TOOL_PROGRESS_REPORTED,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
@@ -5192,6 +5201,7 @@ impl Event {
                 | Self::ProviderQuotaClear(_)
                 | Self::HarnessProviderQuotaChanged(_)
                 | Self::ProviderPromptSubmitted(_)
+                | Self::ToolProgressReported(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
                 | Self::ToolError(_)

@@ -1,7 +1,7 @@
 use tau_proto::{
     AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderModelsDeclared,
     ProviderModelsUpdated, SessionAgentLoaded, SessionAgentUnloaded, ToolError, ToolName,
-    ToolResult, ToolResultKind, ToolType,
+    ToolProgress, ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
@@ -60,6 +60,26 @@ fn tool_lifecycle_state_never_enters_semantic_history() {
             publisher_instance_id: 1.into(),
             tool_name: ToolName::new("runtime_tool"),
         }),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
+/// Peer progress observations and canonical harness progress stay live-only
+/// even when a sender incorrectly requests durable publication.
+#[test]
+fn tool_progress_never_enters_semantic_history() {
+    let progress = ToolProgress {
+        call_id: "progress-call".into(),
+        tool_name: ToolName::new("runtime_tool"),
+        message: Some("running".to_owned()),
+        progress: None,
+        display: None,
+    };
+    for event in [
+        Event::ToolProgressReported(progress.clone()),
+        Event::ToolProgress(progress),
     ] {
         assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));

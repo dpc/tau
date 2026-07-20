@@ -370,11 +370,17 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   completion is valid for a `call_id`: once either `tool.background_result` or
   `tool.background_error` has been recorded, later background completion events
   for that id are rejected during both live append and durable replay.
-- **`tool.progress`** *(extension)* — In-flight progress update with an
-  optional message, current/total counters, and/or complete display state.
-  Providers should usually emit an initial `tool.progress` immediately after
-  receiving `tool.started`, before expensive work, to replace the UI's generic
-  pending line with provider-owned formatting.
+- **`tool.progress_reported`** *(Tool/Core extension)* — Transient peer
+  observation of in-flight progress with an optional message, current/total
+  counters, and/or complete display state. Tool providers should usually submit
+  an initial report immediately after receiving `tool.started`, before expensive
+  work. The harness commits and broadcasts the report before validating the
+  captured routed-call owner and background state.
+- **`tool.progress`** *(harness)* — Protected transient canonical progress. For
+  extension-owned calls it derives from a valid committed
+  `tool.progress_reported` observation; harness-owned internal tools may publish
+  it directly. It uses the harness delivery source and cannot be rewritten or
+  dropped.
 - **`tool.cancel_request`** *(harness)* — The harness asks an extension to cancel an
   in-flight call.
 - **`tool.cancelled`** *(extension/harness)* — A non-backgrounded call was

@@ -1233,10 +1233,7 @@ fn dispatch_dir_lock_update(
         invoke.agent_id.clone(),
         request.dir.clone(),
         move || {
-            send_event(
-                &wait_tx,
-                waiting_progress_event(&wait_invoke, &[wait_dir], None),
-            )
+            let _ = wait_tx.report_tool_progress(waiting_progress(&wait_invoke, &[wait_dir], None));
         },
     );
 
@@ -1439,13 +1436,13 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
     }
 }
 
-/// Build a progress event that replaces the live tool block while waiting for
+/// Build a progress payload that replaces the live tool block while waiting for
 /// a directory update lock.
-pub(crate) fn waiting_progress_event(
+pub(crate) fn waiting_progress(
     invoke: &ToolStarted,
     dirs: &[PathBuf],
     shell_command_mode: Option<crate::tools::shell::ShellCommandMode>,
-) -> Event {
+) -> ToolProgress {
     let dirs_display = display_dirs(dirs);
     let mut display = match shell_command_mode {
         Some(mode) => crate::tools::shell::initial_display(&invoke.arguments, mode),
@@ -1459,13 +1456,13 @@ pub(crate) fn waiting_progress_event(
     display.status = ToolUseStatus::InProgress;
     display.status_text = "waiting".to_owned();
 
-    Event::ToolProgress(ToolProgress {
+    ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: Some(format!("waiting for directory lock: {dirs_display}")),
         progress: None,
         display: Some(display),
-    })
+    }
 }
 /// Canonicalize `path` as an existing directory.
 pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {

@@ -2,9 +2,9 @@
 
 ## Status
 
-The external-message, provider-model, and tool-lifecycle slices now use generic `Emit`
-publication, immutable authenticated internal publisher snapshots, source-aware
-admission, and downstream canonicalization as required by
+The external-message, provider-model, tool-lifecycle, and tool-progress slices
+now use generic `Emit` publication, immutable authenticated internal publisher
+snapshots, source-aware admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
@@ -43,6 +43,11 @@ The harness owns final-name validation and deterministic startup collision
 resolution. Extensions retain declaration and tool-specific semantic ownership.
 The exact flow is
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+Tool/Core peers likewise submit `tool.progress_reported` observations through
+ordinary generic publication. Only the post-commit consumer validates the
+captured live routed-call owner and background state, then publishes protected
+harness-sourced `tool.progress`; see
+[SPEC-tool-progress-reports-and-canonical-facts](../../../specs/SPEC-tool-progress-reports-and-canonical-facts.md).
 For each prompt, the harness alone resolves the effective
 post-policy/provider-filtered tool snapshot used for definitions,
 authorization, capabilities, and diagnostics, as specified by

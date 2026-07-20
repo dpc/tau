@@ -169,7 +169,7 @@ fn register_tools_with_prompt_fragment(
             let mut local_invoke = cx.invoke.clone();
             local_invoke.tool_name = cx.local_tool_name().clone();
             cx.handle
-                .emit(initial_progress(cx.invoke, cx.local_tool_name()))?;
+                .report_tool_progress(initial_progress(cx.invoke, cx.local_tool_name()))?;
             let mut event = cx.state.dispatch(local_invoke);
             match &mut event {
                 Event::ToolResult(result) => result.tool_name = wire_tool_name,
@@ -7021,8 +7021,8 @@ pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
     }
 }
 
-fn initial_progress(invoke: &ToolStarted, local_tool_name: &tau_proto::ToolName) -> Event {
-    Event::ToolProgress(ToolProgress {
+fn initial_progress(invoke: &ToolStarted, local_tool_name: &tau_proto::ToolName) -> ToolProgress {
+    ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: None,
@@ -7031,7 +7031,7 @@ fn initial_progress(invoke: &ToolStarted, local_tool_name: &tau_proto::ToolName)
             local_tool_name.as_str(),
             &invoke.arguments,
         )),
-    })
+    }
 }
 
 fn invocation_display_args(arguments: &CborValue) -> Option<String> {

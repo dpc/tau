@@ -123,6 +123,40 @@ impl ClientHandle {
         ))
     }
 
+    /// Submit a transient tool progress observation for downstream routed-call
+    /// validation.
+    ///
+    /// Success acknowledges only local protocol output. The harness commits the
+    /// report through ordinary interception before it may publish a separate
+    /// canonical `tool.progress` fact. The helper does not apply logical
+    /// tool-name scoping; callers must preserve the routed wire name from
+    /// [`tau_proto::ToolStarted::tool_name`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn report_tool_progress(&self, progress: tau_proto::ToolProgress) -> ClientResult<()> {
+        self.emit_transient(tau_proto::Event::ToolProgressReported(progress))
+    }
+
+    /// Enqueue a transient tool progress observation without waiting for flush.
+    ///
+    /// Queue admission does not acknowledge report commit or canonical
+    /// progress. The helper does not apply logical tool-name scoping; callers
+    /// must preserve the routed wire name from
+    /// [`tau_proto::ToolStarted::tool_name`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn report_tool_progress_detached(
+        &self,
+        progress: tau_proto::ToolProgress,
+    ) -> ClientResult<()> {
+        self.emit_transient_detached(tau_proto::Event::ToolProgressReported(progress))
+    }
+
     /// Sends one raw peer-to-harness message and normally waits until it is
     /// flushed.
     ///

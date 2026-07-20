@@ -158,27 +158,23 @@ impl RuntimeState {
         &self,
         invoke: &tau_proto::ToolStarted,
         local_tool_name: &tau_proto::ToolName,
-    ) -> Option<Event> {
+    ) -> Option<tau_proto::ToolProgress> {
         match local_tool_name.as_str() {
-            name if email::is_tool_name(name) => {
-                Some(Event::ToolProgress(tau_proto::ToolProgress {
-                    call_id: invoke.call_id.clone(),
-                    tool_name: invoke.tool_name.clone(),
-                    message: None,
-                    progress: None,
-                    display: Some(email::initial_display_for_tool(
-                        local_tool_name.as_str(),
-                        &invoke.arguments,
-                    )),
-                }))
-            }
+            name if email::is_tool_name(name) => Some(tau_proto::ToolProgress {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                message: None,
+                progress: None,
+                display: Some(email::initial_display_for_tool(
+                    local_tool_name.as_str(),
+                    &invoke.arguments,
+                )),
+            }),
             name if calendar::is_tool_name(name) => {
                 let mut local_invoke = invoke.clone();
                 local_invoke.tool_name = local_tool_name.clone();
                 let mut progress = calendar::initial_progress(&local_invoke);
-                if let Event::ToolProgress(progress) = &mut progress {
-                    progress.tool_name = invoke.tool_name.clone();
-                }
+                progress.tool_name = invoke.tool_name.clone();
                 Some(progress)
             }
             _ => None,
@@ -337,7 +333,7 @@ fn register_tools_with_prompt_fragment(
                 let local_tool_name = cx.local_tool_name().clone();
                 if let Some(progress) = cx.state.initial_tool_progress(cx.invoke, &local_tool_name)
                 {
-                    cx.handle.emit(progress)?;
+                    cx.handle.report_tool_progress(progress)?;
                 }
                 if let Some(event) = cx.state.dispatch_tool(cx.invoke.clone(), &local_tool_name) {
                     cx.handle.emit(event)?;

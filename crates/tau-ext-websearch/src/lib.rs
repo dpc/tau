@@ -408,13 +408,13 @@ fn dispatch_tool_invoke(
     handle: &ClientHandle,
 ) {
     if let Some(display) = initial_display(&invoke, local_tool_name) {
-        let _ = handle.emit_detached(Event::ToolProgress(ToolProgress {
+        let _ = handle.report_tool_progress_detached(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             message: None,
             progress: None,
             display: Some(display),
-        }));
+        });
     }
     let event = match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),

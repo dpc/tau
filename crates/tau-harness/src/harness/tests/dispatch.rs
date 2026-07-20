@@ -1826,8 +1826,18 @@ fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harn
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _ = connect_test_tool(&mut h, "conn-owner");
-    let _ = connect_test_tool(&mut h, "conn-wrong");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-owner",
+        "configured-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-wrong",
+        "configured-wrong",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry
         .register("conn-owner", shared_test_tool_spec(tool_name));
 
@@ -4573,7 +4583,7 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
 
     h.handle_extension_event_inner(
         "conn-wrong",
-        Event::ToolProgress(tool_progress(
+        Event::ToolProgressReported(tool_progress(
             "owner-progress-call",
             "owned_tool",
             "spoofed progress",
@@ -4581,15 +4591,17 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
     )
     .expect("wrong progress ignored");
 
-    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ToolProgress(progress) if progress.call_id.as_str() == "owner-progress-call"
+        Event::ToolProgress(progress)
+            if progress.call_id.as_str() == "owner-progress-call"
+                && progress.message.as_deref() == Some("spoofed progress")
     )));
     assert!(h.tool_agents.contains_key("owner-progress-call"));
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolProgress(tool_progress(
+        Event::ToolProgressReported(tool_progress(
             "owner-progress-call",
             "owned_tool",
             "real progress",
@@ -4597,12 +4609,16 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
     )
     .expect("owner progress accepted");
 
-    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
-        event,
-        Event::ToolProgress(progress)
-            if progress.call_id.as_str() == "owner-progress-call"
-                && progress.message.as_deref() == Some("real progress")
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolProgress(progress)
+                if progress.call_id.as_str() == "owner-progress-call"
+                    && progress.message.as_deref() == Some("real progress")
+        )
+    ));
 
     h.shutdown().expect("shutdown");
 }
@@ -4816,7 +4832,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
 
     h.handle_extension_event_inner(
         "conn-owner",
-        Event::ToolProgress(tool_progress(
+        Event::ToolProgressReported(tool_progress(
             "late-progress-call",
             "owned_tool",
             "late progress",
@@ -4824,7 +4840,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
     )
     .expect("late progress ignored");
 
-    assert!(!event_log_contains(&h, "conn-owner", |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolProgress(progress)
             if progress.call_id.as_str() == "late-progress-call"
@@ -16592,7 +16608,12 @@ fn backgrounded_tool_progress_is_not_published() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let _ = connect_test_tool(&mut h, "conn-slow");
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-slow",
+        "configured-slow",
+        tau_proto::ClientKind::Tool,
+    );
     h.registry.register(
         "conn-slow",
         ToolSpec {
@@ -16652,7 +16673,7 @@ fn backgrounded_tool_progress_is_not_published() {
 
     h.handle_extension_event_inner(
         "conn-slow",
-        Event::ToolProgress(tau_proto::ToolProgress {
+        Event::ToolProgressReported(tau_proto::ToolProgress {
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
             message: Some("running shell command".to_owned()),

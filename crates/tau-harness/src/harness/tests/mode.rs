@@ -332,7 +332,32 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
         }),
     );
     let tool_call_id = ToolCallId::from("ephemeral-debug-tool-call");
-    h.tool_agents.insert(tool_call_id.clone(), cid);
+    h.tool_agents.insert(tool_call_id.clone(), cid.clone());
+    let progress_owner = "ephemeral-progress-owner";
+    let _progress_sink = connect_ready_configured_extension(
+        &mut h,
+        progress_owner,
+        "configured-progress-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.pending_tool_providers
+        .insert(tool_call_id.clone(), progress_owner.into());
+    let progress_report = Event::ToolProgressReported(tau_proto::ToolProgress {
+        call_id: tool_call_id.clone(),
+        tool_name: ToolName::new("debug_secret_tool"),
+        message: Some("tool-progress-debug-secret".to_owned()),
+        progress: None,
+        display: None,
+    });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: progress_owner.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+            progress_report.clone(),
+            true,
+        )),
+    });
+    h.handle_extension_event_inner(progress_owner, progress_report)
+        .expect("commit ephemeral tool progress report");
     h.publish_event(
         None,
         Event::ToolResult(ToolResult {
@@ -385,6 +410,12 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     assert!(
         !jsonl.contains("tool-result-debug-secret"),
         "tool results owned by an ephemeral agent must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("tool-progress-debug-secret")
+            && !jsonl.contains("tool.progress_reported")
+            && !jsonl.contains("\"tool.progress\""),
+        "raw, committed, and canonical ephemeral tool progress must not be mirrored into debug JSONL"
     );
     assert!(
         !jsonl.contains("message-debug-secret") && !jsonl.contains("ephemeral-message"),
@@ -896,17 +927,15 @@ fn embedded_mode_can_run_shell_commands() {
     assert!(!r.is_empty(), "shell response should not be empty");
 }
 
-/// Ensures a full embedded shell round returns final output when progress is
-/// missed and traces the correlated call/result without provider bytes.
+/// Ensures a full embedded shell round observes committed canonical progress
+/// and traces the correlated call/result without provider bytes.
 #[test]
-fn traced_embedded_returns_shell_output_when_progress_is_missed() {
+fn traced_embedded_observes_canonical_shell_progress() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let o = run_embedded_message_with_echo(&sp, "s1", "shell printf hi").expect("ok");
-    // Socket clients can miss short-lived progress when the command
-    // completes before the subscription writer drains, but the final
-    // response must still arrive and lifecycle tracing is covered above.
     assert!(!o.response.is_empty(), "shell response should not be empty");
+    assert!(!o.progress_messages.is_empty());
     assert_eq!(o.tool_calls.len(), 1);
     assert_eq!(o.tool_calls[0].name.as_str(), "shell");
     assert_eq!(o.tool_results.len(), 1);

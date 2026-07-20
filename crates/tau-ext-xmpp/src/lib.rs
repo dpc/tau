@@ -138,6 +138,14 @@ impl Output {
         self.send(HarnessInputMessage::emit(event));
     }
 
+    /// Submit one transient tool progress observation.
+    fn report_tool_progress(&self, progress: ToolProgress) {
+        self.send(HarnessInputMessage::emit_with_transient(
+            Event::ToolProgressReported(progress),
+            true,
+        ));
+    }
+
     /// Emit one transient external-message report for downstream
     /// canonicalization.
     fn emit_message_report(&self, event: Event) {
@@ -772,7 +780,7 @@ impl Extension {
     }
 
     fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
-        self.output.emit(Event::ToolProgress(ToolProgress {
+        self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             message: Some("xmpp tool started".to_owned()),
@@ -782,7 +790,7 @@ impl Extension {
                 status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
                 ..Default::default()
             }),
-        }));
+        });
         let event = match local_tool_name.as_str() {
             REGISTER_TOOL_NAME => self.handle_register(invoke),
             SEND_TOOL_NAME => self.handle_send(invoke),

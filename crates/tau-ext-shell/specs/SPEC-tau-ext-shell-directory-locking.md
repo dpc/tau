@@ -131,7 +131,8 @@ and releases all overlapping manual locks, regardless of owner. It does not canc
 release automatic locks held by running tools. An ancestor or descendant displayed by
 a waiting call can therefore be used to clear the conflicting manual lock.
 
-Blocked ext-shell calls emit `ToolProgress` with a live `ToolDisplay` naming the
+Blocked ext-shell calls submit `tool.progress_reported` with a live
+`ToolDisplay` naming the
 directory or directories being awaited. Terminal `dir_lock` success and failure
 displays include the relevant directory when known. Normal foreground and
 auto-background behavior still applies because the harness sees the tool call as

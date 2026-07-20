@@ -507,6 +507,13 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
+        Event::ToolProgressReported(ToolProgress {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            message: Some("provider running".to_owned()),
+            progress: None,
+            display: None,
+        }),
         Event::ToolProgress(ToolProgress {
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -1647,6 +1654,7 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::AgentStatsUpdated(_)
                 | Event::AgentReplayComplete(_)
                 | Event::SessionReplayComplete(_)
+                | Event::ToolProgressReported(_)
                 | Event::ToolProgress(_)
                 | Event::ToolDelegateProgress(_)
                 | Event::ToolError(_)
@@ -1771,6 +1779,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.delegate_progress",
         "tool.error",
         "tool.progress",
+        "tool.progress_reported",
         "tool.registration_declared",
         "tool.register",
         "tool.rejected",
@@ -2516,6 +2525,38 @@ fn tool_lifecycle_event_names_and_provenance_match_wire_family() {
     }
 }
 
+/// Tool progress submission and canonical observation share a payload while
+/// retaining distinct transient wire names.
+#[test]
+fn tool_progress_report_and_canonical_fact_have_distinct_wire_names() {
+    let progress = ToolProgress {
+        call_id: "progress-call".into(),
+        tool_name: ToolName::new("owned_tool"),
+        message: Some("running".to_owned()),
+        progress: Some(ProgressUpdate {
+            current: Some(1),
+            total: Some(2),
+        }),
+        display: None,
+    };
+    for (event, expected) in [
+        (
+            Event::ToolProgressReported(progress.clone()),
+            "tool.progress_reported",
+        ),
+        (Event::ToolProgress(progress.clone()), "tool.progress"),
+    ] {
+        assert_eq!(event.name().to_string(), expected);
+        assert!(event.defaults_to_transient());
+        let json = serde_json::to_value(&event).expect("serialize progress event");
+        assert_eq!(json["event"], expected);
+        assert_eq!(
+            serde_json::from_value::<Event>(json).expect("decode progress event"),
+            event
+        );
+    }
+}
+
 /// Ensures execution lifecycle events retain the provider wire-family event
 /// names.
 #[test]
@@ -2952,6 +2993,13 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             message: Some("running".to_owned()),
+            progress: None,
+            display: None,
+        }),
+        Event::ToolProgressReported(ToolProgress {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            message: Some("provider running".to_owned()),
             progress: None,
             display: None,
         }),

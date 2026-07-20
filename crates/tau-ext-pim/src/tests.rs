@@ -888,7 +888,7 @@ fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
             {
                 registered = true;
             }
-            Event::ToolProgress(event) if event.call_id.as_str() == "prefixed-calendar" => {
+            Event::ToolProgressReported(event) if event.call_id.as_str() == "prefixed-calendar" => {
                 assert_eq!(event.tool_name.as_str(), "work_calendar_list_calendars");
                 progress = true;
             }

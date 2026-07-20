@@ -829,7 +829,7 @@ pub(super) fn reaction_error_message(
 
 /// Return a non-terminal progress event when a duplicate shares active I/O.
 fn reaction_coalesced(invoke: ToolStarted) -> Event {
-    Event::ToolProgress(ToolProgress {
+    Event::ToolProgressReported(ToolProgress {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         message: Some("identical slack_react call is already in progress".to_owned()),

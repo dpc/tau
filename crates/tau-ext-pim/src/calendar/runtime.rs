@@ -3055,8 +3055,8 @@ pub(crate) fn initial_display_for_tool(tool_name: &str, arguments: &CborValue) -
     initial_display(arguments)
 }
 
-pub(crate) fn initial_progress(invoke: &ToolStarted) -> Event {
-    Event::ToolProgress(ToolProgress {
+pub(crate) fn initial_progress(invoke: &ToolStarted) -> ToolProgress {
+    ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: None,
@@ -3065,7 +3065,7 @@ pub(crate) fn initial_progress(invoke: &ToolStarted) -> Event {
             invoke.tool_name.as_str(),
             &invoke.arguments,
         )),
-    })
+    }
 }
 
 fn invocation_display_args(arguments: &CborValue) -> Option<String> {

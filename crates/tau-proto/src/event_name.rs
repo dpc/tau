@@ -227,6 +227,10 @@ impl EventName {
         Self::from_static(EventCategory::Tool, "background_result");
     pub const TOOL_BACKGROUND_ERROR: Self =
         Self::from_static(EventCategory::Tool, "background_error");
+    /// Tool-provider observation submitted for downstream validation.
+    pub const TOOL_PROGRESS_REPORTED: Self =
+        Self::from_static(EventCategory::Tool, "progress_reported");
+    /// Harness-validated canonical tool progress.
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL_REQUEST: Self = Self::from_static(EventCategory::Tool, "cancel_request");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");

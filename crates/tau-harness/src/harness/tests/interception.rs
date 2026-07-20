@@ -1,4 +1,5 @@
 mod tool_lifecycle;
+mod tool_progress;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;

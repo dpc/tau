@@ -101,7 +101,7 @@ impl Output {
             && let HarnessInputMessage::Emit(emit) = &mut message
         {
             let tool_name = match emit.event.as_mut() {
-                Event::ToolProgress(event) => Some(&mut event.tool_name),
+                Event::ToolProgressReported(event) => Some(&mut event.tool_name),
                 Event::ToolResult(event) => Some(&mut event.tool_name),
                 Event::ToolError(event) => Some(&mut event.tool_name),
                 Event::ToolCancelled(event) => Some(&mut event.tool_name),
@@ -120,6 +120,17 @@ impl Output {
                 .send(message)
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         }
+    }
+
+    /// Submit one transient tool progress observation.
+    fn report_tool_progress(
+        &self,
+        progress: tau_proto::ToolProgress,
+    ) -> tau_client::ClientResult<()> {
+        self.send(HarnessInputMessage::emit_with_transient(
+            Event::ToolProgressReported(progress),
+            true,
+        ))
     }
 
     fn register_local_tool(
@@ -1531,12 +1542,10 @@ fn dispatch_locked_tool_invoke(
     let wait_shell_command_mode = shell_command_mode;
     let wait_tx = tx.clone();
     let on_wait = move || {
-        let _ = wait_tx.send(HarnessInputMessage::emit(
-            crate::dir_lock::waiting_progress_event(
-                &wait_invoke,
-                &wait_dirs,
-                wait_shell_command_mode,
-            ),
+        let _ = wait_tx.report_tool_progress(crate::dir_lock::waiting_progress(
+            &wait_invoke,
+            &wait_dirs,
+            wait_shell_command_mode,
         ));
     };
     let guard = match if shell_command_mode.is_some() {
@@ -1841,15 +1850,13 @@ fn dispatch_tool_invoke(
     }
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
-        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-            tau_proto::ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: None,
-                progress: None,
-                display: Some(display),
-            },
-        )));
+        let _ = tx.report_tool_progress(tau_proto::ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: None,
+            progress: None,
+            display: Some(display),
+        });
     }
 
     let events = execute_tool(invoke, world);
@@ -1873,15 +1880,13 @@ fn dispatch_cancellable_non_shell_tool(
         .insert(invoke.call_id.clone(), cancel_tx);
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
-        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-            tau_proto::ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: None,
-                progress: None,
-                display: Some(display),
-            },
-        )));
+        let _ = tx.report_tool_progress(tau_proto::ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: None,
+            progress: None,
+            display: Some(display),
+        });
     }
 
     let call_id = invoke.call_id.clone();
@@ -1956,18 +1961,16 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         .expect("running call registry lock poisoned")
         .insert(invoke.call_id.clone(), cancel_tx);
 
-    let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-        tau_proto::ToolProgress {
-            call_id: invoke.call_id.clone(),
-            tool_name: invoke.tool_name.clone(),
-            message: None,
-            progress: None,
-            display: Some(crate::tools::shell::initial_display(
-                &invoke.arguments,
-                shell_command_mode,
-            )),
-        },
-    )));
+    let _ = tx.report_tool_progress(tau_proto::ToolProgress {
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        message: None,
+        progress: None,
+        display: Some(crate::tools::shell::initial_display(
+            &invoke.arguments,
+            shell_command_mode,
+        )),
+    });
     let result = crate::tools::shell::run_command_cancellable_for_tool(
         crate::tools::shell::ShellInvocation {
             surface: crate::tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())

@@ -31,7 +31,7 @@ impl<R: std::io::Read> EventReader<R> {
             match self.inner.read_message()? {
                 None => return Ok(None),
                 Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
-                    Event::ToolProgress(progress)
+                    Event::ToolProgressReported(progress)
                         if progress.message.is_none() && progress.display.is_some() =>
                     {
                         continue;

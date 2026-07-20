@@ -5824,7 +5824,7 @@ impl Harness {
                 self.tool_call_targets_ephemeral_agent(&rejected.call_id)
             }
             Event::ToolResult(result) => self.tool_call_targets_ephemeral_agent(&result.call_id),
-            Event::ToolProgress(progress) => {
+            Event::ToolProgress(progress) | Event::ToolProgressReported(progress) => {
                 self.tool_call_targets_ephemeral_agent(&progress.call_id)
             }
             Event::ToolCancelRequest(cancel) => {
@@ -8197,11 +8197,12 @@ impl Harness {
             HarnessInputMessage::Emit(emit) => {
                 // Governing contract:
                 // `specs/DECISION-generic-peer-event-emission.md`.
-                // It requires this arm to remain a generic
-                // admission/interception/commit chokepoint.
-                // Do not add concrete-event semantics here. Existing routing
-                // below is migration debt; move each family to committed-event
-                // processing or a dedicated protocol message instead.
+                // `Emit` is a private protocol submission request, not a committed
+                // event fact. Keep this arm a generic
+                // admission/interception/commit chokepoint: never add
+                // concrete-event semantics here. Move each family to
+                // committed-event processing or a dedicated protocol message
+                // instead.
                 let (event, transient) = emit.into_parts();
                 self.handle_extension_event_inner_with_transient(
                     source_id,
@@ -8277,6 +8278,11 @@ impl Harness {
             // publish the corresponding mutable declaration instead.
             return Ok(());
         }
+        if matches!(event, Event::ToolProgress(_)) {
+            // Canonical tool progress is harness-authored. Tool/Core extensions
+            // publish `tool.progress_reported` observations instead.
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
@@ -8307,6 +8313,28 @@ impl Harness {
             }
             let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
             self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
+        if matches!(event, Event::ToolProgressReported(_)) {
+            // This is only declarative event-authority admission. Per
+            // `specs/DECISION-generic-peer-event-emission.md`, routed-call
+            // validation, background suppression, and canonical publication run
+            // from the committed-event consumer. Keep this path semantically
+            // identical to ordinary generic Emit publication.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                    && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks tool progress report authority"
+                );
+                return Ok(());
+            }
+            self.handle_extension_fallback_event(source_id, event, transient_override);
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsUpdated(_)) {
@@ -8395,6 +8423,10 @@ impl Harness {
             self.process_committed_tool_declaration(peer_context, event);
             return;
         }
+        if let Event::ToolProgressReported(progress) = event {
+            self.process_committed_tool_progress_report(peer_context, progress);
+            return;
+        }
         let Event::ProviderModelsDeclared(declaration) = event else {
             return;
         };
@@ -8445,6 +8477,55 @@ impl Harness {
         if extension.activation_reservation.is_some() {
             self.finish_pending_provider_model_declaration(source_id.as_str());
         }
+    }
+
+    /// Validate one committed peer progress observation and publish its
+    /// canonical harness-authored fact.
+    ///
+    /// This method is intentionally downstream of generic `Emit` commit under
+    /// `specs/DECISION-generic-peer-event-emission.md`. Interception
+    /// replacements must reach this point before routed-call ownership and
+    /// background suppression are evaluated.
+    fn process_committed_tool_progress_report(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        progress: &tau_proto::ToolProgress,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
+        else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                        && entry.state != ExtensionState::Disconnected
+                });
+        let source_owns_route = self
+            .pending_tool_providers
+            .get(&progress.call_id)
+            .is_some_and(|source| source == &extension.source);
+        if !source_is_current
+            || !self.tool_agents.contains_key(&progress.call_id)
+            || !source_owns_route
+            || self.tool_turn.is_backgrounded(&progress.call_id)
+        {
+            return;
+        }
+        self.enqueue_publish(
+            Some(HARNESS_CONNECTION_ID),
+            Event::ToolProgress(progress.clone()),
+            true,
+            true,
+            None,
+        );
     }
 
     /// Validate and apply one committed tool lifecycle declaration.
@@ -8677,15 +8758,6 @@ impl Harness {
         match event {
             Event::ToolRequest(request) => {
                 self.handle_extension_tool_request(source_id, request)?;
-                Ok(None)
-            }
-            Event::ToolProgress(progress) => {
-                if self.tool_agents.contains_key(&progress.call_id)
-                    && self.validate_tool_event_source(&progress.call_id, source_id)
-                    && !self.tool_turn.is_backgrounded(&progress.call_id)
-                {
-                    self.publish_event(Some(source_id), Event::ToolProgress(progress));
-                }
                 Ok(None)
             }
             other => Ok(Some(other)),
@@ -9540,10 +9612,11 @@ impl Harness {
             }
             HarnessInputMessage::Emit(emit) => {
                 // Keep this arm aligned with
-                // `DECISION-generic-peer-event-emission`: new peer event
-                // families must not acquire semantic work at `Emit` intake.
-                // Migrate the legacy UI dispatcher downstream or use a
-                // dedicated message for directed/control operations.
+                // `specs/DECISION-generic-peer-event-emission.md`: `Emit` is a
+                // private submission request rather than a committed fact. New
+                // peer event families must not acquire semantic work at intake;
+                // process them downstream of commit or use a dedicated message
+                // for directed/control operations.
                 let (event, transient) = emit.into_parts();
                 self.handle_client_event_inner_with_transient(client_id, event, Some(transient))?;
                 Ok(true)
@@ -12197,6 +12270,7 @@ impl Harness {
                 | Event::MessageReactionAddedReported(_)
                 | Event::MessageReactionRemovedReported(_)
                 | Event::MessageSentReported(_)
+                | Event::ToolProgressReported(_)
         )
     }
 
@@ -12224,7 +12298,6 @@ impl Harness {
                 | Event::ToolError(_)
                 | Event::ProviderToolResult(_)
                 | Event::ProviderToolError(_)
-                | Event::ToolProgress(_)
                 | Event::ToolCancelled(_)
                 | Event::ToolBackgroundResult(_)
                 | Event::ToolBackgroundError(_)
@@ -12249,6 +12322,7 @@ impl Harness {
                 | Event::ProviderModelsUpdated(_)
                 | Event::ToolRegister(_)
                 | Event::ToolUnregister(_)
+                | Event::ToolProgress(_)
         )
     }
 
@@ -21512,11 +21586,30 @@ impl Harness {
         // unit tests via `submit_user_prompt` / manual turn-state setup.
         self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
 
+        let progress_observer_id = tau_proto::ConnectionId::from("__embedded_progress_observer");
+        let (progress_tx, progress_rx) = mpsc::channel();
+        self.bus.connect(Connection::new(
+            ConnectionMetadata {
+                id: progress_observer_id.clone(),
+                name: "embedded progress observer".to_owned(),
+                kind: ClientKind::Ui,
+                origin: ConnectionOrigin::InMemory,
+            },
+            Box::new(ChannelSink { tx: progress_tx }),
+        ));
+        if let Err(error) = self.bus.set_subscriptions(
+            progress_observer_id.as_str(),
+            Vec::new(),
+            vec![EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS)],
+        ) {
+            self.bus.disconnect(progress_observer_id.as_str());
+            return Err(HarnessError::Route(error));
+        }
         let started_at = Instant::now();
         let mut progress_messages = Vec::new();
         let mut tool_calls = Vec::new();
         let mut tool_results = Vec::new();
-        loop {
+        let result = 'interaction: loop {
             self.process_runtime_deadlines();
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
@@ -21538,7 +21631,7 @@ impl Harness {
                     self.process_runtime_deadlines();
                     continue;
                 }
-                Err(_) => return Err(HarnessError::ResponseTimeout),
+                Err(_) => break 'interaction Err(HarnessError::ResponseTimeout),
             };
             self.log_event(&harness_evt);
             match harness_evt {
@@ -21550,9 +21643,6 @@ impl Harness {
                         HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
                         _ => None,
                     };
-                    if let Some(Event::ToolProgress(progress)) = event {
-                        progress_messages.push(format_tool_progress(progress));
-                    }
                     if let Some(Event::ProviderResponseFinished(response)) = event {
                         record_embedded_tool_calls(&response.output_items, &mut tool_calls);
                     }
@@ -21571,9 +21661,18 @@ impl Harness {
                         }
                         _ => None,
                     };
-                    self.handle_extension_message(&connection_id, *message)?;
+                    if let Err(error) = self.handle_extension_message(&connection_id, *message) {
+                        break 'interaction Err(error);
+                    }
+                    while let Ok(WriterCommand::Message(message)) = progress_rx.try_recv() {
+                        if let HarnessOutputMessage::Deliver(delivery) = message
+                            && let Event::ToolProgress(progress) = delivery.event()
+                        {
+                            progress_messages.push(format_tool_progress(progress));
+                        }
+                    }
                     if is_final {
-                        return Ok(InteractionOutcome {
+                        break 'interaction Ok(InteractionOutcome {
                             lifecycle_messages: Vec::new(),
                             progress_messages,
                             tool_calls,
@@ -21586,7 +21685,7 @@ impl Harness {
                     let was_provider = self.is_provider_extension(&connection_id);
                     self.handle_disconnect(&connection_id);
                     if was_provider {
-                        return Err(provider_disconnected_error());
+                        break 'interaction Err(provider_disconnected_error());
                     }
                 }
                 HarnessEvent::ReadFailed {
@@ -21595,27 +21694,37 @@ impl Harness {
                 } => {
                     let was_provider = self.is_provider_extension(&connection_id);
                     if self.extensions.entries.contains_key(&connection_id) {
-                        self.handle_extension_protocol_failure(
+                        if let Err(error) = self.handle_extension_protocol_failure(
                             &connection_id,
                             format!("extension protocol decode failed: {error}"),
-                        )?;
+                        ) {
+                            break 'interaction Err(error);
+                        }
                     } else {
                         self.handle_disconnect(&connection_id);
                     }
                     if was_provider {
-                        return Err(provider_disconnected_error());
+                        break 'interaction Err(provider_disconnected_error());
                     }
                 }
                 HarnessEvent::NewClient(_) => {}
                 HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
-                    self.handle_supervised_writer_cleanup_complete_at(
+                    if let Err(error) = self.handle_supervised_writer_cleanup_complete_at(
                         &connection_id,
                         Instant::now(),
-                    )?;
+                    ) {
+                        break 'interaction Err(error);
+                    }
                 }
-                HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+                HarnessEvent::Command(command) => {
+                    if let Err(error) = self.handle_harness_command(command) {
+                        break 'interaction Err(error);
+                    }
+                }
             }
-        }
+        };
+        self.bus.disconnect(progress_observer_id.as_str());
+        result
     }
 
     pub(crate) fn dump_initial_prompt(

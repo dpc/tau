@@ -3456,6 +3456,41 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
     ));
 }
 
+/// The progress helper must name a peer report and set explicit transient
+/// metadata rather than submitting the protected canonical fact.
+#[test]
+fn client_handle_submits_transient_tool_progress_report() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.finish_startup().expect("finish test startup");
+    handle
+        .report_tool_progress(tau_proto::ToolProgress {
+            call_id: "progress-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            message: Some("running".to_owned()),
+            progress: None,
+            display: None,
+        })
+        .expect("submit progress report");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::Emit(emit)]
+            if emit.transient
+                && matches!(
+                    emit.event.as_ref(),
+                    Event::ToolProgressReported(progress)
+                        if progress.call_id.as_str() == "progress-call"
+                )
+    ));
+}
+
 /// A configuration rejection after declarations have flushed still wins the
 /// startup-gate race and prevents the terminal Ready frame.
 #[test]

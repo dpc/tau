@@ -291,7 +291,7 @@ impl<R: std::io::Read> EventReader<R> {
             match self.inner.read_message()? {
                 None => return Ok(None),
                 Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
-                    Event::ToolProgress(progress)
+                    Event::ToolProgressReported(progress)
                         if progress.message.is_none()
                             && progress.display.is_some()
                             && progress.tool_name != SHELL_TOOL_NAME
@@ -1049,7 +1049,7 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
     loop {
         assert!(started.elapsed() < Duration::from_secs(2));
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id == call_id => break,
+            Some(Event::ToolProgressReported(progress)) if progress.call_id == call_id => break,
             Some(_) => continue,
             None => panic!("extension closed before shell started"),
         }
@@ -1292,7 +1292,7 @@ fn shell_dir_force_unlock_releases_overlapping_manual_lock() {
             {
                 break;
             }
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "edit-after-force-unlock" =>
             {
                 panic!("edit still waited after force unlock: {progress:?}");
@@ -1574,7 +1574,9 @@ fn dir_lock_blocks_conflicting_edit_until_unlock() {
     writer.flush().expect("flush edit");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "blocked-edit" => {
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "blocked-edit" =>
+            {
                 assert!(progress.message.as_deref().is_some_and(|message| {
                     message.contains(lock_dir.to_str().expect("lock dir path is UTF-8"))
                 }));
@@ -1671,7 +1673,9 @@ fn disconnect_cancels_active_dir_lock_waiter_before_scheduler_join() {
     writer.flush().expect("flush edit");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "blocked-edit" => {
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "blocked-edit" =>
+            {
                 break;
             }
             Some(Event::ToolResult(result)) if result.call_id.as_str() == "blocked-edit" => {
@@ -1753,7 +1757,9 @@ fn locked_apply_patch_uses_workdir_frozen_at_admission() {
     writer.flush().expect("flush patch");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "blocked-patch" => {
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "blocked-patch" =>
+            {
                 assert!(progress.message.as_deref().is_some_and(|message| {
                     message.contains(cwd_a.to_str().expect("cwd a path is UTF-8"))
                 }));
@@ -1966,7 +1972,9 @@ fn shell_with_covering_manual_lock_displays_inferred_read_write_mode() {
 
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "rw-shell" => {
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "rw-shell" =>
+            {
                 assert_eq!(progress.display.expect("display").mode, "rw");
                 break;
             }
@@ -2057,7 +2065,7 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
             {
                 break;
             }
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "lock-after-delegate-result" =>
             {
                 panic!("lock waited after delegate lifecycle release: {progress:?}");
@@ -2120,7 +2128,7 @@ fn dir_lock_releases_agent_locks_on_session_agent_unloaded() {
     writer.flush().expect("flush queued lock");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "lock-after-unload" =>
             {
                 break;
@@ -2231,7 +2239,7 @@ fn dir_lock_unlock_can_target_another_owner() {
             {
                 break;
             }
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "lock-after-force-unlock" =>
             {
                 panic!("second lock waited after force unlock: {progress:?}");
@@ -2398,7 +2406,7 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
                 );
                 break;
             }
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "same-agent-edit" =>
             {
                 panic!("same-agent automatic edit waited on its own manual lock: {progress:?}");
@@ -2425,15 +2433,13 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
     ) else {
         panic!("expected tool started");
     };
-    let Event::ToolProgress(progress) = crate::dir_lock::waiting_progress_event(
+    let progress = crate::dir_lock::waiting_progress(
         &invoke,
         &[tempdir.path().to_path_buf()],
         Some(crate::tools::shell::ShellCommandMode::visible(
             crate::tools::shell::ShellAccessMode::ReadWrite,
         )),
-    ) else {
-        panic!("expected tool progress");
-    };
+    );
     let display = progress.display.expect("waiting display");
 
     assert_eq!(display.mode, "rw");
@@ -2488,7 +2494,7 @@ fn inferred_read_only_shell_bypasses_directory_update_lock() {
 
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "read-only-shell" =>
             {
                 assert_ne!(
@@ -2564,7 +2570,7 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
     writer.flush().expect("flush shell");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "same-agent-shell" =>
             {
                 break;
@@ -2596,7 +2602,7 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
                 );
                 break;
             }
-            Some(Event::ToolProgress(progress))
+            Some(Event::ToolProgressReported(progress))
                 if progress.call_id.as_str() == "same-agent-edit" =>
             {
                 panic!("same-agent edit waited on its own active automatic lock: {progress:?}");
@@ -5548,7 +5554,7 @@ fn shell_tool_reports_progress_and_success() {
     writer.flush().expect("flush");
 
     let progress = reader.read_event().expect("read").expect("progress");
-    let Event::ToolProgress(progress) = progress else {
+    let Event::ToolProgressReported(progress) = progress else {
         panic!("expected tool progress");
     };
     assert_eq!(progress.display.expect("display").mode, "");
@@ -5590,7 +5596,7 @@ fn gpt_shell_tool_reports_progress_and_success() {
     writer.flush().expect("flush");
 
     let progress = reader.read_event().expect("read").expect("progress");
-    let Event::ToolProgress(progress) = progress else {
+    let Event::ToolProgressReported(progress) = progress else {
         panic!("expected tool progress");
     };
     assert_eq!(progress.tool_name, GPT_SHELL_TOOL_NAME);

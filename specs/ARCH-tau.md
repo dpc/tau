@@ -6,6 +6,10 @@ Peer tool providers declare registration lifecycle through transient events;
 the harness validates committed declarations and publishes canonical runtime
 state as specified by
 [SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).
+They submit transient progress observations separately; the harness validates
+committed routed-call ownership and publishes protected canonical progress as
+specified by
+[SPEC-tool-progress-reports-and-canonical-facts](SPEC-tool-progress-reports-and-canonical-facts.md).
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 

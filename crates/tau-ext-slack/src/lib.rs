@@ -1416,6 +1416,14 @@ impl Output {
     fn emit(&self, event: Event) {
         let _ = self.send(HarnessInputMessage::emit(event));
     }
+
+    /// Submit one transient tool progress observation.
+    fn report_tool_progress(&self, progress: ToolProgress) {
+        let _ = self.send(HarnessInputMessage::emit_with_transient(
+            Event::ToolProgressReported(progress),
+            true,
+        ));
+    }
 }
 
 struct Extension {
@@ -1644,7 +1652,7 @@ impl Extension {
 
     /// Dispatch a Tau tool invocation owned by this extension.
     fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
-        self.output.emit(Event::ToolProgress(ToolProgress {
+        self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             message: Some("slack tool started".to_owned()),
@@ -1654,7 +1662,7 @@ impl Extension {
                 status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
                 ..Default::default()
             }),
-        }));
+        });
         let event = match local_tool_name.as_str() {
             REGISTER_TOOL_NAME => Some(self.handle_register(invoke)),
             CONVERSATIONS_TOOL_NAME => Some(self.handle_conversations(invoke)),
@@ -1669,7 +1677,11 @@ impl Extension {
             _ => Some(tool_error(invoke, "unknown slack tool".to_owned())),
         };
         if let Some(event) = event {
-            self.output.emit(event);
+            if let Event::ToolProgressReported(progress) = event {
+                self.output.report_tool_progress(progress);
+            } else {
+                self.output.emit(event);
+            }
         }
     }
 

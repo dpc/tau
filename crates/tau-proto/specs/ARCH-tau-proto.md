@@ -18,6 +18,13 @@ payloads identify the configured extension and its harness-assigned logical
 instance; this is stable across supervised process respawn rather than a
 process-connection generation. See
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+Tool progress likewise separates transient Tool/Core
+`tool.progress_reported` observations from protected harness-authored canonical
+`tool.progress` facts. Both share the `ToolProgress` payload, but the event names
+distinguish a committed peer report from the canonical harness fact. The
+enclosing `HarnessInputMessage::Emit` is the peer's private submission message;
+see
+[SPEC-tool-progress-reports-and-canonical-facts](../../../specs/SPEC-tool-progress-reports-and-canonical-facts.md).
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately

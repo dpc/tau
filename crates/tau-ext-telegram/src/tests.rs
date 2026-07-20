@@ -2403,7 +2403,9 @@ fn run_ignores_unrelated_tool_started_events() {
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
-                Event::ToolProgress(progress) if progress.tool_name.as_str() == "other_tool" => {
+                Event::ToolProgressReported(progress)
+                    if progress.tool_name.as_str() == "other_tool" =>
+                {
                     panic!("unrelated tool should not receive Telegram progress");
                 }
                 Event::ToolError(error) if error.tool_name.as_str() == "other_tool" => {

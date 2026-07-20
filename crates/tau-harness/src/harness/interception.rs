@@ -209,6 +209,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::PROVIDER_MODELS_UPDATED,
     EventName::TOOL_REGISTER,
     EventName::TOOL_UNREGISTER,
+    EventName::TOOL_PROGRESS,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -307,6 +308,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ProviderModelsUpdated(_)
             | Event::ToolRegister(_)
             | Event::ToolUnregister(_)
+            | Event::ToolProgress(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)

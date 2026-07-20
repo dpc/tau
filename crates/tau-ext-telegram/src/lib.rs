@@ -570,6 +570,13 @@ impl Output {
         self.send(HarnessInputMessage::emit(event));
     }
 
+    fn report_tool_progress(&self, progress: ToolProgress) {
+        self.send(HarnessInputMessage::emit_with_transient(
+            Event::ToolProgressReported(progress),
+            true,
+        ));
+    }
+
     /// Emit one transient external-message report for downstream
     /// canonicalization.
     fn emit_message_report(&self, event: Event) {
@@ -784,7 +791,7 @@ impl Extension {
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
-        self.output.emit(Event::ToolProgress(ToolProgress {
+        self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             message: Some("telegram tool started".to_owned()),
@@ -794,7 +801,7 @@ impl Extension {
                 status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
                 ..Default::default()
             }),
-        }));
+        });
         let event = match invoke.tool_name.as_str() {
             name if name == self.tool_names.register.as_str() => self.handle_register(invoke),
             name if name == self.tool_names.send.as_str() => self.handle_send(invoke),
