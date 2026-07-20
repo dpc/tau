@@ -128,14 +128,15 @@ impl ShellRuntime {
             let _ = self.lock_manager.disable();
         }
         if dir_lock_changed {
-            self.tx.register_local_tool(tau_proto::ToolRegister {
-                tool: dir_lock_tool_spec(self.config.dir_lock.enable),
-                tool_group: Some(tau_proto::ToolGroup {
-                    name: tau_proto::ToolGroupName::new("shell"),
+            self.tx
+                .register_local_tool(tau_proto::ToolRegistrationDeclared {
+                    tool: dir_lock_tool_spec(self.config.dir_lock.enable),
+                    tool_group: Some(tau_proto::ToolGroup {
+                        name: tau_proto::ToolGroupName::new("shell"),
+                        prompt_fragment: None,
+                    }),
                     prompt_fragment: None,
-                }),
-                prompt_fragment: None,
-            })?;
+                })?;
         }
         Ok(())
     }

@@ -328,7 +328,7 @@ fn generic_prefixes_scope_xmpp_instances() {
             .iter()
             .filter_map(|frame| match frame {
                 HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                    Event::ToolRegister(register) => Some(register),
+                    Event::ToolRegistrationDeclared(register) => Some(register),
                     _ => None,
                 },
                 _ => None,

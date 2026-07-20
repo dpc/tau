@@ -1911,12 +1911,12 @@ fn send_startup_declarations(
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
     ])?;
-    runtime.startup_local_tool(tau_proto::ToolRegister {
+    runtime.startup_local_tool(tau_proto::ToolRegistrationDeclared {
         tool: register_tool_spec_for(tool_names),
         tool_group: Some(telegram_tool_group()),
         prompt_fragment: None,
     })?;
-    runtime.startup_local_tool(tau_proto::ToolRegister {
+    runtime.startup_local_tool(tau_proto::ToolRegistrationDeclared {
         tool: send_tool_spec_for(tool_names),
         tool_group: Some(telegram_tool_group()),
         prompt_fragment: None,

@@ -29,8 +29,9 @@ use tau_proto::{
     PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
     ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
-    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
+    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRegistrationDeclared, ToolRejected,
+    ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget,
+    nearest_name_suggestion,
 };
 
 /// Harness-owned validated quota state for one provider extension route.
@@ -6876,7 +6877,11 @@ impl Harness {
             .or_default()
     }
 
-    fn stage_extension_tool_registration(&mut self, source_id: &str, registration: ToolRegister) {
+    fn stage_extension_tool_registration(
+        &mut self,
+        source_id: &str,
+        registration: ToolRegistrationDeclared,
+    ) {
         self.extension_activation_stage_mut(source_id)
             .tool_registrations
             .push(registration);
@@ -6887,7 +6892,7 @@ impl Harness {
     fn validate_or_reject_assigned_prefix(
         &mut self,
         source_id: &str,
-        registration: &ToolRegister,
+        registration: &ToolRegistrationDeclared,
     ) -> bool {
         let Some(entry) = self.extensions.entries.get(source_id) else {
             return true;
@@ -7041,16 +7046,27 @@ impl Harness {
         self.extension_activation_stage_mut(source_id).action_schema = Some(schema);
     }
 
-    fn register_extension_tool(&mut self, source_id: &str, registration: ToolRegister) {
+    fn register_extension_tool(
+        &mut self,
+        source_id: &str,
+        publisher_extension_id: ExtensionName,
+        publisher_instance_id: tau_proto::ExtensionInstanceId,
+        registration: ToolRegistrationDeclared,
+    ) {
         let internal_name = registration.tool.name.clone();
         let visible_name = self.tool_model_visible_name(&registration.tool).clone();
         let was_available = !self
             .registry
             .providers_for(internal_name.as_str())
             .is_empty();
-        let report = self
-            .registry
-            .register_with_prompt_fragment(source_id, registration);
+        let report = self.registry.register_with_prompt_fragment(
+            source_id,
+            tau_core::ToolRegistration {
+                tool: registration.tool.clone(),
+                tool_group: registration.tool_group.clone(),
+                prompt_fragment: registration.prompt_fragment.clone(),
+            },
+        );
         if !report.errors.is_empty() {
             for error in report.errors {
                 tracing::warn!(
@@ -7072,6 +7088,16 @@ impl Harness {
         if !was_available {
             self.mark_tool_available_for_notice(internal_name, visible_name);
         }
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::ToolRegister(ToolRegister {
+                publisher_extension_id,
+                publisher_instance_id,
+                tool: registration.tool,
+                tool_group: registration.tool_group,
+                prompt_fragment: registration.prompt_fragment,
+            }),
+        );
     }
 
     fn ensure_tool_started_subscription(&mut self, source_id: &str) {
@@ -7465,8 +7491,20 @@ impl Harness {
         if let Some(intercept) = stage.intercept {
             self.register_extension_interceptor(source_id, intercept);
         }
+        let tool_publisher = self
+            .extensions
+            .entries
+            .get(source_id)
+            .map(|entry| (ExtensionName::from(entry.name.clone()), entry.instance_id));
         for registration in stage.tool_registrations {
-            self.register_extension_tool(source_id, registration);
+            if let Some((publisher_extension_id, publisher_instance_id)) = tool_publisher.clone() {
+                self.register_extension_tool(
+                    source_id,
+                    publisher_extension_id,
+                    publisher_instance_id,
+                    registration,
+                );
+            }
         }
         let mut staged_model_ids = HashSet::new();
         let mut final_provider_models = None;
@@ -7556,6 +7594,10 @@ impl Harness {
             && self
                 .extensions
                 .pending_provider_model_declarations
+                .is_empty()
+            && self
+                .extensions
+                .pending_tool_lifecycle_declarations
                 .is_empty()
             && self
                 .extensions
@@ -7762,6 +7804,10 @@ impl Harness {
             .extensions
             .pending_provider_model_declarations
             .contains_key(source_id)
+            || self
+                .extensions
+                .pending_tool_lifecycle_declarations
+                .contains_key(source_id)
         {
             return Ok(());
         }
@@ -8008,8 +8054,8 @@ impl Harness {
                 if matches!(
                     emit.event.as_ref(),
                     Event::ActionSchemaPublished(_)
-                        | Event::ToolRegister(_)
-                        | Event::ToolUnregister(_)
+                        | Event::ToolRegistrationDeclared(_)
+                        | Event::ToolUnregistrationDeclared(_)
                         | Event::ExtSkillAvailable(_)
                         | Event::ExtAgentsMdAvailable(_)
                         | Event::ProviderModelsDeclared(_)
@@ -8149,8 +8195,10 @@ impl Harness {
                 self.try_advance_queue();
             }
             HarnessInputMessage::Emit(emit) => {
-                // `DECISION-generic-peer-event-emission` requires this arm to
-                // become a generic admission/interception/commit chokepoint.
+                // Governing contract:
+                // `specs/DECISION-generic-peer-event-emission.md`.
+                // It requires this arm to remain a generic
+                // admission/interception/commit chokepoint.
                 // Do not add concrete-event semantics here. Existing routing
                 // below is migration debt; move each family to committed-event
                 // processing or a dedicated protocol message instead.
@@ -8222,6 +8270,43 @@ impl Harness {
         if event_name.category() == &tau_proto::EventCategory::Message {
             // Canonical message facts are harness-authored. Bridges publish the
             // corresponding `message.*_reported` event instead.
+            return Ok(());
+        }
+        if matches!(event, Event::ToolRegister(_) | Event::ToolUnregister(_)) {
+            // Canonical tool state is harness-authored. Tool/Core extensions
+            // publish the corresponding mutable declaration instead.
+            return Ok(());
+        }
+        if matches!(
+            event,
+            Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
+        ) {
+            // This is declarative authorship/resource admission only. Per
+            // `DECISION-generic-peer-event-emission`, prefix/schema/ownership
+            // validation and registry mutation run from the committed-event
+            // consumer, never from this generic Emit intake path.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                    && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks tool declaration authority"
+                );
+                return Ok(());
+            }
+            if self.should_stage_extension_capabilities(source_id) {
+                *self
+                    .extensions
+                    .pending_tool_lifecycle_declarations
+                    .entry(source_id.into())
+                    .or_default() += 1;
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsUpdated(_)) {
@@ -8303,6 +8388,13 @@ impl Harness {
             self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, true, None);
             return;
         }
+        if matches!(
+            event,
+            Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
+        ) {
+            self.process_committed_tool_declaration(peer_context, event);
+            return;
+        }
         let Event::ProviderModelsDeclared(declaration) = event else {
             return;
         };
@@ -8328,11 +8420,7 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_provider_model_activation_reservation(
-                source_id.as_str(),
-                reservation,
-                event,
-            )
+            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
         {
             self.finish_pending_provider_model_declaration(source_id.as_str());
             return;
@@ -8359,8 +8447,76 @@ impl Harness {
         }
     }
 
+    /// Validate and apply one committed tool lifecycle declaration.
+    fn process_committed_tool_declaration(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
+        else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.instance_id == extension.instance_id
+                && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            // A committed declaration keeps its captured publisher envelope, but
+            // an obsolete generation cannot mutate or release the replacement
+            // generation's registry/staging state.
+            return;
+        }
+        if let Some(reservation) = extension.activation_reservation
+            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+        {
+            self.finish_pending_tool_lifecycle_declaration(source_id.as_str());
+            return;
+        }
+
+        match event {
+            Event::ToolRegistrationDeclared(registration) => {
+                if self.validate_or_reject_assigned_prefix(source_id.as_str(), registration) {
+                    if self.should_stage_extension_capabilities(source_id.as_str())
+                        && extension.activation_reservation.is_some()
+                    {
+                        self.stage_extension_tool_registration(
+                            source_id.as_str(),
+                            registration.clone(),
+                        );
+                    } else {
+                        self.register_extension_tool(
+                            source_id.as_str(),
+                            extension.publisher.clone(),
+                            extension.instance_id,
+                            registration.clone(),
+                        );
+                    }
+                }
+            }
+            Event::ToolUnregistrationDeclared(unregister) => {
+                self.handle_extension_tool_unregister(
+                    source_id.as_str(),
+                    extension.publisher.clone(),
+                    extension.instance_id,
+                    unregister.clone(),
+                );
+            }
+            _ => unreachable!("caller filters tool lifecycle declarations"),
+        }
+
+        if extension.activation_reservation.is_some() {
+            self.finish_pending_tool_lifecycle_declaration(source_id.as_str());
+        }
+    }
+
     /// Resize a pre-activation frame reservation to its committed replacement.
-    fn reaccount_provider_model_activation_reservation(
+    fn reaccount_activation_reservation(
         &mut self,
         source_id: &str,
         reservation: interception::ActivationReservation,
@@ -8375,6 +8531,10 @@ impl Harness {
             .saturating_sub(reservation.encoded_bytes)
             .saturating_add(replacement_bytes);
         if MAX_EXTENSION_ACTIVATION_BYTES < next_bytes {
+            stage.retained_message_count = stage.retained_message_count.saturating_sub(1);
+            stage.retained_message_bytes = stage
+                .retained_message_bytes
+                .saturating_sub(reservation.encoded_bytes);
             let message = format!(
                 "extension activation staging exceeds {} messages or {} encoded bytes after interception",
                 MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
@@ -8420,23 +8580,56 @@ impl Harness {
                 .retained_message_bytes
                 .saturating_sub(reservation.encoded_bytes);
         }
-        self.finish_pending_provider_model_declaration(extension.source.as_str());
+        match reservation.declaration_family {
+            interception::ActivationDeclarationFamily::ProviderModels => {
+                self.finish_pending_provider_model_declaration(extension.source.as_str());
+            }
+            interception::ActivationDeclarationFamily::ToolLifecycle => {
+                self.finish_pending_tool_lifecycle_declaration(extension.source.as_str());
+            }
+        }
     }
 
     /// Release one admitted pre-`Ready` declaration and retry activation.
     fn finish_pending_provider_model_declaration(&mut self, source_id: &str) {
+        self.finish_pending_activation_declaration(
+            source_id,
+            interception::ActivationDeclarationFamily::ProviderModels,
+        );
+    }
+
+    /// Release one admitted pre-`Ready` tool declaration and retry activation.
+    fn finish_pending_tool_lifecycle_declaration(&mut self, source_id: &str) {
+        self.finish_pending_activation_declaration(
+            source_id,
+            interception::ActivationDeclarationFamily::ToolLifecycle,
+        );
+    }
+
+    /// Release one family-specific pending count and retry extension
+    /// activation.
+    fn finish_pending_activation_declaration(
+        &mut self,
+        source_id: &str,
+        declaration_family: interception::ActivationDeclarationFamily,
+    ) {
         let source_id = tau_proto::ConnectionId::from(source_id);
-        if let Some(count) = self
-            .extensions
-            .pending_provider_model_declarations
-            .get_mut(&source_id)
-        {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.extensions
-                    .pending_provider_model_declarations
-                    .remove(&source_id);
+        let pending = match declaration_family {
+            interception::ActivationDeclarationFamily::ProviderModels => {
+                &mut self.extensions.pending_provider_model_declarations
             }
+            interception::ActivationDeclarationFamily::ToolLifecycle => {
+                &mut self.extensions.pending_tool_lifecycle_declarations
+            }
+        };
+        let remove = if let Some(count) = pending.get_mut(&source_id) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            pending.remove(&source_id);
         }
         if self.pending_publish_error.is_none()
             && let Err(error) = self.maybe_finish_extension_activation(source_id.as_str())
@@ -8482,21 +8675,6 @@ impl Harness {
         event: Event,
     ) -> Result<Option<Event>, HarnessError> {
         match event {
-            Event::ToolRegister(registration) => {
-                if !self.validate_or_reject_assigned_prefix(source_id, &registration) {
-                    return Ok(None);
-                }
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_tool_registration(source_id, registration);
-                } else {
-                    self.register_extension_tool(source_id, registration);
-                }
-                Ok(None)
-            }
-            Event::ToolUnregister(unregister) => {
-                self.handle_extension_tool_unregister(source_id, unregister);
-                Ok(None)
-            }
             Event::ToolRequest(request) => {
                 self.handle_extension_tool_request(source_id, request)?;
                 Ok(None)
@@ -8517,31 +8695,57 @@ impl Harness {
     fn handle_extension_tool_unregister(
         &mut self,
         source_id: &str,
-        unregister: tau_proto::ToolUnregister,
+        publisher_extension_id: ExtensionName,
+        publisher_instance_id: tau_proto::ExtensionInstanceId,
+        unregister: tau_proto::ToolUnregistrationDeclared,
     ) {
-        self.remove_staged_tool_registration(source_id, &unregister.tool_name);
+        let removed_staged = self.remove_staged_tool_registration(source_id, &unregister.tool_name);
         if self.should_stage_extension_capabilities(source_id) {
-            return;
-        }
-        let visible_name = self
-            .registry
-            .providers_for(unregister.tool_name.as_str())
-            .into_iter()
-            .find(|provider| provider.connection_id.as_str() == source_id)
-            .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
-            .unwrap_or_else(|| unregister.tool_name.clone());
-        let removed = self
-            .registry
-            .unregister(source_id, unregister.tool_name.as_str());
-        if removed
-            && self
+            if removed_staged {
+                return;
+            }
+        } else {
+            let visible_name = self
                 .registry
                 .providers_for(unregister.tool_name.as_str())
-                .is_empty()
-        {
-            self.mark_tool_unavailable_for_notice(unregister.tool_name.clone(), visible_name);
+                .into_iter()
+                .find(|provider| provider.connection_id.as_str() == source_id)
+                .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
+                .unwrap_or_else(|| unregister.tool_name.clone());
+            let removed = self
+                .registry
+                .unregister(source_id, unregister.tool_name.as_str());
+            if removed {
+                if self
+                    .registry
+                    .providers_for(unregister.tool_name.as_str())
+                    .is_empty()
+                {
+                    self.mark_tool_unavailable_for_notice(
+                        unregister.tool_name.clone(),
+                        visible_name,
+                    );
+                }
+                self.publish_event(
+                    Some(HARNESS_CONNECTION_ID),
+                    Event::ToolUnregister(tau_proto::ToolUnregister {
+                        publisher_extension_id,
+                        publisher_instance_id,
+                        tool_name: unregister.tool_name,
+                    }),
+                );
+                return;
+            }
         }
-        self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+            tau_proto::NoticeLevel::Critical,
+            true,
+            &format!(
+                "Rejected tool unregistration from `{source_id}`: `{}` is not owned by this extension",
+                unregister.tool_name
+            ),
+        );
     }
 
     fn handle_extension_tool_request(
@@ -11189,6 +11393,9 @@ impl Harness {
         self.extensions
             .pending_provider_model_declarations
             .remove(connection_id);
+        self.extensions
+            .pending_tool_lifecycle_declarations
+            .remove(connection_id);
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
@@ -12040,6 +12247,8 @@ impl Harness {
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
                 | Event::ProviderModelsUpdated(_)
+                | Event::ToolRegister(_)
+                | Event::ToolUnregister(_)
         )
     }
 
@@ -18546,7 +18755,7 @@ impl Harness {
 
     fn is_registered_tool_enabled_for_role(
         &self,
-        registration: &ToolRegister,
+        registration: &ToolRegistrationDeclared,
         role_name: &str,
     ) -> bool {
         self.is_tool_enabled_for_role(

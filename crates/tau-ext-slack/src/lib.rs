@@ -4747,7 +4747,7 @@ impl TauExtension for SlackExtension {
                     tool.description = Some(format!(
                         "Register or unregister this agent for Slack receive routes. Policy-permitted verified humans may then send prompts; dynamic DMs remain exact-allowlisted-user-bound. Registration grants no proactive authority. {conversations} reports configured receive and proactive-send policy. When replying, use {send}."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(slack_tool_group()),
                         prompt_fragment: None,
@@ -4763,7 +4763,7 @@ impl TauExtension for SlackExtension {
                     tool.description = Some(format!(
                         "List bounded pages of operator-configured Slack conversations and route policy. Returns model-facing aliases only, never native Slack IDs. Use an alias with {send} only when policy.proactive_send is true."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(slack_tool_group()),
                         prompt_fragment: None,
@@ -4780,7 +4780,7 @@ impl TauExtension for SlackExtension {
                     tool.description = Some(format!(
                         "Reply through a Tau-issued Slack reply_to, or send proactively to an operator-configured alias, optionally discoverable with {conversations}. A successful result returns a message_ref usable with separately authorized {react}. Native Slack conversation and thread IDs are never accepted."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(slack_tool_group()),
                         prompt_fragment: None,
@@ -4796,7 +4796,7 @@ impl TauExtension for SlackExtension {
                     tool.description = Some(format!(
                         "Add or remove one emoji reaction on an exact Tau-issued Slack message_ref, including refs returned by {send}. Channel IDs and timestamps are never accepted as separate route arguments; aliases, toggle, list, and discovery are also rejected."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(slack_tool_group()),
                         prompt_fragment: None,

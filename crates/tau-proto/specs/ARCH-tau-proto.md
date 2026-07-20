@@ -11,6 +11,14 @@ delivery envelope and the remaining exact event-family mappings required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
 remain to be implemented.
 
+Tool lifecycle uses distinct transient peer declarations
+(`tool.registration_declared`, `tool.unregistration_declared`) and protected
+harness-authored canonical state (`tool.register`, `tool.unregister`). Canonical
+payloads identify the configured extension and its harness-assigned logical
+instance; this is stable across supervised process respawn rather than a
+process-connection generation. See
+[SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately
 reviewed, human-confirmed decision mandated by

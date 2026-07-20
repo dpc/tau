@@ -26,3 +26,9 @@ Current-session roster enrichment is read-only and path-exact: `AgentStore`
 reads at most the bounded first record plus an already-loaded or journal-bound checkpoint
 display projection. It does not replay the transcript, repair the checkpoint, or
 scan the global agents directory.
+
+`ToolRegistry` stores only harness-accepted runtime registration projections keyed by live
+connection. Peer declarations and harness-authored canonical lifecycle events
+remain protocol/harness concerns under
+[SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md);
+neither enters core semantic journals.

@@ -212,6 +212,10 @@ impl EventName {
 
     // -- Well-known event names ----------------------------------------
 
+    pub const TOOL_REGISTRATION_DECLARED: Self =
+        Self::from_static(EventCategory::Tool, "registration_declared");
+    pub const TOOL_UNREGISTRATION_DECLARED: Self =
+        Self::from_static(EventCategory::Tool, "unregistration_declared");
     pub const TOOL_REGISTER: Self = Self::from_static(EventCategory::Tool, "register");
     pub const TOOL_UNREGISTER: Self = Self::from_static(EventCategory::Tool, "unregister");
     pub const TOOL_REQUEST: Self = Self::from_static(EventCategory::Tool, "request");

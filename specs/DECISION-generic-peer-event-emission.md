@@ -193,3 +193,5 @@ This decision changes the extension interface and event sequencing under
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
 The external-message report-to-canonical flow is specified by
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+The tool declaration-to-canonical-state flow is specified by
+[SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).

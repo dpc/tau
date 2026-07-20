@@ -1251,12 +1251,14 @@ pub struct ToolGroup {
     pub prompt_fragment: Option<PromptFragment>,
 }
 
-/// Tool registration event emitted by an extension or provider.
+/// Tool registration declaration emitted by a tool or core extension.
 ///
-/// Registers or refreshes one tool definition and its optional grouping/prompt
-/// context. The harness uses this as routing metadata for later tool requests.
+/// Proposes one tool definition and its optional grouping/prompt context. The
+/// harness validates the committed declaration before publishing
+/// [`ToolRegister`]. Declarations are transient and interceptable; commit is
+/// not an acceptance acknowledgement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolRegister {
+pub struct ToolRegistrationDeclared {
     /// Tool metadata made available to the agent and used for routing calls.
     pub tool: ToolSpec,
     /// Optional group containing this tool.
@@ -1268,10 +1270,55 @@ pub struct ToolRegister {
     pub prompt_fragment: Option<PromptFragment>,
 }
 
-/// Tool unregistration event emitted when a provider withdraws one tool.
+/// Tool unregistration declaration emitted when an extension proposes
+/// withdrawing one of its tools.
+///
+/// The transient, interceptable declaration commits before the harness checks
+/// ownership. An accepted active withdrawal produces [`ToolUnregister`];
+/// unknown or non-owner withdrawals produce a diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolUnregistrationDeclared {
+    /// Name of the extension-owned tool proposed for withdrawal.
+    pub tool_name: ToolName,
+}
+
+/// Harness-authored canonical state for one accepted tool registration.
+///
+/// This transient runtime-only event is immutable, must-pass, and not replayed
+/// after a cold restart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolRegister {
+    /// Stable configured extension identity that owns the tool.
+    pub publisher_extension_id: ExtensionName,
+    /// Harness-assigned logical configured-extension instance identity.
+    ///
+    /// This remains stable when the supervised process for that configured
+    /// instance respawns; it is not a process-connection generation.
+    pub publisher_instance_id: ExtensionInstanceId,
+    /// Tool metadata made available to the agent and used for routing calls.
+    pub tool: ToolSpec,
+    /// Optional group containing this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_group: Option<ToolGroup>,
+    /// Optional system-prompt fragment rendered whenever this tool is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_fragment: Option<PromptFragment>,
+}
+
+/// Harness-authored canonical state for one accepted tool withdrawal.
+///
+/// This transient runtime-only event is immutable, must-pass, and not replayed
+/// after a cold restart.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolUnregister {
-    /// Name of the tool to remove from harness routing metadata.
+    /// Stable configured extension identity that owned the tool.
+    pub publisher_extension_id: ExtensionName,
+    /// Harness-assigned logical configured-extension instance identity.
+    ///
+    /// This remains stable when the supervised process for that configured
+    /// instance respawns; it is not a process-connection generation.
+    pub publisher_instance_id: ExtensionInstanceId,
+    /// Name of the tool removed from harness routing metadata.
     pub tool_name: ToolName,
 }
 
@@ -4489,6 +4536,10 @@ pub enum ProviderBackendTransport {
 #[serde(tag = "event", content = "payload")]
 pub enum Event {
     // Tools
+    #[serde(rename = "tool.registration_declared")]
+    ToolRegistrationDeclared(ToolRegistrationDeclared),
+    #[serde(rename = "tool.unregistration_declared")]
+    ToolUnregistrationDeclared(ToolUnregistrationDeclared),
     #[serde(rename = "tool.register")]
     ToolRegister(ToolRegister),
     #[serde(rename = "tool.unregister")]
@@ -4894,6 +4945,8 @@ impl Event {
 
     fn tool_event_name(&self) -> Option<EventName> {
         match self {
+            Self::ToolRegistrationDeclared(_) => EventName::TOOL_REGISTRATION_DECLARED,
+            Self::ToolUnregistrationDeclared(_) => EventName::TOOL_UNREGISTRATION_DECLARED,
             Self::ToolRegister(_) => EventName::TOOL_REGISTER,
             Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
             Self::ToolRequest(_) => EventName::TOOL_REQUEST,
@@ -5120,7 +5173,11 @@ impl Event {
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
             self,
-            Self::ToolCancelled(_)
+            Self::ToolRegistrationDeclared(_)
+                | Self::ToolUnregistrationDeclared(_)
+                | Self::ToolRegister(_)
+                | Self::ToolUnregister(_)
+                | Self::ToolCancelled(_)
                 | Self::MessageDeliveredReported(_)
                 | Self::MessageEditedReported(_)
                 | Self::MessageDeletedReported(_)

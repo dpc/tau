@@ -23,6 +23,49 @@ fn provider_model_state_never_enters_semantic_history() {
     }
 }
 
+/// Tool declarations and canonical registry state are runtime lifecycle only,
+/// even if a peer sends an incorrect durable Emit override.
+#[test]
+fn tool_lifecycle_state_never_enters_semantic_history() {
+    let declaration = tau_proto::ToolRegistrationDeclared {
+        tool: tau_proto::ToolSpec {
+            name: ToolName::new("runtime_tool"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            format: None,
+            tool_type: ToolType::Function,
+            tags: Vec::new(),
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+        tool_group: None,
+        prompt_fragment: None,
+    };
+    for event in [
+        Event::ToolRegistrationDeclared(declaration.clone()),
+        Event::ToolRegister(tau_proto::ToolRegister {
+            publisher_extension_id: ExtensionName::from("tool"),
+            publisher_instance_id: 1.into(),
+            tool: declaration.tool,
+            tool_group: None,
+            prompt_fragment: None,
+        }),
+        Event::ToolUnregistrationDeclared(tau_proto::ToolUnregistrationDeclared {
+            tool_name: ToolName::new("runtime_tool"),
+        }),
+        Event::ToolUnregister(tau_proto::ToolUnregister {
+            publisher_extension_id: ExtensionName::from("tool"),
+            publisher_instance_id: 1.into(),
+            tool_name: ToolName::new("runtime_tool"),
+        }),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
 /// Ensures ordinary transient facts remain live-only so progress/status updates
 /// cannot accidentally enter durable session or agent replay logs.
 #[test]

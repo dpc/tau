@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted, UnixMicros,
+    PROTOCOL_VERSION, Ready, Subscribe, ToolRegistrationDeclared, ToolStarted, UnixMicros,
 };
 use tau_supervisor::{
     ExtensionCommand, ReceiveOutcome, StderrPolicy, SupervisedChild, SupervisionError,
@@ -37,7 +37,7 @@ fn expect_message(child: &mut SupervisedChild, label: &str) -> HarnessInputMessa
     }
 }
 
-fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
+fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegistrationDeclared {
     let hello = expect_message(child, "hello");
     assert_eq!(
         hello,
@@ -60,12 +60,12 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
         })
     );
 
-    let register = expect_message(child, "register");
-    let HarnessInputMessage::Emit(emit) = register else {
-        panic!("expected tool register emit");
+    let declaration = expect_message(child, "tool registration declaration");
+    let HarnessInputMessage::Emit(emit) = declaration else {
+        panic!("expected tool registration declaration emit");
     };
-    let Event::ToolRegister(register) = *emit.event else {
-        panic!("expected tool register event");
+    let Event::ToolRegistrationDeclared(declaration) = *emit.event else {
+        panic!("expected tool registration declaration event");
     };
 
     let ready = expect_message(child, "ready");
@@ -76,7 +76,7 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
         })
     );
 
-    register
+    declaration
 }
 
 fn disconnect_child(child: &mut SupervisedChild, reason: &str) {
@@ -384,7 +384,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     let register = expect_child_startup(&mut child);
     assert_eq!(
         register,
-        ToolRegister {
+        ToolRegistrationDeclared {
             tool: tau_proto::ToolSpec {
                 name: tau_proto::ToolName::new("echo"),
                 model_visible_name: None,

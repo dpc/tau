@@ -313,11 +313,10 @@ fn shell_spawn_is_unavailable_during_init_and_has_no_side_effect() {
             .iter()
             .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
     );
-    assert!(
-        frames
-            .iter()
-            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolRegister(_))))
-    );
+    assert!(frames.iter().all(|frame| !matches!(
+        emitted_event(frame),
+        Some(Event::ToolRegistrationDeclared(_))
+    )));
     assert!(!marker.exists());
 }
 #[test]
@@ -767,21 +766,28 @@ fn register_tool_emits_registration_before_ready() {
 
     let frames = run_frames(&[configure_with_script(&script)]);
 
-    let register_pos = frames
+    let declaration_pos = frames
         .iter()
-        .position(|frame| matches!(emitted_event(frame), Some(Event::ToolRegister(_))))
-        .expect("tool.register");
+        .position(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::ToolRegistrationDeclared(_))
+            )
+        })
+        .expect("tool.registration_declared");
     let ready_pos = frames
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("ready");
-    assert!(register_pos < ready_pos);
-    let Some(Event::ToolRegister(register)) = emitted_event(&frames[register_pos]) else {
-        panic!("expected tool.register");
+    assert!(declaration_pos < ready_pos);
+    let Some(Event::ToolRegistrationDeclared(declaration)) =
+        emitted_event(&frames[declaration_pos])
+    else {
+        panic!("expected tool.registration_declared");
     };
-    assert_eq!(register.tool.name.as_str(), "project_status");
+    assert_eq!(declaration.tool.name.as_str(), "project_status");
     assert_eq!(
-        register.tool_group.as_ref().map(|g| g.name.as_str()),
+        declaration.tool_group.as_ref().map(|g| g.name.as_str()),
         Some("host")
     );
 }
@@ -866,7 +872,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::ToolRegister(register)) if register.tool.name.as_str() == "work_echo_args"
+        Some(Event::ToolRegistrationDeclared(register)) if register.tool.name.as_str() == "work_echo_args"
     )));
     let results: Vec<_> = frames
         .iter()

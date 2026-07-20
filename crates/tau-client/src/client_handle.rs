@@ -70,38 +70,56 @@ impl ClientHandle {
         })
     }
 
-    /// Register a logical/local tool through the installed name scope.
+    /// Publish a transient registration declaration for one logical/local tool.
+    ///
+    /// Success means only that the declaration was buffered or flushed locally;
+    /// it does not acknowledge harness commit or acceptance. Interception may
+    /// drop or replace it, and accepted state appears later as a
+    /// harness-authored `tool.register` event (or a rejection diagnostic).
     ///
     /// # Errors
     ///
     /// Returns an error when scope installation, composition, or output fails.
-    pub fn register_local_tool(&self, registration: tau_proto::ToolRegister) -> ClientResult<()> {
+    pub fn register_local_tool(
+        &self,
+        registration: tau_proto::ToolRegistrationDeclared,
+    ) -> ClientResult<()> {
         let registration = self.tool_name_scope()?.scope_registration(registration)?;
-        self.emit(tau_proto::Event::ToolRegister(registration))
+        self.emit_transient(tau_proto::Event::ToolRegistrationDeclared(registration))
     }
 
-    /// Registers a logical/local tool without waiting for protocol flush.
+    /// Publishes a transient logical/local tool declaration without waiting for
+    /// protocol flush.
+    ///
+    /// Queue admission is not a harness acceptance acknowledgement; accepted
+    /// state appears later as canonical `tool.register` or a rejection
+    /// diagnostic.
     ///
     /// # Errors
     ///
     /// Returns an error when scope composition fails or the writer has stopped.
     pub fn register_local_tool_detached(
         &self,
-        registration: tau_proto::ToolRegister,
+        registration: tau_proto::ToolRegistrationDeclared,
     ) -> ClientResult<()> {
         let registration = self.tool_name_scope()?.scope_registration(registration)?;
-        self.emit_detached(tau_proto::Event::ToolRegister(registration))
+        self.emit_transient_detached(tau_proto::Event::ToolRegistrationDeclared(registration))
     }
 
-    /// Unregister a logical/local tool through the installed name scope.
+    /// Publish a transient unregistration declaration for one logical/local
+    /// tool.
+    ///
+    /// Success means only that the declaration was buffered or flushed locally;
+    /// accepted withdrawal appears later as harness-authored `tool.unregister`,
+    /// while an unknown or non-owned tool produces a rejection diagnostic.
     ///
     /// # Errors
     ///
     /// Returns an error when scope installation, composition, or output fails.
     pub fn unregister_local_tool(&self, local: tau_proto::ToolName) -> ClientResult<()> {
         let tool_name = self.tool_name_scope()?.wire_tool_name(&local)?;
-        self.emit(tau_proto::Event::ToolUnregister(
-            tau_proto::ToolUnregister { tool_name },
+        self.emit_transient(tau_proto::Event::ToolUnregistrationDeclared(
+            tau_proto::ToolUnregistrationDeclared { tool_name },
         ))
     }
 
@@ -140,8 +158,8 @@ impl ClientHandle {
                 if matches!(
                     emit.event.as_ref(),
                     tau_proto::Event::ActionSchemaPublished(_)
-                        | tau_proto::Event::ToolRegister(_)
-                        | tau_proto::Event::ToolUnregister(_)
+                        | tau_proto::Event::ToolRegistrationDeclared(_)
+                        | tau_proto::Event::ToolUnregistrationDeclared(_)
                         | tau_proto::Event::ExtSkillAvailable(_)
                         | tau_proto::Event::ExtAgentsMdAvailable(_)
                         | tau_proto::Event::ProviderModelsDeclared(_)

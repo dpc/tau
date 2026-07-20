@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
-use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegister};
+use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegistrationDeclared};
 
 use crate::event::SupervisedWriterHandle;
 use crate::extension::ExtensionEntry;
@@ -37,7 +37,7 @@ pub(super) struct DeferredExtensionMessage {
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExtensionActivationStage {
     /// Tool registrations received before the extension finished its handshake.
-    pub(super) tool_registrations: Vec<ToolRegister>,
+    pub(super) tool_registrations: Vec<ToolRegistrationDeclared>,
     /// Canonical provider model updates derived from committed declarations and
     /// awaiting activation, in declaration commit order.
     pub(super) provider_model_updates: Vec<tau_proto::ProviderModelsUpdated>,
@@ -104,6 +104,9 @@ pub(crate) struct ExtensionRuntimeState {
     /// Pre-`Ready` provider declarations admitted but not yet committed or
     /// dropped by interception.
     pub(super) pending_provider_model_declarations: HashMap<tau_proto::ConnectionId, usize>,
+    /// Pre-`Ready` tool declarations admitted but not yet committed or dropped
+    /// by interception.
+    pub(super) pending_tool_lifecycle_declarations: HashMap<tau_proto::ConnectionId, usize>,
     /// Connections that sent `Ready` but are still waiting for the global
     /// initial collision preflight or their atomic stage activation.
     pub(super) ready_received: HashSet<tau_proto::ConnectionId>,

@@ -79,8 +79,8 @@ impl ToolNameScope {
     /// Returns an error if any composed structural identifier overflows.
     pub fn scope_registration(
         &self,
-        mut registration: tau_proto::ToolRegister,
-    ) -> ClientResult<tau_proto::ToolRegister> {
+        mut registration: tau_proto::ToolRegistrationDeclared,
+    ) -> ClientResult<tau_proto::ToolRegistrationDeclared> {
         registration.tool.name = self.wire_tool_name(&registration.tool.name)?;
         registration.tool.model_visible_name = registration
             .tool

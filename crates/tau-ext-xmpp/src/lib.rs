@@ -2483,7 +2483,7 @@ impl TauExtension for XmppExtension {
                     tool.description = Some(format!(
                         "Register or unregister the current agent for XMPP messages. Incoming messages are accepted only from configured allowed_jids. Use {send} to reply to XMPP-originated message facts."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(xmpp_tool_group()),
                         prompt_fragment: None,
@@ -2499,7 +2499,7 @@ impl TauExtension for XmppExtension {
                     tool.description = Some(format!(
                         "Send a text reply to this agent's registered XMPP room or direct conversation. There is no destination argument; use {register} first. Replies to room-message prompts are visible to room occupants."
                     ));
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: Some(xmpp_tool_group()),
                         prompt_fragment: None,

@@ -204,9 +204,11 @@ fn unregister_shell(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &conn_id,
-        TestProtocolItem::Event(Event::ToolUnregister(tau_proto::ToolUnregister {
-            tool_name: ToolName::new("shell"),
-        })),
+        TestProtocolItem::Event(Event::ToolUnregistrationDeclared(
+            tau_proto::ToolUnregistrationDeclared {
+                tool_name: ToolName::new("shell"),
+            },
+        )),
     )
     .expect("unregister shell");
 }
@@ -218,11 +220,13 @@ fn reregister_shell(h: &mut Harness, spec: ToolSpec) {
         .to_owned();
     h.handle_extension_event(
         &conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: spec,
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: spec,
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("reregister shell");
 }
@@ -1126,11 +1130,13 @@ fn extension_rejects_pre_hello_protocol_messages() {
     let declaration_error = h
         .handle_extension_event(
             conn_id,
-            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                tool: staged_tool_spec("too_early"),
-                tool_group: None,
-                prompt_fragment: None,
-            })),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("too_early"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                },
+            )),
         )
         .expect_err("pre-Hello declaration must fail");
     assert!(declaration_error.to_string().contains("out-of-order"));
@@ -1592,15 +1598,17 @@ fn handshaking_tool_register_is_not_active_before_ready() {
 
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("staged_tool"),
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "staged_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "STAGED TOOL PROMPT",
-            )),
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("staged_tool"),
+                tool_group: None,
+                prompt_fragment: Some(tau_proto::PromptFragment::new(
+                    "staged_tool.instructions",
+                    tau_proto::PromptPriority::new(10),
+                    "STAGED TOOL PROMPT",
+                )),
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_event(
@@ -1675,15 +1683,17 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
 
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("staged_tool"),
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "staged_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "STAGED TOOL PROMPT",
-            )),
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("staged_tool"),
+                tool_group: None,
+                prompt_fragment: Some(tau_proto::PromptFragment::new(
+                    "staged_tool.instructions",
+                    tau_proto::PromptPriority::new(10),
+                    "STAGED TOOL PROMPT",
+                )),
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_event(
@@ -1765,7 +1775,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
         let mut spec = staged_tool_spec("slack_send");
         spec.model_visible_name = Some(ToolName::new("slack_send"));
         let registration = tau_client::ToolNameScope::from_configure(&configure)
-            .scope_registration(tau_proto::ToolRegister {
+            .scope_registration(tau_proto::ToolRegistrationDeclared {
                 tool: spec,
                 tool_group: Some(tau_proto::ToolGroup {
                     name: tau_proto::ToolGroupName::new("slack"),
@@ -1776,7 +1786,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
             .expect("scope logical registration");
         h.handle_extension_event(
             connection_id,
-            TestProtocolItem::Event(Event::ToolRegister(registration)),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(registration)),
         )
         .expect("stage tool");
         sinks.insert(connection_id, sink);
@@ -1861,11 +1871,13 @@ fn optional_disconnect_completes_initial_activation_barrier() {
         .require = false;
     h.handle_extension_event(
         "ready-owner",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("barrier_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("barrier_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
 
@@ -1873,11 +1885,13 @@ fn optional_disconnect_completes_initial_activation_barrier() {
         .expect("ready received");
     h.handle_extension_event(
         "ready-owner",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("post_ready_barrier_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("post_ready_barrier_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("post-Ready declaration is deferred as runtime traffic");
     assert!(h.registry.providers_for("barrier_tool").is_empty());
@@ -1992,11 +2006,13 @@ fn post_ready_tool_registration_has_topology_independent_runtime_semantics() {
             .require = false;
         h.handle_extension_event(
             "startup-owner",
-            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                tool: staged_tool_spec("ready_frozen_tool"),
-                tool_group: None,
-                prompt_fragment: None,
-            })),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("ready_frozen_tool"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                },
+            )),
         )
         .expect("stage startup owner");
         h.handle_extension_message("late-claimant", TestMessage::Ready(Default::default()))
@@ -2007,11 +2023,13 @@ fn post_ready_tool_registration_has_topology_independent_runtime_semantics() {
         }
         h.handle_extension_event(
             "late-claimant",
-            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                tool: staged_tool_spec("ready_frozen_tool"),
-                tool_group: None,
-                prompt_fragment: None,
-            })),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("ready_frozen_tool"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                },
+            )),
         )
         .expect("late runtime claim is isolated");
         if blocked_at_registration {
@@ -2047,11 +2065,13 @@ fn required_tool_disconnect_completes_initial_activation_barrier() {
     connect_handshaking_tool(&mut h, "required-tool-blocker");
     h.handle_extension_event(
         "ready-owner",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("required_disconnect_barrier_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("required_disconnect_barrier_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_message("ready-owner", TestMessage::Ready(Default::default()))
@@ -2089,11 +2109,13 @@ fn optional_timeout_completes_barrier_for_required_ready_peer() {
         .require = false;
     h.handle_extension_event(
         "required-ready",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("timeout_barrier_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("timeout_barrier_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_message("required-ready", TestMessage::Ready(Default::default()))
@@ -2450,11 +2472,13 @@ fn initial_internal_tool_conflicts_follow_availability_policy() {
             .require = required;
         h.handle_extension_event(
             "claimant",
-            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                tool: staged_tool_spec("reserved_tool"),
-                tool_group: None,
-                prompt_fragment: None,
-            })),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("reserved_tool"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                },
+            )),
         )
         .expect("stage conflicting tool");
         let result = h.handle_extension_message("claimant", TestMessage::Ready(Default::default()));
@@ -2499,11 +2523,13 @@ fn initial_tool_collision_matrix_is_deterministic() {
                 .require = *required;
             h.handle_extension_event(
                 connection_id,
-                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                    tool: staged_tool_spec("shared_startup_tool"),
-                    tool_group: None,
-                    prompt_fragment: None,
-                })),
+                TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                    tau_proto::ToolRegistrationDeclared {
+                        tool: staged_tool_spec("shared_startup_tool"),
+                        tool_group: None,
+                        prompt_fragment: None,
+                    },
+                )),
             )
             .expect("stage tool");
         }
@@ -2596,11 +2622,13 @@ fn invalid_initial_tool_registration_does_not_claim_collision_ownership() {
                 .require = required;
             h.handle_extension_event(
                 connection_id,
-                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                    tool: spec,
-                    tool_group: None,
-                    prompt_fragment: None,
-                })),
+                TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                    tau_proto::ToolRegistrationDeclared {
+                        tool: spec,
+                        tool_group: None,
+                        prompt_fragment: None,
+                    },
+                )),
             )
             .expect("stage registration");
         }
@@ -2650,11 +2678,13 @@ fn initial_tool_refresh_validates_only_last_same_owner_registration() {
         for tool in [first, second] {
             h.handle_extension_event(
                 "refresh-owner",
-                TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                    tool,
-                    tool_group: None,
-                    prompt_fragment: None,
-                })),
+                TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                    tau_proto::ToolRegistrationDeclared {
+                        tool,
+                        tool_group: None,
+                        prompt_fragment: None,
+                    },
+                )),
             )
             .expect("stage refresh");
         }
@@ -2704,28 +2734,32 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
 
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: spec,
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "visible_staged_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "ALIASED TOOL PROMPT",
-            )),
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: spec,
+                tool_group: None,
+                prompt_fragment: Some(tau_proto::PromptFragment::new(
+                    "visible_staged_tool.instructions",
+                    tau_proto::PromptPriority::new(10),
+                    "ALIASED TOOL PROMPT",
+                )),
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("empty_fragment_tool"),
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "empty_fragment_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "",
-            )),
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("empty_fragment_tool"),
+                tool_group: None,
+                prompt_fragment: Some(tau_proto::PromptFragment::new(
+                    "empty_fragment_tool.instructions",
+                    tau_proto::PromptPriority::new(10),
+                    "",
+                )),
+            },
+        )),
     )
     .expect("stage empty prompt tool");
     h.handle_extension_message(
@@ -2799,11 +2833,13 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     let staged_sink = connect_handshaking_tool(&mut h, "conn-staged-tool");
     h.handle_extension_event(
         "conn-staged-tool",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("staged_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("staged_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
     h.publish_for_agent(
@@ -2908,11 +2944,13 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
     let staged_sink = connect_handshaking_tool(&mut h, "conn-unadvertised-staged-tool");
     h.handle_extension_event(
         "conn-unadvertised-staged-tool",
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("unadvertised_staged_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("unadvertised_staged_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
 
@@ -2995,11 +3033,13 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
 
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("never_ready_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("never_ready_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage tool");
 
@@ -3259,11 +3299,13 @@ fn intercepted_provider_resolution_propagates_initial_tool_collision() {
         connect_handshaking_tool(&mut h, owner);
         h.handle_extension_event(
             owner,
-            TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                tool: staged_tool_spec("intercept_blocked_collision"),
-                tool_group: None,
-                prompt_fragment: None,
-            })),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: staged_tool_spec("intercept_blocked_collision"),
+                    tool_group: None,
+                    prompt_fragment: None,
+                },
+            )),
         )
         .expect("stage colliding tool");
     }
@@ -4006,15 +4048,17 @@ fn disconnect_before_ready_drops_all_staged_state() {
 
     h.handle_extension_event(
         conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("dropped_tool"),
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "dropped.tool.fragment",
-                tau_proto::PromptPriority::new(10),
-                "DROPPED TOOL FRAGMENT",
-            )),
-        })),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("dropped_tool"),
+                tool_group: None,
+                prompt_fragment: Some(tau_proto::PromptFragment::new(
+                    "dropped.tool.fragment",
+                    tau_proto::PromptPriority::new(10),
+                    "DROPPED TOOL FRAGMENT",
+                )),
+            },
+        )),
     )
     .expect("stage tool");
     h.handle_extension_event(
@@ -4268,13 +4312,17 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
 
     let conn_id = "provider-staged-absence-replacement";
     let sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    let tool_conn_id = "tool-staged-absence-replacement";
+    connect_handshaking_tool(&mut h, tool_conn_id);
     h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
-            tool: staged_tool_spec("captured_only_tool"),
-            tool_group: None,
-            prompt_fragment: None,
-        })),
+        tool_conn_id,
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("captured_only_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
     )
     .expect("stage captured tool");
     let cid = ensure_test_user_agent(&mut h);
@@ -4291,6 +4339,8 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         )
         .expect("stage model snapshot");
     }
+    h.handle_extension_message(tool_conn_id, TestMessage::Ready(Default::default()))
+        .expect("tool Ready waits on provider");
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentInferenceDispatchStarted(checkpoint)
@@ -4369,8 +4419,9 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
 
 #[test]
 fn tool_unregister_removes_tool_from_future_prompt() {
-    // Regression: an explicit ToolUnregister must update the live registry used
-    // for future prompt assembly while leaving old prompt snapshots intact.
+    // Regression: an explicit ToolUnregistrationDeclared must update the live
+    // registry used for future prompt assembly while leaving old prompt
+    // snapshots intact.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -4609,7 +4660,7 @@ fn duplicate_provider_is_rejected_without_ambiguous_fallback() {
 #[test]
 fn assigned_tool_prefix_rejects_unprefixed_registration() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     connect_handshaking_tool(&mut h, "prefixed-extension");
     h.extensions
         .entries
@@ -4622,19 +4673,20 @@ fn assigned_tool_prefix_rejects_unprefixed_registration() {
         ("work_slack_send", Some("visible"), Some("work_slack")),
         ("work_slack_send", Some("work_visible"), Some("slack")),
     ] {
-        let mut spec = shell_tool_spec(&h);
-        spec.name = ToolName::new(name);
+        let mut spec = staged_tool_spec(name);
         spec.model_visible_name = alias.map(ToolName::new);
-        h.handle_extension_event_inner(
+        h.handle_extension_event(
             "prefixed-extension",
-            Event::ToolRegister(tau_proto::ToolRegister {
-                tool: spec,
-                tool_group: group.map(|name| tau_proto::ToolGroup {
-                    name: tau_proto::ToolGroupName::new(name),
+            TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+                tau_proto::ToolRegistrationDeclared {
+                    tool: spec,
+                    tool_group: group.map(|name| tau_proto::ToolGroup {
+                        name: tau_proto::ToolGroupName::new(name),
+                        prompt_fragment: None,
+                    }),
                     prompt_fragment: None,
-                }),
-                prompt_fragment: None,
-            }),
+                },
+            )),
         )
         .expect("handle registration");
         assert!(h.registry.providers_for(name).is_empty());
@@ -4652,7 +4704,14 @@ fn assigned_tool_prefix_rejects_unprefixed_registration() {
             break;
         }
     }
-    assert!(saw_notice);
+    assert!(
+        saw_notice,
+        "events: {:?}",
+        event_log_events(&h)
+            .into_iter()
+            .map(|event| event.name().to_string())
+            .collect::<Vec<_>>()
+    );
     h.shutdown().expect("shutdown");
 }
 

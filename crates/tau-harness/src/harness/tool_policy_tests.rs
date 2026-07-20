@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 
 use tau_config::settings::{AgentRole, TauDirs, ToolPolicy};
+use tau_core::ToolRegistration;
 use tau_proto::{
     BackgroundSupport, Effort, ModelId, ModelName, ModelTag, ProviderModelInfo, ProviderName,
-    ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolRegister, ToolSpec, ToolTag, ToolType,
-    Verbosity,
+    ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolSpec, ToolTag, ToolType, Verbosity,
 };
 use tempfile::TempDir;
 
@@ -121,7 +121,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     ] {
         harness.registry.register_with_prompt_fragment(
             "tools",
-            ToolRegister {
+            ToolRegistration {
                 tool: spec,
                 tool_group: Some(group.clone()),
                 prompt_fragment: None,
@@ -148,7 +148,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     ] {
         harness.registry.register_with_prompt_fragment(
             "harness",
-            ToolRegister {
+            ToolRegistration {
                 tool: tagged_tool(name, enabled_by_default, tags),
                 tool_group: Some(ToolGroup {
                     name: ToolGroupName::new(group),
@@ -313,7 +313,7 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
     custom.tool_type = ToolType::Custom;
     policy.harness.registry.register_with_prompt_fragment(
         "tools",
-        ToolRegister {
+        ToolRegistration {
             tool: custom,
             tool_group: None,
             prompt_fragment: None,

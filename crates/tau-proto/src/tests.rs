@@ -418,7 +418,7 @@ fn action_schema_fixture() -> ActionSchema {
 
 fn representative_events() -> Vec<Event> {
     let mut events = vec![
-        Event::ToolRegister(ToolRegister {
+        Event::ToolRegistrationDeclared(ToolRegistrationDeclared {
             tool: ToolSpec {
                 name: ToolName::new("echo"),
                 model_visible_name: None,
@@ -434,6 +434,13 @@ fn representative_events() -> Vec<Event> {
             tool_group: None,
             prompt_fragment: None,
         }),
+        Event::ToolRegister(ToolRegister {
+            publisher_extension_id: ExtensionName::from("tool-extension"),
+            publisher_instance_id: ExtensionInstanceId::new(7),
+            tool: echo_tool_spec(),
+            tool_group: None,
+            prompt_fragment: None,
+        }),
         Event::ToolRequest(ToolRequest {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
@@ -442,7 +449,12 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("agent-1"),
             originator: PromptOriginator::User,
         }),
+        Event::ToolUnregistrationDeclared(ToolUnregistrationDeclared {
+            tool_name: ToolName::new("old_echo"),
+        }),
         Event::ToolUnregister(ToolUnregister {
+            publisher_extension_id: ExtensionName::from("tool-extension"),
+            publisher_instance_id: ExtensionInstanceId::new(7),
             tool_name: ToolName::new("old_echo"),
         }),
         Event::ToolStarted(ToolStarted {
@@ -1618,7 +1630,11 @@ fn expected_default_transient(event: &Event) -> bool {
     event.is_message_report()
         || matches!(
             event,
-            Event::ToolCancelled(_)
+            Event::ToolRegistrationDeclared(_)
+                | Event::ToolUnregistrationDeclared(_)
+                | Event::ToolRegister(_)
+                | Event::ToolUnregister(_)
+                | Event::ToolCancelled(_)
                 | Event::ProviderModelsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
                 | Event::ProviderResponseUpdated(_)
@@ -1755,11 +1771,13 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.delegate_progress",
         "tool.error",
         "tool.progress",
+        "tool.registration_declared",
         "tool.register",
         "tool.rejected",
         "tool.request",
         "tool.result",
         "tool.started",
+        "tool.unregistration_declared",
         "tool.unregister",
         "ui.agent_model_select",
         "ui.cancel_prompt",
@@ -2427,6 +2445,60 @@ fn provider_model_event_names_match_wire_family() {
                 models: Vec::new(),
             }),
             "provider.models_updated",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(event.name().to_string(), expected);
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(json["event"], expected);
+        assert!(event.defaults_to_transient());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode cbor");
+        assert_eq!(
+            ciborium::from_reader::<Event, _>(cbor.as_slice()).expect("decode cbor"),
+            event
+        );
+    }
+}
+
+/// Tool declarations and canonical state retain distinct wire names, transient
+/// defaults, and canonical configured-instance provenance.
+#[test]
+fn tool_lifecycle_event_names_and_provenance_match_wire_family() {
+    let declaration = ToolRegistrationDeclared {
+        tool: echo_tool_spec(),
+        tool_group: None,
+        prompt_fragment: None,
+    };
+    let cases = [
+        (
+            Event::ToolRegistrationDeclared(declaration.clone()),
+            "tool.registration_declared",
+        ),
+        (
+            Event::ToolUnregistrationDeclared(ToolUnregistrationDeclared {
+                tool_name: ToolName::new("echo"),
+            }),
+            "tool.unregistration_declared",
+        ),
+        (
+            Event::ToolRegister(ToolRegister {
+                publisher_extension_id: ExtensionName::from("tool-extension"),
+                publisher_instance_id: ExtensionInstanceId::new(9),
+                tool: declaration.tool,
+                tool_group: None,
+                prompt_fragment: None,
+            }),
+            "tool.register",
+        ),
+        (
+            Event::ToolUnregister(ToolUnregister {
+                publisher_extension_id: ExtensionName::from("tool-extension"),
+                publisher_instance_id: ExtensionInstanceId::new(9),
+                tool_name: ToolName::new("echo"),
+            }),
+            "tool.unregister",
         ),
     ];
 
@@ -3168,21 +3240,22 @@ fn echo_tool_spec() -> ToolSpec {
     }
 }
 
-/// `tool.register` remains compatible with extensions that omit prompt
-/// fragments, while newer extensions can attach one ordered prompt fragment.
+/// `tool.registration_declared` remains compatible with extensions that omit
+/// prompt fragments, while newer extensions can attach one ordered prompt
+/// fragment.
 #[test]
-fn tool_register_prompt_is_optional_and_round_trips_when_present() {
-    let without_prompt: ToolRegister = serde_json::from_value(serde_json::json!({
+fn tool_registration_declaration_prompt_is_optional_and_round_trips_when_present() {
+    let without_prompt: ToolRegistrationDeclared = serde_json::from_value(serde_json::json!({
         "tool": {
             "name": "echo",
             "description": "Echo a payload",
             "tool_type": "function"
         }
     }))
-    .expect("deserialize tool register without prompt");
+    .expect("deserialize tool registration declaration without prompt");
     assert_eq!(without_prompt.prompt_fragment, None);
 
-    let with_prompt = ToolRegister {
+    let with_prompt = ToolRegistrationDeclared {
         tool: echo_tool_spec(),
         tool_group: None,
         prompt_fragment: Some(PromptFragment::new(
@@ -3191,13 +3264,14 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
             "Prefer the echo tool for echo requests.",
         )),
     };
-    let json = serde_json::to_value(&with_prompt).expect("serialize tool register with prompt");
+    let json = serde_json::to_value(&with_prompt).expect("serialize tool declaration with prompt");
     assert_eq!(json["prompt_fragment"]["priority"], serde_json::json!(7));
     assert_eq!(
         json["prompt_fragment"]["template"],
         serde_json::json!("Prefer the echo tool for echo requests.")
     );
-    let decoded: ToolRegister = serde_json::from_value(json).expect("decode prompt fragment");
+    let decoded: ToolRegistrationDeclared =
+        serde_json::from_value(json).expect("decode prompt fragment");
     assert_eq!(decoded, with_prompt);
 }
 

@@ -23,6 +23,10 @@ accepted Configure-derived declarations, and `Ready`, in that order.
 `startup_event` preserves durable `Emit` metadata, while
 `startup_transient_event` sets `Emit.transient` for runtime-only declarations;
 both retain their builder order before `Ready`.
+Tool helpers always publish transient `tool.registration_declared` /
+`tool.unregistration_declared` inputs rather than harness-owned canonical state;
+the complete downstream contract is
+[SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
 Configure-derived declarations are buffered while handlers run so they override
 same-name static defaults without becoming visible before configuration is
 accepted. Rejection emits `ConfigError`, discards buffered declarations, and

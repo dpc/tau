@@ -378,8 +378,8 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) -> Vec<ToolSpe
     let mut tools = Vec::new();
     while tools.len() < 3 {
         let event = reader.read_event().expect("read").expect("register");
-        let Event::ToolRegister(register) = event else {
-            panic!("expected ToolRegister, got {event:?}");
+        let Event::ToolRegistrationDeclared(register) = event else {
+            panic!("expected ToolRegistrationDeclared, got {event:?}");
         };
         tools.push(register.tool);
     }

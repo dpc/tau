@@ -116,11 +116,11 @@ fn restart_tool_can_return_error() {
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
     assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
     assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
-    let Some(Event::ToolRegister(register)) = emitted_event(&frames[3]) else {
-        panic!("expected tool register");
+    let Some(Event::ToolRegistrationDeclared(declaration)) = emitted_event(&frames[3]) else {
+        panic!("expected tool registration declaration");
     };
     assert_eq!(
-        register
+        declaration
             .tool_group
             .as_ref()
             .map(|group| group.name.as_str()),
@@ -142,11 +142,11 @@ fn restart_tool_can_exit_without_reply() {
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
     assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
     assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
-    let Some(Event::ToolRegister(register)) = emitted_event(&frames[3]) else {
-        panic!("expected tool register");
+    let Some(Event::ToolRegistrationDeclared(declaration)) = emitted_event(&frames[3]) else {
+        panic!("expected tool registration declaration");
     };
     assert_eq!(
-        register
+        declaration
             .tool_group
             .as_ref()
             .map(|group| group.name.as_str()),

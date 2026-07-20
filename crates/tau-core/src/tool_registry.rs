@@ -11,7 +11,7 @@ use std::fmt;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use tau_proto::{
     CborValue, ConnectionId, PromptFragment, ToolExample, ToolExampleSelector, ToolGroup, ToolName,
-    ToolRegister, ToolRequest, ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
+    ToolRequest, ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
 };
 
 use crate::connection::RouteError;
@@ -36,6 +36,20 @@ pub enum ToolProviderKind {
     Internal,
     /// Tool is handled by the extension connection that registered it.
     Extension,
+}
+
+/// Registry input for one harness-accepted tool definition.
+///
+/// The harness translates a committed peer declaration into this neutral core
+/// type only after completing protocol authorship and lifecycle validation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolRegistration {
+    /// Tool metadata made available for routing and prompt assembly.
+    pub tool: ToolSpec,
+    /// Optional group containing this tool.
+    pub tool_group: Option<ToolGroup>,
+    /// Optional system-prompt fragment enabled with this tool.
+    pub prompt_fragment: Option<PromptFragment>,
 }
 
 /// One live provider registered for a tool name.
@@ -1401,7 +1415,7 @@ impl ToolRegistry {
     pub fn register(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
         self.register_provider(
             connection_id,
-            ToolRegister {
+            ToolRegistration {
                 tool,
                 tool_group: None,
                 prompt_fragment: None,
@@ -1414,7 +1428,7 @@ impl ToolRegistry {
     pub fn register_internal(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
         self.register_provider(
             connection_id,
-            ToolRegister {
+            ToolRegistration {
                 tool,
                 tool_group: None,
                 prompt_fragment: None,
@@ -1432,7 +1446,7 @@ impl ToolRegistry {
     ) -> RegisterToolReport {
         self.register_provider(
             connection_id,
-            ToolRegister {
+            ToolRegistration {
                 tool,
                 tool_group: Some(tool_group),
                 prompt_fragment: None,
@@ -1446,7 +1460,7 @@ impl ToolRegistry {
     pub fn register_with_prompt_fragment(
         &mut self,
         connection_id: &str,
-        registration: ToolRegister,
+        registration: ToolRegistration,
     ) -> RegisterToolReport {
         self.register_provider(connection_id, registration, ToolProviderKind::Extension)
     }
@@ -1454,10 +1468,10 @@ impl ToolRegistry {
     fn register_provider(
         &mut self,
         connection_id: &str,
-        registration: ToolRegister,
+        registration: ToolRegistration,
         kind: ToolProviderKind,
     ) -> RegisterToolReport {
-        let ToolRegister {
+        let ToolRegistration {
             tool,
             tool_group,
             prompt_fragment,

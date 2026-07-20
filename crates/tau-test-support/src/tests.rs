@@ -264,10 +264,10 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             .expect("tool startup event should arrive");
         match startup_message {
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ToolRegister(tool_register) => {
-                    let register_report = registry.register(&tool_id, tool_register.tool.clone());
+                Event::ToolRegistrationDeclared(declaration) => {
+                    let register_report = registry.register(&tool_id, declaration.tool.clone());
                     assert!(register_report.errors.is_empty());
-                    registered_tool_names.push(tool_register.tool.name);
+                    registered_tool_names.push(declaration.tool.name);
                 }
                 Event::ActionSchemaPublished(_)
                 | Event::ExtensionStarting(_)

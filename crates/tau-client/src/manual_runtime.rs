@@ -418,7 +418,12 @@ impl<State> ManualExtensionRuntime<State> {
             ))
     }
 
-    /// Register one logical/local tool during deferred startup.
+    /// Publish one transient logical/local tool registration declaration during
+    /// deferred startup.
+    ///
+    /// Success reports local output only, not harness commit or acceptance.
+    /// Accepted state appears after activation as harness-authored
+    /// `tool.register`, or rejection produces a diagnostic.
     ///
     /// # Errors
     ///
@@ -426,7 +431,7 @@ impl<State> ManualExtensionRuntime<State> {
     /// established a scope, composition fails, or output fails.
     pub fn startup_local_tool(
         &mut self,
-        registration: tau_proto::ToolRegister,
+        registration: tau_proto::ToolRegistrationDeclared,
     ) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
         let registration = self
@@ -434,8 +439,9 @@ impl<State> ManualExtensionRuntime<State> {
             .tool_name_scope()?
             .scope_registration(registration)?;
         self.handle
-            .send_startup(tau_proto::HarnessInputMessage::emit(
-                tau_proto::Event::ToolRegister(registration),
+            .send_startup(tau_proto::HarnessInputMessage::emit_with_transient(
+                tau_proto::Event::ToolRegistrationDeclared(registration),
+                true,
             ))
     }
 

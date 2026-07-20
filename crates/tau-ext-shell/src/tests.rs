@@ -449,8 +449,8 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
         .expect("enable dir_lock");
     writer.flush().expect("flush config");
     let refreshed = reader.read_event().expect("read").expect("refresh");
-    let Event::ToolRegister(register) = refreshed else {
-        panic!("expected ToolRegister, got {refreshed:?}");
+    let Event::ToolRegistrationDeclared(register) = refreshed else {
+        panic!("expected ToolRegistrationDeclared, got {refreshed:?}");
     };
     assert_eq!(register.tool.name.as_str(), "work_dir_lock");
 
@@ -651,22 +651,23 @@ fn targeted_user_shell_runs_from_agent_workdir() {
     );
 }
 
-/// Consumes startup events (tool registers). The hello/subscribe/ready
-/// messages are filtered out by the test-side `EventReader` wrapper.
+/// Consumes startup events (tool registration declarations). The
+/// hello/subscribe/ready messages are filtered out by the test-side
+/// `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
     for expected in [
-        EventName::TOOL_REGISTER,                               // echo
-        EventName::TOOL_REGISTER,                               // read
-        EventName::TOOL_REGISTER,                               // read_image
-        EventName::TOOL_REGISTER,                               // edit
-        EventName::TOOL_REGISTER,                               // apply_patch
-        EventName::TOOL_REGISTER,                               // dir_lock
-        EventName::TOOL_REGISTER,                               // grep
-        EventName::TOOL_REGISTER,                               // find
-        EventName::TOOL_REGISTER,                               // ls
-        EventName::TOOL_REGISTER,                               // cd
-        EventName::TOOL_REGISTER,                               // shell
-        EventName::TOOL_REGISTER,                               // gpt_shell
+        EventName::TOOL_REGISTRATION_DECLARED,                  // echo
+        EventName::TOOL_REGISTRATION_DECLARED,                  // read
+        EventName::TOOL_REGISTRATION_DECLARED,                  // read_image
+        EventName::TOOL_REGISTRATION_DECLARED,                  // edit
+        EventName::TOOL_REGISTRATION_DECLARED,                  // apply_patch
+        EventName::TOOL_REGISTRATION_DECLARED,                  // dir_lock
+        EventName::TOOL_REGISTRATION_DECLARED,                  // grep
+        EventName::TOOL_REGISTRATION_DECLARED,                  // find
+        EventName::TOOL_REGISTRATION_DECLARED,                  // ls
+        EventName::TOOL_REGISTRATION_DECLARED,                  // cd
+        EventName::TOOL_REGISTRATION_DECLARED,                  // shell
+        EventName::TOOL_REGISTRATION_DECLARED,                  // gpt_shell
         EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER,         // shell cwd context
         EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER, // session skills/AGENTS.md
         EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,           // shell.cwd
@@ -786,7 +787,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         let HarnessInputMessage::Emit(emit) = message else {
             panic!("expected tool registration before Ready, got {message:?}");
         };
-        let Event::ToolRegister(register) = *emit.event else {
+        let Event::ToolRegistrationDeclared(register) = *emit.event else {
             panic!(
                 "expected tool registration before Ready, got {:?}",
                 emit.event
@@ -879,7 +880,7 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        let Event::ToolRegister(register) = event else {
+        let Event::ToolRegistrationDeclared(register) = event else {
             continue;
         };
         if register.tool.name == ECHO_TOOL_NAME {
@@ -993,7 +994,7 @@ fn startup_registers_schema_valid_tool_examples() {
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        let Event::ToolRegister(register) = event else {
+        let Event::ToolRegistrationDeclared(register) = event else {
             continue;
         };
         tau_core::validate_tool_examples(&register.tool)
@@ -1155,7 +1156,7 @@ fn startup_registers_dir_lock_disabled_by_default() {
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        let Event::ToolRegister(register) = event else {
+        let Event::ToolRegistrationDeclared(register) = event else {
             continue;
         };
         if register.tool.name == DIR_LOCK_TOOL_NAME {
@@ -1319,7 +1320,9 @@ fn dir_lock_config_re_registers_tool_enabled_when_config_true() {
 
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
+            Some(Event::ToolRegistrationDeclared(register))
+                if register.tool.name == DIR_LOCK_TOOL_NAME =>
+            {
                 assert!(register.tool.enabled_by_default);
                 assert!(
                     register
@@ -1374,7 +1377,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
         .enumerate()
         .filter_map(|(index, frame)| match frame {
             HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.name.as_str() == DIR_LOCK_TOOL_NAME =>
                 {
                     Some((index, &register.tool))
@@ -2659,7 +2662,7 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        let Event::ToolRegister(register) = event else {
+        let Event::ToolRegistrationDeclared(register) = event else {
             continue;
         };
         if register.tool.name == SHELL_TOOL_NAME || register.tool.name == GPT_SHELL_TOOL_NAME {
@@ -2732,7 +2735,7 @@ fn startup_registers_shell_workdir_prompt_fragment() {
             .expect("read")
             .expect("startup event should arrive");
         match event {
-            Event::ToolRegister(register) => {
+            Event::ToolRegistrationDeclared(register) => {
                 saw_tool_fragment |= register.prompt_fragment.is_some();
             }
             Event::ExtensionContextProviderRegister(_) => {

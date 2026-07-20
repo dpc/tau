@@ -1,3 +1,5 @@
+mod tool_lifecycle;
+
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::{PendingTool, background_completion_prompt};

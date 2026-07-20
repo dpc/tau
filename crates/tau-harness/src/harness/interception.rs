@@ -97,6 +97,17 @@ pub(crate) struct ActivationReservation {
     pub(crate) encoded_bytes: usize,
     /// Original delivery transience retained across same-name replacement.
     pub(crate) transient: bool,
+    /// Declaration family whose pre-activation pending count owns this charge.
+    pub(crate) declaration_family: ActivationDeclarationFamily,
+}
+
+/// Pre-activation declaration family bound to one quota reservation.
+#[derive(Clone, Copy)]
+pub(crate) enum ActivationDeclarationFamily {
+    /// Provider model replacement declaration.
+    ProviderModels,
+    /// Tool registration or unregistration declaration.
+    ToolLifecycle,
 }
 
 /// Immutable authenticated metadata carried beside one generic peer publish.
@@ -196,6 +207,8 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // Canonical provider model state is harness-owned current state. Declarations
     // remain mutable and interceptable before this protected projection.
     EventName::PROVIDER_MODELS_UPDATED,
+    EventName::TOOL_REGISTER,
+    EventName::TOOL_UNREGISTER,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -292,6 +305,8 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::MessageReactionRemoved(_)
             | Event::MessageSent(_)
             | Event::ProviderModelsUpdated(_)
+            | Event::ToolRegister(_)
+            | Event::ToolUnregister(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
@@ -779,9 +794,17 @@ impl Harness {
         let activation_reservation = extension
             .filter(|entry| entry.state != crate::extension::ExtensionState::Ready)
             .and_then(|_| {
-                matches!(event, Event::ProviderModelsDeclared(_)).then(|| ActivationReservation {
+                let declaration_family = match event {
+                    Event::ProviderModelsDeclared(_) => ActivationDeclarationFamily::ProviderModels,
+                    Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_) => {
+                        ActivationDeclarationFamily::ToolLifecycle
+                    }
+                    _ => return None,
+                };
+                Some(ActivationReservation {
                     encoded_bytes: Self::encoded_emit_size(&event, transient),
                     transient,
+                    declaration_family,
                 })
             });
         let peer_context = PeerPublicationContext {

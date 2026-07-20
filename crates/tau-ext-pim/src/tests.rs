@@ -687,10 +687,10 @@ fn startup_registers_email_and_calendar_tools() {
                     ];
             }
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::ToolRegister(_)) =>
+                if matches!(emit.event.as_ref(), Event::ToolRegistrationDeclared(_)) =>
             {
                 assert!(!saw_ready, "tools should be registered before Ready");
-                let Event::ToolRegister(register) = *emit.event else {
+                let Event::ToolRegistrationDeclared(register) = *emit.event else {
                     unreachable!();
                 };
                 if register.prompt_fragment.is_some() {
@@ -883,7 +883,7 @@ fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
             continue;
         };
         match emit.event.as_ref() {
-            Event::ToolRegister(register)
+            Event::ToolRegistrationDeclared(register)
                 if register.tool.name.as_str() == "work_calendar_list_calendars" =>
             {
                 registered = true;

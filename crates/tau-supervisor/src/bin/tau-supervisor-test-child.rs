@@ -5,8 +5,8 @@ use std::io::{BufReader, BufWriter, Write};
 
 use tau_proto::{
     CborValue, ClientKind, Event, EventDelivery, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Ready, Subscribe, ToolRegister,
-    ToolResult, ToolSpec, ToolStarted,
+    PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Ready, Subscribe,
+    ToolRegistrationDeclared, ToolResult, ToolSpec, ToolStarted,
 };
 
 const EXIT_IMMEDIATELY_ARG: &str = "--exit-immediately";
@@ -104,8 +104,8 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
             tau_proto::EventName::TOOL_STARTED,
         )],
     }))?;
-    writer.write_message(&HarnessInputMessage::emit(Event::ToolRegister(
-        ToolRegister {
+    writer.write_message(&HarnessInputMessage::emit_with_transient(
+        Event::ToolRegistrationDeclared(ToolRegistrationDeclared {
             tool: ToolSpec {
                 name: tau_proto::ToolName::new("echo"),
                 model_visible_name: None,
@@ -120,8 +120,9 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
             },
             tool_group: None,
             prompt_fragment: None,
-        },
-    )))?;
+        }),
+        true,
+    ))?;
     writer.write_message(&HarnessInputMessage::Ready(Ready {
         message: Some("ready".to_owned()),
     }))?;

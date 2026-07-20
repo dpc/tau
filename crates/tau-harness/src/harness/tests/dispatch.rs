@@ -2240,7 +2240,12 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let _events = connect_test_tool(&mut h, "conn-invalid-example");
+    let _events = connect_ready_configured_extension(
+        &mut h,
+        "conn-invalid-example",
+        "invalid-example",
+        tau_proto::ClientKind::Tool,
+    );
     let mut spec = shared_test_tool_spec("invalid_example_tool");
     spec.parameters = Some(serde_json::json!({
         "type": "object",
@@ -2261,7 +2266,7 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
 
     h.handle_extension_event_inner(
         "conn-invalid-example",
-        Event::ToolRegister(tau_proto::ToolRegister {
+        Event::ToolRegistrationDeclared(tau_proto::ToolRegistrationDeclared {
             tool: spec,
             tool_group: None,
             prompt_fragment: None,
@@ -22681,7 +22686,7 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
     ] {
         h.registry.register_with_prompt_fragment(
             "conn-grouped",
-            tau_proto::ToolRegister {
+            tau_core::ToolRegistration {
                 tool: ToolSpec {
                     name: ToolName::new(name),
                     model_visible_name: None,

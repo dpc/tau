@@ -124,13 +124,16 @@ impl Output {
 
     fn register_local_tool(
         &self,
-        registration: tau_proto::ToolRegister,
+        registration: tau_proto::ToolRegistrationDeclared,
     ) -> tau_client::ClientResult<()> {
         match &self.inner {
             OutputInner::Client(handle) => handle.register_local_tool(registration),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
-                .send(HarnessInputMessage::emit(Event::ToolRegister(registration)))
+                .send(HarnessInputMessage::emit_with_transient(
+                    Event::ToolRegistrationDeclared(registration),
+                    true,
+                ))
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         }
     }

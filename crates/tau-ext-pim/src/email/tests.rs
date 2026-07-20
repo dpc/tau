@@ -378,11 +378,11 @@ fn spawn_extension_with_config(
 
 fn drain_startup_register(
     reader: &mut HarnessInputReader<BufReader<UnixStream>>,
-) -> tau_proto::ToolRegister {
+) -> tau_proto::ToolRegistrationDeclared {
     loop {
         match reader.read_message().expect("read").expect("frame") {
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ToolRegister(register) = *emit.event {
+                if let Event::ToolRegistrationDeclared(register) = *emit.event {
                     return register;
                 }
             }
@@ -685,7 +685,7 @@ fn email_run_startup_order_and_subscriptions_are_stable() {
         matches!(
             frame,
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::ToolRegister(_))
+                if matches!(emit.event.as_ref(), Event::ToolRegistrationDeclared(_))
         )
     }));
     assert!(matches!(
@@ -706,7 +706,7 @@ fn registers_email_read_tool_prompt_fragment() {
     loop {
         match pair.reader.read_message().expect("read").expect("frame") {
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ToolRegister(register) = *emit.event {
+                if let Event::ToolRegistrationDeclared(register) = *emit.event {
                     if register.tool.name.as_str() == "email_read" {
                         let fragment = register.prompt_fragment.expect("read prompt fragment");
                         assert_eq!(fragment.name, "email.instructions");

@@ -775,11 +775,12 @@ impl TauExtension for ConfigureDeclarationExtension {
             .configure_raw(move |cx| {
                 let mut configured_tool = tool_spec("configured_tool");
                 configured_tool.description = Some("configured".to_owned());
-                cx.handle.register_local_tool(tau_proto::ToolRegister {
-                    tool: configured_tool,
-                    tool_group: None,
-                    prompt_fragment: None,
-                })?;
+                cx.handle
+                    .register_local_tool(tau_proto::ToolRegistrationDeclared {
+                        tool: configured_tool,
+                        tool_group: None,
+                        prompt_fragment: None,
+                    })?;
                 if self.reject {
                     Err(ClientError::handler("reject configured declaration"))
                 } else {
@@ -2025,7 +2026,7 @@ fn ordinary_manual_configure_rejection_returns_error_without_ready() {
     assert!(!frames.iter().any(|frame| matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::ToolRegister(_))
+            if matches!(emit.event.as_ref(), Event::ToolRegistrationDeclared(_))
     )));
 }
 
@@ -3163,9 +3164,10 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
     assert!(frames.iter().any(|frame| matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if matches!(
+            if emit.transient
+                && matches!(
                 emit.event.as_ref(),
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.name.as_str() == "work_owned_tool"
             )
     )));
@@ -3179,7 +3181,7 @@ fn configure_declaration_overrides_static_declaration_before_ready() {
         .enumerate()
         .filter_map(|(index, frame)| match frame {
             HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegister(register) => Some((index, register)),
+                Event::ToolRegistrationDeclared(register) => Some((index, register)),
                 _ => None,
             },
             _ => None,
@@ -3207,9 +3209,10 @@ fn rejected_configure_discards_buffered_declaration_and_withholds_ready() {
     assert!(frames.iter().all(|frame| !matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if matches!(
+            if emit.transient
+                && matches!(
                 emit.event.as_ref(),
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.description.as_deref() == Some("configured")
             )
     )));
@@ -3418,7 +3421,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
         .expect("install scope");
     handle.finish_startup().expect("finish test startup");
     handle
-        .register_local_tool(tau_proto::ToolRegister {
+        .register_local_tool(tau_proto::ToolRegistrationDeclared {
             tool: tool_spec("dynamic"),
             tool_group: None,
             prompt_fragment: None,
@@ -3434,18 +3437,20 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
     assert!(matches!(
         &frames[0],
         HarnessInputMessage::Emit(emit)
-            if matches!(
+            if emit.transient
+                && matches!(
                 emit.event.as_ref(),
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.name.as_str() == "work_dynamic"
             )
     ));
     assert!(matches!(
         &frames[1],
         HarnessInputMessage::Emit(emit)
-            if matches!(
+            if emit.transient
+                && matches!(
                 emit.event.as_ref(),
-                Event::ToolUnregister(unregister)
+                Event::ToolUnregistrationDeclared(unregister)
                     if unregister.tool_name.as_str() == "work_dynamic"
             )
     ));
@@ -3715,7 +3720,7 @@ fn scoped_tool_factory_rejects_mismatched_logical_name() {
             builder.scoped_tool(
                 ToolName::new("declared"),
                 |_| {
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool: tool_spec("returned"),
                         tool_group: None,
                         prompt_fragment: None,
@@ -3759,7 +3764,7 @@ fn scoped_and_static_tools_preserve_public_declaration_order() {
                 |_| {
                     let mut tool = tool_spec("refresh");
                     tool.description = Some("first scoped".to_owned());
-                    Ok(tau_proto::ToolRegister {
+                    Ok(tau_proto::ToolRegistrationDeclared {
                         tool,
                         tool_group: None,
                         prompt_fragment: None,
@@ -3778,7 +3783,7 @@ fn scoped_and_static_tools_preserve_public_declaration_order() {
         .iter()
         .filter_map(|frame| match frame {
             HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegister(register) => register.tool.description.as_deref(),
+                Event::ToolRegistrationDeclared(register) => register.tool.description.as_deref(),
                 _ => None,
             },
             _ => None,

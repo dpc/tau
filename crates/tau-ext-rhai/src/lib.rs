@@ -32,8 +32,8 @@ use tau_client::{
 use tau_proto::{
     CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessNotice,
     HarnessOutputMessage, InterceptAction, InterceptionPriority, NoticeLevel, PromptOriginator,
-    ToolError, ToolGroup, ToolGroupName, ToolName, ToolRegister, ToolResult, ToolResultKind,
-    ToolSpec, ToolStarted, ToolType, UnixMicros,
+    ToolError, ToolGroup, ToolGroupName, ToolName, ToolRegistrationDeclared, ToolResult,
+    ToolResultKind, ToolSpec, ToolStarted, ToolType, UnixMicros,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -617,14 +617,14 @@ fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
 struct PreparedInitMessages {
     /// Script-authored subscriptions, intercepts, and Ready text.
     init: InitOutput,
-    /// Tool registrations after immutable prefix composition.
-    registrations: Vec<ToolRegister>,
+    /// Tool declarations after immutable prefix composition.
+    tool_declarations: Vec<ToolRegistrationDeclared>,
 }
 
 /// Scope-compose every tool before emitting any init-derived declaration.
 ///
 /// This preflight keeps a late composition failure from leaking an earlier
-/// Subscribe, Intercept, ToolRegister, or Ready frame.
+/// Subscribe, Intercept, ToolRegistrationDeclared, or Ready frame.
 fn prepare_init_messages(
     manual: &mut ManualExtensionRuntime<()>,
     runtime: &mut ScriptRuntime,
@@ -632,18 +632,18 @@ fn prepare_init_messages(
 ) -> tau_client::ClientResult<PreparedInitMessages> {
     let handle = manual.handle();
     let scope = handle.tool_name_scope()?;
-    let mut registrations = Vec::new();
+    let mut tool_declarations = Vec::new();
     let mut names = Vec::new();
-    for registration in runtime.tool_register_events() {
+    for registration in runtime.tool_registration_declarations() {
         let local_name = registration.tool.name.clone();
         let registration = scope.scope_registration(registration)?;
         names.push((registration.tool.name.clone(), local_name));
-        registrations.push(registration);
+        tool_declarations.push(registration);
     }
     runtime.wire_to_local_tools.extend(names);
     Ok(PreparedInitMessages {
         init,
-        registrations,
+        tool_declarations,
     })
 }
 
@@ -653,7 +653,7 @@ fn send_init_messages(
 ) -> Result<(), Box<dyn Error>> {
     let PreparedInitMessages {
         init,
-        registrations,
+        tool_declarations,
     } = prepared;
     if !init.subscribe.is_empty() {
         manual.startup_subscribe(init.subscribe)?;
@@ -661,8 +661,8 @@ fn send_init_messages(
     for intercept in init.intercept {
         manual.startup_intercept(intercept.selectors, intercept.priority)?;
     }
-    for registration in registrations {
-        manual.startup_event(Event::ToolRegister(registration))?;
+    for registration in tool_declarations {
+        manual.startup_transient_event(Event::ToolRegistrationDeclared(registration))?;
     }
     manual.startup_ready(Some(
         init.ready_message
@@ -1080,12 +1080,12 @@ impl ScriptRuntime {
         Ok(())
     }
 
-    fn tool_register_events(&self) -> Vec<ToolRegister> {
+    fn tool_registration_declarations(&self) -> Vec<ToolRegistrationDeclared> {
         let state = self.host_state.borrow();
         state
             .tools
             .iter()
-            .map(|tool| ToolRegister {
+            .map(|tool| ToolRegistrationDeclared {
                 tool: tool.spec.clone(),
                 tool_group: tool.group.as_ref().map(|group_name| {
                     state

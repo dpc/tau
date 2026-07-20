@@ -2,7 +2,7 @@
 
 ## Status
 
-The external-message and provider-model slices now use generic `Emit`
+The external-message, provider-model, and tool-lifecycle slices now use generic `Emit`
 publication, immutable authenticated internal publisher snapshots, source-aware
 admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
@@ -35,9 +35,15 @@ This component implements the harness-owned parts of [SPEC-agent-watch](../../..
 ## Tool-surface and extension-instance ownership
 
 The harness assigns immutable per-instance tool-prefix envelopes through
-Configure, validates registration and final-name ownership, and owns startup
-collision resolution. Extensions retain declaration and tool-specific semantic
-ownership. For each prompt, the harness alone resolves the effective
+Configure. Configured Tool/Core peers publish transient
+`tool.*_declared` events; only a post-commit consumer validates replacements,
+mutates the registry, and publishes protected harness-authored canonical
+`tool.register` / `tool.unregister` state with configured instance provenance.
+The harness owns final-name validation and deterministic startup collision
+resolution. Extensions retain declaration and tool-specific semantic ownership.
+The exact flow is
+[SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+For each prompt, the harness alone resolves the effective
 post-policy/provider-filtered tool snapshot used for definitions,
 authorization, capabilities, and diagnostics, as specified by
 [SPEC-tau-harness-prompt-dispatch](SPEC-tau-harness-prompt-dispatch.md).

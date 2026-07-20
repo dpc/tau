@@ -590,7 +590,7 @@ fn generic_prefixes_scope_slack_instances() {
             .iter()
             .filter_map(|frame| match frame {
                 HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                    Event::ToolRegister(register) => Some(register),
+                    Event::ToolRegistrationDeclared(register) => Some(register),
                     _ => None,
                 },
                 _ => None,
@@ -3455,7 +3455,9 @@ fn run_config_does_not_refresh_send_schema() {
         .iter()
         .filter_map(|frame| match frame {
             HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegister(register) if register.tool.name.as_str() == SEND_TOOL_NAME => {
+                Event::ToolRegistrationDeclared(register)
+                    if register.tool.name.as_str() == SEND_TOOL_NAME =>
+                {
                     Some(&register.tool)
                 }
                 _ => None,
@@ -3478,7 +3480,9 @@ fn initial_send_schema_is_static_before_ready() {
         .enumerate()
         .filter_map(|(index, frame)| match frame {
             HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegister(register) if register.tool.name.as_str() == SEND_TOOL_NAME => {
+                Event::ToolRegistrationDeclared(register)
+                    if register.tool.name.as_str() == SEND_TOOL_NAME =>
+                {
                     Some((index, &register.tool))
                 }
                 _ => None,

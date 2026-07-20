@@ -2,6 +2,11 @@
 
 Tau is a Rust workspace whose end-user `tau` binary composes first-party components. `tau-cli` starts and connects to the `tau-harness` daemon; the harness owns sessions, event sequencing, extension lifecycle, provider dispatch, and harness-owned tools. `tau-core` supplies state, routing, policy, sessions, and tool registration. `tau-proto` owns shared wire types and CBOR contracts, while `tau-client` provides the client/extension runtime and `tau-socket` supplies local Unix transport. Extensions and provider backends depend on those shared boundaries rather than owning harness state.
 
+Peer tool providers declare registration lifecycle through transient events;
+the harness validates committed declarations and publishes canonical runtime
+state as specified by
+[SPEC-tool-declarations-and-canonical-state](SPEC-tool-declarations-and-canonical-state.md).
+
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 
 Local configured extensions are trusted host executables with limited protocol

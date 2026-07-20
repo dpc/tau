@@ -11,7 +11,12 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
     if event.is_message_report()
         || matches!(
             event,
-            Event::ProviderModelsDeclared(_) | Event::ProviderModelsUpdated(_)
+            Event::ProviderModelsDeclared(_)
+                | Event::ProviderModelsUpdated(_)
+                | Event::ToolRegistrationDeclared(_)
+                | Event::ToolUnregistrationDeclared(_)
+                | Event::ToolRegister(_)
+                | Event::ToolUnregister(_)
         )
         || is_raw_tool_terminal_event(event)
     {

@@ -2329,7 +2329,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.name.as_str() == "work_telegram_register"
                         && register
                             .tool_group
@@ -2338,7 +2338,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
                 {
                     saw_register_tool = true;
                 }
-                Event::ToolRegister(register)
+                Event::ToolRegistrationDeclared(register)
                     if register.tool.name.as_str() == "work_telegram_send" =>
                 {
                     saw_send_tool = true;

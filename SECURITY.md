@@ -80,6 +80,17 @@ stdio stream is a hostile availability boundary or process sandbox. Operation
 quotas do not promise to bound protocol deserialization; see
 [`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md#extension-data)
 and [`ARCH-tau-supervisor`](crates/tau-supervisor/specs/ARCH-tau-supervisor.md#child-environment).
+Only authenticated configured Tool/Core peers may publish transient tool
+registration/unregistration declarations; canonical `tool.register` and
+`tool.unregister` state is harness-authored. After declaration commit, the
+harness binds processing to the captured configured identity and live connection,
+then enforces assigned prefixes, schema/example bounds, ownership, and startup
+collision policy. Pre-Ready reservations are bounded and released on
+drop/disconnect, and neither declarations nor canonical runtime state enters
+semantic journals. Security review must revisit this boundary when changing the
+authority matrix, interception replacement/drop behavior, activation accounting,
+disconnect/respawn identity checks, or persistence classification. See
+[`SPEC-tool-declarations-and-canonical-state`](specs/SPEC-tool-declarations-and-canonical-state.md).
 Generic configured-extension spawn diagnostics treat the configured instance
 name, resolved executable, and explicitly configured cwd as non-secret metadata;
 do not place credentials or tokens in those fields. Diagnostics bound and escape

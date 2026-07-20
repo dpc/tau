@@ -308,14 +308,25 @@ their selected models.
   `provider.response_finished` closes the pending provider route.
 ## Tools
 
-Tool events span three emitters: extensions register/implement tools,
-the agent requests calls, and the harness orchestrates dispatch.
+Tool events separate extension declarations from harness-owned accepted state,
+agent requests, and harness dispatch. The registration lifecycle contract is
+[SPEC-tool-declarations-and-canonical-state](../specs/SPEC-tool-declarations-and-canonical-state.md).
 
-- **`tool.register`** *(extension)* — A tool provider advertises a tool
+- **`tool.registration_declared`** *(Tool/Core extension)* — A tool provider
+  proposes a tool
   spec (name, description, JSON-schema parameters, `enabled_by_default`,
-  and legacy execution-mode metadata).
-- **`tool.unregister`** *(extension)* — A previously registered tool is
-  withdrawn.
+  and legacy execution-mode metadata). The declaration is transient and
+  interceptable.
+- **`tool.unregistration_declared`** *(Tool/Core extension)* — A provider
+  proposes withdrawing one of its owned tools. Like registration declarations,
+  it is transient and interceptable.
+- **`tool.register`** *(harness)* — Protected canonical state for an accepted
+  registration, including configured extension and instance provenance. It is a
+  transient, immutable, must-pass lifecycle event with no cold-restart replay.
+- **`tool.unregister`** *(harness)* — Protected canonical state for an accepted
+  active withdrawal. Unknown or non-owner declarations produce a diagnostic
+  instead. It has the same transient, immutable, must-pass, no-replay contract
+  as `tool.register`.
 - **`tool.request`** *(provider/extension)* — A runtime request to run a
   tool call by id, owner agent id, model-produced name, and CBOR arguments. It
   may come from an agent response or another extension, and can still be
