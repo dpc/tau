@@ -1,6 +1,6 @@
 # DECISION-generic-peer-event-emission: Generic peer event emission
 
-Authority: confirmed, 2026-07-19, dpc
+Authority: confirmed, 2026-07-20, dpc
 
 ## Status
 
@@ -44,6 +44,25 @@ storage. `Emit.transient` applies uniformly as generic publication metadata;
 reports are transient unless a separately approved contract defines idempotent
 durable recovery. A committed transient event has runtime ordering and live
 delivery but no cold-restart replay guarantee.
+
+`tool.request` retains its existing caller-selected session-restore
+classification as an explicit exception. Generic intake preserves
+`Emit.transient`: `true` is live-only, while `false` records the request for
+execution-state correlation. A restored request is observation only and never
+reruns routing, execution, or recovery. Durable peer requests record the stable
+configured publisher name rather than their run-local connection id. This
+exception deliberately follows the caller's persistence request even when the
+extension chose it incorrectly; generic Emit does not special-case or reject
+that choice.
+
+Configured extensions are trusted local executables under the existing local
+IPC boundary. For a `tool.request` that resolves to a harness-internal tool, the
+peer-supplied `agent_id` supplies ordinary correlation to a currently loaded
+agent; it is not treated as adversarial input requiring a separate rejection
+policy. This correlation is runtime-only and remains separate from transcript
+tool-call ownership: peer-internal terminal facts do not fold into an agent
+transcript. The harness still owns live-generation validation, registry routing,
+pending-call accounting, and the resulting started or terminal facts.
 
 The authenticated publisher is immutable metadata outside the rewriteable
 `Event`. The pre-commit publication envelope delivered to interceptors carries
@@ -199,5 +218,7 @@ The tool progress report-to-canonical-fact flow is specified by
 [SPEC-tool-progress-reports-and-canonical-facts](SPEC-tool-progress-reports-and-canonical-facts.md).
 The terminal tool report-to-canonical-outcome flow is specified by
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+The peer tool-request commit-to-routing flow is specified by
+[SPEC-tool-requests-and-routing](SPEC-tool-requests-and-routing.md).
 The provider-quota report-to-canonical-current-state flow is specified by
 [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).

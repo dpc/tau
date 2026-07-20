@@ -1812,6 +1812,12 @@ pub struct Harness {
     /// enrich terminal runtime events before they are folded into transcript
     /// facts.
     pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
+    /// Ownerless calls accepted from committed configured-peer requests.
+    peer_tool_requests: std::collections::HashSet<ToolCallId>,
+    /// `call_id` to loaded-agent runtime correlation for peer requests routed
+    /// internally. Kept separate from `tool_agents` because these calls do not
+    /// own transcript branches.
+    peer_internal_tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
     /// Tool call ids that were known to this harness and reached a terminal
     /// state. Used for same-session known-id collection; owner-scoped
     /// cancellation diagnostics use `completed_tool_agents`.
@@ -2648,6 +2654,8 @@ impl Harness {
             ui_shell_route_rng: StdRng::from_entropy(),
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
+            peer_tool_requests: HashSet::new(),
+            peer_internal_tool_agents: HashMap::new(),
             completed_tool_calls: HashSet::new(),
             completed_ephemeral_tool_calls: HashSet::new(),
             completed_tool_agents: HashMap::new(),
@@ -4460,8 +4468,19 @@ impl Harness {
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
+        let persistence_source = match &event {
+            // A configured peer's durable request must not retain its run-local
+            // connection id. The stable configured publisher is the only identity
+            // that remains meaningful when the restore fact is replayed.
+            Event::ToolRequest(_) => peer_context
+                .extension
+                .as_ref()
+                .map(|extension| extension.publisher.as_str())
+                .or(source),
+            _ => source,
+        };
         let folded_node_id = match self.persist_semantic_event(
-            source,
+            persistence_source,
             &event,
             transient,
             parent_for_fold,
@@ -5828,7 +5847,18 @@ impl Harness {
             Event::ToolRejected(rejected) => {
                 self.tool_call_targets_ephemeral_agent(&rejected.call_id)
             }
-            Event::ToolResult(result) => self.tool_call_targets_ephemeral_agent(&result.call_id),
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+                self.tool_call_targets_ephemeral_agent(&result.call_id)
+            }
+            Event::ToolError(error) | Event::ProviderToolError(error) => {
+                self.tool_call_targets_ephemeral_agent(&error.call_id)
+            }
+            Event::ToolBackgroundResult(result) => {
+                self.tool_call_targets_ephemeral_agent(&result.call_id)
+            }
+            Event::ToolBackgroundError(error) => {
+                self.tool_call_targets_ephemeral_agent(&error.call_id)
+            }
             Event::ToolProgress(progress) | Event::ToolProgressReported(progress) => {
                 self.tool_call_targets_ephemeral_agent(&progress.call_id)
             }
@@ -5872,6 +5902,7 @@ impl Harness {
             || self
                 .tool_agents
                 .get(call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(call_id))
                 .and_then(|cid| self.agents.get(cid))
                 .is_some_and(|agent| agent.persistence.is_ephemeral())
     }
@@ -8369,6 +8400,37 @@ impl Harness {
             self.handle_extension_fallback_event(source_id, event, transient_override);
             return Ok(());
         }
+        if let Event::ToolRequest(request) = &event {
+            // This is only structural and authoring-authority admission. Per
+            // `specs/DECISION-generic-peer-event-emission.md`, duplicate
+            // correlation checks, pending-call bookkeeping, and registry routing
+            // run from the committed-event consumer.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(
+                    entry.kind,
+                    ClientKind::Provider | ClientKind::Tool | ClientKind::Core
+                ) && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks tool request authority"
+                );
+                return Ok(());
+            }
+            if request.call_id.is_empty() {
+                self.reject_extension_tool_request(format!(
+                    "extension emitted tool request `{}` with an empty call_id; refusing to publish it",
+                    request.tool_name
+                ));
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if matches!(event, Event::ProviderModelsUpdated(_)) {
             // Canonical provider state is harness-authored. Providers publish the
             // mutable `provider.models_declared` input instead.
@@ -8430,9 +8492,6 @@ impl Harness {
         let Some(event) = self.handle_extension_action_event(source_id, event) else {
             return Ok(());
         };
-        let Some(event) = self.handle_extension_tool_lifecycle_event(source_id, event)? else {
-            return Ok(());
-        };
         let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
             return Ok(());
         };
@@ -8479,6 +8538,10 @@ impl Harness {
             Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
         ) {
             self.process_committed_tool_declaration(peer_context, event);
+            return;
+        }
+        if let Event::ToolRequest(request) = event {
+            self.process_committed_tool_request(peer_context, request);
             return;
         }
         if let Event::ToolProgressReported(progress) = event {
@@ -8552,6 +8615,99 @@ impl Harness {
         }
         if extension.activation_reservation.is_some() {
             self.finish_pending_provider_model_declaration(source_id.as_str());
+        }
+    }
+
+    /// Route one peer request only after its ordinary generic commit.
+    ///
+    /// The request has already passed interception, persistence when selected,
+    /// debug recording, and broadcast. Correlation checks, pending-call
+    /// mutation, and registry routing intentionally remain downstream under
+    /// `specs/DECISION-generic-peer-event-emission.md`.
+    fn process_committed_tool_request(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        request: &ToolRequest,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref().filter(|extension| {
+            matches!(
+                extension.kind,
+                ClientKind::Provider | ClientKind::Tool | ClientKind::Core
+            )
+        }) else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.connection_id == extension.source
+                        && entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && entry.kind == extension.kind
+                        && entry.state != ExtensionState::Disconnected
+                });
+        if !source_is_current {
+            // The request remains a committed observation, but a parked stale
+            // generation cannot route work or alter replacement-generation state.
+            return;
+        }
+        if let Some(message) = self.extension_tool_request_rejection(request) {
+            self.reject_extension_tool_request(message);
+            return;
+        }
+
+        self.track_extension_tool_request_metadata(request);
+        match self.registry.route_tool_request(request.clone()) {
+            Ok(route) => {
+                match &route.target {
+                    ToolRouteTarget::Internal => {
+                        // Configured extensions are trusted local executables; see
+                        // `SECURITY.md#local-ipc-and-external-ingress`. Their
+                        // payload agent id supplies ordinary request correlation,
+                        // while the harness still requires a live loaded route.
+                        let Some(cid) = self
+                            .agent_routes
+                            .get(request.agent_id.as_str())
+                            .filter(|cid| self.agents.contains_key(*cid))
+                            .cloned()
+                        else {
+                            self.reject_peer_tool_request(
+                                request.clone(),
+                                request.tool_name.clone(),
+                                format!(
+                                    "cannot invoke harness-internal tool `{}` for unavailable agent `{}`",
+                                    request.tool_name, request.agent_id
+                                ),
+                            );
+                            return;
+                        };
+                        self.peer_internal_tool_agents
+                            .insert(request.call_id.clone(), cid.clone());
+                        self.tool_turn
+                            .record_unqueued_in_flight(cid.clone(), request.call_id.clone());
+                        self.bump_tools_started_for(&cid);
+                        self.record_wait_tool_request(&request.call_id);
+                    }
+                    ToolRouteTarget::Extension(provider_connection_id) => {
+                        // Establish terminal-report authority before the selected
+                        // tool can observe `tool.started` and immediately answer.
+                        self.ensure_tool_started_subscription(provider_connection_id);
+                        self.pending_tool_providers
+                            .insert(request.call_id.clone(), provider_connection_id.clone());
+                        self.peer_tool_requests.insert(request.call_id.clone());
+                    }
+                }
+                let event = Event::ToolStarted(route.invoke);
+                self.publish_event(Some(HARNESS_CONNECTION_ID), event);
+            }
+            Err(ToolRouteError::NoProvider { tool_name }) => {
+                self.reject_unroutable_extension_tool_request(request.clone(), tool_name);
+            }
+            Err(error) => {
+                self.pending_publish_error = Some(HarnessError::ToolRoute(error));
+            }
         }
     }
 
@@ -8636,15 +8792,20 @@ impl Harness {
             .get(&progress.call_id)
             .is_some_and(|source| source == &extension.source);
         if !source_is_current
-            || !self.tool_agents.contains_key(&progress.call_id)
+            || !(self.tool_agents.contains_key(&progress.call_id)
+                || self.peer_tool_requests.contains(&progress.call_id))
             || !source_owns_route
             || self.tool_turn.is_backgrounded(&progress.call_id)
         {
             return;
         }
+        let mut progress = progress.clone();
+        if let Some(tool) = self.pending_tools.get(&progress.call_id) {
+            progress.tool_name = tool.name.clone();
+        }
         self.enqueue_publish(
             Some(HARNESS_CONNECTION_ID),
-            Event::ToolProgress(progress.clone()),
+            Event::ToolProgress(progress),
             true,
             true,
             None,
@@ -8691,7 +8852,11 @@ impl Harness {
             .pending_tool_providers
             .get(call_id)
             .is_some_and(|source| source == &extension.source);
-        if !source_is_current || !self.tool_agents.contains_key(call_id) || !source_owns_route {
+        if !source_is_current
+            || !(self.tool_agents.contains_key(call_id)
+                || self.peer_tool_requests.contains(call_id))
+            || !source_owns_route
+        {
             return;
         }
         let source_id = extension.source.as_str();
@@ -8931,20 +9096,6 @@ impl Harness {
         }
     }
 
-    fn handle_extension_tool_lifecycle_event(
-        &mut self,
-        source_id: &str,
-        event: Event,
-    ) -> Result<Option<Event>, HarnessError> {
-        match event {
-            Event::ToolRequest(request) => {
-                self.handle_extension_tool_request(source_id, request)?;
-                Ok(None)
-            }
-            other => Ok(Some(other)),
-        }
-    }
-
     fn handle_extension_tool_unregister(
         &mut self,
         source_id: &str,
@@ -9001,81 +9152,25 @@ impl Harness {
         );
     }
 
-    fn handle_extension_tool_request(
-        &mut self,
-        source_id: &str,
-        request: ToolRequest,
-    ) -> Result<(), HarnessError> {
-        if let Some(message) = self.extension_tool_request_rejection(&request) {
-            self.reject_extension_tool_request(message);
-            return Ok(());
-        }
-        // Track extension-originated runtime metadata before publishing so
-        // terminal events can be attributed and enriched.
-        self.track_extension_tool_request_metadata(&request);
-        // Publish with the owning agent when known so live observers and runtime
-        // delivery see the same agent attribution used for later terminal tool
-        // facts. `ToolRequest` itself remains a runtime routing intent, not an
-        // agent-transcript fold.
-        let owning_cid = self.tool_agents.get(&request.call_id).cloned();
-        if let Some(cid) = owning_cid.as_ref()
-            && !self.pending_tools.contains_key(&request.call_id)
-        {
-            self.pending_tools.insert(
-                request.call_id.clone(),
-                PendingTool {
-                    name: request.tool_name.clone(),
-                    internal_name: request.tool_name.clone(),
-                    tool_type: request.tool_type,
-                    allows_provider_image: false,
-                },
-            );
-            self.bump_tools_started_for(cid);
-        }
-        let event = Event::ToolRequest(request.clone());
-        match owning_cid.as_ref() {
-            Some(cid) => self.publish_event_for_agent(cid, Some(source_id), event),
-            None => self.publish_event(Some(source_id), event),
-        }
-        // `ToolRequest` is the runtime pre-routing intent. `route_tool_request`
-        // resolves it. On success we publish `ToolStarted`; subscribed tool
-        // extensions see that event and the owner starts work. On failure we
-        // publish `ToolRejected` and the terminal `ToolError` for model-facing
-        // completion.
-        match self.registry.route_tool_request(request.clone()) {
-            Ok(route) => {
-                let started = route.invoke;
-                let event = Event::ToolStarted(started.clone());
-                match owning_cid.as_ref() {
-                    Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
-                    None => self.publish_event(Some(source_id), event),
-                }
-                match route.target {
-                    ToolRouteTarget::Internal => {}
-                    ToolRouteTarget::Extension(provider_connection_id) => {
-                        self.ensure_tool_started_subscription(&provider_connection_id);
-                        self.pending_tool_providers
-                            .insert(request.call_id.clone(), provider_connection_id);
-                    }
-                }
-            }
-            Err(ToolRouteError::NoProvider { tool_name }) => {
-                self.reject_unroutable_extension_tool_request(source_id, request, tool_name);
-            }
-            Err(error) => return Err(HarnessError::ToolRoute(error)),
-        }
-        Ok(())
-    }
-
     fn reject_unroutable_extension_tool_request(
         &mut self,
-        source_id: &str,
         request: ToolRequest,
         tool_name: ToolName,
     ) {
+        let message = unavailable_tool_error_message(&tool_name);
+        self.reject_peer_tool_request(request, tool_name, message);
+    }
+
+    /// Publish ordered rejection and terminal closure for one committed peer
+    /// request, then retain its completed-call tombstone.
+    fn reject_peer_tool_request(
+        &mut self,
+        request: ToolRequest,
+        tool_name: ToolName,
+        message: String,
+    ) {
         let call_id = request.call_id.to_string();
         let owning_cid = self.tool_agents.get(&request.call_id).cloned();
-        let message = unavailable_tool_error_message(&tool_name);
         let rejected = ToolRejected {
             call_id: request.call_id.clone(),
             tool_name: tool_name.clone(),
@@ -9085,8 +9180,10 @@ impl Harness {
         };
         let event = Event::ToolRejected(rejected);
         match owning_cid.as_ref() {
-            Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
-            None => self.publish_event(Some(source_id), event),
+            Some(cid) => {
+                self.publish_for_agent_from(cid, Some(HARNESS_CONNECTION_ID), event);
+            }
+            None => self.publish_event(Some(HARNESS_CONNECTION_ID), event),
         }
         let error = ToolError {
             call_id: request.call_id,
@@ -9094,11 +9191,11 @@ impl Harness {
             tool_type: request.tool_type,
             message,
             details: None,
-            originator: tau_proto::PromptOriginator::User,
+            originator: request.originator,
 
             display: None,
         };
-        self.publish_terminal_tool_error(owning_cid.as_ref(), None, error);
+        self.publish_terminal_tool_error(owning_cid.as_ref(), Some(HARNESS_CONNECTION_ID), error);
         self.clear_tool_call_tracking(&call_id);
     }
 
@@ -9225,6 +9322,30 @@ impl Harness {
             self.publish_terminal_tool_result(Some(&cid), Some(HARNESS_CONNECTION_ID), result);
             self.on_tool_call_complete(&call_id);
             self.clear_tool_call_tracking(&call_id);
+        } else if self.peer_tool_requests.contains(&result.call_id)
+            && let Some(tool) = self.pending_tools.get(&result.call_id).cloned()
+        {
+            let call_id = result.call_id.to_string();
+            result.tool_name = tool.name;
+            result.tool_type = tool.tool_type;
+            if !result.provider_content.is_empty() {
+                self.publish_terminal_tool_error(
+                    None,
+                    Some(HARNESS_CONNECTION_ID),
+                    ToolError {
+                        call_id: result.call_id,
+                        tool_name: result.tool_name,
+                        tool_type: result.tool_type,
+                        message: "image result rejected for ownerless peer tool request".to_owned(),
+                        details: None,
+                        display: None,
+                        originator: result.originator,
+                    },
+                );
+            } else {
+                self.publish_terminal_tool_result(None, Some(HARNESS_CONNECTION_ID), result);
+            }
+            self.clear_tool_call_tracking(&call_id);
         } else {
             self.emit_info(&format!(
                 "discarding duplicate tool result for call_id={}",
@@ -9248,6 +9369,14 @@ impl Harness {
             self.dedup_tool_error(&cid, &mut error);
             self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
             self.on_tool_call_complete(&call_id);
+            self.clear_tool_call_tracking(&call_id);
+        } else if self.peer_tool_requests.contains(&error.call_id)
+            && let Some(tool) = self.pending_tools.get(&error.call_id).cloned()
+        {
+            let call_id = error.call_id.to_string();
+            error.tool_name = tool.name;
+            error.tool_type = tool.tool_type;
+            self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
             self.clear_tool_call_tracking(&call_id);
         } else {
             self.emit_info(&format!(
@@ -9275,6 +9404,14 @@ impl Harness {
                 Event::ToolCancelled(cancelled),
             );
             self.on_tool_call_complete(&call_id);
+            self.clear_tool_call_tracking(&call_id);
+        } else if self.peer_tool_requests.contains(&cancelled.call_id)
+            && let Some(tool) = self.pending_tools.get(&cancelled.call_id).cloned()
+        {
+            let call_id = cancelled.call_id.to_string();
+            cancelled.tool_name = tool.name;
+            cancelled.tool_type = tool.tool_type;
+            self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
             self.clear_tool_call_tracking(&call_id);
         }
     }
@@ -12354,12 +12491,6 @@ impl Harness {
     }
 
     fn extension_tool_request_rejection(&self, request: &ToolRequest) -> Option<String> {
-        if request.call_id.is_empty() {
-            return Some(format!(
-                "extension emitted tool request `{}` with an empty call_id; refusing to route it",
-                request.tool_name
-            ));
-        }
         self.known_tool_call_ids().contains(&request.call_id).then(|| {
             format!(
                 "extension emitted tool request `{}` with already-known call_id `{}`; refusing to route it",
@@ -12396,6 +12527,11 @@ impl Harness {
         );
     }
 
+    /// Return loaded-agent correlation for one peer request routed internally.
+    pub(crate) fn peer_internal_tool_agent(&self, call_id: &ToolCallId) -> Option<&AgentId> {
+        self.peer_internal_tool_agents.get(call_id)
+    }
+
     fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
         self.prompt_tool_specs.remove(agent_prompt_id);
         self.prompt_tool_call_prompts
@@ -12407,7 +12543,11 @@ impl Harness {
     /// terminal-event enrichment and transcript attribution can still read the
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
-        let owner = self.tool_agents.get(call_id).cloned();
+        let owner = self
+            .tool_agents
+            .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .cloned();
         if owner
             .as_ref()
             .and_then(|cid| self.agents.get(cid))
@@ -12416,6 +12556,8 @@ impl Harness {
             self.completed_ephemeral_tool_calls.insert(call_id.into());
         }
         self.completed_tool_calls.insert(call_id.into());
+        self.peer_tool_requests.remove(call_id);
+        self.peer_internal_tool_agents.remove(call_id);
         if let Some(owner) = owner {
             self.completed_tool_agents.insert(call_id.into(), owner);
         }
@@ -15587,6 +15729,8 @@ impl Harness {
         self.tool_turn.clear();
         self.tool_agents.clear();
         self.pending_tools.clear();
+        self.peer_tool_requests.clear();
+        self.peer_internal_tool_agents.clear();
         self.completed_tool_calls.clear();
         self.completed_ephemeral_tool_calls.clear();
         self.completed_tool_agents.clear();
@@ -16641,6 +16785,27 @@ impl Harness {
     }
 
     fn remove_agent(&mut self, cid: &AgentId) {
+        let mut peer_internal_calls = self
+            .peer_internal_tool_agents
+            .iter()
+            .filter_map(|(call_id, owner)| (owner == cid).then_some(call_id.clone()))
+            .collect::<Vec<_>>();
+        peer_internal_calls.sort();
+        for call_id in peer_internal_calls {
+            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+                self.clear_tool_call_tracking(call_id.as_str());
+                continue;
+            };
+            self.finish_prebuilt_internal_tool_error(ToolError {
+                call_id,
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+                message: "agent unloaded while peer-requested internal tool was pending".to_owned(),
+                details: None,
+                display: None,
+                originator: PromptOriginator::User,
+            });
+        }
         let unloading_agent_id = self
             .agents
             .get(cid)
@@ -20692,7 +20857,12 @@ impl Harness {
         call_id: &ToolCallId,
         result: CborValue,
     ) {
-        let Some(cid) = self.tool_agents.get(call_id).cloned() else {
+        let Some(cid) = self
+            .tool_agents
+            .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .cloned()
+        else {
             return;
         };
         let Some(tool) = self.pending_tools.get(call_id).cloned() else {
@@ -20709,7 +20879,16 @@ impl Harness {
 
             display: None,
         };
-        self.publish_for_agent(&cid, Event::ProviderToolResult(result.clone()));
+        if self.peer_internal_tool_agents.contains_key(call_id) {
+            // Peer-internal agent correlation is runtime-only: publish the
+            // placeholder without transcript ownership.
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::ProviderToolResult(result.clone()),
+            );
+        } else {
+            self.publish_for_agent(&cid, Event::ProviderToolResult(result.clone()));
+        }
         self.record_wait_tool_result(result);
     }
 
@@ -20789,7 +20968,13 @@ impl Harness {
         mut result: ToolResult,
         advance_queue: bool,
     ) {
-        let Some(cid) = self.tool_agents.get(&result.call_id).cloned() else {
+        let peer_internal = self.peer_internal_tool_agents.contains_key(&result.call_id);
+        let Some(cid) = self
+            .tool_agents
+            .get(&result.call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(&result.call_id))
+            .cloned()
+        else {
             return;
         };
         let call_id = result.call_id.clone();
@@ -20806,6 +20991,22 @@ impl Harness {
             display: result.display,
             originator: result.originator,
         };
+        if peer_internal {
+            // Settle ownerless runtime/wait state without creating transcript or
+            // background-completion-prompt ownership.
+            self.publish_event(
+                Some(source_id),
+                Event::ToolBackgroundResult(background.clone()),
+            );
+            self.record_wait_background_result(background);
+            self.tool_turn.mark_complete(&call_id);
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
+            }
+            self.emit_agent_stats_updated(&cid);
+            self.clear_tool_call_tracking(call_id.as_str());
+            return;
+        }
         self.publish_for_agent_from(
             &cid,
             Some(source_id),
@@ -20878,7 +21079,13 @@ impl Harness {
         mut error: ToolError,
         completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
-        let Some(cid) = self.tool_agents.get(&error.call_id).cloned() else {
+        let peer_internal = self.peer_internal_tool_agents.contains_key(&error.call_id);
+        let Some(cid) = self
+            .tool_agents
+            .get(&error.call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(&error.call_id))
+            .cloned()
+        else {
             return;
         };
         let call_id = error.call_id.clone();
@@ -20900,6 +21107,14 @@ impl Harness {
             display: error.display,
             originator: error.originator,
         };
+        if peer_internal {
+            // Settle ownerless runtime/wait state without creating transcript or
+            // background-completion-prompt ownership.
+            self.publish_event(source, Event::ToolBackgroundError(background.clone()));
+            self.record_wait_background_error(background);
+            self.clear_tool_call_tracking(call_id.as_str());
+            return;
+        }
         self.publish_terminal_background_error(&cid, source, background);
         match completion_prompt_mode {
             BackgroundCompletionPromptMode::QueueAndAdvance => {

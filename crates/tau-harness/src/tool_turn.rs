@@ -88,8 +88,7 @@ impl ToolTurnMachine {
     }
 
     /// Mark an invocation as in flight without queueing it first.
-    #[cfg(test)]
-    pub(crate) fn record_in_flight_for_test(
+    pub(crate) fn record_unqueued_in_flight(
         &mut self,
         conversation_id: AgentId,
         call_id: ToolCallId,

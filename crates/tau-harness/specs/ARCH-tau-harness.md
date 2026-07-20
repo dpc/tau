@@ -3,7 +3,7 @@
 ## Status
 
 The external-message, provider-model, provider-quota, tool-lifecycle,
-tool-progress, and terminal-tool-outcome slices
+tool-request, tool-progress, and terminal-tool-outcome slices
 now use generic `Emit` publication, immutable authenticated internal publisher
 snapshots, source-aware admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
@@ -55,6 +55,17 @@ generation and exact routed-call owner before applying existing terminal
 processing and publishing protected harness-sourced terminal, provider, or
 background projections; see
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Provider/Tool/Core peers submit `tool.request` through generic
+publication before routing. The post-commit consumer revalidates the captured
+generation and call-id correlation, installs terminal ownership, and publishes
+harness-sourced started or rejection/terminal facts. Caller-selected durable
+requests retain stable configured publisher provenance but never rerun work on
+replay; see
+[SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
+Peer requests routed to harness-internal tools use separate runtime loaded-agent
+correlation for execution, wait, ephemeral, and unload lifecycle; they never
+acquire transcript tool-call ownership, so their terminal facts remain
+ownerless and non-transcript.
 For each prompt, the harness alone resolves the effective
 post-policy/provider-filtered tool snapshot used for definitions,
 authorization, capabilities, and diagnostics, as specified by

@@ -292,6 +292,11 @@ fn preserve_shell_command_identity(original: &Event, replacement: &mut Event) {
     }
 }
 
+/// Reject a replacement that cannot carry tool-call correlation.
+fn invalid_tool_request_replacement(event: &Event) -> bool {
+    matches!(event, Event::ToolRequest(request) if request.call_id.is_empty())
+}
+
 pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
     matches!(
         original,
@@ -1051,6 +1056,14 @@ impl Harness {
                             target: "tau_harness::interception",
                             event = %event_name,
                             "interceptor tried to modify an immutable protected fact; \
+                             publishing original instead",
+                        );
+                        Some(original_event)
+                    } else if invalid_tool_request_replacement(&new_event) {
+                        tracing::warn!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            "interceptor returned a tool request with an empty call id; \
                              publishing original instead",
                         );
                         Some(original_event)

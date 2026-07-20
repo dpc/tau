@@ -367,7 +367,12 @@ impl<'a> InternalToolHost<'a> {
         &mut self,
         started: &tau_proto::ToolStarted,
     ) -> Option<(AgentId, AgentToolCall, ToolName)> {
-        let cid = self.harness.tool_agents.get(&started.call_id)?.clone();
+        let cid = self
+            .harness
+            .tool_agents
+            .get(&started.call_id)
+            .or_else(|| self.harness.peer_internal_tool_agent(&started.call_id))?
+            .clone();
         let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
         let call = AgentToolCall {
             id: started.call_id.clone(),

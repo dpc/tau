@@ -5141,7 +5141,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     );
     h.tool_agents.insert(call_id.clone(), cid.clone());
     h.tool_turn
-        .record_in_flight_for_test(cid.clone(), call_id.clone());
+        .record_unqueued_in_flight(cid.clone(), call_id.clone());
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cid, vec![call_id.clone()]);
@@ -5254,7 +5254,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     );
     h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
     h.tool_turn
-        .record_in_flight_for_test(cancel_cid.clone(), call_id.clone());
+        .record_unqueued_in_flight(cancel_cid.clone(), call_id.clone());
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
@@ -12762,7 +12762,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
             },
         );
         h.tool_turn
-            .record_in_flight_for_test(cid.clone(), call_id.into());
+            .record_unqueued_in_flight(cid.clone(), call_id.into());
         h.prompt_tool_call_prompts
             .insert(call_id.into(), "sp-seeded-tools".into());
     }
@@ -12896,7 +12896,7 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
             },
         );
         h.tool_turn
-            .record_in_flight_for_test(cid.clone(), call_id.into());
+            .record_unqueued_in_flight(cid.clone(), call_id.into());
         h.prompt_tool_call_prompts
             .insert(call_id.into(), "sp-seeded-tools".into());
     }
@@ -12969,7 +12969,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
         },
     );
     h.tool_turn
-        .record_in_flight_for_test(cid.clone(), "call-replay-compact".into());
+        .record_unqueued_in_flight(cid.clone(), "call-replay-compact".into());
     h.prompt_tool_call_prompts
         .insert("call-replay-compact".into(), "sp-seeded-tools".into());
     h.request_agent_tool_compaction(
@@ -13166,7 +13166,7 @@ fn setup_manual_cross_compaction_test() -> (
         },
     );
     h.tool_turn
-        .record_in_flight_for_test(caller_cid.clone(), "call-cross-compact".into());
+        .record_unqueued_in_flight(caller_cid.clone(), "call-cross-compact".into());
     h.prompt_tool_call_prompts
         .insert("call-cross-compact".into(), "sp-seeded-tools".into());
     let call = AgentToolCall {
@@ -16354,7 +16354,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.background_completion_targets
         .insert(call_id.clone(), side_cid.clone());
     h.tool_turn
-        .record_in_flight_for_test(side_cid.clone(), call_id.clone());
+        .record_unqueued_in_flight(side_cid.clone(), call_id.clone());
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.queue_background_completion_prompt(&side_cid, &call_id);
 

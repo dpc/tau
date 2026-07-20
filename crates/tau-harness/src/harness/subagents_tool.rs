@@ -271,6 +271,12 @@ impl Harness {
         }
     }
 
+    /// Reports whether the wait projection tracks one pending tool call.
+    #[cfg(test)]
+    pub(crate) fn wait_tracks_call_for_test(&self, call_id: &ToolCallId) -> bool {
+        self.subagents.wait_tracker.calls.contains_key(call_id)
+    }
+
     pub(crate) fn record_wait_tool_result(&mut self, result: ToolResult) {
         let Some(owner) = self.wait_owner_for_call(&result.call_id) else {
             return;
@@ -340,8 +346,36 @@ impl Harness {
     fn wait_owner_for_call(&self, call_id: &ToolCallId) -> Option<AgentId> {
         self.tool_agents
             .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
             .or_else(|| self.background_completion_targets.get(call_id))
             .cloned()
+    }
+
+    /// Settle runtime accounting and clear one harness-owned internal call.
+    fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
+        if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
+            self.tool_turn.mark_complete(call_id);
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
+            }
+            self.emit_agent_stats_updated(&cid);
+        } else {
+            self.on_tool_call_complete(call_id.as_str());
+        }
+        self.clear_tool_call_tracking(call_id.as_str());
+    }
+
+    /// Return transcript ownership only for ordinary agent-owned internal
+    /// calls.
+    ///
+    /// Peer-internal correlation is runtime state and must not graft terminal
+    /// facts into a transcript without a matching tool-call node.
+    fn harness_owned_terminal_transcript_owner<'a>(
+        &self,
+        cid: &'a AgentId,
+        call_id: &ToolCallId,
+    ) -> Option<&'a AgentId> {
+        (!self.peer_internal_tool_agents.contains_key(call_id)).then_some(cid)
     }
 
     /// Complete waits owned by `owner` after inference-activating input has
@@ -1742,7 +1776,9 @@ impl Harness {
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
-        if self.tool_agents.contains_key(&call.id) {
+        if self.tool_agents.contains_key(&call.id)
+            || self.peer_internal_tool_agents.contains_key(&call.id)
+        {
             return;
         }
         self.tool_agents.insert(call.id.clone(), cid.clone());
@@ -1796,9 +1832,9 @@ impl Harness {
             display,
             originator: tau_proto::PromptOriginator::User,
         };
-        self.publish_terminal_tool_result(Some(cid), None, result);
-        self.on_tool_call_complete(call_id.as_str());
-        self.clear_tool_call_tracking(call_id.as_str());
+        let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
+        self.publish_terminal_tool_result(transcript_owner, None, result);
+        self.finish_harness_owned_tool_tracking(&call_id);
     }
 
     pub(crate) fn finish_harness_owned_tool_with_error(
@@ -1835,36 +1871,48 @@ impl Harness {
             display,
             originator: tau_proto::PromptOriginator::User,
         };
-        self.publish_terminal_tool_error(Some(cid), None, error);
-        self.on_tool_call_complete(call_id.as_str());
-        self.clear_tool_call_tracking(call_id.as_str());
+        let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
+        self.publish_terminal_tool_error(transcript_owner, None, error);
+        self.finish_harness_owned_tool_tracking(&call_id);
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
         let call_id = result.call_id.clone();
-        let Some(owner_cid) = self.tool_agents.get(&call_id).cloned() else {
+        let Some(owner_cid) = self
+            .tool_agents
+            .get(&call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(&call_id))
+            .cloned()
+        else {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
         } else {
-            self.publish_terminal_tool_result(Some(&owner_cid), None, result);
-            self.on_tool_call_complete(call_id.as_str());
-            self.clear_tool_call_tracking(call_id.as_str());
+            let transcript_owner =
+                self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
+            self.publish_terminal_tool_result(transcript_owner, None, result);
+            self.finish_harness_owned_tool_tracking(&call_id);
         }
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_error(&mut self, error: ToolError) {
         let call_id = error.call_id.clone();
-        let Some(owner_cid) = self.tool_agents.get(&call_id).cloned() else {
+        let Some(owner_cid) = self
+            .tool_agents
+            .get(&call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(&call_id))
+            .cloned()
+        else {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
         } else {
-            self.publish_terminal_tool_error(Some(&owner_cid), None, error);
-            self.on_tool_call_complete(call_id.as_str());
-            self.clear_tool_call_tracking(call_id.as_str());
+            let transcript_owner =
+                self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
+            self.publish_terminal_tool_error(transcript_owner, None, error);
+            self.finish_harness_owned_tool_tracking(&call_id);
         }
     }
 
@@ -1877,13 +1925,20 @@ impl Harness {
                 self.suppress_background_completion_prompt(call_id);
             }
             let wait_call_id = reply.wait_call_id.clone();
-            let Some(cid) = self.tool_agents.get(&wait_call_id).cloned() else {
+            let Some(cid) = self
+                .tool_agents
+                .get(&wait_call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(&wait_call_id))
+                .cloned()
+            else {
                 continue;
             };
+            let transcript_owner =
+                self.harness_owned_terminal_transcript_owner(&cid, &wait_call_id);
             match reply.kind {
                 WaitReplyKind::Result { result, display } => {
                     self.publish_terminal_tool_result(
-                        Some(&cid),
+                        transcript_owner,
                         None,
                         ToolResult {
                             call_id: reply.wait_call_id,
@@ -1903,7 +1958,7 @@ impl Harness {
                     display,
                 } => {
                     self.publish_terminal_tool_error(
-                        Some(&cid),
+                        transcript_owner,
                         None,
                         ToolError {
                             call_id: reply.wait_call_id,
@@ -1917,8 +1972,7 @@ impl Harness {
                     );
                 }
             }
-            self.on_tool_call_complete(wait_call_id.as_str());
-            self.clear_tool_call_tracking(wait_call_id.as_str());
+            self.finish_harness_owned_tool_tracking(&wait_call_id);
         }
     }
 }

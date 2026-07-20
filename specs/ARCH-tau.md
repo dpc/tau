@@ -14,6 +14,10 @@ Terminal result, error, and cancellation observations follow the same
 commit-before-validation boundary. The harness alone publishes protected
 terminal and provider transcript projections as specified by
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Provider/Tool/Core peers publish tool routing intents before the
+harness checks correlation or resolves a provider. Started and rejected outcomes
+are harness-authored, and durable request replay is observation-only, as specified
+by [SPEC-tool-requests-and-routing](SPEC-tool-requests-and-routing.md).
 Provider extensions similarly report bounded quota replacements, patches, and
 clears before validation; only the harness publishes accepted current snapshots,
 as specified by

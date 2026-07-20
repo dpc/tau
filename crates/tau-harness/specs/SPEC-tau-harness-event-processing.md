@@ -31,12 +31,19 @@ and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 
-`tool.request` and `tool.started` are session-scoped execution restore facts.
-They are persisted in each session's `restore-events.cbor` stream (or the
+`tool.request` and `tool.started` are eligible session-scoped execution restore
+facts. Non-transient facts are persisted in each session's
+`restore-events.cbor` stream (or the
 equivalent in-memory stream for ephemeral sessions), replayed only to peers that
 request matching `historical_selectors`, and deliberately kept out of agent
 transcript logs. Live tool execution remains driven only by non-replay
 `tool.started` deliveries.
+For peer-authored requests, generic Emit preserves the supplied `transient`
+value. Only non-transient requests enter the restore stream, where their source
+is the stable configured publisher name rather than the run-local connection.
+The live committed peer envelope alone invokes correlation and routing;
+historical delivery never does. The complete peer request flow is
+[SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
 
 Catch-up snapshots reconstructed from current harness state (for example
 `session.agent_loaded`, folded metadata, and `harness.session_dir`) are also

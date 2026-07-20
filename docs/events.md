@@ -310,6 +310,10 @@ their selected models.
   Generic live subscribers receive no image bytes, and historical replay may
   omit provider content entirely; neither generic broadcast nor replay is
   provider-content authority.
+  Peer requests routed to harness-internal tools are the explicit exception:
+  their loaded-agent correlation is runtime-only, so resulting
+  `provider.tool_result` / `provider.tool_error` events remain ownerless and do
+  not fold into prompt history.
 - **`provider.cache_miss_diagnostic`** — Provider-owned diagnostic for a prompt
   with unexpectedly low cache reuse. The harness accepts it only from the
   provider that owns the prompt, and providers emit it before the matching
@@ -343,9 +347,15 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   with any known live, completed, or durable transcript tool call are refused
   with `harness.notice` only, not a call-id-keyed terminal event. Transcript
   tool-call truth comes from the provider response's `ContextItem::ToolCall`,
-  not this routing event. The event is persisted in the session restore log,
+  not this routing event. When non-transient, the event is persisted in the session restore log,
   not the agent transcript log, so restore handlers can correlate execution
   state without re-running live tool execution.
+  Configured Provider, Tool, and Core extensions publish the request through
+  ordinary generic Emit; it commits before duplicate-call checks or registry
+  routing. `Emit.transient=true` keeps it live-only, while `false` records the
+  stable configured publisher in session restore history. Historical delivery
+  never routes or executes it.
+  See [SPEC-tool-requests-and-routing](../specs/SPEC-tool-requests-and-routing.md).
 - **`tool.started`** *(harness)* — The harness accepted and routed a
   tool request. This runtime broadcast is the signal that the selected tool
   provider should start the call, and that UIs can show a generic pending tool

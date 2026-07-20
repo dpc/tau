@@ -133,6 +133,9 @@ harness snapshots. Peers that perform side effects must register live handlers
 and ignore `deliver` frames with `replay: true`; restore handlers may opt in to
 historical execution facts such as `tool.request` and `tool.started` and to
 catch-up snapshots such as `session.agent_loaded` or `harness.session_dir`.
+Historical `tool.request` is correlation evidence only: replay consumers must
+never route, execute, or recover the requested call. See
+[SPEC-tool-requests-and-routing](../specs/SPEC-tool-requests-and-routing.md).
 Timer-like extensions should rebuild active state from replayed execution facts
 and wait for `agent.replay_complete` before submitting restored overdue internal
 prompts.

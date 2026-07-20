@@ -32,6 +32,11 @@ canonical terminal and provider projections. Reports and canonical facts reuse
 the existing terminal payload DTOs; the event names establish authorship and
 commit stage. See
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+The unchanged `tool.request` name is a peer routing intent from configured
+Provider/Tool/Core extensions. Its enclosing `Emit.transient` selects live-only
+or session-restore publication; durable replay carries stable configured
+publisher provenance but never requests execution. See
+[SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately

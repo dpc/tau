@@ -109,6 +109,20 @@ while existing provider/cancellation/background transcript persistence is
 unchanged. Ephemeral-agent classification suppresses raw reports and every
 projection from durable debug JSONL. See
 [`SPEC-terminal-tool-reports-and-canonical-outcomes`](specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Provider/Tool/Core peers may also publish `tool.request` routing
+intents. The request commits before live generation, call-id correlation, and
+registry routing checks; only harness-sourced derived facts assert acceptance
+or terminal closure. Durable requests retain stable configured publisher
+identity but replay never routes or executes work. See
+[`SPEC-tool-requests-and-routing`](specs/SPEC-tool-requests-and-routing.md).
+Configured local extensions are trusted to supply request agent correlation.
+Internal-route correlation remains runtime/accounting state and never grants
+agent-transcript ownership; its terminal projections are ownerless.
+Separate pending correlation accepts progress and terminal reports only from the
+exact routed owner; every accepted terminal or routed-owner disconnect clears
+live request state and retains the completed-call tombstone. Re-check
+request-to-terminal and internal-route closure tests whenever pending-call
+ownership or report consumers change.
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

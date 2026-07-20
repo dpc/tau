@@ -4857,7 +4857,7 @@ fn disconnected_tool_completes_pending_call() {
     h.pending_tool_providers
         .insert(call_id.clone(), conn_id.clone().into());
     h.tool_turn
-        .record_in_flight_for_test(cid.clone(), call_id.clone());
+        .record_unqueued_in_flight(cid.clone(), call_id.clone());
     if let Some(conv) = h.agents.get_mut(&cid) {
         conv.turn_state = AgentTurnState::ToolsRunning {
             remaining_calls: vec![call_id.clone()],
@@ -6534,6 +6534,8 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
     );
 }
 
+/// A peer request with an in-flight agent call ID must commit before rejection,
+/// while preserving the original call's owner, metadata, and terminal path.
 #[test]
 fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     let td = TempDir::new().expect("tempdir");
@@ -6544,6 +6546,12 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
         "owner-ext",
         "configured-owner",
         tau_proto::ClientKind::Tool,
+    );
+    connect_ready_configured_extension(
+        &mut h,
+        "hijacker-ext",
+        "configured-hijacker",
+        tau_proto::ClientKind::Provider,
     );
     let cid = ensure_test_user_agent(&mut h);
     let owner_agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -6587,16 +6595,24 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     );
     h.pending_tool_providers
         .insert(call_id.clone(), "owner-ext".into());
+    let completed_before = h.completed_tool_calls.clone();
+    let (in_flight_before, total_before) = {
+        let agent = &h.agents[&cid];
+        (agent.tools_in_flight, agent.tools_total)
+    };
 
     h.handle_extension_event(
         "hijacker-ext",
-        TestProtocolItem::Event(Event::ToolRequest(tau_proto::ToolRequest {
-            call_id: call_id.clone(),
-            tool_name: ToolName::new("write"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            agent_id: crate::parse_agent_id("agent-1"),
-            originator: tau_proto::PromptOriginator::User,
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ToolRequest(tau_proto::ToolRequest {
+                call_id: call_id.clone(),
+                tool_name: ToolName::new("write"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                agent_id: crate::parse_agent_id("agent-1"),
+                originator: tau_proto::PromptOriginator::User,
+            })),
+            transient: true,
         })),
     )
     .expect("reject reused extension call id");
@@ -6612,6 +6628,9 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             .map(tau_proto::ConnectionId::as_str),
         Some("owner-ext")
     );
+    assert_eq!(h.completed_tool_calls, completed_before);
+    assert_eq!(h.agents[&cid].tools_in_flight, in_flight_before);
+    assert_eq!(h.agents[&cid].tools_total, total_before);
     assert!(!event_log_events(&h).iter().any(|event| {
         matches!(
             event,
@@ -6624,6 +6643,23 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             Event::HarnessNotice(info) if info.message.contains("already-known call_id")
         )
     }));
+    let events = event_log_events(&h);
+    let request_pos = events
+        .iter()
+        .position(
+            |event| matches!(event, Event::ToolRequest(request) if request.call_id == call_id),
+        )
+        .expect("duplicate request commits");
+    let notice_pos = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::HarnessNotice(info) if info.message.contains("already-known call_id")
+            )
+        })
+        .expect("duplicate notice");
+    assert!(request_pos < notice_pos);
     assert!(
         !default_agent_tree(&h)
             .nodes()
