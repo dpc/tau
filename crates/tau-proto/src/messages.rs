@@ -693,6 +693,22 @@ pub struct SessionAgentListError {
     pub message: String,
 }
 
+/// Request for the harness's authoritative current session id.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetCurrentSession {
+    /// Caller-generated correlation id.
+    pub request_id: String,
+}
+
+/// Directed response to [`GetCurrentSession`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CurrentSessionResult {
+    /// Correlation id copied from the request.
+    pub request_id: String,
+    /// Harness-owned current session id at request handling time.
+    pub session_id: SessionId,
+}
+
 /// Request for a content-minimized roster of the currently bound session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GetSessionAgentList {
@@ -973,6 +989,7 @@ pub enum HarnessInputMessage {
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
     GetRenderedPrompt(GetRenderedPrompt),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
+    GetCurrentSession(GetCurrentSession),
     GetSessionAgentList(GetSessionAgentList),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
@@ -1010,6 +1027,7 @@ pub enum HarnessOutputMessage {
     RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     RenderedPromptResult(Box<RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
+    CurrentSessionResult(CurrentSessionResult),
     SessionAgentListResult(Box<SessionAgentListResult>),
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),

@@ -1311,6 +1311,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             request_id: "render-tools-1".to_owned(),
             role: "engineer".to_owned(),
         }),
+        HarnessInputMessage::GetCurrentSession(GetCurrentSession {
+            request_id: "current-session-1".to_owned(),
+        }),
         HarnessInputMessage::GetSessionAgentList(GetSessionAgentList {
             request_id: "agent-list-1".to_owned(),
             session_id: "s1".into(),
@@ -1408,6 +1411,10 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                 error: None,
             },
         )),
+        HarnessOutputMessage::CurrentSessionResult(CurrentSessionResult {
+            request_id: "current-session-1".to_owned(),
+            session_id: "s1".into(),
+        }),
         HarnessOutputMessage::SessionAgentListResult(Box::new(SessionAgentListResult {
             request_id: "agent-list-1".to_owned(),
             session_id: "s1".into(),

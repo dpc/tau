@@ -136,7 +136,7 @@ pub enum Command {
     #[command(hide = true)]
     Run(RunArgs),
 
-    /// Inspect persisted sessions.
+    /// Inspect sessions.
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -195,12 +195,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
-    /// List all sessions.
-    List {
-        /// Path to per-session storage root (`<state-dir>/sessions/`)
-        #[arg(long, default_value_os_t = default_sessions_dir())]
-        sessions_dir: PathBuf,
-    },
+    /// List currently running sessions.
+    List,
 
     /// Show a single session's history.
     Show {

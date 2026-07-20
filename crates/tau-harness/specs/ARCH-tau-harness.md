@@ -133,6 +133,14 @@ exit-on-disconnect path a bounded grace period to shut down and remove its own
 runtime pair; forced termination is only the fallback. Targeted session lookup
 may traverse a larger bounded raw catalog than general peer discovery so stale
 unrelated pairs do not consume the much smaller matching-candidate budget.
+Local running-session listing isolates bounded runtime-path traversal, then uses
+a per-candidate, correlation-matched local socket RPC to obtain each responsive harness's
+in-memory current session id. Runtime metadata and persisted session directories
+are not lifecycle authority. The overall scan has a fixed deadline and fails
+instead of returning a partial snapshot when candidate traversal or the total
+probe budget is incomplete.
+This authority is governed by
+[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
 
 Accept-loop shutdown must use an owned wake/cancellation primitive tied to the
 accept thread, not polling sleeps and not the filesystem socket pathname. Runtime

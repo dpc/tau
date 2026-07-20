@@ -165,6 +165,14 @@ sender/recipient projections or prompt routing. It is renderer-local: attachment
 catch-up is limited to projections replayed for currently loaded agents, not a
 new durable session-wide message index.
 
+`tau session list` uses runtime paths only to locate socket candidates. Each
+responsive harness returns its in-memory current session id through a directed
+local control RPC; persisted directories and runtime metadata never supply rows.
+The CLI sorts, deduplicates, and escapes ids into line- and ANSI-control-safe
+records. The runtime scan and protocol authority are governed by
+[ARCH-tau-harness](../../tau-harness/specs/ARCH-tau-harness.md) and
+[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
 parent-before-child TSV ordering, and escaping. The C-b active action and C-B

@@ -301,6 +301,9 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::RenderedToolDefinitionsResult(_) => {
             "message.rendered_tool_definitions_result".to_owned()
         }
+        HarnessOutputMessage::CurrentSessionResult(_) => {
+            "message.current_session_result".to_owned()
+        }
         HarnessOutputMessage::SessionAgentListResult(_) => {
             "message.session_agent_list_result".to_owned()
         }
@@ -333,6 +336,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
         HarnessInputMessage::GetRenderedPrompt(_) => "get_rendered_prompt",
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
+        HarnessInputMessage::GetCurrentSession(_) => "get_current_session",
         HarnessInputMessage::GetSessionAgentList(_) => "get_session_agent_list",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",

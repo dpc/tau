@@ -66,6 +66,7 @@ enum TestMessage {
     ConfigError(tau_proto::ConfigError),
     Emit(tau_proto::Emit),
     InterceptReply(InterceptReply),
+    GetCurrentSession(tau_proto::GetCurrentSession),
     GetSessionAgentList(tau_proto::GetSessionAgentList),
     Configure(tau_proto::Configure),
     InterceptRequest(tau_proto::InterceptRequest),
@@ -74,6 +75,7 @@ enum TestMessage {
     RenderedSystemPromptResult(Box<tau_proto::RenderedSystemPromptResult>),
     RenderedPromptResult(Box<tau_proto::RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
+    CurrentSessionResult(tau_proto::CurrentSessionResult),
     SessionAgentListResult(Box<tau_proto::SessionAgentListResult>),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
@@ -131,6 +133,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::RenderedToolDefinitionsResult(message) => {
                 Self::Message(TestMessage::RenderedToolDefinitionsResult(message))
             }
+            HarnessOutputMessage::CurrentSessionResult(message) => {
+                Self::Message(TestMessage::CurrentSessionResult(message))
+            }
             HarnessOutputMessage::SessionAgentListResult(message) => {
                 Self::Message(TestMessage::SessionAgentListResult(message))
             }
@@ -181,6 +186,7 @@ impl TestMessage {
             Self::ConfigError(message) => HarnessInputMessage::ConfigError(message),
             Self::Emit(message) => HarnessInputMessage::Emit(message),
             Self::InterceptReply(message) => HarnessInputMessage::InterceptReply(message),
+            Self::GetCurrentSession(message) => HarnessInputMessage::GetCurrentSession(message),
             Self::GetSessionAgentList(message) => HarnessInputMessage::GetSessionAgentList(message),
             Self::Configure(_)
             | Self::InterceptRequest(_)
@@ -189,6 +195,7 @@ impl TestMessage {
             | Self::RenderedSystemPromptResult(_)
             | Self::RenderedPromptResult(_)
             | Self::RenderedToolDefinitionsResult(_)
+            | Self::CurrentSessionResult(_)
             | Self::SessionAgentListResult(_)
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)

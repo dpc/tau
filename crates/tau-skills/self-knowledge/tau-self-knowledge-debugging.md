@@ -74,14 +74,16 @@ cargo r -- dev send <session_id> '!pwd'
 
 The command requires the session id and finds the matching running daemon via
 runtime harness metadata. That metadata's `session_id` is the daemon's active
-current session and is updated by `/session new`; stale sockets are cleaned
-during discovery, and ambiguous live matches are treated as an error. It
+current session and is updated by `/session new`; discovery leaves stale runtime
+files untouched, and ambiguous live matches are treated as an error. It
 supports normal prompts, core slash commands, and `!` / `!!` shell-command
 submissions.
 
 ## Quick inspection workflow
 
-1. Identify the session id. If unsure, list `~/.local/state/tau/sessions/` and sort by `meta.json` or directory mtime.
+1. Identify a running session with `tau session list`. For historical sessions,
+   inspect `~/.local/state/tau/sessions/` and sort by `meta.json` or directory
+   mtime.
 2. Read `events.jsonl` around the failing prompt first.
 3. Cross-check with `logs/tau-harness.log` and extension logs for errors or panics.
 4. Check session/agent `events.cbor` only when the bug involves replay or persisted semantic contents.

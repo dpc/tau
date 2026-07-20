@@ -140,6 +140,11 @@ prompts.
 
 ## Current-session agent roster RPC
 
+Accepted local socket clients use `get_current_session` to request the
+harness-owned in-memory current session id. The directed
+`current_session_result` is correlation-matched and bypasses event publication,
+subscriptions, and persisted runtime metadata.
+
 UI-classified local clients use `get_session_agent_list` to request a shallow,
 read-only roster from the harness currently bound to an exact `session_id`.
 `current` scope returns current members; `history` also returns previously loaded

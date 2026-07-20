@@ -8154,6 +8154,7 @@ impl Harness {
             | HarnessInputMessage::GetRenderedSystemPrompt(_)
             | HarnessInputMessage::GetRenderedPrompt(_)
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
+            | HarnessInputMessage::GetCurrentSession(_)
             | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
@@ -8978,6 +8979,12 @@ impl Harness {
         }
     }
 
+    fn is_ui_client(&self, client_id: &str) -> bool {
+        self.bus
+            .connection(client_id)
+            .is_some_and(|connection| connection.kind == ClientKind::Ui)
+    }
+
     fn handle_client_message(
         &mut self,
         client_id: &str,
@@ -9040,11 +9047,23 @@ impl Harness {
                 self.send_rendered_tool_definitions_result(client_id, request);
                 Ok(true)
             }
+            HarnessInputMessage::GetCurrentSession(request) => {
+                if self.is_ui_client(client_id) {
+                    let _ = self.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::CurrentSessionResult(
+                            tau_proto::CurrentSessionResult {
+                                request_id: request.request_id,
+                                session_id: self.current_session_id.clone(),
+                            },
+                        ),
+                    );
+                }
+                Ok(true)
+            }
             HarnessInputMessage::GetSessionAgentList(request) => {
-                let is_ui = self.bus.connections().iter().any(|connection| {
-                    connection.id.as_str() == client_id && connection.kind == ClientKind::Ui
-                });
-                if is_ui {
+                if self.is_ui_client(client_id) {
                     self.send_session_agent_list_result(client_id, request);
                 }
                 Ok(true)

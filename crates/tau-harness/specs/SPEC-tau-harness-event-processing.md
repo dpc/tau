@@ -125,9 +125,18 @@ must-pass and immutable because they carry the complete shared classification.
 
 ## Directed agent-roster reads
 
-`get_session_agent_list` is accepted only from a connection whose `Hello`
-classified it as `ClientKind::Ui`. Its result is correlated and sent only to the
-requester. It bypasses event publication, interception, persistence,
+`get_current_session` is accepted from an attached local socket/control
+connection and returns the event loop's in-memory current session id directly to
+that requester. Socket connections currently retain their accepted UI metadata;
+the `Hello.client_kind` claim does not authorize this same-UID control RPC.
+Runtime files locate the socket but do not supply the returned lifecycle fact.
+See
+[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+
+`get_session_agent_list` uses the same harness-assigned local UI/control
+connection metadata as `get_current_session`; `Hello.client_kind` does not
+authorize it. Its result is correlated and sent only to the requester. It
+bypasses event publication, interception, persistence,
 subscriptions, and replay. The serialized event-loop position supplies one
 coherent membership/runtime/navigation cut, although the result may become stale
 immediately after delivery.

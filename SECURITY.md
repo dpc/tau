@@ -108,6 +108,12 @@ Targeted session lookup bounds raw traversal, matching candidates, metadata
 bytes, and total time and fails closed when uniqueness remains unproven,
 including unreadable conventional metadata owned by a live or
 liveness-unknown PID.
+Local running-session listing isolates bounded raw traversal from its caller and
+uses runtime paths only as socket candidates. Each responsive daemon returns its
+in-memory current session id through a correlation-matched, per-probe-deadline
+local socket RPC; adjacent metadata and persisted session directories are not
+lifecycle authority. The CLI escapes record separators and terminal controls
+before writing line-oriented output.
 
 Inter-harness/session communication is likewise cooperative same-UID IPC, with
 correlation and bounded model-spend admission rather than hostile-sender ACLs.

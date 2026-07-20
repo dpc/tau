@@ -160,6 +160,7 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
         HarnessInputMessage::GetRenderedPrompt(_) => "GetRenderedPrompt",
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
+        HarnessInputMessage::GetCurrentSession(_) => "GetCurrentSession",
         HarnessInputMessage::GetSessionAgentList(_) => "GetSessionAgentList",
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
         HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",

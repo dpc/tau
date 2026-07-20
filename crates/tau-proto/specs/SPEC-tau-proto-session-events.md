@@ -104,6 +104,11 @@ results acknowledge processing but do not replace the authoritative snapshot.
 
 ## Directed current-session agent roster
 
+`get_current_session` carries a correlation id and `current_session_result`
+echoes it with the harness-owned current session id.
+See
+[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+
 `get_session_agent_list` carries a correlation id, exact current session id, and
 `current` or `history` scope. `session_agent_list_result` echoes the correlation
 and session ids and carries either every row or one whole-request error with no

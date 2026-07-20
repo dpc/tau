@@ -82,6 +82,11 @@ pub enum SocketTransportError {
         /// Underlying stream clone error.
         source: io::Error,
     },
+    /// Spawning the bounded background socket reader failed.
+    SpawnReader {
+        /// Underlying thread admission error.
+        source: io::Error,
+    },
     /// Encoding a protocol message failed.
     Encode {
         /// Underlying protocol encode error.
@@ -144,6 +149,9 @@ impl fmt::Display for SocketTransportError {
                 )
             }
             Self::Clone { source } => write!(f, "failed to clone Unix socket stream: {source}"),
+            Self::SpawnReader { source } => {
+                write!(f, "failed to spawn Unix socket reader: {source}")
+            }
             Self::Encode { source } => write!(f, "failed to encode socket event: {source}"),
             Self::Flush { source } => write!(f, "failed to flush socket stream: {source}"),
             Self::Decode { source } => write!(f, "failed to decode socket event: {source}"),
@@ -163,6 +171,7 @@ impl std::error::Error for SocketTransportError {
             Self::Accept { source } => Some(source),
             Self::Connect { source, .. } => Some(source),
             Self::Clone { source } => Some(source),
+            Self::SpawnReader { source } => Some(source),
             Self::Encode { source } => Some(source),
             Self::Flush { source } => Some(source),
             Self::Decode { source } => Some(source),
@@ -427,7 +436,7 @@ impl SocketPeer {
         let shutdown_stream = stream
             .try_clone()
             .map_err(|source| SocketTransportError::Clone { source })?;
-        let (reader_frames, reader_thread) = spawn_reader(stream);
+        let (reader_frames, reader_thread) = spawn_reader(stream)?;
         Ok(Self {
             writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
             reader_frames: Some(reader_frames),
@@ -503,15 +512,18 @@ impl Drop for SocketPeer {
     }
 }
 
-fn spawn_reader(
-    stream: UnixStream,
-) -> (
+type ReaderWorker = (
     Receiver<Result<HarnessOutputMessage, DecodeError>>,
     thread::JoinHandle<()>,
-) {
+);
+
+fn spawn_reader(stream: UnixStream) -> Result<ReaderWorker, SocketTransportError> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    let reader_thread = thread::spawn(move || read_frames(stream, sender));
-    (receiver, reader_thread)
+    let reader_thread = thread::Builder::new()
+        .name("tau-socket-reader".to_owned())
+        .spawn(move || read_frames(stream, sender))
+        .map_err(|source| SocketTransportError::SpawnReader { source })?;
+    Ok((receiver, reader_thread))
 }
 
 fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>) {

@@ -155,6 +155,54 @@ fn roster_result_is_ui_only_and_requester_directed() {
     assert!(tool.lock().expect("tool frames").is_empty());
 }
 
+/// Current-session probes use harness-assigned connection metadata rather than
+/// the caller's Hello claim and return the in-memory id only to the requester.
+#[test]
+fn current_session_result_is_authoritative_ui_only_and_directed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let requester = connect_test_client(&mut harness, "requester", tau_proto::ClientKind::Ui);
+    let other_ui = connect_test_client(&mut harness, "other-ui", tau_proto::ClientKind::Ui);
+    let tool = connect_test_client(&mut harness, "tool", tau_proto::ClientKind::Tool);
+    let request = tau_proto::GetCurrentSession {
+        request_id: "current-1".to_owned(),
+    };
+
+    harness
+        .handle_client_message(
+            "requester",
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: "claim-external".into(),
+                client_kind: tau_proto::ClientKind::External,
+            }),
+        )
+        .expect("Hello claim");
+    harness
+        .handle_client_message(
+            "requester",
+            HarnessInputMessage::GetCurrentSession(request.clone()),
+        )
+        .expect("UI request");
+    harness
+        .handle_client_message("tool", HarnessInputMessage::GetCurrentSession(request))
+        .expect("non-UI request is ignored");
+
+    assert!(
+        requester
+            .lock()
+            .expect("requester frames")
+            .iter()
+            .any(|routed| matches!(
+                &routed.frame,
+                HarnessOutputMessage::CurrentSessionResult(result)
+                    if result.request_id == "current-1" && result.session_id.as_str() == "s1"
+            ))
+    );
+    assert!(other_ui.lock().expect("other UI frames").is_empty());
+    assert!(tool.lock().expect("tool frames").is_empty());
+}
+
 /// Membership cache limits and invariants fail before retaining a row vector.
 #[test]
 fn roster_bounds_cached_membership_before_projection() {

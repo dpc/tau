@@ -6,8 +6,9 @@
 //! - `<pid>.sock` — Unix socket for client connections
 //! - `<pid>.json` — daemon metadata used for discovery
 //!
-//! Discovery is socket-first: clients enumerate `*.sock`, read the matching
-//! `*.json`, then verify liveness by connecting to the socket.
+//! Metadata-based discovery enumerates `*.sock`, reads matching `*.json`, then
+//! verifies liveness. Running-session listing instead treats sockets as
+//! candidates and asks each responsive harness for its in-memory session id.
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -506,52 +507,23 @@ fn probe_peer_entrypoint(
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> bool {
-    let probe_deadline = deadline.min(Instant::now() + SESSION_DISCOVERY_PROBE_TIMEOUT);
-    let Some(remaining) = probe_deadline.checked_duration_since(Instant::now()) else {
+    let ProbeConnect::Connected(mut peer, probe_deadline) = connect_probe_peer(
+        harness_path,
+        deadline,
+        cancelled,
+        crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        tau_proto::ClientKind::External,
+    ) else {
         return false;
     };
-    if cancelled.load(Ordering::Acquire) {
-        return false;
-    }
-    let timeout = remaining;
-    let Ok(mut peer) =
-        tau_socket::SocketPeer::connect_with_io_timeout(socket_path(harness_path), timeout)
-    else {
-        return false;
-    };
-    let Some(timeout) = probe_deadline.checked_duration_since(Instant::now()) else {
-        return false;
-    };
-    if cancelled.load(Ordering::Acquire) || peer.set_write_timeout(timeout).is_err() {
-        return false;
-    }
     let request_id = format!("peer-probe-{}", std::process::id());
     if peer
-        .send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
-            client_kind: tau_proto::ClientKind::External,
-        }))
-        .and_then(|()| {
-            let timeout = probe_deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "probe deadline elapsed")
-                })
-                .map_err(|source| tau_socket::SocketTransportError::Flush { source })?;
-            if cancelled.load(Ordering::Acquire) {
-                return Err(tau_socket::SocketTransportError::Flush {
-                    source: std::io::Error::new(std::io::ErrorKind::Interrupted, "probe cancelled"),
-                });
-            }
-            peer.set_write_timeout(timeout)?;
-            peer.send(&tau_proto::HarnessInputMessage::PeerSessionProbe(
-                tau_proto::PeerSessionProbe {
-                    request_id: request_id.clone(),
-                    session_id: session_id.into(),
-                },
-            ))
-        })
+        .send(&tau_proto::HarnessInputMessage::PeerSessionProbe(
+            tau_proto::PeerSessionProbe {
+                request_id: request_id.clone(),
+                session_id: session_id.into(),
+            },
+        ))
         .is_err()
     {
         return false;
@@ -566,6 +538,57 @@ fn probe_peer_entrypoint(
             message: tau_proto::HarnessOutputMessage::PeerSessionProbeResult(result),
         }) if result.request_id == request_id && result.available
     )
+}
+
+enum ProbeConnect {
+    Connected(tau_socket::SocketPeer, Instant),
+    Unresponsive,
+    Infrastructure(std::io::Error),
+}
+
+fn connect_probe_peer(
+    harness_path: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    client_name: tau_proto::ExtensionName,
+    client_kind: tau_proto::ClientKind,
+) -> ProbeConnect {
+    let connect = || -> Option<Result<(tau_socket::SocketPeer, Instant), std::io::Error>> {
+        let probe_deadline = deadline.min(Instant::now() + SESSION_DISCOVERY_PROBE_TIMEOUT);
+        let timeout = probe_deadline.checked_duration_since(Instant::now())?;
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut peer = match tau_socket::SocketPeer::connect_with_io_timeout(
+            socket_path(harness_path),
+            timeout,
+        ) {
+            Ok(peer) => peer,
+            Err(tau_socket::SocketTransportError::SpawnReader { source }) => {
+                return Some(Err(source));
+            }
+            Err(_) => return None,
+        };
+        peer.set_write_timeout(probe_deadline.checked_duration_since(Instant::now())?)
+            .ok()?;
+        peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name,
+            client_kind,
+        }))
+        .ok()?;
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        peer.set_write_timeout(probe_deadline.checked_duration_since(Instant::now())?)
+            .ok()?;
+        Some(Ok((peer, probe_deadline)))
+    };
+    match connect() {
+        Some(Ok((peer, probe_deadline))) => ProbeConnect::Connected(peer, probe_deadline),
+        Some(Err(error)) => ProbeConnect::Infrastructure(error),
+        None => ProbeConnect::Unresponsive,
+    }
 }
 
 fn discovery_probe_slots() -> &'static (Mutex<usize>, Condvar) {
@@ -772,6 +795,180 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Lists authoritative session ids reported by responsive harness daemons.
+///
+/// Persisted session directories and runtime metadata are not lifecycle
+/// authority. This non-destructive scan uses bounded runtime-directory
+/// traversal only to locate socket candidates, then obtains each id through a
+/// bounded local control RPC answered from harness memory. Results are sorted
+/// and deduplicated; having no responsive daemons produces an empty vector.
+///
+/// # Errors
+///
+/// Returns an error instead of a partial list when the bounded candidate scan
+/// fails, process-wide discovery admission is busy, the scan worker cannot be
+/// spawned, or the total probe deadline expires before every candidate is
+/// resolved.
+pub fn list_running_session_ids() -> Result<Vec<tau_proto::SessionId>, std::io::Error> {
+    let permit = DiscoveryCallPermit::try_acquire()
+        .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy"))?;
+    let deadline = Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let scan_cancelled = Arc::clone(&cancelled);
+    let runtime_dir = harnesses_dir();
+    let scan_permit = permit.clone();
+    let (scan_tx, scan_rx) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("tau-running-session-scan".to_owned())
+        .spawn(move || {
+            let _permit = scan_permit;
+            let result = scan_running_session_candidates(&runtime_dir, deadline, &scan_cancelled);
+            let _ = scan_tx.send(result);
+        })
+        .map_err(|error| {
+            running_session_list_incomplete(&format!("could not spawn runtime scan: {error}"))
+        })?;
+    let scan_timeout = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| running_session_list_incomplete("runtime scan timed out"))?;
+    let mut candidates = match scan_rx.recv_timeout(scan_timeout) {
+        Ok(result) => result?,
+        Err(_) => {
+            cancelled.store(true, Ordering::Release);
+            return Err(running_session_list_incomplete("runtime scan timed out"));
+        }
+    };
+    candidates.sort();
+    let mut session_ids = Vec::new();
+    for harness_path in candidates {
+        if Instant::now() >= deadline {
+            return Err(running_session_list_incomplete(
+                "runtime probe deadline reached before every candidate",
+            ));
+        }
+        match probe_current_session(&harness_path, deadline, &cancelled) {
+            CurrentSessionProbe::Reported(session_id) => session_ids.push(session_id),
+            CurrentSessionProbe::Unresponsive => {}
+            CurrentSessionProbe::DeadlineExpired => {
+                return Err(running_session_list_incomplete(
+                    "runtime probe deadline expired",
+                ));
+            }
+            CurrentSessionProbe::Infrastructure(error) => {
+                return Err(running_session_list_incomplete(&format!(
+                    "runtime probe infrastructure failed: {error}"
+                )));
+            }
+        }
+    }
+    session_ids.sort();
+    session_ids.dedup();
+    Ok(session_ids)
+}
+
+fn scan_running_session_candidates(
+    runtime_dir: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    #[cfg(test)]
+    let delay_ms = TEST_DISCOVERY_SCAN_DELAY
+        .lock()
+        .expect("test scan delay lock poisoned")
+        .as_ref()
+        .filter(|(path, _)| path == runtime_dir)
+        .map(|(_, delay_ms)| *delay_ms);
+    #[cfg(test)]
+    if let Some(delay_ms) = delay_ms {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+    if !runtime_dir.try_exists()? {
+        return Ok(Vec::new());
+    }
+    let mut entries = std::fs::read_dir(runtime_dir)?;
+    let mut candidates = Vec::new();
+    for entries_visited in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(running_session_list_incomplete("runtime scan timed out"));
+        }
+        let Some(entry) = entries.next() else {
+            return Ok(candidates);
+        };
+        if entries_visited == SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+            return Err(running_session_list_incomplete(
+                "runtime directory entry limit reached",
+            ));
+        }
+        let socket_path = entry?.path();
+        if socket_path.extension().and_then(|ext| ext.to_str()) == Some(SOCK_EXTENSION) {
+            candidates.push(socket_path.with_extension(""));
+        }
+    }
+    Ok(candidates)
+}
+
+enum CurrentSessionProbe {
+    Reported(tau_proto::SessionId),
+    Unresponsive,
+    DeadlineExpired,
+    Infrastructure(std::io::Error),
+}
+
+fn probe_current_session(
+    harness_path: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> CurrentSessionProbe {
+    let reported = (|| {
+        let (mut peer, probe_deadline) = match connect_probe_peer(
+            harness_path,
+            deadline,
+            cancelled,
+            "tau-session-list".into(),
+            tau_proto::ClientKind::Ui,
+        ) {
+            ProbeConnect::Connected(peer, probe_deadline) => (peer, probe_deadline),
+            ProbeConnect::Unresponsive => return None,
+            ProbeConnect::Infrastructure(error) => {
+                return Some(Err(error));
+            }
+        };
+        let request_id = format!("current-session-{}", std::process::id());
+        peer.send(&tau_proto::HarnessInputMessage::GetCurrentSession(
+            tau_proto::GetCurrentSession {
+                request_id: request_id.clone(),
+            },
+        ))
+        .ok()?;
+        loop {
+            match peer
+                .recv_timeout(probe_deadline.checked_duration_since(Instant::now())?)
+                .ok()?
+            {
+                tau_socket::SocketReceive::Message {
+                    message: tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
+                } if result.request_id == request_id => return Some(Ok(result.session_id)),
+                tau_socket::SocketReceive::Message {
+                    message: tau_proto::HarnessOutputMessage::Disconnect(_),
+                }
+                | tau_socket::SocketReceive::Timeout
+                | tau_socket::SocketReceive::Closed => return None,
+                tau_socket::SocketReceive::Message { .. } => {}
+            }
+        }
+    })();
+    match reported {
+        Some(Ok(session_id)) => CurrentSessionProbe::Reported(session_id),
+        Some(Err(error)) => CurrentSessionProbe::Infrastructure(error),
+        None if Instant::now() >= deadline => CurrentSessionProbe::DeadlineExpired,
+        None => CurrentSessionProbe::Unresponsive,
+    }
+}
+
+fn running_session_list_incomplete(reason: &str) -> std::io::Error {
+    std::io::Error::other(format!("could not list all running sessions: {reason}"))
 }
 
 /// Finds the single live harness advertising `session_id` as its active
@@ -1121,6 +1318,43 @@ mod tests {
         })
     }
 
+    fn spawn_current_session_daemon(path: &Path, session_id: &str) -> std::thread::JoinHandle<()> {
+        let listener =
+            tau_socket::SocketListener::bind(socket_path(path)).expect("current-session listener");
+        let session_id = tau_proto::SessionId::from(session_id);
+        std::thread::spawn(move || {
+            let mut client = listener.accept().expect("accept current-session probe");
+            assert!(matches!(
+                client.recv().expect("hello"),
+                Some(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+                    client_kind: tau_proto::ClientKind::Ui,
+                    ..
+                }))
+            ));
+            let Some(tau_proto::HarnessInputMessage::GetCurrentSession(request)) =
+                client.recv().expect("current-session request")
+            else {
+                panic!("expected current-session request");
+            };
+            client
+                .send(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
+                    tau_proto::CurrentSessionResult {
+                        request_id: "unrelated-request".to_owned(),
+                        session_id: "wrong-session".into(),
+                    },
+                ))
+                .expect("unrelated current-session result");
+            client
+                .send(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
+                    tau_proto::CurrentSessionResult {
+                        request_id: request.request_id,
+                        session_id,
+                    },
+                ))
+                .expect("current-session result");
+        })
+    }
+
     /// Exercises live opt-in confirmation against two daemon sockets while
     /// proving a non-opted daemon is not probed and full project paths are
     /// never returned.
@@ -1442,6 +1676,185 @@ mod tests {
             metadata.project_root.as_deref(),
             Some(project_root.as_path())
         );
+    }
+
+    /// Ensures running-session listing derives lifecycle from responsive daemon
+    /// memory rather than persisted sessions, runtime metadata, or stale paths.
+    #[test]
+    fn running_session_list_includes_only_reachable_active_sessions() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let live = harnesses_dir().join("live");
+        let stale = harnesses_dir().join(std::process::id().to_string());
+        let daemon = spawn_current_session_daemon(&live, "running-session");
+        write_peer_metadata(&stale, "historical-session", Path::new("/stale"), false);
+        std::fs::write(socket_path(&stale), b"not a socket").expect("stale socket");
+
+        assert_eq!(
+            list_running_session_ids().expect("running sessions"),
+            vec![tau_proto::SessionId::from("running-session")]
+        );
+        daemon.join().expect("current-session daemon");
+    }
+
+    /// Ensures absence of runtime candidates is a successful empty,
+    /// pipe-friendly listing rather than a synthesized placeholder row.
+    #[test]
+    fn running_session_list_is_empty_without_runtime_directory() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+
+        assert!(
+            list_running_session_ids()
+                .expect("running sessions")
+                .is_empty()
+        );
+        assert!(!harnesses_dir().exists());
+    }
+
+    /// Ensures daemon memory remains authoritative when adjacent metadata is
+    /// missing or unreadable during a rewrite or startup window.
+    #[test]
+    fn running_session_list_ignores_invalid_runtime_metadata() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let live = harnesses_dir().join("live");
+        let daemon = spawn_current_session_daemon(&live, "authoritative-session");
+        std::fs::write(metadata_path(&live), b"{").expect("invalid metadata");
+
+        assert_eq!(
+            list_running_session_ids().expect("running sessions"),
+            vec![tau_proto::SessionId::from("authoritative-session")]
+        );
+        daemon.join().expect("current-session daemon");
+    }
+
+    /// Ensures listing sorts and deduplicates session ids reported by distinct
+    /// responsive harnesses.
+    #[test]
+    fn running_session_list_returns_sorted_distinct_ids() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let z = spawn_current_session_daemon(&harnesses_dir().join("a"), "z-session");
+        let duplicate = spawn_current_session_daemon(&harnesses_dir().join("b"), "a-session");
+        let a = spawn_current_session_daemon(&harnesses_dir().join("c"), "a-session");
+
+        assert_eq!(
+            list_running_session_ids().expect("running sessions"),
+            vec![
+                tau_proto::SessionId::from("a-session"),
+                tau_proto::SessionId::from("z-session")
+            ]
+        );
+        z.join().expect("z daemon");
+        duplicate.join().expect("duplicate daemon");
+        a.join().expect("a daemon");
+    }
+
+    /// Ensures the raw directory-entry bound fails the whole listing rather
+    /// than returning a partial set after a stale-file flood.
+    #[test]
+    fn running_session_list_fails_at_directory_entry_bound() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        for index in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+            std::fs::write(harnesses_dir().join(format!("junk-{index}")), b"junk")
+                .expect("junk runtime entry");
+        }
+
+        let error = list_running_session_ids().expect_err("bounded listing");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime directory entry limit reached")
+        );
+    }
+
+    /// Ensures one responsive non-Tau or stalled socket consumes only its
+    /// per-probe budget and cannot hide a later responsive harness.
+    #[test]
+    fn running_session_list_continues_after_one_probe_timeout() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let blocked = harnesses_dir().join("a-blocked");
+        let live = harnesses_dir().join("b-live");
+        let blocked_listener =
+            tau_socket::SocketListener::bind(socket_path(&blocked)).expect("blocked listener");
+        let blocked_daemon = std::thread::spawn(move || {
+            let _client = blocked_listener.accept().expect("accept blocked probe");
+            std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT * 2);
+        });
+        let live_daemon = spawn_current_session_daemon(&live, "responsive-session");
+        let started = Instant::now();
+
+        assert_eq!(
+            list_running_session_ids().expect("running sessions"),
+            vec![tau_proto::SessionId::from("responsive-session")]
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        blocked_daemon.join().expect("blocked daemon");
+        live_daemon.join().expect("live daemon");
+    }
+
+    /// Ensures a blocked runtime-directory operation is isolated from the
+    /// caller's total deadline while retaining bounded discovery admission.
+    #[test]
+    fn running_session_list_isolates_slow_storage() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let _serial = TEST_DISCOVERY_SERIAL
+            .lock()
+            .expect("test discovery serial lock poisoned");
+        *TEST_DISCOVERY_SCAN_DELAY
+            .lock()
+            .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 2_100));
+        let started = Instant::now();
+
+        let error = list_running_session_ids().expect_err("scan deadline");
+
+        *TEST_DISCOVERY_SCAN_DELAY
+            .lock()
+            .expect("test scan delay lock poisoned") = None;
+        assert!(started.elapsed() < Duration::from_millis(2_200));
+        assert!(error.to_string().contains("runtime scan timed out"));
+    }
+
+    /// Ensures expiry inside the final probe fails the whole listing rather
+    /// than returning the ids collected before the global budget ran out.
+    #[test]
+    fn running_session_list_rejects_partial_result_on_final_probe_deadline() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
+        let _serial = TEST_DISCOVERY_SERIAL
+            .lock()
+            .expect("test discovery serial lock poisoned");
+        let live = spawn_current_session_daemon(&harnesses_dir().join("a-live"), "collected");
+        let blocked = harnesses_dir().join("z-blocked");
+        let listener =
+            tau_socket::SocketListener::bind(socket_path(&blocked)).expect("blocked listener");
+        let daemon = std::thread::spawn(move || {
+            let _client = listener.accept().expect("accept final probe");
+            std::thread::sleep(SESSION_DISCOVERY_PROBE_TIMEOUT);
+        });
+        *TEST_DISCOVERY_SCAN_DELAY
+            .lock()
+            .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 1_750));
+
+        let error = list_running_session_ids().expect_err("global probe deadline");
+
+        *TEST_DISCOVERY_SCAN_DELAY
+            .lock()
+            .expect("test scan delay lock poisoned") = None;
+        assert!(error.to_string().contains("probe deadline expired"));
+        live.join().expect("live daemon");
+        daemon.join().expect("blocked daemon");
     }
 
     /// Ensures session discovery ignores the old active-session value after a

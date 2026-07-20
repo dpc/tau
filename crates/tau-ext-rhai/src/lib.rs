@@ -527,6 +527,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::RenderedSystemPromptResult(_)
         | HarnessOutputMessage::RenderedPromptResult(_)
         | HarnessOutputMessage::RenderedToolDefinitionsResult(_)
+        | HarnessOutputMessage::CurrentSessionResult(_)
         | HarnessOutputMessage::SessionAgentListResult(_)
         | HarnessOutputMessage::ExtensionDataResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)

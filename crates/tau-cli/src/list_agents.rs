@@ -1,7 +1,7 @@
 //! Running-session agent roster command and picker projection.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{self, Write as _};
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -92,7 +92,7 @@ pub(crate) fn run(args: &crate::cli::AgentListArgs) -> Result<(), CliError> {
         scope,
     )?;
     let output = format_rows(&visible_agents(agents, filter));
-    write_stdout(&output)
+    crate::line_output::write_stdout(&output)
 }
 
 /// Requests one agent roster directly from a running harness socket.
@@ -245,7 +245,7 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
             persistence_name(agent.persistence).to_owned(),
             facts_name(&agent.facts).to_owned(),
             facts_role(&agent.facts)
-                .map(escape_field)
+                .map(crate::line_output::escape_field)
                 .unwrap_or_else(dash),
             facts_parent(&agent.facts)
                 .as_ref()
@@ -255,7 +255,7 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
                 .map(|timestamp| timestamp.get().to_string())
                 .unwrap_or_else(dash),
             facts_display_name(&agent.facts)
-                .map(escape_field)
+                .map(crate::line_output::escape_field)
                 .unwrap_or_else(dash),
         ];
         output.push_str(&fields.join("\t"));
@@ -342,24 +342,6 @@ fn order_key(agent: &SessionAgentListEntry) -> (u8, u64, tau_proto::AgentId) {
         || (1, u64::MAX, agent.agent_id.clone()),
         |timestamp| (0, timestamp.get(), agent.agent_id.clone()),
     )
-}
-
-fn escape_field(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '\t' => escaped.push_str("\\t"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 fn lifecycle_name(lifecycle: SessionAgentLifecycle) -> &'static str {
@@ -449,16 +431,6 @@ fn facts_display_name(facts: &SessionAgentFacts) -> Option<&str> {
 
 fn dash() -> String {
     "-".to_owned()
-}
-
-fn write_stdout(output: &str) -> Result<(), CliError> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    match stdout.write_all(output.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err(CliError::Io(error)),
-    }
 }
 
 #[cfg(test)]

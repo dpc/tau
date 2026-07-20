@@ -94,44 +94,11 @@ registry. The profile-independent source registry gate is
 `cargo test --profile ci -p tau --test component_registry`; it does not execute
 each archived target.
 
-The runtime fixture contained 100 sessions with 100 alternating durable
-load/unload events each. After warming each binary, the benchmark pinned itself
-to one available CPU and timed 25 fixed-seed, randomized-order pairs of ten
-`tau session list --sessions-dir FIXTURE` invocations, discarding output.
-Record every paired ratio, absolute median, and range; do not infer sustained
-runtime behavior from startup-only loops. Create the fixture with a temporary
-`tau-session-inspect` example that opens a `SessionStore` and, for session ids
-`benchmark-session-0000` through `0099`, appends 100 alternating
-`SessionAgentLoaded`/`SessionAgentUnloaded` events for agent `main`:
-
-```console
-(
-  set -e
-  example_dir=crates/tau-session-inspect/examples
-  example=$example_dir/release_profile_fixture.rs
-  created_dir=0
-  if [ ! -d "$example_dir" ]; then
-    mkdir "$example_dir"
-    created_dir=1
-  fi
-  if [ -e "$example" ]; then
-    echo "refusing to overwrite $example" >&2
-    exit 1
-  fi
-  cleanup() {
-    rm -f "$example"
-    if [ "$created_dir" = 1 ]; then rmdir "$example_dir"; fi
-  }
-  trap cleanup EXIT
-  cp misc/generate-release-profile-fixture.rs "$example"
-  rm -rf /tmp/tau-profile-sessions
-  cargo run --profile ci -p tau-session-inspect \
-    --example release_profile_fixture -- /tmp/tau-profile-sessions
-)
-
-python3 misc/benchmark-release-profile.py \
-  --fat /tmp/tau-fat-baseline/bin/tau \
-  --thin /tmp/tau-thin-candidate/bin/tau \
-  --sessions-dir /tmp/tau-profile-sessions \
-  --seed 2000 --rounds 25 --iterations 10
-```
+The recorded session-replay result belongs to the reference revision. Current
+`tau session list` queries running daemons and no longer replays arbitrary
+persisted session directories, so the old fixture generator and benchmark
+driver were retired rather than silently measuring an empty live-session scan.
+Check out the reference revision when auditing that historical measurement. A
+future release-profile comparison that needs session replay must add a benchmark
+with an explicit persisted-session input instead of repurposing the live-session
+command.

@@ -280,16 +280,15 @@ fn list_agents_command_parses_filters() {
 }
 
 /// Session inspection operations share the same noun-first nested command shape
-/// as agent inspection without changing their existing arguments.
+/// as agent inspection.
 #[test]
 fn session_commands_parse_nested_operations() {
-    let list =
-        super::cli::Cli::parse_from(["tau", "session", "list", "--sessions-dir", "/tmp/sessions"]);
+    let list = super::cli::Cli::parse_from(["tau", "session", "list"]);
     assert!(matches!(
         list.command,
         Some(super::cli::Command::Session {
-            command: super::cli::SessionCommand::List { sessions_dir },
-        }) if sessions_dir == std::path::PathBuf::from("/tmp/sessions")
+            command: super::cli::SessionCommand::List,
+        })
     ));
 
     let show = super::cli::Cli::parse_from(["tau", "session", "show", "--session-id", "s1"]);

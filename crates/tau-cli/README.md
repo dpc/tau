@@ -50,6 +50,15 @@ remains the input target for starting a new agent.
 The shifted default requires enhanced keyboard reporting; legacy terminals may
 bind `agent-pick-all` to another distinguishable key.
 
+`tau session list` prints one escaped row per distinct current session id
+reported by responsive local harnesses. Runtime paths only locate socket
+candidates; each daemon reports its in-memory current session through a directed
+local control RPC, and persisted session directories never add rows.
+Backslash, tab, newline, carriage return, and other control characters use the
+same `\\`, `\t`, `\n`, `\r`, and `\u{hex}` escaping as agent-list fields.
+This makes records line- and ANSI-control-safe; it does not normalize general
+Unicode format characters.
+
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because
 the pasted Gmail loopback URL contains a one-time OAuth authorization code and
