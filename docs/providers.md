@@ -304,8 +304,11 @@ deterministic unchanged-request failure closes immediately.
 Retry delays do not occupy one of the bounded provider workers. One in-memory
 scheduler parks logical prompts, applies jittered class-specific Fibonacci
 cadence (up to about thirty minutes for persistent failures), honors later
-trusted reset/`Retry-After` hints, and shares cooldowns by configured provider
-profile. Retry status is visible and says how to cancel. Profiles and
+trusted reset/`Retry-After` hints for other failure classes, and shares cooldowns
+by configured provider profile. Usage-window reset estimates remain informational
+because the user or provider may restore access early; Tau continues probing on
+the bounded persistent-failure cadence. Retry status is visible and says how to
+cancel. Profiles and
 credentials are resolved again when delayed work becomes due. This state lasts
 only for the process/session lifetime; Tau deliberately does not replay
 ambiguous in-flight requests after a cold restart. Permanent OAuth rejection

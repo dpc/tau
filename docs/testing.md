@@ -123,7 +123,8 @@ prompt-scoped and global cancellation in queued/delayed/active states,
 profile reload before a later success, and exactly one submitted/terminal
 lifecycle. Backend fixtures should cover Codex WebSocket, generic Chat
 Completions HTTP/SSE, and OpenRouter retry-then-success paths, including tentative
-output clearing and trusted hint lower bounds.
+output clearing, trusted hint lower bounds for non-usage-window classes, and
+bounded policy scheduling despite distant usage-window reset estimates.
 Manual `/retry` coverage must drive the scheduler/runtime boundary
 deterministically: assert delayed-count transfer, timer/manual and
 shutdown/manual ownership races, one-shot cooldown bypass, and that a failed

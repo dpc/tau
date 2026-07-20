@@ -1114,6 +1114,31 @@ fn overflowing_trusted_hint_falls_back_to_policy_due() {
     );
 }
 
+/// Usage-window reset estimates can become stale after provider- or user-driven
+/// recovery, so even a multi-day estimate must retain periodic policy probes.
+#[test]
+fn usage_window_reset_hint_does_not_suppress_policy_retries() {
+    let distant_reset = Some(Duration::from_secs(419_322));
+    assert_eq!(
+        scheduler_retry_hint(RetryClass::UsageWindow, distant_reset),
+        None
+    );
+    assert_eq!(
+        scheduler_retry_hint(RetryClass::Throttle, distant_reset),
+        distant_reset,
+        "other trusted retry hints retain their lower-bound behavior"
+    );
+
+    let now = Instant::now();
+    let policy_delay = Duration::from_secs(17);
+    let hint_delay =
+        scheduler_retry_hint(RetryClass::UsageWindow, distant_reset).unwrap_or(Duration::ZERO);
+    assert_eq!(
+        retry_common_due(now, policy_delay, hint_delay),
+        now + policy_delay
+    );
+}
+
 /// Proves configured-to-removed-to-re-added reconciliation clears only the old
 /// provider's shared generation and leaves unrelated cooldown state intact.
 #[test]
@@ -2155,7 +2180,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                     decision,
                 },
             )
-            .expect("install five-day usage-window cooldown");
+            .expect("install generated usage-window cooldown");
             for used_basis_points in [10_000, 0] {
                 send_worker_message(
                     &output_tx,
@@ -2278,15 +2303,29 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             .count()
             == 2
     });
-    assert!(decode_frames(&output.bytes()).iter().any(|frame| matches!(
-        input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
-            if update.agent_prompt_id.as_str() == "probe"
-                && update.status.as_ref().is_some_and(|status| {
-                    status.text.contains("next attempt in about 5d")
-                        && !status.text.contains("432000s")
-                })
-    )));
+    let frames = decode_frames(&output.bytes());
+    let status = frames
+        .iter()
+        .find_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseUpdated(update))
+                if update.agent_prompt_id.as_str() == "probe" =>
+            {
+                update
+                    .status
+                    .as_ref()
+                    .filter(|status| status.retry.is_some())
+            }
+            _ => None,
+        })
+        .expect("probe retry status");
+    let retry = status.retry.as_ref().expect("structured retry status");
+    assert_eq!(
+        retry.category,
+        tau_proto::ProviderRetryCategory::UsageWindow
+    );
+    assert!(retry.next_retry_delay_secs < 60);
+    assert!(!status.text.contains("5d"));
+    assert!(!status.text.contains("432000"));
     assert_eq!(calls.lock().expect("call log").as_slice(), ["probe"]);
 
     let mut peer_one = prompt();
@@ -2517,9 +2556,10 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
 }
 
 /// Ensures best-effort quota telemetry cannot clear inference cooldown state or
-/// admit a same-provider peer before its trusted reset boundary.
+/// immediately admit a same-provider peer before its generated shared boundary.
 #[test]
 fn quota_telemetry_does_not_release_shared_inference_cooldown() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     input.push(encode_frames(&[live_event(
         11,
@@ -2579,14 +2619,19 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
     let output = SharedWriter::default();
     let runtime_output = output.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock;
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        run_inner_with_executors_and_clock(
             runtime_input,
             runtime_output,
             profiles,
             move || prompt_profiles.clone(),
             2,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         )
         .expect("run provider");
     });
@@ -2941,8 +2986,9 @@ fn context_window_rejection_finishes_once_without_retry_status() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
-/// Proves four far-future retries release all four bounded worker permits so an
-/// unrelated provider can run immediately, with no attempt before fake repair.
+/// Proves four far-future account-limit retries release all four bounded worker
+/// permits so an unrelated provider runs with no second attempt before
+/// shutdown.
 #[test]
 fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
     let input = BlockingInput::default();
@@ -2991,7 +3037,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
                 &execution.output_waker,
                 WorkerMessage::Retry {
                     job: execution.job,
-                    decision: RetryDecision::new(RetryClass::UsageWindow)
+                    decision: RetryDecision::new(RetryClass::Account)
                         .with_retry_after(Some(Duration::from_secs(86_400))),
                 },
             )
@@ -3544,9 +3590,12 @@ enum MixedStateShutdown {
     Eof,
 }
 
+const MIXED_STATE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Runs the mixed delayed/active/queued lifecycle fixture for broadcast cancel
 /// or input EOF, both of which must close every accepted prompt exactly once.
 fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     let mut delayed = prompt();
     delayed.agent_prompt_id = "mixed-delayed".into();
@@ -3593,7 +3642,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 );
                 active_tx.send(()).expect("report active state");
                 if matches!(shutdown, MixedStateShutdown::Eof) {
-                    let deadline = Instant::now() + Duration::from_secs(1);
+                    let deadline = Instant::now() + MIXED_STATE_TIMEOUT;
                     while !execution
                         .cancellation
                         .is_canceled(&execution.job.agent_prompt_id)
@@ -3608,7 +3657,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     active_cancel_rx
                         .lock()
                         .expect("active cancel receiver")
-                        .recv_timeout(Duration::from_secs(1))
+                        .recv_timeout(MIXED_STATE_TIMEOUT)
                         .expect("global cancel did not wake active backend");
                 }
                 let mut writer = execution.frame_writer();
@@ -3632,15 +3681,20 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let writer = SharedWriter::default();
     let output = writer.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock;
     let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(1);
     let runtime = thread::spawn(move || {
-        let result = run_inner_with_prompt_executor(
+        let result = run_inner_with_executors_and_clock(
             runtime_input,
             writer,
             profiles,
             move || prompt_profiles.clone(),
             2,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         );
         runtime_done_tx
             .send(())
@@ -3649,7 +3703,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     });
 
     delayed_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(MIXED_STATE_TIMEOUT)
         .expect("delayed state");
     wait_for_runtime_frames(&output, |frames| {
         frames.iter().any(|frame| {
@@ -3685,7 +3739,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         })
     });
     active_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(MIXED_STATE_TIMEOUT)
         .expect("active state");
     match shutdown {
         MixedStateShutdown::GlobalCancel => {
@@ -3702,7 +3756,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     }
 
     if matches!(shutdown, MixedStateShutdown::GlobalCancel) {
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + MIXED_STATE_TIMEOUT;
         loop {
             let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
             let canceled = frames
@@ -3732,7 +3786,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         input.close();
     }
     runtime_done_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(MIXED_STATE_TIMEOUT)
         .expect("mixed runtime shuts down within bound");
     runtime.join().expect("mixed runtime join");
 

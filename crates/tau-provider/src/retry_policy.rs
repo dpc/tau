@@ -62,12 +62,15 @@ impl RetryClass {
 pub struct RetryDecision {
     /// Normalized failure class controlling cadence and status.
     pub class: RetryClass,
-    /// Trusted lower bound relative to the time the attempt failed.
+    /// Provider timing hint relative to the time the attempt failed.
+    ///
+    /// The logical-work scheduler decides whether the hint is authoritative for
+    /// the normalized failure class.
     pub retry_after: Option<Duration>,
 }
 
 impl RetryDecision {
-    /// Construct a retry decision without a server timing hint.
+    /// Construct a retry decision without a provider timing hint.
     #[must_use]
     pub const fn new(class: RetryClass) -> Self {
         Self {
@@ -76,7 +79,7 @@ impl RetryDecision {
         }
     }
 
-    /// Attach a trusted lower-bound delay.
+    /// Attach a provider timing hint for scheduler policy to interpret.
     #[must_use]
     pub const fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
         self.retry_after = retry_after;

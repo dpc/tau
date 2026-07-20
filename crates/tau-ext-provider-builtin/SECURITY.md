@@ -18,6 +18,16 @@ ownership/counting, and unrelated providers or generations. Configured
 credential, endpoint, or backend-family identity rotation invalidates only the
 old provider profile cooldown.
 
+Parsed usage-window reset hints remain informational and are not scheduler lower
+bounds. The runtime probes through the existing per-prompt jittered Fibonacci
+cadence (10-second production base and 30-minute generated ceiling) and
+same-profile cooldown because access can recover before a reported reset. Shared
+cooldowns, up to five seconds of stable prompt-local boundary jitter, and bounded
+prompt-worker concurrency limit synchronized load; they do not guarantee one
+probe per profile interval when multiple prompt-local retry states are parked.
+Revisit this policy if provider load guidance, the concurrency override, jitter,
+or shared-cooldown semantics change.
+
 The extension owns serialized Chat Completions/OpenRouter profiles, model
 publication, public response sampling, harness event writes, and logical retry.
 Both wire backends receive only finite-attempt inputs and return typed outcomes;

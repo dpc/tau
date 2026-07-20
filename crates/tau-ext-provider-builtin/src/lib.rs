@@ -1897,8 +1897,9 @@ where
                     let policy_delay = job
                         .retry_state
                         .next_delay(decision.class, job.agent_prompt_id.as_str());
-                    let hint_delay = decision.retry_after.unwrap_or(Duration::ZERO);
-                    let hint_jitter = decision.retry_after.map_or(Duration::ZERO, |_| {
+                    let retry_hint = scheduler_retry_hint(decision.class, decision.retry_after);
+                    let hint_delay = retry_hint.unwrap_or(Duration::ZERO);
+                    let hint_jitter = retry_hint.map_or(Duration::ZERO, |_| {
                         Duration::from_secs(
                             1 + stable_retry_hash(
                                 job.agent_prompt_id.as_str(),
@@ -2201,6 +2202,20 @@ fn reconcile_inference_identity(
 fn retry_common_due(now: Instant, policy_delay: Duration, hint_delay: Duration) -> Instant {
     now.checked_add(policy_delay.max(hint_delay))
         .unwrap_or_else(|| now.checked_add(policy_delay).unwrap_or(now))
+}
+
+/// Keeps usage-window reset estimates informational so early provider or user
+/// recovery is discovered through the bounded persistent-failure cadence.
+fn scheduler_retry_hint(class: RetryClass, retry_after: Option<Duration>) -> Option<Duration> {
+    match class {
+        RetryClass::UsageWindow => None,
+        RetryClass::Transport
+        | RetryClass::Overload
+        | RetryClass::Throttle
+        | RetryClass::Account
+        | RetryClass::Auth
+        | RetryClass::Unknown => retry_after,
+    }
 }
 
 /// Installs newer shared evidence without allowing it to shorten an existing

@@ -19,8 +19,11 @@ credits, usage windows, and reloadable auth/configuration retry slowly.
 Delayed work is parked in one in-memory scheduler and does not consume a
 provider worker. Tau shows a retry status with the reason, next delay, and
 cancellation instruction. Same-profile limits share cooldown state, trusted
-server reset hints are not shortened, and mutable profiles are reloaded before
-later attempts. Retry state does not survive a cold process restart.
+server timing hints remain lower bounds except for usage-window reset estimates,
+and mutable profiles are reloaded before later attempts. Usage-window estimates
+remain informational because the user or provider may restore access early; Tau
+continues bounded periodic probes. Retry state does not survive a cold process
+restart.
 
 Within one provider process, a permanently rejected ChatGPT OAuth refresh is
 suppressed for the exact unchanged credential/profile generation across startup
@@ -145,7 +148,7 @@ five-minute idle watchdog. The timer resets on each provider frame and is not an
 absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt,
 clears tentative output, and parks the logical prompt for another attempt.
 
-Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures; trusted later `Retry-After` and reset hints remain lower bounds. Retry state exists only for the running process/session and is not replayed after cold restart.
+Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures. Trusted later `Retry-After` and reset hints remain lower bounds except for usage-window reset estimates: users or providers may restore access early, so Tau keeps probing at the bounded persistent-failure cadence instead of sleeping until the reported reset. Retry state exists only for the running process/session and is not replayed after cold restart.
 
 
 Provider response streaming note: built-in providers publish transient `provider.response_updated` append deltas for visible assistant/reasoning text. Retry diagnostics are provider status updates, and complete durable assistant output is committed through `provider.response_finished`.
