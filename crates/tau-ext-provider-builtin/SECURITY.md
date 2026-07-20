@@ -78,3 +78,9 @@ Prewarm cancellation callbacks run under their private registry lock and may
 only enqueue a transport wake or invalidate a pool generation. Guard
 unregistration joins an already-started callback and is the socket-publication
 boundary; callback code must never re-enter that registry.
+Provider execution output crosses the trusted local extension boundary as explicit
+transient `_reported` events. The harness, not this extension, publishes correlated
+canonical provider facts and directed retry outcomes. Terminal report image bytes are
+cleared from generic live/debug projections; canonical provider transcript handling
+retains its existing policy. See
+[SPEC-provider-execution-reports-and-canonical-facts](../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).

@@ -151,7 +151,11 @@ clears tentative output, and parks the logical prompt for another attempt.
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures. Trusted later `Retry-After` and reset hints remain lower bounds except for usage-window reset estimates: users or providers may restore access early, so Tau keeps probing at the bounded persistent-failure cadence instead of sleeping until the reported reset. Retry state exists only for the running process/session and is not replayed after cold restart.
 
 
-Provider response streaming note: built-in providers publish transient `provider.response_updated` append deltas for visible assistant/reasoning text. Retry diagnostics are provider status updates, and complete durable assistant output is committed through `provider.response_finished`.
+Provider response streaming note: built-in providers submit explicit transient
+`provider.response_updated_reported` append deltas for visible assistant/reasoning text
+and `provider.response_finished_reported` terminal payloads. The harness publishes the
+correlated canonical update and durable finished facts. Retry diagnostics are provider
+status updates.
 
 Live byte stats are public provider-owned `provider.response_updated.response_stats`
 samples. Built-in providers count backend response bytes at the transport receive

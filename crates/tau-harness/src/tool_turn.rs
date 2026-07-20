@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use tau_proto::{AgentId, BackgroundSupport, ToolCallId, ToolName, ToolType};
+use tau_proto::{AgentId, BackgroundSupport, ConnectionId, ToolCallId, ToolName, ToolType};
 
 use crate::harness::AgentToolCall;
 
@@ -23,6 +23,8 @@ pub(crate) struct PendingToolInvocation {
     pub(crate) invocation: AgentToolCall,
     /// Foreground/background support resolved at enqueue time.
     pub(crate) background_support: BackgroundSupport,
+    /// Source to apply to report-derived dispatch successors.
+    pub(crate) source: Option<ConnectionId>,
 }
 
 /// Pure queue and in-flight state for tool dispatch during agent turns.
@@ -52,17 +54,30 @@ struct InFlightToolInvocation {
 
 impl ToolTurnMachine {
     /// Enqueue one tool invocation at the back of the turn queue.
+    #[cfg(test)]
     pub(crate) fn push(
         &mut self,
         conversation_id: AgentId,
         invocation: AgentToolCall,
         background_support: BackgroundSupport,
     ) {
+        self.push_from(conversation_id, invocation, background_support, None);
+    }
+
+    /// Enqueue one tool invocation and retain source for derived facts.
+    pub(crate) fn push_from(
+        &mut self,
+        conversation_id: AgentId,
+        invocation: AgentToolCall,
+        background_support: BackgroundSupport,
+        source: Option<ConnectionId>,
+    ) {
         self.pending_tool_invocations
             .push_back(PendingToolInvocation {
                 conversation_id,
                 invocation,
                 background_support,
+                source,
             });
     }
 

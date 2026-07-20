@@ -124,7 +124,12 @@ record. Evidence never automatically lowers limits or thresholds.
 
 Reactive context recovery never trusts provider prose or a provider-authored recovery decision. Eligibility uses the closed failure category, an empty output set, harness-owned prompt operation/model routing, durable activation cut, advertised model capability, and role policy. Watchers receive only the existing sanitized `recovering_context` state; prompt bodies and raw provider errors are not included.
 
-Provider-supplied recovery disposition is unconditionally cleared at ingress and may only be stamped by the harness after eligibility checks. Any accepted streamed semantic output makes the response recovery-ineligible. Cancellation durably terminalizes an active reactive compaction transaction.
+Provider-supplied recovery disposition remains observable on the committed report
+but is unconditionally cleared and rederived by the terminal pipeline before
+canonical publication. Any accepted streamed semantic output makes the response
+recovery-ineligible. Cancellation durably terminalizes an active reactive
+compaction transaction. The report boundary is specified by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 
 ## Harness dispatch refinement
 

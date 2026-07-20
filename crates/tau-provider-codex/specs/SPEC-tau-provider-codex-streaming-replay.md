@@ -11,12 +11,12 @@ Responses streams may deliver visible assistant text, reasoning summaries, large
 function-call arguments, or custom-tool input during an agent turn. Providers emit
 displayable assistant/reasoning append deltas and final tool-call items, and publish
 public content-free response throughput samples on
-`provider.response_updated.response_stats`.
+`provider.response_updated_reported.response_stats`.
 
 The sampler starts when the backend request is dispatched. Lower-layer WebSocket
 frame receives immediately advance the prompt-local received byte counter before
 semantic parsing, while parsed chunks update pending visible/non-visible deltas.
-The provider writes the first non-empty `provider.response_updated` sample as soon as
+The provider writes the first non-empty `provider.response_updated_reported` sample as soon as
 streamed output is observed, then writes later non-terminal samples only on one-second
 response deadlines; later byte changes never bypass that cadence. Each public
 `response_stats` pair uses `previous` = the last provider sample actually emitted for

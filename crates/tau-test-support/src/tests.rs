@@ -340,12 +340,16 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             .expect("read")
             .expect("provider prompt acknowledgement should arrive");
         if let HarnessInputMessage::Emit(emit) = message {
+            assert!(
+                emit.transient,
+                "provider reports must be explicitly transient"
+            );
             match *emit.event {
-                Event::ProviderPromptSubmitted(submitted) => {
+                Event::ProviderPromptSubmittedReported(submitted) => {
                     assert_eq!(submitted.agent_prompt_id.as_str(), "sp-1");
                     break;
                 }
-                Event::ProviderResponseFinished(finished) => {
+                Event::ProviderResponseFinishedReported(finished) => {
                     panic!(
                         "missing backend closed before cancellation: {:?}",
                         finished.error
@@ -374,8 +378,12 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             .expect("read")
             .expect("provider event should arrive");
         if let HarnessInputMessage::Emit(emit) = message
-            && let Event::ProviderResponseFinished(r) = *emit.event
+            && let Event::ProviderResponseFinishedReported(r) = *emit.event
         {
+            assert!(
+                emit.transient,
+                "provider reports must be explicitly transient"
+            );
             break r;
         }
     };

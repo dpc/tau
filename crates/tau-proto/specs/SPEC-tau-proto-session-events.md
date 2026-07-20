@@ -7,9 +7,14 @@
 First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
 Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
 
-`provider.response_updated.response_stats` is public provider-owned response-liveness metadata. It is content-free, prompt-local, and owned by the provider because the provider owns the backend request lifecycle and reads the response byte stream. Providers attach previous/current cumulative samples to rate-limited response updates: `previous` is the last sample that was actually emitted for that provider prompt, and `current` is the new cumulative sample. Providers may emit the first non-empty response/progress/stat update immediately so UIs learn that output has started. Later non-terminal provider response/progress/stat updates must not be emitted more than once per second per prompt; later byte changes never bypass that cadence. A final flush may bypass the cadence immediately before the provider prompt closes.
+`provider.response_updated.response_stats` is public provider-owned response-liveness metadata. Providers submit it on `provider.response_updated_reported`; the harness preserves it on the correlated canonical update. It is content-free, prompt-local, and owned by the provider because the provider owns the backend request lifecycle and reads the response byte stream. Providers attach previous/current cumulative samples to rate-limited response updates: `previous` is the last sample that was actually emitted for that provider prompt, and `current` is the new cumulative sample. Providers may emit the first non-empty response/progress/stat update immediately so UIs learn that output has started. Later non-terminal provider response/progress/stat updates must not be emitted more than once per second per prompt; later byte changes never bypass that cadence. A final flush may bypass the cadence immediately before the provider prompt closes.
 
-The harness validates provider prompt ownership and routing for `provider.response_updated`, but it must not consume, strip, remap, account, or project provider response stats. UI clients render response throughput directly from the provider update. Stats-only provider updates are valid public transient events.
+After `provider.response_updated_reported` commits, the harness validates its
+captured Provider source and prompt routing, then preserves the stats on canonical
+`provider.response_updated`; it must not consume, strip, remap, account, or
+separately project them. UI clients render response throughput from the canonical
+update. Stats-only reports remain valid public transient updates after
+canonicalization.
 
 ## Tree navigation targets
 

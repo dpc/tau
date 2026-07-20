@@ -1411,7 +1411,7 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
     let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
         panic!("expected provider response update frame: {frames:?}");
     };
-    let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+    let tau_proto::Event::ProviderResponseUpdatedReported(update) = emit.event.as_ref() else {
         panic!("expected provider response update: {:?}", emit.event);
     };
     assert!(update.deltas.is_empty());
@@ -1444,7 +1444,7 @@ fn chatgpt_connecting_update_is_sanitized() {
     let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
         panic!("expected connecting status frame: {frames:?}");
     };
-    let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+    let tau_proto::Event::ProviderResponseUpdatedReported(update) = emit.event.as_ref() else {
         panic!("expected provider response update: {:?}", emit.event);
     };
     assert!(update.deltas.is_empty());
@@ -1501,7 +1501,7 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
         .into_iter()
         .filter_map(|frame| match frame {
             tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
-                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
                 _ => None,
             },
             _ => None,
@@ -1595,7 +1595,7 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
         .into_iter()
         .filter_map(|frame| match frame {
             tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
-                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
                 _ => None,
             },
             _ => None,
@@ -1692,7 +1692,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
         .into_iter()
         .filter_map(|frame| match frame {
             tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
-                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
                 _ => None,
             },
             _ => None,
@@ -1755,7 +1755,7 @@ fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
         .into_iter()
         .filter_map(|frame| match frame {
             tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
-                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
                 _ => None,
             },
             _ => None,
@@ -1807,7 +1807,7 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
         .into_iter()
         .filter_map(|frame| match frame {
             tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
-                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
                 _ => None,
             },
             _ => None,
@@ -1874,7 +1874,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
         panic!("expected repetition status frame: {frames:?}");
     };
-    let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+    let tau_proto::Event::ProviderResponseUpdatedReported(update) = emit.event.as_ref() else {
         panic!("expected provider response update: {:?}", emit.event);
     };
     assert!(matches!(
@@ -1910,7 +1910,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
         panic!("expected provider response finished frame: {frames:?}");
     };
-    let tau_proto::Event::ProviderResponseFinished(finished) = emit.event.as_ref() else {
+    let tau_proto::Event::ProviderResponseFinishedReported(finished) = emit.event.as_ref() else {
         panic!("expected provider response finished: {:?}", emit.event);
     };
     assert_eq!(

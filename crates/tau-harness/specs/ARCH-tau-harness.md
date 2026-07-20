@@ -2,8 +2,8 @@
 
 ## Status
 
-The external-message, provider-model, provider-quota, tool-lifecycle,
-tool-request, tool-progress, and terminal-tool-outcome slices
+The external-message, provider-model, provider-quota, provider-execution,
+tool-lifecycle, tool-request, tool-progress, and terminal-tool-outcome slices
 now use generic `Emit` publication, immutable authenticated internal publisher
 snapshots, source-aware admission, and downstream canonicalization as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
@@ -62,6 +62,13 @@ harness-sourced started or rejection/terminal facts. Caller-selected durable
 requests retain stable configured publisher provenance but never rerun work on
 replay; see
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
+
+Configured Provider execution uses the same generic commit boundary. Five `_reported`
+observations commit before exact generation and prompt/retry correlation; the harness
+then publishes canonical provider facts or a requester-directed retry outcome. Terminal
+response alternatives retain the existing recovery, persistence, tool dispatch, and turn
+closure pipeline. See
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 Peer requests routed to harness-internal tools use separate runtime loaded-agent
 correlation for execution, wait, ephemeral, and unload lifecycle; they never
 acquire transcript tool-call ownership, so their terminal facts remain

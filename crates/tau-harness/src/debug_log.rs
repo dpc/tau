@@ -164,7 +164,8 @@ fn redact_event_binary_content(event: &mut Event) {
         Event::AgentCompacted(compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
         }
-        Event::ProviderResponseFinished(finished) => {
+        Event::ProviderResponseFinishedReported(finished)
+        | Event::ProviderResponseFinished(finished) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
         }
         _ => {}

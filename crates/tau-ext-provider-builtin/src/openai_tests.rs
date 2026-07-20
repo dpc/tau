@@ -292,7 +292,8 @@ fn retry_banner_emits_status_not_message_delta() {
     }
 
     let frames = decode_frames(&bytes);
-    let Some(Event::ProviderResponseUpdated(update)) = frames.first().and_then(input_event) else {
+    let Some(Event::ProviderResponseUpdatedReported(update)) = frames.first().and_then(input_event)
+    else {
         panic!("expected provider response update frame: {frames:?}");
     };
     assert!(update.deltas.is_empty());
@@ -390,14 +391,14 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("finished");
         writer.flush().expect("flush fake response");
     });
@@ -429,7 +430,7 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
         })
@@ -524,14 +525,14 @@ fn profile_rotation_cancels_active_prewarm() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("finished");
         writer.flush().expect("flush fake response");
     });
@@ -617,9 +618,9 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("successful terminal");
         writer.flush().expect("flush terminal");
         completed_tx
@@ -654,7 +655,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "sp-1"
                         && update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
@@ -746,9 +747,9 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
         finished.error = None;
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("write identity-race terminal");
         writer.flush().expect("flush identity-race terminal");
         completed_tx.send(id).expect("report identity-race finish");
@@ -808,7 +809,7 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "sp-1"
                         && update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
@@ -1228,16 +1229,18 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
         tau_proto::ProviderStopReason::Length,
     ] {
         successful.stop_reason = stop_reason;
-        let success_message =
-            HarnessInputMessage::emit(Event::ProviderResponseFinished(successful.clone()));
+        let success_message = HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(successful.clone()),
+        );
         assert!(
             successful_probe_matches(&success_message, &prompt_id, &probe, &cooldowns),
             "{stop_reason:?} is authoritative after commit validation"
         );
     }
     successful.stop_reason = tau_proto::ProviderStopReason::EndTurn;
-    let success_message =
-        HarnessInputMessage::emit(Event::ProviderResponseFinished(successful.clone()));
+    let success_message = HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(successful.clone()),
+    );
     assert!(!successful_probe_matches(
         &success_message,
         &tau_proto::AgentPromptId::from("different"),
@@ -1256,13 +1259,14 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
         &cooldowns
     ));
 
-    let error_message =
-        HarnessInputMessage::emit(Event::ProviderResponseFinished(simple_finished(
+    let error_message = HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(simple_finished(
             prompt_id.clone(),
             agent_id,
             tau_proto::PromptOriginator::User,
             "provider error",
-        )));
+        )),
+    );
     assert!(!successful_probe_matches(
         &error_message,
         &prompt_id,
@@ -1277,7 +1281,9 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
         let mut non_success = successful.clone();
         non_success.stop_reason = stop_reason;
         assert!(!successful_probe_matches(
-            &HarnessInputMessage::emit(Event::ProviderResponseFinished(non_success)),
+            &HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
+                non_success
+            )),
             &prompt_id,
             &probe,
             &cooldowns
@@ -1286,7 +1292,9 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
     let mut typed_failure = successful.clone();
     typed_failure.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
     assert!(!successful_probe_matches(
-        &HarnessInputMessage::emit(Event::ProviderResponseFinished(typed_failure)),
+        &HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
+            typed_failure
+        )),
         &prompt_id,
         &probe,
         &cooldowns
@@ -1526,8 +1534,8 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     tx.send(WorkerMessage::Output {
-        message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-            ProviderResponseUpdated {
+        message: Box::new(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
                 agent_prompt_id: target.clone(),
                 agent_id: agent_id.clone(),
                 deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
@@ -1539,16 +1547,16 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
                 status: None,
                 response_stats: None,
                 originator: originator.clone(),
-            },
-        ))),
+            }),
+        )),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
     })
     .expect("queue target delta");
     tx.send(WorkerMessage::Output {
-        message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-            ProviderResponseUpdated {
+        message: Box::new(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
                 agent_prompt_id: target.clone(),
                 agent_id: agent_id.clone(),
                 deltas: Vec::new(),
@@ -1560,8 +1568,8 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
                 }),
                 response_stats: None,
                 originator: originator.clone(),
-            },
-        ))),
+            }),
+        )),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
@@ -1569,9 +1577,14 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     .expect("queue target clear");
     for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
         tx.send(WorkerMessage::Output {
-            message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(id.clone(), agent_id.clone(), originator.clone(), text),
-            ))),
+            message: Box::new(HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    id.clone(),
+                    agent_id.clone(),
+                    originator.clone(),
+                    text,
+                )),
+            )),
             cancel_generation: 0,
             agent_prompt_id: id.clone(),
             cooldown_probe: None,
@@ -1606,7 +1619,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
             .iter()
             .filter(|message| matches!(
                 input_event(message),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id == target
                         && !update.status.as_ref().is_some_and(|status| status.clear_response)
             ))
@@ -1619,7 +1632,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         .position(|message| {
             matches!(
                 input_event(message),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id == target
                         && update.status.as_ref().is_some_and(|status| status.clear_response)
             )
@@ -1630,7 +1643,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         .position(|message| {
             matches!(
                 input_event(message),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id == target
                         && finished.error.as_deref() == Some("(cancelled by harness)")
             )
@@ -1642,7 +1655,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
             .iter()
             .filter(|message| matches!(
                 input_event(message),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id == target
                         && finished.error.as_deref() == Some("(cancelled by harness)")
             ))
@@ -1652,7 +1665,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     );
     assert!(committed.iter().any(|message| matches!(
         input_event(message),
-        Some(Event::ProviderResponseFinished(finished))
+        Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id == peer
                 && finished.error.as_deref() == Some("peer success")
     )));
@@ -1662,14 +1675,14 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     );
 
     let reused = validate_worker_output_for_commit(
-        Box::new(HarnessInputMessage::emit(Event::ProviderResponseFinished(
-            simple_finished(
+        Box::new(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(simple_finished(
                 target.clone(),
                 agent_id,
                 originator,
                 "reused prompt success",
-            ),
-        ))),
+            )),
+        )),
         0,
         0,
         false,
@@ -1679,7 +1692,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     .expect("reused prompt ID may commit");
     assert!(matches!(
         input_event(&reused),
-        Some(Event::ProviderResponseFinished(finished))
+        Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id == target
                 && finished.error.as_deref() == Some("reused prompt success")
     ));
@@ -1869,14 +1882,14 @@ fn prompt_workers_start_concurrently() {
         let mut writer = execution.frame_writer();
         write_prompt_submitted(&agent_prompt_id, &originator, &mut writer).expect("submitted");
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     agent_prompt_id.clone(),
                     tau_proto::AgentId::parse("agent-1").expect("valid test agent id"),
                     originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("finished");
         writer.flush().expect("flush fake response");
 
@@ -1904,7 +1917,12 @@ fn prompt_workers_start_concurrently() {
     let frames = decode_frames(&output.bytes());
     let finished_count = frames
         .iter()
-        .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
+        .filter(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(_))
+            )
+        })
         .count();
     assert_eq!(finished_count, 2);
 }
@@ -1949,14 +1967,14 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("finished frame");
         writer.flush().expect("flush finished frame");
     });
@@ -1984,7 +2002,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
         })
@@ -2006,7 +2024,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
         })
@@ -2016,7 +2034,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         .filter(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderPromptSubmitted(submitted))
+                Some(Event::ProviderPromptSubmittedReported(submitted))
                     if submitted.agent_prompt_id.as_str() == "sp-1"
             )
         })
@@ -2026,7 +2044,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         .filter(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
         })
@@ -2036,7 +2054,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
     assert!(frames.iter().any(|frame| {
         matches!(
             input_event(frame),
-            Some(Event::ProviderRetryPromptResult(result))
+            Some(Event::ProviderRetryPromptResultReported(result))
                 if result.request_id.as_str() == "runtime-manual-1"
                     && result.status == tau_proto::RetryPromptStatus::Accepted
         )
@@ -2077,14 +2095,14 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
         } else {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                    simple_finished(
+                .write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseFinishedReported(simple_finished(
                         execution.job.agent_prompt_id,
                         execution.job.prompt.agent_id,
                         execution.job.prompt.originator,
                         "done",
-                    ),
-                )))
+                    )),
+                ))
                 .expect("finish manual attempt");
             writer.flush().expect("flush finish");
         }
@@ -2110,7 +2128,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
         })
@@ -2131,7 +2149,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
     let frames = decode_frames(&output.bytes());
     assert!(frames.iter().any(|frame| matches!(
         input_event(frame),
-        Some(Event::ProviderRetryPromptResult(result))
+        Some(Event::ProviderRetryPromptResultReported(result))
             if result.request_id.as_str() == "count-transfer"
                 && result.status == tau_proto::RetryPromptStatus::Accepted
     )));
@@ -2255,9 +2273,9 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("successful terminal");
         writer.flush().expect("flush successful terminal");
         completed_tx.send(id).expect("report successful attempt");
@@ -2330,7 +2348,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     let status = frames
         .iter()
         .find_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseUpdated(update))
+            Some(Event::ProviderResponseUpdatedReported(update))
                 if update.agent_prompt_id.as_str() == "probe" =>
             {
                 update
@@ -2374,7 +2392,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             frames.iter().any(|frame| {
                 matches!(
                     input_event(frame),
-                    Some(Event::ProviderResponseUpdated(update))
+                    Some(Event::ProviderResponseUpdatedReported(update))
                         if update.agent_prompt_id.as_str() == *id
                             && update.status.as_ref().is_some_and(|status| {
                                 status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
@@ -2411,21 +2429,21 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderRetryPromptResult(result))
+                Some(Event::ProviderRetryPromptResultReported(result))
                     if result.request_id.as_str() == "one-probe"
                         && result.status == tau_proto::RetryPromptStatus::Accepted
             )
         }) && frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderRetryPromptResult(result))
+                Some(Event::ProviderRetryPromptResultReported(result))
                     if result.request_id.as_str() == "duplicate-probe"
                         && result.status == tau_proto::RetryPromptStatus::NotParked
             )
         }) && frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "probe"
                         && finished.stop_reason == tau_proto::ProviderStopReason::ToolCalls
                         && finished.error.is_none()
@@ -2438,7 +2456,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderRetryPromptResult(_))
+                Some(Event::ProviderRetryPromptResultReported(_))
             ))
             .count(),
         2,
@@ -2498,7 +2516,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 frames.iter().any(|frame| {
                     matches!(
                         input_event(frame),
-                        Some(Event::ProviderResponseFinished(finished))
+                        Some(Event::ProviderResponseFinishedReported(finished))
                             if finished.agent_prompt_id.as_str() == *id
                                 && finished.stop_reason == tau_proto::ProviderStopReason::EndTurn
                                 && finished.error.is_none()
@@ -2520,7 +2538,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderRetryPromptResult(_))
+                Some(Event::ProviderRetryPromptResultReported(_))
             ))
             .count(),
         2,
@@ -2532,7 +2550,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderPromptSubmitted(submitted))
+                    Some(Event::ProviderPromptSubmittedReported(submitted))
                         if submitted.agent_prompt_id.as_str() == id
                 ))
                 .count(),
@@ -2544,7 +2562,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderResponseFinished(finished))
+                    Some(Event::ProviderResponseFinishedReported(finished))
                         if finished.agent_prompt_id.as_str() == id
                 ))
                 .count(),
@@ -2556,7 +2574,8 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         frames
             .iter()
             .filter_map(|frame| match input_event(frame) {
-                Some(Event::ProviderResponseFinished(finished)) => Some(&finished.output_items),
+                Some(Event::ProviderResponseFinishedReported(finished)) =>
+                    Some(&finished.output_items),
                 _ => None,
             })
             .flatten()
@@ -2567,7 +2586,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     );
     assert!(!frames.iter().any(|frame| matches!(
         input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
+        Some(Event::ProviderResponseUpdatedReported(update))
             if update.agent_prompt_id.as_str() == "continuation"
                 && update.status.as_ref().is_some_and(|status| status.retry.is_some())
     )));
@@ -2663,7 +2682,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "sp-1"
                         && update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
@@ -2687,7 +2706,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "telemetry-peer"
                         && update.status.as_ref().is_some_and(|status| {
                             status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
@@ -2743,7 +2762,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.status.as_ref().is_some_and(|status| status.retry.is_some())
             )
         })
@@ -2770,7 +2789,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderRetryPromptResult(result))
+                Some(Event::ProviderRetryPromptResultReported(result))
                     if result.request_id.as_str() == "after-shutdown"
             )
         })
@@ -2783,7 +2802,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderPromptSubmitted(submitted))
+                Some(Event::ProviderPromptSubmittedReported(submitted))
                     if submitted.agent_prompt_id.as_str() == "sp-1"
             ))
             .count(),
@@ -2794,7 +2813,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             ))
             .count(),
@@ -2802,7 +2821,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
     );
     assert!(frames.iter().any(|frame| matches!(
         input_event(frame),
-        Some(Event::ProviderRetryPromptResult(result))
+        Some(Event::ProviderRetryPromptResultReported(result))
             if result.request_id.as_str() == "after-shutdown"
                 && result.status == tau_proto::RetryPromptStatus::NotParked
     )));
@@ -2834,14 +2853,14 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
         } else {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                    simple_finished(
+                .write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseFinishedReported(simple_finished(
                         execution.job.agent_prompt_id,
                         execution.job.prompt.agent_id,
                         execution.job.prompt.originator,
                         "done",
-                    ),
-                )))
+                    )),
+                ))
                 .expect("finish");
             writer.flush().expect("flush finish");
         }
@@ -2872,7 +2891,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
                 .filter(|frame| {
                     matches!(
                         input_event(frame),
-                        Some(Event::ProviderResponseUpdated(update))
+                        Some(Event::ProviderResponseUpdatedReported(update))
                             if update.status.as_ref().is_some_and(|status| status.retry.is_some())
                     )
                 })
@@ -2895,7 +2914,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
         })
@@ -2903,7 +2922,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
     let retry_attempts = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseUpdated(update)) => update
+            Some(Event::ProviderResponseUpdatedReported(update)) => update
                 .status
                 .as_ref()?
                 .retry
@@ -2918,7 +2937,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             ))
             .count(),
@@ -2950,9 +2969,9 @@ fn context_window_rejection_finishes_once_without_retry_status() {
         );
         finished.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("terminal frame");
         writer.flush().expect("flush terminal frame");
     });
@@ -2979,7 +2998,7 @@ fn context_window_rejection_finishes_once_without_retry_status() {
         let terminal: Vec<_> = frames
             .iter()
             .filter_map(|frame| match input_event(frame) {
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1" =>
                 {
                     Some(finished)
@@ -2995,7 +3014,7 @@ fn context_window_rejection_finishes_once_without_retry_status() {
             );
             assert!(!frames.iter().any(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update)) if update.status.is_some()
+                Some(Event::ProviderResponseUpdatedReported(update)) if update.status.is_some()
             )));
             break;
         }
@@ -3072,14 +3091,14 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "healthy done",
-                ),
-            )))
+                )),
+            ))
             .expect("healthy finished");
         writer.flush().expect("flush healthy finish");
         healthy_tx.send(()).expect("report healthy completion");
@@ -3128,7 +3147,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderPromptSubmitted(submitted))
+                Some(Event::ProviderPromptSubmittedReported(submitted))
                     if submitted.agent_prompt_id.as_str() == "healthy"
             ))
             .count(),
@@ -3139,7 +3158,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "healthy"
             ))
             .count(),
@@ -3209,14 +3228,14 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                 assert!(config.credentials_match("fresh-token", Some("fresh-account")));
                 let mut writer = execution.frame_writer();
                 writer
-                    .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                        simple_finished(
+                    .write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(simple_finished(
                             execution.job.agent_prompt_id,
                             execution.job.prompt.agent_id,
                             execution.job.prompt.originator,
                             "observed unavailable",
-                        ),
-                    )))
+                        )),
+                    ))
                     .expect("finish after re-addition");
                 writer.flush().expect("flush re-added finish");
                 finished_tx.send(()).expect("report finish");
@@ -3266,7 +3285,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderPromptSubmitted(submitted))
+                Some(Event::ProviderPromptSubmittedReported(submitted))
                     if submitted.agent_prompt_id.as_str() == "sp-1"
             ))
             .count(),
@@ -3277,7 +3296,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             ))
             .count(),
@@ -3301,8 +3320,8 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-                    ProviderResponseUpdated {
+                .write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
                         agent_prompt_id: execution.job.agent_prompt_id.clone(),
                         agent_id: execution.job.prompt.agent_id.clone(),
                         deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
@@ -3314,8 +3333,8 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
                         status: None,
                         response_stats: None,
                         originator: execution.job.prompt.originator.clone(),
-                    },
-                )))
+                    }),
+                ))
                 .expect("tentative update");
             writer.flush().expect("flush tentative update");
             send_worker_message(
@@ -3347,9 +3366,9 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         })];
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("durable finish");
         writer.flush().expect("flush durable finish");
         finished_tx.send(()).expect("report durable finish");
@@ -3388,7 +3407,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         .position(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.deltas.iter().any(|delta| matches!(
                         delta,
                         tau_proto::ProviderResponseTextDelta::Message { text, .. }
@@ -3402,14 +3421,19 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         .position(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.status.as_ref().is_some_and(|status| status.clear_response)
             )
         })
         .expect("partial clear");
     let finish_position = frames
         .iter()
-        .position(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
+        .position(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(_))
+            )
+        })
         .expect("durable finish");
     assert!(
         tentative_position < clear_position && clear_position < finish_position,
@@ -3418,7 +3442,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
     let finished = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseFinished(finished)) => Some(finished),
+            Some(Event::ProviderResponseFinishedReported(finished)) => Some(finished),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3524,14 +3548,14 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "family done",
-                ),
-            )))
+                )),
+            ))
             .expect("family finish");
         writer.flush().expect("flush family finish");
         finished_tx.send(id).expect("report family finish");
@@ -3587,7 +3611,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderPromptSubmitted(submitted))
+                    Some(Event::ProviderPromptSubmittedReported(submitted))
                         if submitted.agent_prompt_id.as_str() == id
                 ))
                 .count(),
@@ -3598,7 +3622,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderResponseFinished(finished))
+                    Some(Event::ProviderResponseFinishedReported(finished))
                         if finished.agent_prompt_id.as_str() == id
                 ))
                 .count(),
@@ -3688,14 +3712,14 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 }
                 let mut writer = execution.frame_writer();
                 writer
-                    .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                        simple_finished(
+                    .write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(simple_finished(
                             execution.job.agent_prompt_id,
                             execution.job.prompt.agent_id,
                             execution.job.prompt.originator,
                             "late success must become canceled",
-                        ),
-                    )))
+                        )),
+                    ))
                     .expect("late active terminal");
                 writer.flush().expect("flush late active terminal");
             }
@@ -3735,7 +3759,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "mixed-delayed"
                         && update.status.as_ref().is_some_and(|status| {
                             status.retry.as_ref().is_some_and(|retry| {
@@ -3756,7 +3780,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdated(update))
+                Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id.as_str() == "mixed-cooldown-peer"
                         && update.status.as_ref().is_some_and(|status| {
                             status.retry.as_ref().is_some_and(|retry| retry.attempt == 0)
@@ -3790,7 +3814,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 .filter(|frame| {
                     matches!(
                         input_event(frame),
-                        Some(Event::ProviderResponseFinished(finished))
+                        Some(Event::ProviderResponseFinishedReported(finished))
                             if finished.error.as_deref() == Some("(cancelled by harness)")
                     )
                 })
@@ -3828,7 +3852,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderPromptSubmitted(submitted))
+                    Some(Event::ProviderPromptSubmittedReported(submitted))
                         if submitted.agent_prompt_id.as_str() == id
                 ))
                 .count(),
@@ -3839,7 +3863,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 .iter()
                 .filter(|frame| matches!(
                     input_event(frame),
-                    Some(Event::ProviderResponseFinished(finished))
+                    Some(Event::ProviderResponseFinishedReported(finished))
                         if finished.agent_prompt_id.as_str() == id
                             && finished.error.as_deref() == Some("(cancelled by harness)")
                 ))
@@ -3894,14 +3918,14 @@ fn cold_restart_discards_old_work_and_cooldown() {
         );
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "fresh success",
-                ),
-            )))
+                )),
+            ))
             .expect("write fresh terminal");
         writer.flush().expect("flush fresh terminal");
         finished_tx.send(()).expect("report fresh completion");
@@ -3944,7 +3968,7 @@ fn cold_restart_discards_old_work_and_cooldown() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderPromptSubmitted(submitted))
+                Some(Event::ProviderPromptSubmittedReported(submitted))
                     if submitted.agent_prompt_id.as_str() == "fresh-after-restart"
             ))
             .count(),
@@ -3955,7 +3979,7 @@ fn cold_restart_discards_old_work_and_cooldown() {
             .iter()
             .filter(|frame| matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "fresh-after-restart"
             ))
             .count(),
@@ -3964,7 +3988,7 @@ fn cold_restart_discards_old_work_and_cooldown() {
     assert!(
         frames.iter().all(|frame| !matches!(
             input_event(frame),
-            Some(Event::ProviderPromptSubmitted(submitted))
+            Some(Event::ProviderPromptSubmittedReported(submitted))
                 if submitted.agent_prompt_id.as_str().starts_with("mixed-")
         )),
         "old ambiguous APs must not be replayed after restart"
@@ -4035,7 +4059,7 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
         if frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "real-terminal"
             )
         }) {
@@ -4059,7 +4083,7 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     let finished = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseFinished(finished))
+            Some(Event::ProviderResponseFinishedReported(finished))
                 if finished.agent_prompt_id.as_str() == "real-terminal" =>
             {
                 Some(finished)
@@ -4074,7 +4098,7 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     );
     assert!(frames.iter().all(|frame| !matches!(
         input_event(frame),
-        Some(Event::ProviderResponseUpdated(update))
+        Some(Event::ProviderResponseUpdatedReported(update))
             if update.agent_prompt_id.as_str() == "real-terminal"
                 && update.status.as_ref().is_some_and(|status|
                     status.text.contains("next attempt"))
@@ -4113,14 +4137,14 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("status fixture finish");
         writer.flush().expect("flush status fixture");
     });
@@ -4146,7 +4170,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
         if frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
             )
         }) {
@@ -4167,7 +4191,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     let statuses = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseUpdated(update)) => update.status.as_ref(),
+            Some(Event::ProviderResponseUpdatedReported(update)) => update.status.as_ref(),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -4182,7 +4206,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     }
     assert!(matches!(
         frames.last().and_then(input_event),
-        Some(Event::ProviderResponseFinished(finished))
+        Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id.as_str() == "sp-1"
     ));
 }
@@ -4217,14 +4241,14 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                simple_finished(
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
                     execution.job.prompt.originator,
                     "done",
-                ),
-            )))
+                )),
+            ))
             .expect("reuse fixture finish");
         writer.flush().expect("flush reuse fixture");
     });
@@ -4275,7 +4299,7 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
             .filter(|frame| {
                 matches!(
                     input_event(frame),
-                    Some(Event::ProviderResponseFinished(finished))
+                    Some(Event::ProviderResponseFinishedReported(finished))
                         if finished.agent_prompt_id.as_str() == "reused"
                 )
             })
@@ -4298,7 +4322,7 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
     let reused_finishes = frames
         .iter()
         .filter_map(|frame| match input_event(frame) {
-            Some(Event::ProviderResponseFinished(finished))
+            Some(Event::ProviderResponseFinishedReported(finished))
                 if finished.agent_prompt_id.as_str() == "reused" =>
             {
                 Some(finished)
@@ -4388,7 +4412,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
         if frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
                         && finished.error.as_deref() == Some("(cancelled by harness)")
             )
@@ -4407,7 +4431,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
         .filter(|frame| {
             matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseFinished(finished))
+                Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id.as_str() == "sp-1"
                         && finished.error.as_deref() == Some("(cancelled by harness)")
             )
@@ -4505,10 +4529,12 @@ fn worker_output_wakes_loop_before_prompt_done() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let frames = decode_frames(&output.bytes());
-        if frames
-            .iter()
-            .any(|frame| matches!(input_event(frame), Some(Event::ProviderPromptSubmitted(_))))
-        {
+        if frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmittedReported(_))
+            )
+        }) {
             break;
         }
         assert!(
@@ -4566,9 +4592,9 @@ fn replayed_prompt_creation_does_not_start_executor_or_emit_prompt_events() {
             !matches!(
                 input_event(frame),
                 Some(
-                    Event::ProviderPromptSubmitted(_)
-                        | Event::ProviderResponseUpdated(_)
-                        | Event::ProviderResponseFinished(_)
+                    Event::ProviderPromptSubmittedReported(_)
+                        | Event::ProviderResponseUpdatedReported(_)
+                        | Event::ProviderResponseFinishedReported(_)
                 )
             )
         }),
@@ -4712,7 +4738,7 @@ fn direct_prompt_request_with_missing_backend_remains_pending_until_disconnect()
     let submitted = frames.iter().position(|frame| {
         matches!(
             input_event(frame),
-            Some(Event::ProviderPromptSubmitted(submitted))
+            Some(Event::ProviderPromptSubmittedReported(submitted))
                 if submitted.agent_prompt_id.as_str() == "sp-1"
         )
     });
@@ -4720,7 +4746,7 @@ fn direct_prompt_request_with_missing_backend_remains_pending_until_disconnect()
     assert!(
         frames.iter().all(|frame| !matches!(
             input_event(frame),
-            Some(Event::ProviderResponseFinished(finished))
+            Some(Event::ProviderResponseFinishedReported(finished))
                 if finished.agent_prompt_id.as_str() == "sp-1"
         )),
         "reloadable missing backend must not be reported as terminal"

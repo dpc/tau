@@ -265,9 +265,13 @@ their selected models.
   Accepted reports derive the canonical current state defined under
   [Harness general](#harness-general); late subscribers never receive raw
   reports.
-- **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
-  and started processing it. Echoes the originator. Transient.
-- **`provider.response_updated`** — Transient provider-owned live response update.
+- **`provider.prompt_submitted_reported`** — Transient Provider-authored acceptance
+  observation. It commits before prompt-owner validation.
+- **`provider.prompt_submitted`** — Harness-sourced canonical fact for a valid
+  acceptance report. Echoes the originator. Transient.
+- **`provider.response_updated_reported`** — Transient Provider-authored live response
+  observation. It commits before prompt-owner and routing-identity validation.
+- **`provider.response_updated`** — Harness-sourced canonical live response update.
   `deltas` carry newly appended displayable assistant/reasoning text. `status`
   carries provider-authored retry/diagnostic status. `compaction` carries
   provider-side compaction lifecycle. `response_stats` carries public
@@ -278,7 +282,10 @@ their selected models.
   broadcasts these updates unchanged; UI clients render stats directly from this
   event. Stats-only updates are valid and transient.
 
-- **`provider.response_finished`** — Final assistant output in original
+- **`provider.response_finished_reported`** — Transient Provider-authored terminal
+  observation. The committed report enters prompt correlation and the existing
+  response terminal pipeline; it never enters semantic replay.
+- **`provider.response_finished`** — Harness-sourced durable final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Terminal request
   rejection may carry a machine-readable `failure_kind`; notably,
@@ -314,7 +321,9 @@ their selected models.
   their loaded-agent correlation is runtime-only, so resulting
   `provider.tool_result` / `provider.tool_error` events remain ownerless and do
   not fold into prompt history.
-- **`provider.cache_miss_diagnostic`** — Provider-owned diagnostic for a prompt
+- **`provider.cache_miss_diagnostic_reported`** — Transient Provider-authored cache
+  observation awaiting prompt-owner validation.
+- **`provider.cache_miss_diagnostic`** — Harness-sourced canonical diagnostic for a prompt
   with unexpectedly low cache reuse. The harness accepts it only from the
   provider that owns the prompt, and providers emit it before the matching
   `provider.response_finished` closes the pending provider route.
@@ -698,8 +707,9 @@ the UI is the only consumer. Components without a terminal silently no-op.
 - **`ui.retry_prompt`** — Correlated request for the harness to resolve the
   selected agent's exact in-flight prompt and direct a manual delayed-retry
   control to its owning provider.
-- **`provider.retry_prompt_result`** — Owning provider scheduler's correlated
-  `accepted` or `not_parked` result for that exact prompt.
+- **`provider.retry_prompt_result_reported`** — Owning provider scheduler's transient
+  correlated `accepted` or `not_parked` report for that exact prompt. A valid report
+  produces only the requester-directed harness-sourced UI outcome.
 - **`ui.retry_prompt_result`** — Requester-directed retry outcome, including
   harness-side validation failures and the captured target-agent label.
 

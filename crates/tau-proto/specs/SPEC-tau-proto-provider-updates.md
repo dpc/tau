@@ -4,8 +4,9 @@ This protocol record refines [SPEC-provider-response-streaming](../../../specs/S
 
 ## Provider response streaming updates
 
-`provider.response_updated` is transient append-delta protocol surface for
-visible assistant/reasoning progress. Providers must send newly appended text in
+`provider.response_updated_reported` is the Provider-authored transient append-delta
+surface. After generic commit and owner validation, the harness publishes canonical
+`provider.response_updated` for visible assistant/reasoning progress. Providers must send newly appended text in
 `deltas`, not full accumulated message snapshots; retry/status diagnostics belong
 in the separate `status` field because they are provider-authored, not
 assistant-authored. Live byte/duration stats are provider-owned content-free metadata carried in
@@ -14,6 +15,11 @@ Fresh transport setup may emit a fixed content-free status with no retry facts;
 it must not expose endpoints, credentials, accounts, or raw transport errors.
 `provider.response_finished.output_items` remains the complete durable response
 and replay source.
+
+The same report/canonical split covers submitted, finished, cache-diagnostic, and
+directed retry-result payloads. The report variants reuse their canonical DTOs but have
+distinct `_reported` wire names; there is no canonical provider retry-result event. See
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 
 ## Structured watched provider status
 

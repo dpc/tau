@@ -44,6 +44,11 @@ reviewed, human-confirmed decision mandated by
 [DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 Bounded provider quota reports are transient provider observations.
+
+Provider execution also separates five Provider-authored `_reported` observations from
+four harness-canonical provider facts and the directed UI retry outcome. The old
+unreported provider retry-result event no longer exists. See
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 `provider.quota_replace_reported`, `provider.quota_patch_reported`, and
 `provider.quota_clear_reported` carry opaque profile epochs, strict sequences,
 complete stable-key window records with independent usage/timing clocks, and

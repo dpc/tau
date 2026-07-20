@@ -182,30 +182,40 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
         else {
             continue;
         };
-        writer.write_frame(&TestProtocolItem::Event(Event::ProviderPromptSubmitted(
-            tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: prompt.agent_prompt_id.clone(),
-                originator: prompt.originator.clone(),
+        writer.write_frame(&TestProtocolItem::Message(TestMessage::Emit(
+            tau_proto::Emit {
+                event: Box::new(Event::ProviderPromptSubmittedReported(
+                    tau_proto::ProviderPromptSubmitted {
+                        agent_prompt_id: prompt.agent_prompt_id.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )),
+                transient: true,
             },
         )))?;
         let reply = reply_for_prompt(&prompt);
-        writer.write_frame(&TestProtocolItem::Event(Event::ProviderResponseFinished(
-            ProviderResponseFinished {
-                agent_prompt_id: prompt.agent_prompt_id,
-                agent_id: prompt.agent_id,
-                output_items: reply.output_items,
-                stop_reason: reply.stop_reason,
-                error: reply.error,
-                failure_kind: None,
-                context_limit_telemetry: None,
-                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                originator: prompt.originator,
-                usage: reply.usage,
-                compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
-                backend: None,
-                provider_response_id: None,
-                ws_pool_delta: None,
+        writer.write_frame(&TestProtocolItem::Message(TestMessage::Emit(
+            tau_proto::Emit {
+                event: Box::new(Event::ProviderResponseFinishedReported(
+                    ProviderResponseFinished {
+                        agent_prompt_id: prompt.agent_prompt_id,
+                        agent_id: prompt.agent_id,
+                        output_items: reply.output_items,
+                        stop_reason: reply.stop_reason,
+                        error: reply.error,
+                        failure_kind: None,
+                        context_limit_telemetry: None,
+                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                        originator: prompt.originator,
+                        usage: reply.usage,
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
+                        backend: None,
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    },
+                )),
+                transient: true,
             },
         )))?;
         writer.flush()?;

@@ -18,6 +18,10 @@ Configured Provider/Tool/Core peers publish tool routing intents before the
 harness checks correlation or resolves a provider. Started and rejected outcomes
 are harness-authored, and durable request replay is observation-only, as specified
 by [SPEC-tool-requests-and-routing](SPEC-tool-requests-and-routing.md).
+Configured providers likewise publish execution reports before the harness validates
+prompt or retry correlation and derives canonical facts or directed outcomes, as
+specified by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 Provider extensions similarly report bounded quota replacements, patches, and
 clears before validation; only the harness publishes accepted current snapshots,
 as specified by

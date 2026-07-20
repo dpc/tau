@@ -111,7 +111,11 @@ jq '.response_id, .cached_tokens, .provider_terminal_event.response.usage, .agen
 
 ## Token/cache efficiency analysis
 
-When asked to analyze cache hit or token usage efficiency for a session, inspect `events.jsonl` and count `provider.response_finished` events. These events often appear twice: once with `type: "from_connection"` and once with `type: "published"`. Filter to one type, preferably `from_connection`, or dedupe by `(response_id, agent_prompt_id)` to avoid exactly doubling token totals.
+When asked to analyze cache hit or token usage efficiency for a session, inspect
+`events.jsonl`. Raw Provider input uses
+`provider.response_finished_reported`; the enriched harness-canonical published record
+uses `provider.response_finished`. Prefer canonical `type: "published"` records for
+harness-derived usage, or select one name/type explicitly rather than combining both.
 
 Useful one-shot summary:
 
@@ -124,7 +128,7 @@ rows = []
 for ln, line in enumerate(p.open(), 1):
     j = json.loads(line)
     ev = j.get('event', {})
-    if ev.get('event') == 'provider.response_finished' and j.get('type') == 'from_connection':
+    if ev.get('event') == 'provider.response_finished' and j.get('type') == 'published':
         pl = ev.get('payload', {})
         usage = pl.get('usage') or {}
         sp = pl.get('agent_prompt_id') or '?'

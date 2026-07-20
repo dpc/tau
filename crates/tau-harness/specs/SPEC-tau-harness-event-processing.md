@@ -108,7 +108,22 @@ call-site policy says otherwise.
 
 ## Provider response update routing
 
-The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and broadcasts public updates. Displayable deltas, status, compaction, and content-free `response_stats` are all public provider-owned transient fields. Stats-only provider updates are valid and must be delivered to subscribers so UIs can render response liveness directly.
+Configured Provider peers submit the five provider execution `_reported` events through
+generic Emit. Reports commit before the harness validates the captured current
+generation and prompt/retry correlation. Canonical provider facts and directed retry
+outcomes use harness source; reports remain outside semantic history for either supplied
+transient value. Full terminal alternatives and the intentionally non-transactional
+report-to-canonical boundary are specified by
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+
+The harness treats canonical `provider.response_updated` as non-durable live
+progress. After the corresponding report commits, it validates that the captured
+Provider source owns the in-flight prompt, overwrites `agent_id` from harness
+prompt ownership, enriches best-effort compaction metadata, and publishes the
+canonical public update. Displayable deltas, status, compaction, and content-free
+`response_stats` are all public provider-owned transient fields. Stats-only
+reports are valid and must produce canonical updates so UIs can render response
+liveness directly.
 
 ## Subscription and replay exposure
 

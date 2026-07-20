@@ -15,7 +15,7 @@ fn retry_result(
     prompt_id: &str,
     status: tau_proto::RetryPromptStatus,
 ) -> Event {
-    Event::ProviderRetryPromptResult(tau_proto::ProviderRetryPromptResult {
+    Event::ProviderRetryPromptResultReported(tau_proto::ProviderRetryPromptResult {
         request_id: id,
         agent_prompt_id: prompt_id.into(),
         status,
@@ -70,8 +70,18 @@ fn matching_events(
 fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let provider_a = connect_test_client(&mut h, "provider-a", tau_proto::ClientKind::Provider);
-    let provider_b = connect_test_client(&mut h, "provider-b", tau_proto::ClientKind::Provider);
+    let provider_a = connect_ready_configured_extension(
+        &mut h,
+        "provider-a",
+        "provider-a",
+        tau_proto::ClientKind::Provider,
+    );
+    let provider_b = connect_ready_configured_extension(
+        &mut h,
+        "provider-b",
+        "provider-b",
+        tau_proto::ClientKind::Provider,
+    );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "agent-a", "prompt-a", Some("provider-a"));
@@ -127,6 +137,8 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
         0
     );
 
+    h.pending_provider_prompts.remove("prompt-b");
+    h.prompt_agents.remove("prompt-b");
     h.handle_extension_event(
         "provider-b",
         TestProtocolItem::Event(retry_result(
@@ -170,7 +182,12 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
 fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "no-route", "prompt-no-route", None);
     let idle = crate::parse_agent_id("idle-agent");
@@ -217,7 +234,12 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
 fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let _provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
@@ -237,7 +259,12 @@ fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
         1
     );
 
-    let _provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     h.pending_provider_prompts
         .insert("prompt".into(), "provider".into());
     h.handle_client_event_inner("requester", retry_request("rollover", "s1", Some("agent")))
@@ -296,7 +323,12 @@ fn retry_request_tombstones_are_bounded() {
 fn retry_same_ui_id_isolated_across_requesters() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let _provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     let first = connect_test_client(&mut h, "first", tau_proto::ClientKind::Ui);
     let second = connect_test_client(&mut h, "second", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
@@ -345,7 +377,12 @@ fn retry_same_ui_id_isolated_across_requesters() {
 fn retry_pending_nonresponsive_provider_is_bounded() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     for index in 0..1_025 {
         add_routed_prompt(
@@ -384,7 +421,12 @@ fn retry_pending_nonresponsive_provider_is_bounded() {
 fn retry_tombstone_eviction_does_not_reuse_provider_token() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let _provider = connect_test_client(&mut h, "provider", tau_proto::ClientKind::Provider);
+    let _provider = connect_ready_configured_extension(
+        &mut h,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
     h.handle_client_event_inner("requester", retry_request("reuse", "s1", Some("agent")))

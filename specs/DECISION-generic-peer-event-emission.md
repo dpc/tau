@@ -140,6 +140,11 @@ The following exact authority and wire-name mapping governs the migration:
 | Custom `extension.event` | unchanged extension-owned name | Configured extension, attached UI, or core component | Ordinary subscribers consume the committed event directly |
 | Harness lifecycle, membership, transcript, status, and all other harness-owned facts | No peer event name | None | Only the harness publishes the canonical fact |
 
+The Provider execution row is implemented by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
+Its old unreported retry-result input has no canonical event successor; a committed
+`provider.retry_prompt_result_reported` produces only the correlated directed UI outcome.
+
 The state-changing UI row comprises `ui.prompt_submitted`, `ui.role_select`,
 `ui.agent_model_select`, `ui.role_update`, `ui.shell_command`,
 `ui.switch_session`, `ui.create_agent`, `ui.navigate_tree`,

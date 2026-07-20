@@ -1743,6 +1743,7 @@ mod interception;
 mod lifecycle;
 mod mode;
 mod model;
+mod provider_execution_reports;
 mod quota;
 mod replay;
 mod retry;

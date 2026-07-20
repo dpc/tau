@@ -328,3 +328,52 @@ fn transient_from_connection_events_are_not_logged_twice() {
         "transient streaming events are logged on publish; the raw inbound copy is redundant"
     );
 }
+
+/// Ensures raw terminal provider reports cannot leak embedded provider-image
+/// bytes into debug JSONL.
+#[test]
+fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
+    let mut event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+        agent_prompt_id: AgentPromptId::from("sp-image"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![tau_proto::ContextItem::ToolResult(
+            tau_proto::ToolResultItem {
+                call_id: "call-image".into(),
+                tool_type: tau_proto::ToolType::Function,
+                status: tau_proto::ToolResultStatus::Success,
+                output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image".into())),
+                provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                    tau_proto::ImageContent {
+                        media_type: tau_proto::ImageMediaType::Png,
+                        data: vec![1, 2, 3].into(),
+                        width: 1,
+                        height: 1,
+                        detail: tau_proto::ImageDetail::High,
+                    },
+                )],
+            },
+        )],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    });
+
+    redact_event_binary_content(&mut event);
+    let Event::ProviderResponseFinishedReported(finished) = event else {
+        unreachable!("report variant")
+    };
+    let tau_proto::ContextItem::ToolResult(result) = &finished.output_items[0] else {
+        unreachable!("tool result")
+    };
+    let tau_proto::ToolResultContentPart::Image(image) = &result.provider_content[0];
+    assert!(image.data.is_empty());
+}

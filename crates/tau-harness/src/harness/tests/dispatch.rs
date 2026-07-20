@@ -6096,8 +6096,12 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "provider-owner",
         tau_proto::ClientKind::Provider,
     );
-    let _other_frames =
-        connect_test_client(&mut h, "provider-other", tau_proto::ClientKind::Provider);
+    let _other_frames = connect_ready_configured_extension(
+        &mut h,
+        "provider-other",
+        "provider-other",
+        tau_proto::ClientKind::Provider,
+    );
     let _tool_frames =
         connect_test_client(&mut h, "tool-impersonator", tau_proto::ClientKind::Tool);
 
@@ -6181,45 +6185,47 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     h.handle_extension_event(
         "provider-other",
-        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: spid.clone(),
-            agent_id: crate::parse_agent_id(&watched_id),
-            deltas: Vec::new(),
-            compaction: None,
-            status: Some(tau_proto::ProviderResponseStatusUpdate {
-                text: "secret forged provider status".to_owned(),
-                clear_response: true,
-                retry: Some(tau_proto::ProviderRetryStatus {
-                    category: tau_proto::ProviderRetryCategory::Transport,
-                    attempt: 1,
-                    next_retry_delay_secs: 2,
+        TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: spid.clone(),
+                agent_id: crate::parse_agent_id(&watched_id),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "secret forged provider status".to_owned(),
+                    clear_response: true,
+                    retry: Some(tau_proto::ProviderRetryStatus {
+                        category: tau_proto::ProviderRetryCategory::Transport,
+                        attempt: 1,
+                        next_retry_delay_secs: 2,
+                    }),
                 }),
-            }),
-            response_stats: None,
-            originator: tau_proto::PromptOriginator::User,
-        })),
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
     )
     .expect("forged stream from provider");
     h.handle_extension_event(
         "tool-impersonator",
-        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: spid.clone(),
-            agent_id: crate::parse_agent_id(&watched_id),
-            deltas: Vec::new(),
-            compaction: None,
-            status: None,
-            response_stats: None,
-            originator: tau_proto::PromptOriginator::User,
-        })),
+        TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: spid.clone(),
+                agent_id: crate::parse_agent_id(&watched_id),
+                deltas: Vec::new(),
+                compaction: None,
+                status: None,
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
     )
     .expect("forged stream from tool");
     h.handle_extension_event(
         "provider-other",
-        TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
-            &spid,
-            crate::parse_agent_id(&watched_id),
-            "spoofed final",
-        ))),
+        TestProtocolItem::Event(Event::ProviderResponseFinishedReported(
+            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "spoofed final"),
+        )),
     )
     .expect("forged final response");
 
@@ -6232,16 +6238,16 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         h.agents[&watched_cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
-    assert!(!event_log_contains(&h, "provider-other", |event| matches!(
+    assert!(event_log_contains(&h, "provider-other", |event| matches!(
         event,
-        Event::ProviderResponseUpdated(_) | Event::ProviderResponseFinished(_)
+        Event::ProviderResponseUpdatedReported(_) | Event::ProviderResponseFinishedReported(_)
     )));
     assert!(!event_log_contains(
         &h,
         "tool-impersonator",
         |event| matches!(
             event,
-            Event::ProviderResponseUpdated(_) | Event::ProviderResponseFinished(_)
+            Event::ProviderResponseUpdatedReported(_) | Event::ProviderResponseFinishedReported(_)
         )
     ));
     assert!(
@@ -6253,27 +6259,29 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: spid.clone(),
-            agent_id: crate::parse_agent_id(&watched_id),
-            deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
-                output_index: 0,
-                text: "real".to_owned(),
-                phase: None,
-            }],
-            compaction: None,
-            status: Some(tau_proto::ProviderResponseStatusUpdate {
-                text: "secret raw owner diagnostic".to_owned(),
-                clear_response: true,
-                retry: Some(tau_proto::ProviderRetryStatus {
-                    category: tau_proto::ProviderRetryCategory::Throttle,
-                    attempt: 9,
-                    next_retry_delay_secs: 10,
+        TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: spid.clone(),
+                agent_id: crate::parse_agent_id(&watched_id),
+                deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                    output_index: 0,
+                    text: "real".to_owned(),
+                    phase: None,
+                }],
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "secret raw owner diagnostic".to_owned(),
+                    clear_response: true,
+                    retry: Some(tau_proto::ProviderRetryStatus {
+                        category: tau_proto::ProviderRetryCategory::Throttle,
+                        attempt: 9,
+                        next_retry_delay_secs: 10,
+                    }),
                 }),
-            }),
-            response_stats: None,
-            originator: tau_proto::PromptOriginator::User,
-        })),
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
     )
     .expect("owner stream");
     let safe_status = session_agent_message_received_events(&h)
@@ -6284,11 +6292,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     assert!(!safe_status.message.contains("secret raw owner diagnostic"));
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
-            &spid,
-            crate::parse_agent_id(&watched_id),
-            "real final",
-        ))),
+        TestProtocolItem::Event(Event::ProviderResponseFinishedReported(
+            provider_text_response(&spid, crate::parse_agent_id(&watched_id), "real final"),
+        )),
     )
     .expect("owner final response");
 
@@ -6305,10 +6311,11 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         0,
         "provider response updates must remain transient"
     );
-    assert!(event_log_contains(&h, "provider-owner", |event| matches!(
-        event,
-        Event::ProviderResponseFinished(_)
-    )));
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(event, Event::ProviderResponseFinished(_))
+    ));
 
     h.shutdown().expect("shutdown");
 }
@@ -6321,7 +6328,12 @@ fn provider_response_stats_are_public_provider_updates() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    connect_test_client(&mut h, "provider-owner", tau_proto::ClientKind::Provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "provider-owner",
+        "provider-owner",
+        tau_proto::ClientKind::Provider,
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = "sp-provider-public-stats".into();
@@ -6344,24 +6356,26 @@ fn provider_response_stats_are_public_provider_updates() {
 
     h.handle_extension_event(
         "provider-owner",
-        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: spid.clone(),
-            agent_id: crate::parse_agent_id("forged_agent"),
-            deltas: Vec::new(),
-            compaction: None,
-            status: None,
-            response_stats: Some(tau_proto::ProviderResponseStats {
-                current: tau_proto::ProviderResponseStatsSample {
-                    response_bytes_received: 4096,
-                    elapsed_micros: 2_000_000,
-                },
-                previous: tau_proto::ProviderResponseStatsSample {
-                    response_bytes_received: 1024,
-                    elapsed_micros: 1_000_000,
-                },
-            }),
-            originator: tau_proto::PromptOriginator::User,
-        })),
+        TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: spid.clone(),
+                agent_id: crate::parse_agent_id("forged_agent"),
+                deltas: Vec::new(),
+                compaction: None,
+                status: None,
+                response_stats: Some(tau_proto::ProviderResponseStats {
+                    current: tau_proto::ProviderResponseStatsSample {
+                        response_bytes_received: 4096,
+                        elapsed_micros: 2_000_000,
+                    },
+                    previous: tau_proto::ProviderResponseStatsSample {
+                        response_bytes_received: 1024,
+                        elapsed_micros: 1_000_000,
+                    },
+                }),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
     )
     .expect("provider stats update");
 
@@ -10231,19 +10245,21 @@ fn reactive_context_overflow_eligibility_fails_closed() {
                 .expect("provider owner");
             h.handle_extension_event(
                 provider.as_str(),
-                TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                    agent_prompt_id: prompt.agent_prompt_id.clone(),
-                    agent_id: prompt.agent_id.clone(),
-                    deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
-                        output_index: 0,
-                        text: "accepted partial output".to_owned(),
-                        phase: None,
-                    }],
-                    compaction: None,
-                    status: None,
-                    response_stats: None,
-                    originator: prompt.originator.clone(),
-                })),
+                TestProtocolItem::Event(Event::ProviderResponseUpdatedReported(
+                    ProviderResponseUpdated {
+                        agent_prompt_id: prompt.agent_prompt_id.clone(),
+                        agent_id: prompt.agent_id.clone(),
+                        deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                            output_index: 0,
+                            text: "accepted partial output".to_owned(),
+                            phase: None,
+                        }],
+                        compaction: None,
+                        status: None,
+                        response_stats: None,
+                        originator: prompt.originator.clone(),
+                    },
+                )),
             )
             .expect("ingest semantic stream delta");
         }
@@ -19368,7 +19384,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
         },
     );
     h.bump_tools_started_for(&cid);
-    h.update_agent_context_usage(&cid, Some(&"test/model".into()), Some(250), Some(50));
+    h.update_agent_context_usage(&cid, Some(&"test/model".into()), Some(250), Some(50), None);
     h.tool_agents.insert("counted-call".into(), cid.clone());
     h.finish_tool_call_runtime_state("counted-call");
 
@@ -21784,7 +21800,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
         .expect("peer prompt in flight");
     let originator = h.agents[&cid].originator.clone();
     assert!(
-        !h.complete_failed_compaction_side_conversation(&cid),
+        !h.complete_failed_compaction_side_conversation(&cid, None),
         "peer endpoint compaction failure follows ordinary blocked-agent recovery"
     );
     assert!(h.agents.contains_key(&cid));
@@ -22858,8 +22874,18 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    connect_test_client(&mut h, "provider-a", tau_proto::ClientKind::Provider);
-    connect_test_client(&mut h, "provider-b", tau_proto::ClientKind::Provider);
+    connect_ready_configured_extension(
+        &mut h,
+        "provider-a",
+        "provider-a",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_ready_configured_extension(
+        &mut h,
+        "provider-b",
+        "provider-b",
+        tau_proto::ClientKind::Provider,
+    );
     h.pending_provider_prompts
         .insert("prompt-1".into(), "provider-a".into());
 
@@ -22867,19 +22893,28 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
     h.handle_extension_message(
         "provider-b",
         TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(Event::ProviderCacheMissDiagnostic(
+            event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
             transient: false,
         }),
     )
     .expect("non-owner diagnostic emit");
-    assert!(h.event_log.get_next_from(baseline_seq).is_none());
+    assert!(matches!(
+        h.event_log
+            .get_next_from(baseline_seq)
+            .map(|entry| entry.event),
+        Some(Event::ProviderCacheMissDiagnosticReported(_))
+    ));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderCacheMissDiagnostic(_)
+    )));
 
     h.handle_extension_message(
         "provider-a",
         TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(Event::ProviderCacheMissDiagnostic(
+            event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
             transient: false,
@@ -23775,12 +23810,13 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         h.agent_navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Suspended)
     );
-    h.react_to_committed_event(&Event::SessionAgentUnloaded(
-        tau_proto::SessionAgentUnloaded {
+    h.react_to_committed_event(
+        None,
+        &Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
             session_id: h.current_session_id.clone(),
             agent_id: agent_id.clone(),
-        },
-    ));
+        }),
+    );
     assert!(!h.agent_navigation_modes.contains_key(&agent_id));
     h.agent_navigation_modes
         .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Suspended);

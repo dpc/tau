@@ -236,13 +236,13 @@ fn chat_completions_event_snapshot(
         .into_iter()
         .filter_map(|message| match message {
             tau_proto::HarnessInputMessage::Emit(mut emit) => {
-                if let Event::ProviderResponseUpdated(update) = emit.event.as_mut()
+                if let Event::ProviderResponseUpdatedReported(update) = emit.event.as_mut()
                     && let Some(stats) = update.response_stats.as_mut()
                 {
                     stats.previous.elapsed_micros = 0;
                     stats.current.elapsed_micros = 0;
                 }
-                if let Event::ProviderResponseFinished(finished) = emit.event.as_mut()
+                if let Event::ProviderResponseFinishedReported(finished) = emit.event.as_mut()
                     && let Some(backend) = finished.backend.as_mut()
                 {
                     backend.base_url = "<loopback-fixture>".to_owned();

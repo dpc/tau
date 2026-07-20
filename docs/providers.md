@@ -134,9 +134,9 @@ This mirrors Tau's tool routing model.
 
 Provider execution should use provider-named events, not `agent.*` events:
 
-- `provider.prompt_submitted`
-- `provider.response_updated`
-- `provider.response_finished`
+- `provider.prompt_submitted_reported`
+- `provider.response_updated_reported`
+- `provider.response_finished_reported`
 
 These should keep the semantics of the current agent execution events as much as possible:
 
@@ -152,17 +152,30 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
-Providers must not write `provider.response_updated` directly from every upstream stream chunk. Providers may emit the first non-empty streamed response/progress sample promptly so UIs learn that output has started. Later non-terminal response/progress updates are batched and emitted at most once per second per prompt; later byte changes are accumulated, not a reason to emit early. A terminal flush is allowed immediately before `provider.response_finished` closes the prompt.
+Providers must not write one `provider.response_updated_reported` event for every
+upstream stream chunk. They may emit the first non-empty streamed response/progress
+sample promptly so UIs learn that output has started. Later non-terminal reports
+are batched and emitted at most once per second per prompt; later byte changes are
+accumulated, not a reason to emit early. A terminal flush is allowed immediately
+before `provider.response_finished_reported`; only a correlated report accepted
+by the harness terminal pipeline closes the prompt.
 
 Providers attach public content-free `response_stats` previous/current samples to these rate-limited updates. Providers own prompt-local response byte counting because they read the upstream stream, and first-party providers advance that counter from lower-layer received backend response bytes before semantic parsing so progress does not wait for a complete response item. `previous` is the last provider response sample that was actually emitted for that prompt, while `current` is the new cumulative sample measured since backend request dispatch.
 
-The harness validates provider prompt ownership and fixes routing identity, then broadcasts `provider.response_updated` unchanged. It must not strip `response_stats`, derive its own response byte counters, or publish a harness-owned response-throughput projection. UI clients render live response throughput directly from provider updates. Stats-only provider updates are valid when no displayable text, status, or compaction changed.
+The harness first commits the report, then validates provider prompt ownership, fixes
+routing identity, and publishes canonical `provider.response_updated`. It must not
+strip `response_stats`, derive its own response byte counters, or publish a separate
+response-throughput projection. UI clients render live response throughput directly
+from canonical provider updates. Stats-only updates are valid when no displayable text,
+status, or compaction changed. The complete authority and terminal contract is
+[SPEC-provider-execution-reports-and-canonical-facts](../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are
 checked per output item with bounded exact-match suffix detectors. On abort the
-provider sends a `provider.response_updated` status with `clear_response: true`,
-then a final response with empty `output_items` and a bounded display `error`.
+provider sends a `provider.response_updated_reported` status with
+`clear_response: true`, then a `provider.response_finished_reported` response with
+empty `output_items` and a bounded display `error`.
 
 Provider final responses may contain tool calls, but providers do not execute Tau tools.
 The harness routes tools and sends follow-up prompts back to the selected provider when needed.

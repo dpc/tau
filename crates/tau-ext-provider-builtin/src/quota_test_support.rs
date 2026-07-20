@@ -101,9 +101,9 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         };
         let mut frame_writer = execution.frame_writer();
         frame_writer
-            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(finished),
+            ))
             .expect("write fixture terminal");
         frame_writer.flush().expect("flush fixture terminal");
     });
@@ -301,7 +301,7 @@ impl<W: Write> Write for RetryInjectingWriter<W> {
                     HarnessInputMessage::Emit(emit)
                         if matches!(
                             emit.event.as_ref(),
-                            Event::ProviderResponseUpdated(update)
+                            Event::ProviderResponseUpdatedReported(update)
                                 if update.status.as_ref().is_some_and(|status| status.retry.is_some())
                         )
                 ))
@@ -314,7 +314,7 @@ impl<W: Write> Write for RetryInjectingWriter<W> {
                         HarnessInputMessage::Emit(emit)
                             if matches!(
                                 emit.event.as_ref(),
-                                Event::ProviderRetryPromptResult(result)
+                                Event::ProviderRetryPromptResultReported(result)
                                     if result.request_id.as_str() == "quota-fixture-retry"
                                         && result.status == tau_proto::RetryPromptStatus::Accepted
                             )
@@ -331,7 +331,7 @@ impl<W: Write> Write for RetryInjectingWriter<W> {
             .and_then(|frames| {
                 frames.into_iter().find_map(|frame| match frame {
                     HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                        Event::ProviderResponseUpdated(update)
+                        Event::ProviderResponseUpdatedReported(update)
                             if update
                                 .status
                                 .as_ref()

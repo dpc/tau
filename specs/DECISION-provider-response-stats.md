@@ -12,3 +12,7 @@ parsing, tool output, UI rendering, or Tau framing. The tradeoff is that provide
 must implement the shared cadence and cumulative contract consistently. Exact
 behavior is specified by
 [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md).
+Provider extensions carry stats on `provider.response_updated_reported`; after the
+report commits and passes prompt correlation, the harness preserves them on canonical
+`provider.response_updated`. This authority boundary is specified by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).

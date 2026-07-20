@@ -61,3 +61,7 @@ reads prove exact prompt/checkpoint membership and the absence of canceled
 provider terminals; process-group and socket cleanup provide the final
 quiescence boundary. This gate has no PTY, core-shell, filesystem mutation, or
 cold-resume claim.
+The deterministic fake provider uses the same explicit transient provider execution
+report wires as production providers; tests observe harness-canonical successors.
+Authority and ordering follow
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).

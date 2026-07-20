@@ -99,8 +99,8 @@ impl ResponseSampler {
             originator: prompt.originator.clone(),
         };
         if writer
-            .write_message(&tau_proto::HarnessInputMessage::emit(
-                tau_proto::Event::ProviderResponseUpdated(event),
+            .write_message(&tau_proto::HarnessInputMessage::emit_transient(
+                tau_proto::Event::ProviderResponseUpdatedReported(event),
             ))
             .is_ok()
             && writer.flush().is_ok()

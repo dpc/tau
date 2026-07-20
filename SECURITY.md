@@ -132,6 +132,15 @@ Unowned or stale reports may remain observable as committed observations but
 cannot mutate current quota state. Neither reports nor canonical snapshots enter
 semantic journals or cold replay; they contain no credentials or account IDs.
 See [SPEC-provider-quota-pacing](specs/SPEC-provider-quota-pacing.md).
+Configured Provider execution uses five transient `_reported` observations through the
+same trusted local boundary. Reports commit before exact live-generation and
+prompt/retry correlation; only harness-sourced successors assert canonical execution
+facts or directed retry outcomes. Reports are excluded from semantic journals for
+either supplied transient value. Raw terminal report delivery/debug projections clear
+provider-image bytes. This boundary validates routing and lifecycle ownership; it does
+not treat configured provider payloads as hostile extension input or add spoofing
+hardening. See
+[SPEC-provider-execution-reports-and-canonical-facts](specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 Committed terminal result reports may carry typed provider images for downstream
 validation, but every debug JSONL projection clears image bytes under
 [`SPEC-typed-image-tool-results`](specs/SPEC-typed-image-tool-results.md); only

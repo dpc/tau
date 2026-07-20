@@ -22,7 +22,7 @@ records that never had provider-wire JSON.
 
 Streamed assistant text and reasoning text are emitted as append deltas only.
 Providers publish public content-free byte/duration response stats on
-`provider.response_updated.response_stats`. The stats count backend response
+`provider.response_updated_reported.response_stats`. The stats count backend response
 bytes received by the provider transport before semantic parsing; they do not
 carry provider content and are not transcript data.
 
@@ -31,7 +31,7 @@ protocol updates are sampled. The extension response sampler starts when the
 finite backend attempt begins. Received stream data advances backend-owned,
 prompt-local response byte counters before semantic event handling, while parsed
 chunks update the typed progress view. The extension's rate-limited emitter writes
-the first non-empty `provider.response_updated` sample as soon as streamed output
+the first non-empty `provider.response_updated_reported` sample as soon as streamed output
 is observed, then writes later non-terminal samples only on one-second response
 deadlines; later byte changes never bypass that cadence. Each public
 `response_stats` pair uses `previous` = the last provider sample actually
@@ -107,7 +107,7 @@ boundary.
 
 Providers must not copy raw streamed text, reasoning, or function-call argument
 chunks into status text, logs, notices, or UI-only diagnostics. Provider response
-stats are public, content-free metadata on transient `provider.response_updated`
+stats are public, content-free metadata submitted on transient `provider.response_updated_reported`
 events: the backend owns the prompt-local byte counter and the extension owns
 sampling and event writes. The extension may emit the first non-empty
 previous/current sample promptly, emits later non-terminal samples at no more

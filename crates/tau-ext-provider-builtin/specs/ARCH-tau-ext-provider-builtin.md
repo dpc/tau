@@ -82,7 +82,7 @@ Streamed assistant text, reasoning text, and tool-call/custom-tool input cross
 the same external-provider boundary. Never copy raw streamed
 text/reasoning/argument/input bytes into status text, notices, traces, or final
 transcript rendering. Provider response stats are public, content-free metadata
-on transient `provider.response_updated` events: backends own prompt-local byte
+on transient `provider.response_updated_reported` events: backends own prompt-local byte
 counters and the extension owns public sampling and writes. It may emit the first
 non-empty previous/current sample promptly, emits later non-terminal samples at
 no more than 1Hz, and may emit a final flush. The harness validates ownership and
@@ -156,3 +156,8 @@ bodies never become the typed category.
 ### Watcher-visible provider work
 
 The provider publishes closed retry categories and bounded retry facts. Harness snapshotting, fanout, deduplication, and content-exposure behavior are governed by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).
+The extension submits all provider execution output as explicit transient `_reported`
+events. The harness commits those observations before deriving canonical
+`provider.prompt_submitted`, `provider.response_updated`, `provider.response_finished`,
+or `provider.cache_miss_diagnostic` facts or a directed retry outcome. See
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).

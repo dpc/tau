@@ -334,15 +334,23 @@ impl EventName {
     pub const PROVIDER_TOOL_RESULT: Self =
         Self::from_static(EventCategory::Provider, "tool_result");
     pub const PROVIDER_TOOL_ERROR: Self = Self::from_static(EventCategory::Provider, "tool_error");
+    pub const PROVIDER_PROMPT_SUBMITTED_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "prompt_submitted_reported");
     pub const PROVIDER_PROMPT_SUBMITTED: Self =
         Self::from_static(EventCategory::Provider, "prompt_submitted");
+    pub const PROVIDER_RESPONSE_UPDATED_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "response_updated_reported");
     pub const PROVIDER_RESPONSE_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "response_updated");
+    pub const PROVIDER_RESPONSE_FINISHED_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "response_finished_reported");
     pub const PROVIDER_RESPONSE_FINISHED: Self =
         Self::from_static(EventCategory::Provider, "response_finished");
     /// Result of an atomic manual delayed-retry ownership check.
-    pub const PROVIDER_RETRY_PROMPT_RESULT: Self =
-        Self::from_static(EventCategory::Provider, "retry_prompt_result");
+    pub const PROVIDER_RETRY_PROMPT_RESULT_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "retry_prompt_result_reported");
+    pub const PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "cache_miss_diagnostic_reported");
     pub const PROVIDER_CACHE_MISS_DIAGNOSTIC: Self =
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
 

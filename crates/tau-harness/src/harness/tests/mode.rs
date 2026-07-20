@@ -27,9 +27,8 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
     );
 
     // Debug-log mirror: every turn that goes through the harness
-    // should produce both an inbound `from_connection` line capturing
-    // the raw agent frame, and a `published` line capturing the
-    // enriched copy the harness committed. This is what
+    // should produce both a committed report line and a canonical `published`
+    // line capturing the enriched copy the harness committed. This is what
     // cache/cost-analysis tooling reads.
     let jsonl = std::fs::read_to_string(sessions_dir.join("s1").join("events.jsonl"))
         .expect("events.jsonl should exist for session s1");
@@ -38,10 +37,10 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_str(l).expect("valid jsonl"))
         .collect();
-    let from_connection_finished = parsed
+    let reported_finished = parsed
         .iter()
         .filter(|e| {
-            e["type"] == "from_connection" && e["event_name"] == "provider.response_finished"
+            e["type"] == "published" && e["event_name"] == "provider.response_finished_reported"
         })
         .count();
     let published_finished = parsed
@@ -49,8 +48,8 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
         .filter(|e| e["type"] == "published" && e["event_name"] == "provider.response_finished")
         .count();
     assert!(
-        1 <= from_connection_finished,
-        "expected ≥1 inbound provider.response_finished line, got {from_connection_finished}",
+        1 <= reported_finished,
+        "expected ≥1 committed provider.response_finished_reported line, got {reported_finished}",
     );
     assert!(
         1 <= published_finished,
@@ -261,10 +260,11 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
     );
 }
 
-/// Prevents the durable debug JSONL mirror from becoming a parallel transcript
-/// for the first prompt of an ephemeral agent created by a socket UI.
+/// Prevents durable debug JSONL from becoming a parallel transcript for
+/// ephemeral agent creation, prompt, message, tool, and provider traffic,
+/// including forged identities and late duplicate reports.
 #[test]
-fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
+fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("harness");
@@ -394,9 +394,144 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
         message: Box::new(tau_proto::HarnessInputMessage::emit(message_fact.clone())),
     });
     h.commit_message_fact(Some("bridge-connection"), message_fact);
+
+    let provider = "ephemeral-provider";
+    connect_ready_configured_extension(&mut h, provider, provider, tau_proto::ClientKind::Provider);
+    let provider_prompt_id: AgentPromptId = "ephemeral-provider-prompt".into();
+    seed_agent_thinking(&mut h, &cid, provider_prompt_id.as_str());
+    h.prompt_agents
+        .insert(provider_prompt_id.clone(), cid.clone());
+    h.agents
+        .get_mut(&cid)
+        .expect("ephemeral agent")
+        .in_flight_prompt = Some(provider_prompt_id.clone());
+    h.agents
+        .get_mut(&cid)
+        .expect("ephemeral agent")
+        .last_prompt_id = Some(provider_prompt_id.clone());
+    h.pending_provider_prompts
+        .insert(provider_prompt_id.clone(), provider.into());
+    connect_test_client(&mut h, "retry-requester", tau_proto::ClientKind::Ui);
+    h.handle_client_event_inner(
+        "retry-requester",
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("ephemeral-ui-retry")
+                .expect("retry id"),
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id.clone()),
+            agent_prompt_id: None,
+        }),
+    )
+    .expect("request ephemeral retry");
+    let retry_request_id = h
+        .pending_retry_prompts
+        .keys()
+        .next()
+        .cloned()
+        .expect("provider retry correlation");
+    let retry_debug_id = retry_request_id.as_str().to_owned();
+    let submitted = Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+        agent_prompt_id: provider_prompt_id.clone(),
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            submitted.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, submitted)
+        .expect("commit ephemeral submitted report");
+    let update = Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: provider_prompt_id.clone(),
+        agent_id: tau_proto::AgentId::parse("forged-durable-agent").expect("agent id"),
+        deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "ephemeral-provider-update-secret".to_owned(),
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            update.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, update)
+        .expect("commit ephemeral update report");
+    let cache =
+        Event::ProviderCacheMissDiagnosticReported(tau_proto::ProviderCacheMissDiagnostic {
+            agent_prompt_id: provider_prompt_id.clone(),
+            model: "ephemeral-provider/cache-secret".into(),
+            originator: tau_proto::PromptOriginator::User,
+            tool_choice: tau_proto::ToolChoice::default(),
+            ws_pool_delta: None,
+            input_tokens: 1,
+            cached_tokens: 0,
+            previous_input_tokens: 1,
+            cacheable_input_tokens: 1,
+            corrected_cache_efficiency: 0.0,
+        });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            cache.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, cache)
+        .expect("commit ephemeral cache report");
+    let retry_result =
+        Event::ProviderRetryPromptResultReported(tau_proto::ProviderRetryPromptResult {
+            request_id: retry_request_id,
+            agent_prompt_id: provider_prompt_id.clone(),
+            status: tau_proto::RetryPromptStatus::Accepted,
+        });
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            retry_result.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, retry_result.clone())
+        .expect("commit ephemeral retry report");
+    let finished =
+        Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
+            &provider_prompt_id,
+            tau_proto::AgentId::parse("forged-durable-agent").expect("agent id"),
+            "ephemeral-provider-finished-secret",
+        ));
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            finished.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, finished.clone())
+        .expect("commit ephemeral finished report");
+
     h.agents
         .remove(&cid)
         .expect("remove completed ephemeral runtime agent");
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            finished.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, finished)
+        .expect("commit late ephemeral finished report");
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: provider.into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
+            retry_result.clone(),
+        )),
+    });
+    h.handle_extension_event_inner(provider, retry_result)
+        .expect("commit duplicate ephemeral retry report");
     let duplicate_terminal_report = Event::ToolResultReported(ToolResult {
         call_id: ToolCallId::from("ephemeral-debug-tool-call"),
         tool_name: ToolName::new("debug_secret_tool"),
@@ -452,6 +587,18 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     assert!(
         !jsonl.contains("message-debug-secret") && !jsonl.contains("ephemeral-message"),
         "raw and committed ephemeral message facts must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("ephemeral-provider-update-secret")
+            && !jsonl.contains("ephemeral-provider-finished-secret")
+            && !jsonl.contains("ephemeral-provider/cache-secret")
+            && !jsonl.contains("ephemeral-provider-prompt")
+            && !jsonl.contains("provider.prompt_submitted_reported")
+            && !jsonl.contains("provider.response_updated_reported")
+            && !jsonl.contains("provider.response_finished_reported")
+            && !jsonl.contains("provider.retry_prompt_result_reported")
+            && !jsonl.contains(&retry_debug_id),
+        "raw, committed, canonical, forged-identity, and late provider execution traffic for an ephemeral agent must not enter debug JSONL:\n{jsonl}"
     );
 }
 

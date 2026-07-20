@@ -153,7 +153,7 @@ fn retry_prompt_events_round_trip() {
         request
     );
 
-    let result = Event::ProviderRetryPromptResult(ProviderRetryPromptResult {
+    let result = Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
         request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
         agent_prompt_id: "prompt-1".into(),
         status: RetryPromptStatus::Accepted,
@@ -192,14 +192,14 @@ fn retry_prompt_events_use_emit_and_deliver_directional_wrappers() {
         target_agent_id: Some(agent_id("agent-1")),
         agent_prompt_id: None,
     }));
-    let provider_result = HarnessInputMessage::emit(Event::ProviderRetryPromptResult(
-        ProviderRetryPromptResult {
+    let provider_result = HarnessInputMessage::emit_transient(
+        Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
             request_id: RetryPromptRequestId::parse("retry-direction")
                 .expect("valid retry request id"),
             agent_prompt_id: "prompt-1".into(),
             status: RetryPromptStatus::NotParked,
-        },
-    ));
+        }),
+    );
     let ui_result =
         HarnessOutputMessage::deliver(Event::UiRetryPromptResult(UiRetryPromptResult {
             request_id: RetryPromptRequestId::parse("retry-direction")
@@ -1334,10 +1334,29 @@ fn representative_events() -> Vec<Event> {
                 Some(Event::MessageReactionRemovedReported(value))
             }
             Event::MessageSent(value) => Some(Event::MessageSentReported(value)),
+            Event::ProviderPromptSubmitted(value) => {
+                Some(Event::ProviderPromptSubmittedReported(value))
+            }
+            Event::ProviderResponseUpdated(value) => {
+                Some(Event::ProviderResponseUpdatedReported(value))
+            }
+            Event::ProviderResponseFinished(value) => {
+                Some(Event::ProviderResponseFinishedReported(value))
+            }
+            Event::ProviderCacheMissDiagnostic(value) => {
+                Some(Event::ProviderCacheMissDiagnosticReported(value))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     events.extend(reports);
+    events.push(Event::ProviderRetryPromptResultReported(
+        ProviderRetryPromptResult {
+            request_id: RetryPromptRequestId::parse("retry-representative").expect("retry id"),
+            agent_prompt_id: "sp-1".into(),
+            status: RetryPromptStatus::Accepted,
+        },
+    ));
     events
 }
 
@@ -1706,6 +1725,11 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ToolCancelled(_)
                 | Event::ProviderModelsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
+                | Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+                | Event::ProviderRetryPromptResultReported(_)
+                | Event::ProviderCacheMissDiagnosticReported(_)
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderPromptSubmitted(_)
                 | Event::ProviderQuotaReplaceReported(_)
@@ -1815,14 +1839,19 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "message.sent",
         "message.sent_reported",
         "provider.cache_miss_diagnostic",
+        "provider.cache_miss_diagnostic_reported",
         "provider.models_declared",
         "provider.models_updated",
         "provider.prompt_submitted",
+        "provider.prompt_submitted_reported",
         "provider.quota_clear_reported",
         "provider.quota_patch_reported",
         "provider.quota_replace_reported",
         "provider.response_finished",
+        "provider.response_finished_reported",
         "provider.response_updated",
+        "provider.response_updated_reported",
+        "provider.retry_prompt_result_reported",
         "provider.tool_error",
         "provider.tool_result",
         "session.agent_loaded",
@@ -2733,6 +2762,98 @@ fn execution_events_use_provider_wire_family() {
         let json = serde_json::to_value(&event).expect("serialize");
         assert_eq!(json["event"], expected);
     }
+}
+
+/// Provider peers use distinct transient report wires; only the harness emits
+/// canonical execution facts and directed retry outcomes.
+#[test]
+fn provider_execution_reports_use_distinct_transient_wires() {
+    let prompt_id = AgentPromptId::from("sp-1");
+    let agent_id = agent_id("engineer_abcd1234");
+    let reports = [
+        (
+            Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
+                agent_prompt_id: prompt_id.clone(),
+                originator: PromptOriginator::User,
+            }),
+            EventName::PROVIDER_PROMPT_SUBMITTED_REPORTED,
+        ),
+        (
+            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+                agent_prompt_id: prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                deltas: Vec::new(),
+                compaction: None,
+                status: None,
+                response_stats: None,
+                originator: PromptOriginator::User,
+            }),
+            EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
+        ),
+        (
+            Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                agent_prompt_id: prompt_id.clone(),
+                agent_id,
+                stop_reason: ProviderStopReason::EndTurn,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: ContextRecoveryDisposition::None,
+                originator: PromptOriginator::User,
+                output_items: Vec::new(),
+                usage: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
+        ),
+        (
+            Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
+                request_id: RetryPromptRequestId::parse("retry-1").expect("retry id"),
+                agent_prompt_id: prompt_id.clone(),
+                status: RetryPromptStatus::Accepted,
+            }),
+            EventName::PROVIDER_RETRY_PROMPT_RESULT_REPORTED,
+        ),
+        (
+            Event::ProviderCacheMissDiagnosticReported(ProviderCacheMissDiagnostic {
+                agent_prompt_id: prompt_id,
+                model: "provider/model".into(),
+                originator: PromptOriginator::User,
+                tool_choice: ToolChoice::default(),
+                ws_pool_delta: None,
+                input_tokens: 1,
+                cached_tokens: 0,
+                previous_input_tokens: 1,
+                cacheable_input_tokens: 1,
+                corrected_cache_efficiency: 0.0,
+            }),
+            EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED,
+        ),
+    ];
+    for (event, expected_name) in reports {
+        assert_eq!(event.name(), expected_name);
+        assert!(event.defaults_to_transient());
+        let json = serde_json::to_value(&event).expect("encode report");
+        assert_eq!(json["event"], expected_name.to_string());
+        assert_eq!(
+            serde_json::from_value::<Event>(json).expect("decode report"),
+            event
+        );
+    }
+
+    let legacy = serde_json::json!({
+        "event": "provider.retry_prompt_result",
+        "payload": {
+            "request_id": "retry-1",
+            "agent_prompt_id": "sp-1",
+            "status": "accepted"
+        }
+    });
+    assert!(serde_json::from_value::<Event>(legacy).is_err());
 }
 
 /// Ensures provider response updates require the new delta-routing fields

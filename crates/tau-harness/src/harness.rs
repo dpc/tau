@@ -1912,6 +1912,15 @@ pub struct Harness {
     /// `prompt_sessions[spid]` lookups become two hops:
     /// `prompt_agents[spid]` → `agents[cid].session_id`.
     pub(crate) prompt_agents: std::collections::HashMap<AgentPromptId, AgentId>,
+    /// Prompt ids that belonged to ephemeral agents before their live route was
+    /// cleared. Retained only for the current session so late provider reports
+    /// cannot leak into durable debug logs.
+    ephemeral_provider_prompts: HashSet<AgentPromptId>,
+    /// Retry request ids that targeted ephemeral agents before one-shot
+    /// correlation was consumed.
+    ephemeral_provider_retry_requests: HashSet<tau_proto::RetryPromptRequestId>,
+    /// Source inherited by synchronous successors of a committed event/report.
+    derived_publish_source: Option<ConnectionId>,
     /// All in-flight agents keyed by stable `AgentId`. User agents and side
     /// agents use the same identity; there is no default/main alias.
     pub(crate) agents: std::collections::HashMap<AgentId, Agent>,
@@ -2254,12 +2263,12 @@ where
             let spid = prompt.agent_prompt_id.clone();
             let prompt = materialize_prompt(&prompt);
             let context_items = prompt.context.flatten();
-            writer.write_message(&HarnessInputMessage::emit(Event::ProviderPromptSubmitted(
-                ProviderPromptSubmitted {
+            writer.write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
                     agent_prompt_id: spid.clone(),
                     originator: prompt.originator.clone(),
-                },
-            )))?;
+                }),
+            ))?;
 
             let is_tool_result = context_items
                 .last()
@@ -2272,8 +2281,8 @@ where
                         _ => None,
                     })
                     .unwrap_or_default();
-                writer.write_message(&HarnessInputMessage::emit(
-                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                writer.write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseFinishedReported(ProviderResponseFinished {
                         agent_prompt_id: spid,
                         agent_id: prompt.agent_id.clone(),
                         output_items: vec![ContextItem::Message(MessageItem {
@@ -2348,8 +2357,8 @@ where
                     }
                 };
 
-                writer.write_message(&HarnessInputMessage::emit(
-                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                writer.write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseFinishedReported(ProviderResponseFinished {
                         agent_prompt_id: spid,
                         agent_id: prompt.agent_id.clone(),
                         output_items: vec![ContextItem::ToolCall(tool_call)],
@@ -2684,6 +2693,9 @@ impl Harness {
             next_deferred_extension_message_order: 0,
             enabled_extension_names: BTreeSet::new(),
             prompt_agents: HashMap::new(),
+            ephemeral_provider_prompts: HashSet::new(),
+            ephemeral_provider_retry_requests: HashSet::new(),
+            derived_publish_source: None,
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
             user_interaction_order: HashMap::new(),
@@ -3557,7 +3569,7 @@ impl Harness {
         message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
         let origin = self.bus.connection(connection_id).map(|m| m.origin.clone());
-        match origin {
+        let subscribed = match origin {
             Some(ConnectionOrigin::Socket) => {
                 let detach_requested = matches!(
                     &message,
@@ -3572,20 +3584,24 @@ impl Harness {
                 if !keep {
                     self.handle_disconnect(connection_id);
                     if self.startup_detach_requested {
-                        return Ok(false);
+                        false
+                    } else {
+                        return Err(HarnessError::Participant(
+                            "initial UI disconnected during startup handshake".to_owned(),
+                        ));
                     }
-                    return Err(HarnessError::Participant(
-                        "initial UI disconnected during startup handshake".to_owned(),
-                    ));
+                } else {
+                    subscribed
                 }
-                Ok(subscribed)
             }
             Some(_) => {
                 self.handle_extension_message(connection_id, message)?;
-                Ok(false)
+                false
             }
-            None => Ok(false),
-        }
+            None => false,
+        };
+        self.take_pending_publish_error()?;
+        Ok(subscribed)
     }
 
     fn handle_startup_disconnect(&mut self, connection_id: &str) -> Result<(), HarnessError> {
@@ -4086,8 +4102,29 @@ impl Harness {
     /// Convenience wrapper that uses the event's default transience
     /// and never marks the publish as `must_pass`.
     pub(crate) fn publish_event(&mut self, source: Option<&str>, event: Event) {
+        let source = self.resolved_publish_source(source);
         let transient = event.defaults_to_transient();
-        self.enqueue_publish(source, event, transient, false, None);
+        self.enqueue_publish(source.as_deref(), event, transient, false, None);
+    }
+
+    fn resolved_publish_source(&self, source: Option<&str>) -> Option<ConnectionId> {
+        source
+            .map(ConnectionId::from)
+            .or_else(|| self.derived_publish_source.clone())
+    }
+
+    fn with_derived_publish_source<T>(
+        &mut self,
+        source: Option<ConnectionId>,
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous_source = self.derived_publish_source.clone();
+        if source.is_some() {
+            self.derived_publish_source = source;
+        }
+        let output = body(self);
+        self.derived_publish_source = previous_source;
+        output
     }
 
     /// Like [`Harness::publish_event`] but tags the publish with the
@@ -4115,6 +4152,7 @@ impl Harness {
             return;
         }
         let transient = event.defaults_to_transient();
+        let source = self.resolved_publish_source(source);
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
                 .get(cid)
@@ -4126,7 +4164,7 @@ impl Harness {
             cid: cid.clone(),
             agent_id,
         });
-        self.enqueue_publish(source, event, transient, false, sync);
+        self.enqueue_publish(source.as_deref(), event, transient, false, sync);
     }
 
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
@@ -4205,6 +4243,7 @@ impl Harness {
             }
         }
 
+        self.remember_ephemeral_provider_prompt(&agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(&agent_prompt_id);
         self.prompt_operations.remove(&agent_prompt_id);
@@ -4312,7 +4351,9 @@ impl Harness {
         if let Some((agent_id, outcome)) = persisted_agent {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
         }
-        self.react_to_committed_event(&event);
+        self.with_derived_publish_source(source.map(Into::into), |harness| {
+            harness.react_to_committed_event(source, &event);
+        });
     }
 
     /// Select and append the canonical journal record for one stamped fact.
@@ -4656,7 +4697,9 @@ impl Harness {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
         self.process_committed_peer_event(peer_context, &event);
-        self.react_to_committed_event(&event);
+        self.with_derived_publish_source(source.map(Into::into), |harness| {
+            harness.react_to_committed_event(source, &event);
+        });
         self.complete_pending_external_receive(&event);
     }
 
@@ -4937,7 +4980,7 @@ impl Harness {
     /// the just-folded user message. The `c.head` sync that this
     /// dispatch depends on is handled inside `commit_event` for any
     /// publish stamped via `publish_event_for_agent`.
-    fn react_to_committed_event(&mut self, event: &Event) {
+    fn react_to_committed_event(&mut self, source: Option<&str>, event: &Event) {
         if let Event::AgentStandaloneCompactionStarted(started) = event {
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
@@ -5075,7 +5118,7 @@ impl Harness {
                 );
             }
             if failed.reason != tau_proto::StandaloneCompactionFailureReason::Cancelled
-                && self.complete_failed_compaction_side_conversation(&cid)
+                && self.complete_failed_compaction_side_conversation(&cid, source)
             {
                 return;
             }
@@ -5182,8 +5225,9 @@ impl Harness {
                             },
                         };
                 }
-                self.publish_for_agent(
+                self.publish_for_agent_from(
                     &cid,
+                    source,
                     Event::AgentInferenceDispatchStarted(
                         tau_proto::AgentInferenceDispatchStarted {
                             agent_id: compacted.agent_id.clone(),
@@ -5296,6 +5340,7 @@ impl Harness {
                         tool_call_count: 0,
                     },
                     &mut normalized_tool_calls,
+                    None,
                 ) {
                     return;
                 }
@@ -5769,10 +5814,44 @@ impl Harness {
     ) -> bool {
         self.agent_creation_event_targets_ephemeral_agent(event)
             || self.message_fact_targets_ephemeral_agent(event)
+            || self.provider_event_targets_ephemeral_agent(event)
             || self.agent_addressed_event_targets_ephemeral_agent(event)
             || self.agent_operational_event_targets_ephemeral_agent(event)
             || self.tool_event_targets_ephemeral_agent(event)
             || self.agent_scoped_event_targets_ephemeral_agent(event, sync_head_for)
+    }
+
+    fn provider_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        let prompt_id = match event {
+            Event::ProviderPromptSubmittedReported(value)
+            | Event::ProviderPromptSubmitted(value) => Some(&value.agent_prompt_id),
+            Event::ProviderResponseUpdatedReported(value)
+            | Event::ProviderResponseUpdated(value) => Some(&value.agent_prompt_id),
+            Event::ProviderResponseFinishedReported(value)
+            | Event::ProviderResponseFinished(value) => Some(&value.agent_prompt_id),
+            Event::ProviderCacheMissDiagnosticReported(value)
+            | Event::ProviderCacheMissDiagnostic(value) => Some(&value.agent_prompt_id),
+            Event::ProviderRetryPromptResultReported(value) => {
+                return self
+                    .pending_retry_prompts
+                    .get(&value.request_id)
+                    .is_some_and(|pending| self.agent_is_ephemeral(&pending.target_agent_id))
+                    || self
+                        .ephemeral_provider_retry_requests
+                        .contains(&value.request_id);
+            }
+            _ => None,
+        };
+        prompt_id.is_some_and(|prompt_id| self.provider_prompt_targets_ephemeral(prompt_id))
+    }
+
+    fn provider_prompt_targets_ephemeral(&self, prompt_id: &AgentPromptId) -> bool {
+        self.ephemeral_provider_prompts.contains(prompt_id)
+            || self
+                .prompt_agents
+                .get(prompt_id)
+                .and_then(|cid| self.agents.get(cid))
+                .is_some_and(|agent| agent.persistence.is_ephemeral())
     }
 
     /// Return whether a message fact selects an ephemeral agent journal.
@@ -5835,7 +5914,6 @@ impl Harness {
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
             Event::ExtInternalPromptSubmitRequest(request) => Some(&request.agent_id),
-            Event::ProviderResponseUpdated(updated) => Some(&updated.agent_id),
             Event::ToolRequest(request) => Some(&request.agent_id),
             Event::ToolStarted(started) => Some(&started.agent_id),
             _ => None,
@@ -8438,6 +8516,46 @@ impl Harness {
         }
         if matches!(
             event,
+            Event::ProviderPromptSubmitted(_)
+                | Event::ProviderResponseUpdated(_)
+                | Event::ProviderResponseFinished(_)
+                | Event::ProviderCacheMissDiagnostic(_)
+        ) {
+            // Canonical provider execution facts are harness-authored. Configured
+            // providers publish the corresponding `_reported` observation through
+            // dumb generic Emit; correlation and terminal work happen only after
+            // that report commits.
+            return Ok(());
+        }
+        if matches!(
+            event,
+            Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+                | Event::ProviderRetryPromptResultReported(_)
+                | Event::ProviderCacheMissDiagnosticReported(_)
+        ) {
+            // This is only configured event-authority admission. Per
+            // `specs/DECISION-generic-peer-event-emission.md`, prompt ownership,
+            // retry correlation, response normalization, and terminal processing
+            // run from the committed-event consumer.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                entry.kind == ClientKind::Provider && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks provider execution report authority"
+                );
+                return Ok(());
+            }
+            self.handle_extension_fallback_event(source_id, event, transient_override);
+            return Ok(());
+        }
+        if matches!(
+            event,
             Event::ProviderQuotaReplaceReported(_)
                 | Event::ProviderQuotaPatchReported(_)
                 | Event::ProviderQuotaClearReported(_)
@@ -8504,9 +8622,6 @@ impl Harness {
         let Some(event) = self.handle_extension_agent_event(source_id, event)? else {
             return Ok(());
         };
-        let Some(event) = self.handle_extension_provider_prompt_event(source_id, event)? else {
-            return Ok(());
-        };
         self.handle_extension_fallback_event(source_id, event, transient_override);
         Ok(())
     }
@@ -8564,6 +8679,17 @@ impl Harness {
                 | Event::ProviderQuotaClearReported(_)
         ) {
             self.process_committed_provider_quota_report(peer_context, event);
+            return;
+        }
+        if matches!(
+            event,
+            Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+                | Event::ProviderRetryPromptResultReported(_)
+                | Event::ProviderCacheMissDiagnosticReported(_)
+        ) {
+            self.process_committed_provider_execution_report(peer_context, event);
             return;
         }
         let Event::ProviderModelsDeclared(declaration) = event else {
@@ -8755,6 +8881,231 @@ impl Harness {
                 self.handle_provider_quota_clear(extension.source.as_str(), clear.clone());
             }
             _ => unreachable!("caller filters provider quota reports"),
+        }
+    }
+
+    /// Apply one committed provider-execution report from the still-current
+    /// captured provider generation.
+    ///
+    /// The report has already passed ordinary interception, commit, and
+    /// broadcast. Prompt ownership, retry correlation, response normalization,
+    /// and terminal response processing intentionally remain downstream under
+    /// `specs/DECISION-generic-peer-event-emission.md`.
+    fn process_committed_provider_execution_report(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| extension.kind == ClientKind::Provider)
+        else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.connection_id == extension.source
+                        && entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && entry.kind == ClientKind::Provider
+                        && entry.state != ExtensionState::Disconnected
+                });
+        if !source_is_current {
+            // The observation remains committed, but a parked stale generation
+            // cannot mutate prompt, retry, recovery, tool, or turn state.
+            return;
+        }
+        let source_id = extension.source.as_str();
+        match event {
+            Event::ProviderRetryPromptResultReported(result) => {
+                self.process_provider_retry_prompt_result_report(source_id, result);
+            }
+            Event::ProviderPromptSubmittedReported(submitted) => {
+                self.process_provider_prompt_submitted_report(source_id, submitted);
+            }
+            Event::ProviderResponseUpdatedReported(updated) => {
+                self.process_provider_response_updated_report(source_id, updated);
+            }
+            Event::ProviderResponseFinishedReported(response) => {
+                self.process_provider_response_finished_report(source_id, response);
+            }
+            Event::ProviderCacheMissDiagnosticReported(diagnostic) => {
+                self.process_provider_cache_miss_diagnostic_report(source_id, diagnostic);
+            }
+            _ => unreachable!("caller filters provider execution reports"),
+        }
+    }
+
+    fn process_provider_retry_prompt_result_report(
+        &mut self,
+        source_id: &str,
+        result: &tau_proto::ProviderRetryPromptResult,
+    ) {
+        let Some(pending) = self.pending_retry_prompts.get(&result.request_id).cloned() else {
+            return;
+        };
+        if pending.provider_connection_id.as_str() != source_id
+            || pending.agent_prompt_id != result.agent_prompt_id
+        {
+            tracing::warn!(
+                target: "tau_harness",
+                source_id,
+                agent_prompt_id = %result.agent_prompt_id,
+                "discarding mismatched provider retry result report"
+            );
+            return;
+        }
+        if self.agent_is_ephemeral(&pending.target_agent_id) {
+            self.ephemeral_provider_retry_requests
+                .insert(result.request_id.clone());
+        }
+        self.pending_retry_prompts.remove(&result.request_id);
+        let message = match result.status {
+            tau_proto::RetryPromptStatus::Accepted => {
+                format!("Retrying agent {} now.", pending.target_label)
+            }
+            tau_proto::RetryPromptStatus::NotParked => format!(
+                "No delayed provider retry is waiting for agent {}; it may already be running.",
+                pending.target_label
+            ),
+        };
+        let _ = self.bus.send_to(
+            pending.requester_client_id.as_str(),
+            Some(HARNESS_CONNECTION_ID),
+            HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
+                tau_proto::UiRetryPromptResult {
+                    request_id: pending.ui_request_id,
+                    target_agent_id: Some(pending.target_agent_id),
+                    target_label: pending.target_label,
+                    status: Some(result.status),
+                    message,
+                },
+            )),
+        );
+    }
+
+    fn process_provider_prompt_submitted_report(
+        &mut self,
+        source_id: &str,
+        submitted: &tau_proto::ProviderPromptSubmitted,
+    ) {
+        if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
+            && self.provider_prompt_owner_matches(
+                source_id,
+                &submitted.agent_prompt_id,
+                tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED_REPORTED,
+            )
+        {
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::ProviderPromptSubmitted(submitted.clone()),
+            );
+        }
+    }
+
+    fn process_provider_response_updated_report(
+        &mut self,
+        source_id: &str,
+        updated: &tau_proto::ProviderResponseUpdated,
+    ) {
+        if self.canceled_prompts.contains(&updated.agent_prompt_id)
+            || !self.provider_prompt_owner_matches(
+                source_id,
+                &updated.agent_prompt_id,
+                tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
+            )
+        {
+            return;
+        }
+        let Some(agent_id) = self.agent_id_for_prompt(&updated.agent_prompt_id) else {
+            return;
+        };
+        let mut updated = updated.clone();
+        updated.agent_id = agent_id;
+        if !updated.deltas.is_empty() {
+            self.prompt_semantic_output
+                .insert(updated.agent_prompt_id.clone());
+        }
+        self.enrich_provider_response_updated_compaction(&mut updated);
+        if let Some(retry) = updated
+            .status
+            .as_ref()
+            .and_then(|status| status.retry.clone())
+            && !self
+                .agents
+                .get(&updated.agent_id)
+                .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+            && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
+        {
+            let turn_generation = self
+                .agents
+                .get(&updated.agent_id)
+                .map_or(0, |agent| agent.turn_generation);
+            self.update_agent_watch_provider_status(
+                &public_id,
+                tau_proto::AgentWatchProviderStatusNotification {
+                    session_id: self.current_session_id.clone(),
+                    subscription_id: String::new(),
+                    turn_generation,
+                    agent_prompt_id: updated.agent_prompt_id.clone(),
+                    state: tau_proto::AgentWatchProviderState::Retrying {
+                        category: watch_category_for_retry(retry.category),
+                        attempt: retry.attempt,
+                        next_retry_delay_secs: retry.next_retry_delay_secs,
+                    },
+                    initial: false,
+                },
+            );
+        }
+        if provider_response_update_has_public_content(&updated) {
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::ProviderResponseUpdated(updated),
+            );
+        }
+    }
+
+    fn process_provider_response_finished_report(
+        &mut self,
+        source_id: &str,
+        response: &tau_proto::ProviderResponseFinished,
+    ) {
+        if self.provider_prompt_owner_matches(
+            source_id,
+            &response.agent_prompt_id,
+            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
+        ) {
+            let result =
+                self.with_derived_publish_source(Some(HARNESS_CONNECTION_ID.into()), |harness| {
+                    harness.handle_provider_response_finished_from(
+                        Some(HARNESS_CONNECTION_ID),
+                        response.clone(),
+                    )
+                });
+            if let Err(error) = result {
+                self.pending_publish_error.get_or_insert(error);
+            }
+        }
+    }
+
+    fn process_provider_cache_miss_diagnostic_report(
+        &mut self,
+        source_id: &str,
+        diagnostic: &tau_proto::ProviderCacheMissDiagnostic,
+    ) {
+        if self.provider_prompt_owner_matches(
+            source_id,
+            &diagnostic.agent_prompt_id,
+            tau_proto::EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED,
+        ) {
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::ProviderCacheMissDiagnostic(diagnostic.clone()),
+            );
         }
     }
 
@@ -9611,147 +9962,6 @@ impl Harness {
                 Ok(None)
             }
             Event::UiSetAgentNavigationMode(_) => Ok(None),
-            other => Ok(Some(other)),
-        }
-    }
-
-    fn handle_extension_provider_prompt_event(
-        &mut self,
-        source_id: &str,
-        event: Event,
-    ) -> Result<Option<Event>, HarnessError> {
-        match event {
-            Event::ProviderRetryPromptResult(result) => {
-                let Some(pending) = self.pending_retry_prompts.get(&result.request_id).cloned()
-                else {
-                    return Ok(None);
-                };
-                if pending.provider_connection_id.as_str() != source_id
-                    || pending.agent_prompt_id != result.agent_prompt_id
-                {
-                    tracing::warn!(
-                        target: "tau_harness",
-                        source_id,
-                        agent_prompt_id = %result.agent_prompt_id,
-                        "discarding mismatched provider retry result"
-                    );
-                    return Ok(None);
-                }
-                self.pending_retry_prompts.remove(&result.request_id);
-                let message = match result.status {
-                    tau_proto::RetryPromptStatus::Accepted => {
-                        format!("Retrying agent {} now.", pending.target_label)
-                    }
-                    tau_proto::RetryPromptStatus::NotParked => format!(
-                        "No delayed provider retry is waiting for agent {}; it may already be running.",
-                        pending.target_label
-                    ),
-                };
-                let _ = self.bus.send_to(
-                    pending.requester_client_id.as_str(),
-                    Some(source_id),
-                    HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
-                        tau_proto::UiRetryPromptResult {
-                            request_id: pending.ui_request_id,
-                            target_agent_id: Some(pending.target_agent_id),
-                            target_label: pending.target_label,
-                            status: Some(result.status),
-                            message,
-                        },
-                    )),
-                );
-                Ok(None)
-            }
-            Event::ProviderPromptSubmitted(submitted) => {
-                if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
-                    && self.provider_prompt_owner_matches(
-                        source_id,
-                        &submitted.agent_prompt_id,
-                        tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
-                    )
-                {
-                    self.publish_event(Some(source_id), Event::ProviderPromptSubmitted(submitted));
-                }
-                Ok(None)
-            }
-            Event::ProviderResponseUpdated(mut updated) => {
-                if !self.canceled_prompts.contains(&updated.agent_prompt_id)
-                    && self.provider_prompt_owner_matches(
-                        source_id,
-                        &updated.agent_prompt_id,
-                        tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
-                    )
-                {
-                    if !updated.deltas.is_empty() {
-                        self.prompt_semantic_output
-                            .insert(updated.agent_prompt_id.clone());
-                    }
-                    if let Some(agent_id) = self.agent_id_for_prompt(&updated.agent_prompt_id) {
-                        updated.agent_id = agent_id;
-                    }
-                    self.enrich_provider_response_updated_compaction(&mut updated);
-                    if let Some(retry) = updated
-                        .status
-                        .as_ref()
-                        .and_then(|status| status.retry.clone())
-                        && !self
-                            .agents
-                            .get(&updated.agent_id)
-                            .is_some_and(|agent| agent.lifecycle_notification_only_turn)
-                        && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
-                    {
-                        let turn_generation = self
-                            .agents
-                            .get(&updated.agent_id)
-                            .map_or(0, |agent| agent.turn_generation);
-                        self.update_agent_watch_provider_status(
-                            &public_id,
-                            tau_proto::AgentWatchProviderStatusNotification {
-                                session_id: self.current_session_id.clone(),
-                                subscription_id: String::new(),
-                                turn_generation,
-                                agent_prompt_id: updated.agent_prompt_id.clone(),
-                                state: tau_proto::AgentWatchProviderState::Retrying {
-                                    category: watch_category_for_retry(retry.category),
-                                    attempt: retry.attempt,
-                                    next_retry_delay_secs: retry.next_retry_delay_secs,
-                                },
-                                initial: false,
-                            },
-                        );
-                    }
-                    if provider_response_update_has_public_content(&updated) {
-                        self.publish_event(
-                            Some(source_id),
-                            Event::ProviderResponseUpdated(updated),
-                        );
-                    }
-                }
-                Ok(None)
-            }
-            Event::ProviderResponseFinished(response) => {
-                if self.provider_prompt_owner_matches(
-                    source_id,
-                    &response.agent_prompt_id,
-                    tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-                ) {
-                    self.handle_provider_response_finished_from(Some(source_id), response)?;
-                }
-                Ok(None)
-            }
-            Event::ProviderCacheMissDiagnostic(diagnostic) => {
-                if self.provider_prompt_owner_matches(
-                    source_id,
-                    &diagnostic.agent_prompt_id,
-                    tau_proto::EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
-                ) {
-                    self.publish_event(
-                        Some(source_id),
-                        Event::ProviderCacheMissDiagnostic(diagnostic),
-                    );
-                }
-                Ok(None)
-            }
             other => Ok(Some(other)),
         }
     }
@@ -11201,6 +11411,10 @@ impl Harness {
             );
             return;
         }
+        if self.agent_is_ephemeral(&target_agent_id) {
+            self.ephemeral_provider_retry_requests
+                .insert(provider_request_id.clone());
+        }
         self.pending_retry_prompts.insert(
             provider_request_id,
             PendingRetryPrompt {
@@ -11687,6 +11901,7 @@ impl Harness {
                 AgentPromptTerminationReason::Canceled,
                 originator,
             );
+            self.remember_ephemeral_provider_prompt(&spid);
             self.prompt_agents.remove(&spid);
             self.prompt_operations.remove(&spid);
             self.prompt_context_limits.remove(&spid);
@@ -12602,6 +12817,11 @@ impl Harness {
                 | Event::ProviderQuotaReplaceReported(_)
                 | Event::ProviderQuotaPatchReported(_)
                 | Event::ProviderQuotaClearReported(_)
+                | Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+                | Event::ProviderRetryPromptResultReported(_)
+                | Event::ProviderCacheMissDiagnosticReported(_)
         )
     }
 
@@ -12920,10 +13140,21 @@ impl Harness {
 
     fn publish_prompt_terminated(
         &mut self,
+        session_id: SessionId,
+        agent_prompt_id: AgentPromptId,
+        reason: AgentPromptTerminationReason,
+        originator: PromptOriginator,
+    ) {
+        self.publish_prompt_terminated_from(session_id, agent_prompt_id, reason, originator, None);
+    }
+
+    fn publish_prompt_terminated_from(
+        &mut self,
         _session_id: SessionId,
         agent_prompt_id: AgentPromptId,
         reason: AgentPromptTerminationReason,
         originator: PromptOriginator,
+        source: Option<&str>,
     ) {
         let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
         let agent_id = crate::parse_agent_id(
@@ -12933,7 +13164,7 @@ impl Harness {
                 .expect("agent has durable id"),
         );
         self.publish_event(
-            None,
+            source,
             Event::AgentPromptTerminated(AgentPromptTerminated {
                 agent_id,
                 agent_prompt_id,
@@ -13784,8 +14015,12 @@ impl Harness {
     }
 
     fn emit_agent_stats_updated(&mut self, cid: &AgentId) {
+        self.emit_agent_stats_updated_from(cid, None);
+    }
+
+    fn emit_agent_stats_updated_from(&mut self, cid: &AgentId, source: Option<&str>) {
         if let Some(stats) = self.agent_stats_snapshot(cid) {
-            self.publish_event(None, Event::AgentStatsUpdated(stats));
+            self.publish_event(source, Event::AgentStatsUpdated(stats));
         }
     }
 
@@ -15498,6 +15733,7 @@ impl Harness {
                 AgentPromptTerminationReason::Canceled,
                 originator.clone(),
             );
+            self.remember_ephemeral_provider_prompt(spid);
             self.prompt_agents.remove(spid);
             self.prompt_operations.remove(spid);
             self.prompt_context_limits.remove(spid);
@@ -15737,6 +15973,8 @@ impl Harness {
         self.pending_tool_providers.clear();
         self.pending_action_invocations.clear();
         self.prompt_agents.clear();
+        self.ephemeral_provider_prompts.clear();
+        self.ephemeral_provider_retry_requests.clear();
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
         self.prompt_context_limits.clear();
@@ -19303,6 +19541,7 @@ impl Harness {
             &response.agent_prompt_id,
             input_tokens,
             cached_tokens,
+            source,
         );
 
         let Some(cid) = response_cid else {
@@ -19323,7 +19562,9 @@ impl Harness {
                 } if prompt_id == &response.agent_prompt_id
             )
         });
-        if !active_compaction_response && self.discard_finished_response_if_stale(&cid, &response) {
+        if !active_compaction_response
+            && self.discard_finished_response_if_stale(&cid, &response, source)
+        {
             return Ok(());
         }
         if self.try_plan_reactive_context_recovery(&cid, &mut response, source) {
@@ -19418,7 +19659,7 @@ impl Harness {
                         Event::ProviderResponseFinished(response.clone()),
                     );
                 }
-                self.reject_standalone_compaction(&cid, &response);
+                self.reject_standalone_compaction(&cid, &response, source);
             }
             return Ok(());
         }
@@ -19465,12 +19706,13 @@ impl Harness {
                 tool_call_count: tool_calls.len(),
             },
             &mut normalized_tool_calls,
+            source,
         ) {
             return Ok(());
         }
 
         if requested_tool_calls {
-            self.dispatch_finished_response_tool_calls(&cid, normalized_tool_calls)?;
+            self.dispatch_finished_response_tool_calls(&cid, normalized_tool_calls, source)?;
         } else {
             self.complete_finished_response_without_tool_calls(
                 &cid,
@@ -19696,7 +19938,7 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.in_flight_prompt = None;
         }
-        self.start_reactive_compaction_for_checkpoint(cid, &checkpoint);
+        self.start_reactive_compaction_for_checkpoint(cid, &checkpoint, source);
         true
     }
 
@@ -19752,7 +19994,7 @@ impl Harness {
                         )
                     });
             if model_matches && capability_matches && policy_allows && branch_matches {
-                self.start_reactive_compaction_for_checkpoint(&cid, &checkpoint);
+                self.start_reactive_compaction_for_checkpoint(&cid, &checkpoint, None);
             } else {
                 self.terminalize_replay_blocked_context_recovery(&cid, &checkpoint);
             }
@@ -19831,6 +20073,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+        source: Option<&str>,
     ) {
         let Some(model) = checkpoint.model.clone() else {
             return;
@@ -19864,8 +20107,9 @@ impl Harness {
                     transaction_id: transaction_id.clone(),
                 };
         }
-        self.publish_for_agent(
+        self.publish_for_agent_from(
             cid,
+            source,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
                 agent_id: crate::parse_agent_id(&agent_id),
                 transaction_id,
@@ -19955,6 +20199,7 @@ impl Harness {
                 cid,
                 response,
                 tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                source,
             );
             return;
         }
@@ -19981,7 +20226,12 @@ impl Harness {
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
     }
 
-    fn reject_standalone_compaction(&mut self, cid: &AgentId, response: &ProviderResponseFinished) {
+    fn reject_standalone_compaction(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        source: Option<&str>,
+    ) {
         self.emit_info(&format!(
             "provider returned an invalid standalone compaction window for agent_prompt_id={}",
             response.agent_prompt_id
@@ -19991,7 +20241,7 @@ impl Harness {
         } else {
             tau_proto::StandaloneCompactionFailureReason::InvalidWindow
         };
-        self.fail_standalone_compaction(cid, response, reason);
+        self.fail_standalone_compaction(cid, response, reason, source);
     }
 
     fn fail_standalone_compaction(
@@ -19999,6 +20249,7 @@ impl Harness {
         cid: &AgentId,
         response: &ProviderResponseFinished,
         reason: tau_proto::StandaloneCompactionFailureReason,
+        source: Option<&str>,
     ) {
         let transaction = self
             .agents
@@ -20023,8 +20274,9 @@ impl Harness {
         self.emit_info_important(&format!(
             "standalone compaction failed for agent `{cid}` ({reason:?}); retry with /compact, switch model/role, or rewind"
         ));
-        self.publish_for_agent(
+        self.publish_for_agent_from(
             cid,
+            source,
             Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
                 agent_id: response.agent_id.clone(),
                 transaction_id,
@@ -20056,6 +20308,7 @@ impl Harness {
     }
 
     fn discard_finished_response_prompt_tracking(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
@@ -20067,8 +20320,21 @@ impl Harness {
     }
 
     fn clear_finished_response_prompt_route(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
+    }
+
+    fn remember_ephemeral_provider_prompt(&mut self, agent_prompt_id: &AgentPromptId) {
+        if self
+            .prompt_agents
+            .get(agent_prompt_id)
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| agent.persistence.is_ephemeral())
+        {
+            self.ephemeral_provider_prompts
+                .insert(agent_prompt_id.clone());
+        }
     }
 
     fn update_finished_response_context_usage(
@@ -20077,13 +20343,20 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
+        source: Option<&str>,
     ) {
         // Per-conversation usage: separate from the global tracker because side
         // agents shouldn't clobber the user's status bar, but generic agent
         // stats still need their context usage.
         if let Some(cid) = response_cid {
             let usage_model = self.prompt_models.get(agent_prompt_id).cloned();
-            self.update_agent_context_usage(cid, usage_model.as_ref(), input_tokens, cached_tokens);
+            self.update_agent_context_usage(
+                cid,
+                usage_model.as_ref(),
+                input_tokens,
+                cached_tokens,
+                source,
+            );
         }
     }
 
@@ -20120,6 +20393,9 @@ impl Harness {
     }
 
     fn emit_duplicate_finished_response_notice(&mut self, agent_prompt_id: &AgentPromptId) {
+        if self.provider_prompt_targets_ephemeral(agent_prompt_id) {
+            return;
+        }
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery
         // removed the entry from `prompt_agents`; later ones
@@ -20145,6 +20421,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
+        source: Option<&str>,
     ) -> bool {
         if !self.is_finished_response_stale(cid, &response.agent_prompt_id) {
             return false;
@@ -20154,11 +20431,12 @@ impl Harness {
             .get(cid)
             .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
         {
-            self.publish_prompt_terminated(
+            self.publish_prompt_terminated_from(
                 session_id,
                 response.agent_prompt_id.clone(),
                 AgentPromptTerminationReason::Stale,
                 originator,
+                source,
             );
         }
         self.emit_info(&format!(
@@ -20379,6 +20657,7 @@ impl Harness {
         cid: &AgentId,
         side: FinishedSideConversation<'_>,
         normalized_tool_calls: &mut NormalizedFinishedToolCalls,
+        source: Option<&str>,
     ) -> bool {
         if self
             .agents
@@ -20410,7 +20689,7 @@ impl Harness {
             self.clear_prompt_tool_snapshot(&side.response.agent_prompt_id);
         }
         if side.requested_tool_calls {
-            self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls);
+            self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls, source);
         }
         if self.has_pending_message_received_prompt(cid) {
             self.fold_pending_prompts_as_steered(cid);
@@ -20430,7 +20709,7 @@ impl Harness {
             text: side.assistant_text.unwrap_or_default().to_owned(),
             error,
         };
-        self.deliver_finished_side_conversation_result(cid, &name, &query_id, result);
+        self.deliver_finished_side_conversation_result(cid, &name, &query_id, result, source);
         self.complete_finished_side_conversation(cid, Some(&side.response.agent_prompt_id));
         true
     }
@@ -20452,6 +20731,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         normalized_tool_calls: &mut NormalizedFinishedToolCalls,
+        source: Option<&str>,
     ) {
         let remaining_calls: Vec<ToolCallId> = normalized_tool_calls
             .calls
@@ -20465,11 +20745,13 @@ impl Harness {
                 .invalid_errors
                 .remove(&entry.call.id)
                 .unwrap_or_else(|| format!("refusing to execute tool call `{}`", entry.call.name));
-            self.reject_agent_tool_call_before_dispatch_without_followup(
+            self.reject_agent_tool_call_before_dispatch_inner(
                 cid,
                 &entry.call,
                 entry.call.name.clone(),
                 message,
+                false,
+                source,
             );
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
@@ -20510,6 +20792,7 @@ impl Harness {
         name: &ExtensionName,
         query_id: &str,
         result: tau_proto::StartAgentResult,
+        result_source: Option<&str>,
     ) {
         let source = self
             .agents
@@ -20521,7 +20804,7 @@ impl Harness {
             } else {
                 let _ = self.bus.send_to(
                     source.as_str(),
-                    None,
+                    result_source,
                     HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
                 );
             }
@@ -20540,7 +20823,11 @@ impl Harness {
 
     /// Completes extension-originated work after a terminal standalone
     /// compaction failure, using only a safe categorical error.
-    fn complete_failed_compaction_side_conversation(&mut self, cid: &AgentId) -> bool {
+    fn complete_failed_compaction_side_conversation(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&str>,
+    ) -> bool {
         if self
             .agents
             .get(cid)
@@ -20566,6 +20853,7 @@ impl Harness {
                 text: String::new(),
                 error: Some("provider failure: compaction".to_owned()),
             },
+            source,
         );
         self.complete_finished_side_conversation(cid, None);
         true
@@ -20608,6 +20896,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         mut normalized_tool_calls: NormalizedFinishedToolCalls,
+        source: Option<&str>,
     ) -> Result<(), HarnessError> {
         // Tool calls to execute — agent stays busy. After all
         // tools complete, maybe_complete_agent_turn drains any
@@ -20642,10 +20931,20 @@ impl Harness {
         for entry in normalized_tool_calls.calls {
             let call = entry.call;
             if let Some(message) = normalized_tool_calls.invalid_errors.remove(&call.id) {
-                self.reject_agent_tool_call_before_dispatch(cid, &call, call.name.clone(), message);
+                self.reject_agent_tool_call_before_dispatch_from(
+                    cid,
+                    &call,
+                    call.name.clone(),
+                    message,
+                    source,
+                );
             } else {
-                self.tool_turn
-                    .push(cid.clone(), call, entry.background_support);
+                self.tool_turn.push_from(
+                    cid.clone(),
+                    call,
+                    entry.background_support,
+                    source.map(Into::into),
+                );
             }
         }
         self.drain_pending_tool_invocations()
@@ -20734,6 +21033,7 @@ impl Harness {
         model: Option<&ModelId>,
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
+        source: Option<&str>,
     ) {
         let context_window =
             model.and_then(|m| context_window_for_model(&self.provider_model_info, m));
@@ -20755,7 +21055,7 @@ impl Harness {
             }
         }
         self.publish_event(
-            None,
+            source,
             Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
                 agent_id: cid.clone(),
                 input_tokens,
@@ -20764,7 +21064,7 @@ impl Harness {
                 percent_used,
             }),
         );
-        self.emit_agent_stats_updated(cid);
+        self.emit_agent_stats_updated_from(cid, source);
     }
 
     /// True iff every configured extension has either reached `Ready`
@@ -20817,6 +21117,7 @@ impl Harness {
                     conversation_id,
                     invocation,
                     background_support: _,
+                    source,
                 },
                 foreground_action,
             )) = self.tool_turn.pop_dispatchable(Instant::now())
@@ -20827,7 +21128,9 @@ impl Harness {
             // If dispatch fails synchronously, roll back the in-flight
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
-            if let Err(error) = self.execute_agent_tool_call(&conversation_id, &invocation) {
+            if let Err(error) =
+                self.execute_agent_tool_call_from(&conversation_id, &invocation, source.as_deref())
+            {
                 self.tool_turn.rollback_dispatch(&call_id);
                 return Err(error);
             }
@@ -21537,6 +21840,7 @@ impl Harness {
         self.publish_prompts_as_steered(cid, pending);
     }
 
+    #[cfg(test)]
     fn reject_agent_tool_call_before_dispatch(
         &mut self,
         cid: &AgentId,
@@ -21544,17 +21848,22 @@ impl Harness {
         tool_name: ToolName,
         message: String,
     ) {
-        self.reject_agent_tool_call_before_dispatch_inner(cid, call, tool_name, message, true);
+        self.reject_agent_tool_call_before_dispatch_inner(
+            cid, call, tool_name, message, true, None,
+        );
     }
 
-    fn reject_agent_tool_call_before_dispatch_without_followup(
+    fn reject_agent_tool_call_before_dispatch_from(
         &mut self,
         cid: &AgentId,
         call: &AgentToolCall,
         tool_name: ToolName,
         message: String,
+        source: Option<&str>,
     ) {
-        self.reject_agent_tool_call_before_dispatch_inner(cid, call, tool_name, message, false);
+        self.reject_agent_tool_call_before_dispatch_inner(
+            cid, call, tool_name, message, true, source,
+        );
     }
 
     fn reject_agent_tool_call_before_dispatch_inner(
@@ -21564,13 +21873,14 @@ impl Harness {
         tool_name: ToolName,
         message: String,
         complete_turn: bool,
+        source: Option<&str>,
     ) {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
         self.bump_tools_started_for(cid);
         self.publish_terminal_tool_error(
             Some(cid),
-            None,
+            source,
             ToolError {
                 call_id: call_id.clone(),
                 tool_name,
@@ -21763,10 +22073,20 @@ impl Harness {
         }
     }
 
+    #[cfg(test)]
     fn execute_agent_tool_call(
         &mut self,
         cid: &AgentId,
         call: &AgentToolCall,
+    ) -> Result<(), HarnessError> {
+        self.execute_agent_tool_call_from(cid, call, None)
+    }
+
+    fn execute_agent_tool_call_from(
+        &mut self,
+        cid: &AgentId,
+        call: &AgentToolCall,
+        source: Option<&str>,
     ) -> Result<(), HarnessError> {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
@@ -21815,10 +22135,10 @@ impl Harness {
                 agent_id: owner_agent_id,
                 originator: owner_originator.clone(),
             };
-            self.publish_for_agent(cid, Event::ToolRequest(request));
+            self.publish_for_agent_from(cid, source, Event::ToolRequest(request));
             self.publish_terminal_tool_error(
                 Some(cid),
-                None,
+                source,
                 ToolError {
                     call_id: call_id.clone(),
                     tool_name,
@@ -21876,7 +22196,13 @@ impl Harness {
                         message.push_str(&hint);
                     }
                 }
-                self.reject_agent_tool_call_before_dispatch(cid, call, visible_tool_name, message);
+                self.reject_agent_tool_call_before_dispatch_from(
+                    cid,
+                    call,
+                    visible_tool_name,
+                    message,
+                    source,
+                );
                 return Ok(());
             }
         }
@@ -21908,7 +22234,7 @@ impl Harness {
             agent_id: owner_agent_id.clone(),
             originator: owner_originator.clone(),
         };
-        self.publish_for_agent(cid, Event::ToolRequest(published_request));
+        self.publish_for_agent_from(cid, source, Event::ToolRequest(published_request));
         let request = ToolRequest {
             call_id: call_id.clone(),
             tool_name: internal_tool_name.clone(),
@@ -21923,20 +22249,21 @@ impl Harness {
                 let started = route.invoke;
                 match route.target {
                     ToolRouteTarget::Internal => {
-                        self.publish_for_agent(cid, Event::ToolStarted(started));
+                        self.publish_for_agent_from(cid, source, Event::ToolStarted(started));
                     }
                     ToolRouteTarget::Extension(provider_connection_id) => {
                         self.ensure_tool_started_subscription(&provider_connection_id);
                         self.pending_tool_providers
                             .insert(call_id.clone(), provider_connection_id);
-                        self.publish_for_agent(cid, Event::ToolStarted(started));
+                        self.publish_for_agent_from(cid, source, Event::ToolStarted(started));
                     }
                 }
             }
             Err(ToolRouteError::NoProvider { tool_name: _ }) => {
                 let message = unavailable_tool_error_message(&visible_tool_name);
-                self.publish_for_agent(
+                self.publish_for_agent_from(
                     cid,
+                    source,
                     Event::ToolRejected(ToolRejected {
                         call_id: call_id.clone(),
                         tool_name: visible_tool_name.clone(),
@@ -21955,7 +22282,7 @@ impl Harness {
 
                     display: None,
                 };
-                self.publish_terminal_tool_error(Some(cid), None, error);
+                self.publish_terminal_tool_error(Some(cid), source, error);
                 self.on_tool_call_complete(&call.id);
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -22009,26 +22336,27 @@ impl Harness {
         // unit tests via `submit_user_prompt` / manual turn-state setup.
         self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
 
-        let progress_observer_id = tau_proto::ConnectionId::from("__embedded_committed_observer");
-        let (progress_tx, progress_rx) = mpsc::channel();
+        let committed_observer_id = tau_proto::ConnectionId::from("__embedded_committed_observer");
+        let (observer_tx, observer_rx) = mpsc::channel();
         self.bus.connect(Connection::new(
             ConnectionMetadata {
-                id: progress_observer_id.clone(),
+                id: committed_observer_id.clone(),
                 name: "embedded committed-event observer".to_owned(),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::InMemory,
             },
-            Box::new(ChannelSink { tx: progress_tx }),
+            Box::new(ChannelSink { tx: observer_tx }),
         ));
         if let Err(error) = self.bus.set_subscriptions(
-            progress_observer_id.as_str(),
+            committed_observer_id.as_str(),
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS),
                 EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
             ],
         ) {
-            self.bus.disconnect(progress_observer_id.as_str());
+            self.bus.disconnect(committed_observer_id.as_str());
             return Err(HarnessError::Route(error));
         }
         let started_at = Instant::now();
@@ -22037,6 +22365,40 @@ impl Harness {
         let mut tool_results = Vec::new();
         let result = 'interaction: loop {
             self.process_runtime_deadlines();
+            if let Err(error) = self.take_pending_publish_error() {
+                break 'interaction Err(error);
+            }
+            let mut final_text = None;
+            let mut is_final = false;
+            while let Ok(WriterCommand::Message(message)) = observer_rx.try_recv() {
+                if let HarnessOutputMessage::Deliver(delivery) = message {
+                    match delivery.event() {
+                        Event::ToolProgress(progress) => {
+                            progress_messages.push(format_tool_progress(progress));
+                        }
+                        Event::ToolResult(result) => {
+                            tool_results.push(byte_free_embedded_tool_result(result));
+                        }
+                        Event::ProviderResponseFinished(response) => {
+                            record_embedded_tool_calls(&response.output_items, &mut tool_calls);
+                            is_final = tool_calls_from_output_items(&response.output_items)
+                                .is_empty()
+                                && response.originator.is_user();
+                            final_text = assistant_text_from_output_items(&response.output_items);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if is_final {
+                break 'interaction Ok(InteractionOutcome {
+                    lifecycle_messages: Vec::new(),
+                    progress_messages,
+                    tool_calls,
+                    tool_results,
+                    response: final_text.unwrap_or_default(),
+                });
+            }
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
@@ -22065,49 +22427,8 @@ impl Harness {
                     connection_id,
                     message,
                 } => {
-                    let event = match message.as_ref() {
-                        HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
-                        _ => None,
-                    };
-                    if let Some(Event::ProviderResponseFinished(response)) = event {
-                        record_embedded_tool_calls(&response.output_items, &mut tool_calls);
-                    }
-                    let is_final = matches!(
-                        event,
-                        Some(Event::ProviderResponseFinished(r))
-                            if tool_calls_from_output_items(&r.output_items).is_empty()
-                                && r.originator.is_user()
-                    );
-                    let final_text = match event {
-                        Some(Event::ProviderResponseFinished(r)) => {
-                            assistant_text_from_output_items(&r.output_items)
-                        }
-                        _ => None,
-                    };
                     if let Err(error) = self.handle_extension_message(&connection_id, *message) {
                         break 'interaction Err(error);
-                    }
-                    while let Ok(WriterCommand::Message(message)) = progress_rx.try_recv() {
-                        if let HarnessOutputMessage::Deliver(delivery) = message {
-                            match delivery.event() {
-                                Event::ToolProgress(progress) => {
-                                    progress_messages.push(format_tool_progress(progress));
-                                }
-                                Event::ToolResult(result) => {
-                                    tool_results.push(byte_free_embedded_tool_result(result));
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    if is_final {
-                        break 'interaction Ok(InteractionOutcome {
-                            lifecycle_messages: Vec::new(),
-                            progress_messages,
-                            tool_calls,
-                            tool_results,
-                            response: final_text.unwrap_or_default(),
-                        });
                     }
                 }
                 HarnessEvent::Disconnected { connection_id } => {
@@ -22152,7 +22473,7 @@ impl Harness {
                 }
             }
         };
-        self.bus.disconnect(progress_observer_id.as_str());
+        self.bus.disconnect(committed_observer_id.as_str());
         result
     }
 
@@ -22396,7 +22717,8 @@ fn event_without_provider_image_bytes(event: &Event) -> Event {
         Event::AgentCompacted(compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
         }
-        Event::ProviderResponseFinished(finished) => {
+        Event::ProviderResponseFinishedReported(finished)
+        | Event::ProviderResponseFinished(finished) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
         }
         _ => {}

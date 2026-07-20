@@ -1,6 +1,12 @@
 # SPEC-provider-response-streaming: Provider response streaming
 
-`provider.response_updated` carries transient, prompt-local progress. Assistant text and reasoning use append-only deltas; provider-authored status and retry diagnostics stay in the separate status field. The first non-empty progress sample may be emitted promptly. Later nonterminal output, status, and stats updates are sampled at most once per second per prompt, with one immediate terminal flush permitted before closure.
+Providers submit `provider.response_updated_reported` as transient, prompt-local
+progress. After generic report commit and prompt-owner validation, the harness publishes
+canonical `provider.response_updated`. Assistant text and reasoning use append-only
+deltas; provider-authored status and retry diagnostics stay in the separate status
+field. The first non-empty progress sample may be emitted promptly. Later nonterminal
+output, status, and stats updates are sampled at most once per second per prompt, with
+one immediate terminal flush permitted before closure.
 
 Providers accumulate arbitrary upstream chunks, transport bytes, visible text,
 compaction status, and non-visible semantic output independently of that public
@@ -19,6 +25,8 @@ deriving public routing identity and broadcasting the samples unchanged.
 
 This ownership choice is recorded by
 [DECISION-provider-response-stats](DECISION-provider-response-stats.md).
+Report/canonical authority and terminal correlation are specified by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 
 First-party providers apply a bounded exact-repetition guard to assistant text, reasoning summaries, and tool-argument deltas before acceptance. Detection clears transient output and terminates with the closed `repetition_detected` failure rather than treating repeated text as durable model output.
 

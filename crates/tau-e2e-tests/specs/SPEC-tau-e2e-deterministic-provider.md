@@ -7,8 +7,8 @@ provider discovery, or provider self-knowledge.
 
 Control is strict versioned `ScenarioV1` or `ScenarioV2` data supplied in startup
 Configure. V1 uses one global FIFO; V2 uses independent lane-local FIFOs. Actions
-match selected stable typed prompt projections and emit ordinary provider
-events. Dynamic prompt identities are copied from the request; provider-authored
+match selected stable typed prompt projections and emit explicit transient provider
+execution reports. Dynamic prompt identities are copied from the request; provider-authored
 tool call IDs must return unchanged in tool-result continuations. Unknown
 configuration, unexpected prompts, overlaps, first mismatches, and unconsumed
 actions fail closed with bounded synthetic diagnostics.
@@ -88,5 +88,10 @@ provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,
 production retry scheduling, crash-exact replay, universal packaging beyond
 the exact Gate 1 CLI and Gate 2 bundled core-shell components, or
 broad terminal rendering fidelity. Live/VCR and transcript-replay fixtures remain separate.
+
+The fake Provider submits prompt, update, and terminal output through explicit transient
+`provider.*_reported` events. Assertions consume the harness-canonical execution facts,
+so deterministic scenarios exercise the same commit-before-correlation boundary as
+production providers.
 
 Refines [ARCH-tau-e2e-tests](ARCH-tau-e2e-tests.md).

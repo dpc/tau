@@ -1,8 +1,11 @@
 use tau_proto::{
-    AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderModelsDeclared,
-    ProviderModelsUpdated, ProviderName, ProviderQuotaClear, ProviderQuotaEpoch,
-    ProviderQuotaPatch, ProviderQuotaReplace, SessionAgentLoaded, SessionAgentUnloaded,
-    ToolCancelled, ToolError, ToolName, ToolProgress, ToolResult, ToolResultKind, ToolType,
+    AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderCacheMissDiagnostic,
+    ProviderModelsDeclared, ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted,
+    ProviderQuotaClear, ProviderQuotaEpoch, ProviderQuotaPatch, ProviderQuotaReplace,
+    ProviderResponseFinished, ProviderResponseUpdated, ProviderRetryPromptResult,
+    ProviderStopReason, RetryPromptRequestId, RetryPromptStatus, SessionAgentLoaded,
+    SessionAgentUnloaded, ToolCancelled, ToolError, ToolName, ToolProgress, ToolResult,
+    ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
@@ -60,6 +63,67 @@ fn provider_quota_state_never_enters_semantic_history() {
             route_bindings: Vec::new(),
         }),
     ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
+/// Provider execution reports are committed observations, never replayable
+/// semantic facts, regardless of the peer-selected transient bit.
+#[test]
+fn provider_execution_reports_never_enter_semantic_history() {
+    let prompt_id = tau_proto::AgentPromptId::from("prompt-1");
+    let agent_id = parse_agent_id("agent-1");
+    for event in [
+        Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
+            agent_prompt_id: prompt_id.clone(),
+            originator: PromptOriginator::User,
+        }),
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+            agent_prompt_id: prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+            agent_prompt_id: prompt_id.clone(),
+            agent_id,
+            output_items: Vec::new(),
+            stop_reason: ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+        Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
+            request_id: RetryPromptRequestId::parse("retry-1").expect("retry id"),
+            agent_prompt_id: prompt_id.clone(),
+            status: RetryPromptStatus::Accepted,
+        }),
+        Event::ProviderCacheMissDiagnosticReported(ProviderCacheMissDiagnostic {
+            agent_prompt_id: prompt_id,
+            model: "provider/model".into(),
+            originator: PromptOriginator::User,
+            tool_choice: tau_proto::ToolChoice::default(),
+            ws_pool_delta: None,
+            input_tokens: 1,
+            cached_tokens: 0,
+            previous_input_tokens: 1,
+            cacheable_input_tokens: 1,
+            corrected_cache_efficiency: 0.0,
+        }),
+    ] {
+        assert!(event.defaults_to_transient());
         assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
     }

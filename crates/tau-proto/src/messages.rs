@@ -1015,7 +1015,13 @@ impl HarnessInputMessage {
         Self::Emit(Emit::new(event))
     }
 
-    /// Wraps an event emission request with explicit transient metadata.
+    /// Wraps an event emission request with the transient flag set.
+    #[must_use]
+    pub fn emit_transient(event: Event) -> Self {
+        Self::Emit(Emit::with_transient(event, true))
+    }
+
+    /// Wraps an event emission request with caller-selected transient metadata.
     #[must_use]
     pub fn emit_with_transient(event: Event, transient: bool) -> Self {
         Self::Emit(Emit::with_transient(event, transient))

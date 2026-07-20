@@ -3264,7 +3264,10 @@ pub enum RetryPromptStatus {
     NotParked,
 }
 
-/// Provider response to a targeted [`UiRetryPrompt`].
+/// Provider-authored `provider.retry_prompt_result_reported` payload for a
+/// targeted [`UiRetryPrompt`]. The harness validates its private correlation
+/// and sends the requester a [`UiRetryPromptResult`]; there is no canonical
+/// provider event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRetryPromptResult {
     /// Correlation identifier copied from the request.
@@ -4088,10 +4091,14 @@ pub struct AgentPromptPrewarmRequested {
 }
 
 // ---------------------------------------------------------------------------
-// Provider execution events — facts from the provider backend
+// Provider execution payloads — reports and canonical harness facts
 // ---------------------------------------------------------------------------
 
 /// The provider accepted a prompt and began processing it.
+///
+/// Provider extensions submit this payload as
+/// `provider.prompt_submitted_reported`; the harness publishes the validated
+/// canonical `provider.prompt_submitted` fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderPromptSubmitted {
     /// Prompt id the provider accepted.
@@ -4110,6 +4117,9 @@ pub struct ProviderPromptSubmitted {
 /// appended assistant/reasoning text in `deltas`; the complete durable response
 /// remains [`ProviderResponseFinished::output_items`]. Some updates are
 /// status- or compaction-only and therefore have empty `deltas`.
+/// Provider extensions submit this payload as
+/// `provider.response_updated_reported`; the harness publishes the validated
+/// canonical `provider.response_updated` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderResponseUpdated {
@@ -4375,6 +4385,9 @@ impl ProviderFailureKind {
     }
 }
 
+/// Terminal provider-response payload shared by a Provider-authored
+/// `provider.response_finished_reported` observation and the harness-canonical
+/// `provider.response_finished` fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
     /// Prompt id the provider finished.
@@ -4396,12 +4409,14 @@ pub struct ProviderResponseFinished {
     /// prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<ProviderFailureKind>,
-    /// Sanitized harness-authored context-limit diagnostic for terminal context
-    /// rejection. Providers cannot author this field.
+    /// Sanitized harness-authored context-limit diagnostic on canonical
+    /// responses. Reports may carry an untrusted value, which the terminal
+    /// pipeline discards and rederives before canonical publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit_telemetry: Option<ContextLimitTelemetry>,
-    /// Harness-authored recovery decision. Provider-supplied values are
-    /// overwritten before the event is committed.
+    /// Harness-authored recovery decision on canonical responses. Provider
+    /// reports may carry an untrusted value, which the terminal pipeline
+    /// discards and rederives before canonical publication.
     #[serde(default, skip_serializing_if = "ContextRecoveryDisposition::is_none")]
     pub recovery_disposition: ContextRecoveryDisposition,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
@@ -4466,6 +4481,10 @@ pub struct WsPoolDelta {
     pub silent_reconnects: u32,
 }
 
+/// Cache diagnostic payload submitted as
+/// `provider.cache_miss_diagnostic_reported` and republished canonically by the
+/// harness after prompt-owner validation.
+///
 /// Diagnostic emitted when a prompt with a previous provider response reports
 /// unexpectedly low provider cache reuse. Provider extensions derive it from
 /// the original [`AgentPromptCreated`] plus final [`ProviderResponseFinished`]
@@ -4854,14 +4873,28 @@ pub enum Event {
     SessionReplayComplete(SessionReplayComplete),
 
     // Provider execution
+    /// Provider-authored prompt-acceptance observation awaiting harness
+    /// validation.
+    #[serde(rename = "provider.prompt_submitted_reported")]
+    ProviderPromptSubmittedReported(ProviderPromptSubmitted),
     #[serde(rename = "provider.prompt_submitted")]
     ProviderPromptSubmitted(ProviderPromptSubmitted),
+    /// Provider-authored streaming observation awaiting harness validation.
+    #[serde(rename = "provider.response_updated_reported")]
+    ProviderResponseUpdatedReported(ProviderResponseUpdated),
     #[serde(rename = "provider.response_updated")]
     ProviderResponseUpdated(ProviderResponseUpdated),
+    /// Provider-authored terminal observation awaiting harness validation.
+    #[serde(rename = "provider.response_finished_reported")]
+    ProviderResponseFinishedReported(ProviderResponseFinished),
     #[serde(rename = "provider.response_finished")]
     ProviderResponseFinished(ProviderResponseFinished),
-    #[serde(rename = "provider.retry_prompt_result")]
-    ProviderRetryPromptResult(ProviderRetryPromptResult),
+    /// Provider-authored manual-retry outcome awaiting harness correlation.
+    #[serde(rename = "provider.retry_prompt_result_reported")]
+    ProviderRetryPromptResultReported(ProviderRetryPromptResult),
+    /// Provider-authored cache observation awaiting harness validation.
+    #[serde(rename = "provider.cache_miss_diagnostic_reported")]
+    ProviderCacheMissDiagnosticReported(ProviderCacheMissDiagnostic),
     #[serde(rename = "provider.cache_miss_diagnostic")]
     ProviderCacheMissDiagnostic(ProviderCacheMissDiagnostic),
 }
@@ -5207,10 +5240,24 @@ impl Event {
 
     fn provider_execution_event_name(&self) -> Option<EventName> {
         match self {
+            Self::ProviderPromptSubmittedReported(_) => {
+                EventName::PROVIDER_PROMPT_SUBMITTED_REPORTED
+            }
             Self::ProviderPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
+            Self::ProviderResponseUpdatedReported(_) => {
+                EventName::PROVIDER_RESPONSE_UPDATED_REPORTED
+            }
             Self::ProviderResponseUpdated(_) => EventName::PROVIDER_RESPONSE_UPDATED,
+            Self::ProviderResponseFinishedReported(_) => {
+                EventName::PROVIDER_RESPONSE_FINISHED_REPORTED
+            }
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
-            Self::ProviderRetryPromptResult(_) => EventName::PROVIDER_RETRY_PROMPT_RESULT,
+            Self::ProviderRetryPromptResultReported(_) => {
+                EventName::PROVIDER_RETRY_PROMPT_RESULT_REPORTED
+            }
+            Self::ProviderCacheMissDiagnosticReported(_) => {
+                EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED
+            }
             Self::ProviderCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
             _ => return None,
         }
@@ -5239,6 +5286,11 @@ impl Event {
                 | Self::MessageSentReported(_)
                 | Self::ProviderModelsDeclared(_)
                 | Self::ProviderModelsUpdated(_)
+                | Self::ProviderPromptSubmittedReported(_)
+                | Self::ProviderResponseUpdatedReported(_)
+                | Self::ProviderResponseFinishedReported(_)
+                | Self::ProviderRetryPromptResultReported(_)
+                | Self::ProviderCacheMissDiagnosticReported(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderQuotaReplaceReported(_)
                 | Self::ProviderQuotaPatchReported(_)

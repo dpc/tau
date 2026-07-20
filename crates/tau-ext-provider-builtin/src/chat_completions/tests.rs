@@ -90,7 +90,7 @@ fn successful_sampling_preserves_delta_and_stats_order() {
             let tau_proto::HarnessInputMessage::Emit(emit) = frame else {
                 panic!("expected emitted provider update");
             };
-            let tau_proto::Event::ProviderResponseUpdated(update) = *emit.event else {
+            let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event else {
                 panic!("expected provider response update");
             };
             update
@@ -294,7 +294,7 @@ fn decode_updates(bytes: &[u8]) -> Vec<tau_proto::ProviderResponseUpdated> {
             let tau_proto::HarnessInputMessage::Emit(emit) = frame else {
                 panic!("expected emitted update");
             };
-            let tau_proto::Event::ProviderResponseUpdated(update) = *emit.event else {
+            let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event else {
                 panic!("expected provider response update");
             };
             update

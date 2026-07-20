@@ -268,10 +268,12 @@ impl FakeState {
             "turn={index} prompt_id={}",
             prompt.agent_prompt_id
         ))?;
-        handle.emit(Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-            agent_prompt_id: prompt.agent_prompt_id.clone(),
-            originator: prompt.originator.clone(),
-        }))?;
+        handle.emit_transient(Event::ProviderPromptSubmittedReported(
+            ProviderPromptSubmitted {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                originator: prompt.originator.clone(),
+            },
+        ))?;
         let terminal = match turn {
             ScenarioTurnV1::Text {
                 user_text,
@@ -280,21 +282,23 @@ impl FakeState {
             } => {
                 self.require_user_text(index, prompt, &user_text)?;
                 for text in deltas {
-                    handle.emit(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                        agent_prompt_id: prompt.agent_prompt_id.clone(),
-                        agent_id: prompt.agent_id.clone(),
-                        deltas: vec![ProviderResponseTextDelta::Message {
-                            output_index: 0,
-                            text,
-                            phase: None,
-                        }],
-                        compaction: None,
-                        status: None,
-                        response_stats: None,
-                        originator: prompt.originator.clone(),
-                    }))?;
+                    handle.emit_transient(Event::ProviderResponseUpdatedReported(
+                        ProviderResponseUpdated {
+                            agent_prompt_id: prompt.agent_prompt_id.clone(),
+                            agent_id: prompt.agent_id.clone(),
+                            deltas: vec![ProviderResponseTextDelta::Message {
+                                output_index: 0,
+                                text,
+                                phase: None,
+                            }],
+                            compaction: None,
+                            status: None,
+                            response_stats: None,
+                            originator: prompt.originator.clone(),
+                        },
+                    ))?;
                 }
-                Event::ProviderResponseFinished(finished(
+                Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
@@ -324,7 +328,7 @@ impl FakeState {
                 {
                     return Err(self.mismatch(index, "tool schema projection mismatch"));
                 }
-                Event::ProviderResponseFinished(finished(
+                Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![ContextItem::ToolCall(ToolCallItem {
                         call_id,
@@ -352,7 +356,7 @@ impl FakeState {
                 {
                     return Err(self.mismatch(index, "tool result continuity mismatch"));
                 }
-                Event::ProviderResponseFinished(finished(
+                Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
@@ -364,7 +368,7 @@ impl FakeState {
             "turn={index} matched remaining={}",
             turn_count - self.next_turn
         ))?;
-        handle.emit(terminal)
+        handle.emit_transient(terminal)
     }
 
     fn handle_v2_prompt(
@@ -416,10 +420,12 @@ impl FakeState {
             "lane={lane_id} action={cursor} prompt_id={}",
             prompt.agent_prompt_id
         ))?;
-        handle.emit(Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-            agent_prompt_id: prompt.agent_prompt_id.clone(),
-            originator: prompt.originator.clone(),
-        }))?;
+        handle.emit_transient(Event::ProviderPromptSubmittedReported(
+            ProviderPromptSubmitted {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                originator: prompt.originator.clone(),
+            },
+        ))?;
         self.trace(&format!(
             "lane={lane_id} action={cursor} matched remaining={}",
             action_count - self.lane_cursors[lane_index]
@@ -436,7 +442,7 @@ impl FakeState {
     ) -> ClientResult<()> {
         match action {
             ScenarioActionV2::Text { response, .. } => {
-                handle.emit(Event::ProviderResponseFinished(finished(
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
@@ -444,7 +450,7 @@ impl FakeState {
             }
             ScenarioActionV2::DummyToolCall { call_id, .. } => {
                 let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
-                handle.emit(Event::ProviderResponseFinished(finished(
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![ContextItem::ToolCall(ToolCallItem {
                         call_id,
@@ -461,7 +467,7 @@ impl FakeState {
                 call_id, response, ..
             } => {
                 let _ = call_id;
-                handle.emit(Event::ProviderResponseFinished(finished(
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
@@ -498,13 +504,12 @@ impl FakeState {
                 ),
             ),
             ScenarioActionV2::CoreShellCreateResult { response, .. }
-            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => {
-                handle.emit(Event::ProviderResponseFinished(finished(
+            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => handle
+                .emit_transient(Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
-                )))
-            }
+                ))),
             ScenarioActionV2::Error {
                 failure_kind,
                 error,
@@ -513,7 +518,7 @@ impl FakeState {
                 let mut terminal = finished(prompt, Vec::new(), ProviderStopReason::Error);
                 terminal.error = Some(error);
                 terminal.failure_kind = Some(failure_kind);
-                handle.emit(Event::ProviderResponseFinished(terminal))
+                handle.emit_transient(Event::ProviderResponseFinishedReported(terminal))
             }
             ScenarioActionV2::Disconnect { reason, .. } => {
                 self.trace(&format!("deliberate_disconnect={reason}"))?;
@@ -543,7 +548,8 @@ impl FakeState {
                                 &format!("prompt_id={prompt_id} hold_timeout"),
                             );
                             let _ = completion.send(());
-                            let _ = handle.emit(Event::ProviderResponseFinished(terminal));
+                            let _ = handle
+                                .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                             HoldOutcome::TimedOut
                         }
                         Ok(canceled_by) => {
@@ -558,7 +564,8 @@ impl FakeState {
                             terminal.error = Some("(cancelled by harness)".to_owned());
                             terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
                             let _ = completion.send(());
-                            let _ = handle.emit(Event::ProviderResponseFinished(terminal));
+                            let _ = handle
+                                .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                             HoldOutcome::Canceled(canceled_by)
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => HoldOutcome::Shutdown,
@@ -591,11 +598,13 @@ impl FakeState {
                 if pending.len() == participants {
                     let completed = self.barriers.remove(&barrier).unwrap_or_default();
                     for participant in completed {
-                        handle.emit(Event::ProviderResponseFinished(finished(
-                            &participant.prompt,
-                            vec![assistant_message(participant.response)],
-                            ProviderStopReason::EndTurn,
-                        )))?;
+                        handle.emit_transient(Event::ProviderResponseFinishedReported(
+                            finished(
+                                &participant.prompt,
+                                vec![assistant_message(participant.response)],
+                                ProviderStopReason::EndTurn,
+                            ),
+                        ))?;
                     }
                 }
                 Ok(())
@@ -963,7 +972,7 @@ fn emit_tool_call(
     name: &str,
     arguments: CborValue,
 ) -> ClientResult<()> {
-    handle.emit(Event::ProviderResponseFinished(finished(
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
         prompt,
         vec![ContextItem::ToolCall(ToolCallItem {
             call_id,

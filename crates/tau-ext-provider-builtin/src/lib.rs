@@ -2031,12 +2031,14 @@ where
                         tau_proto::RetryPromptStatus::NotParked
                     };
                     let mut frame_writer = handle_frame_writer(handle);
-                    frame_writer.write_message(&HarnessInputMessage::emit(
-                        Event::ProviderRetryPromptResult(tau_proto::ProviderRetryPromptResult {
-                            request_id,
-                            agent_prompt_id,
-                            status,
-                        }),
+                    frame_writer.write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderRetryPromptResultReported(
+                            tau_proto::ProviderRetryPromptResult {
+                                request_id,
+                                agent_prompt_id,
+                                status,
+                            },
+                        ),
                     ))?;
                     frame_writer.flush()?;
                 }
@@ -2283,18 +2285,18 @@ fn validate_worker_output_for_commit(
     let HarnessInputMessage::Emit(emit) = message.as_ref() else {
         return None;
     };
-    let Event::ProviderResponseFinished(finished) = emit.event.as_ref() else {
+    let Event::ProviderResponseFinishedReported(finished) = emit.event.as_ref() else {
         return None;
     };
     cancellation.take_canceled(agent_prompt_id);
-    Some(HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        simple_finished(
+    Some(HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(simple_finished(
             finished.agent_prompt_id.clone(),
             finished.agent_id.clone(),
             finished.originator.clone(),
             "(cancelled by harness)",
-        ),
-    )))
+        )),
+    ))
 }
 
 fn is_intentional_partial_clear_for(
@@ -2306,7 +2308,7 @@ fn is_intentional_partial_clear_for(
         HarnessInputMessage::Emit(emit)
             if matches!(
                 emit.event.as_ref(),
-                Event::ProviderResponseUpdated(update)
+                Event::ProviderResponseUpdatedReported(update)
                     if update.agent_prompt_id == *agent_prompt_id
                         && update.status.as_ref().is_some_and(|status| status.clear_response)
             )
@@ -2345,7 +2347,7 @@ fn is_successful_terminal_for(
     let HarnessInputMessage::Emit(emit) = message else {
         return false;
     };
-    let Event::ProviderResponseFinished(finished) = emit.event.as_ref() else {
+    let Event::ProviderResponseFinishedReported(finished) = emit.event.as_ref() else {
         return false;
     };
     finished.agent_prompt_id == *agent_prompt_id
@@ -3642,8 +3644,8 @@ fn emit_retry_status(
         delay_text,
         job.retry_state.attempts,
     );
-    handle.send(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
+    handle.send(HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: job.agent_prompt_id.clone(),
             agent_id: job.prompt.agent_id.clone(),
             deltas: Vec::new(),
@@ -3659,8 +3661,8 @@ fn emit_retry_status(
             }),
             response_stats: None,
             originator: job.prompt.originator.clone(),
-        },
-    )))
+        }),
+    ))
 }
 
 fn retry_class_provider_category(class: RetryClass) -> tau_proto::ProviderRetryCategory {
@@ -3721,12 +3723,12 @@ fn write_prompt_submitted<W: Write>(
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderPromptSubmitted(
-        ProviderPromptSubmitted {
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
             agent_prompt_id: agent_prompt_id.into(),
             originator: originator.clone(),
-        },
-    )))?;
+        }),
+    ))?;
     writer.flush()?;
     Ok(())
 }
@@ -3741,14 +3743,14 @@ fn finish_canceled<W: Write>(
         agent_prompt_id,
         "skipping provider request — already canceled by harness",
     );
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        simple_finished(
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(simple_finished(
             agent_prompt_id.into(),
             prompt.agent_id.clone(),
             prompt.originator.clone(),
             "(cancelled by harness)",
-        ),
-    )))?;
+        )),
+    ))?;
     writer.flush()?;
     Ok(())
 }
@@ -4178,8 +4180,8 @@ fn emit_retry_banner<W: Write>(
         attempt,
         error,
     );
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
+    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
             agent_id: agent_id.clone(),
             deltas: Vec::new(),
@@ -4191,8 +4193,8 @@ fn emit_retry_banner<W: Write>(
             }),
             response_stats: None,
             originator: originator.clone(),
-        },
-    )));
+        }),
+    ));
     let _ = writer.flush();
 }
 
@@ -4324,8 +4326,8 @@ where
                         finish_canceled(agent_prompt_id, prompt, writer)?;
                         return Ok(None);
                     }
-                    writer.write_message(&HarnessInputMessage::emit(
-                        Event::ProviderResponseFinished(*finished),
+                    writer.write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(*finished),
                     ))?;
                     writer.flush()?;
                     Ok(None)
@@ -4339,8 +4341,8 @@ where
                             writer,
                         )?;
                     }
-                    writer.write_message(&HarnessInputMessage::emit(
-                        Event::ProviderResponseFinished(*finished),
+                    writer.write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(*finished),
                     ))?;
                     writer.flush()?;
                     Ok(None)
@@ -4379,8 +4381,8 @@ fn emit_chat_completions_partial_clear<W: Write>(
     text: &str,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: prompt.agent_id.clone(),
             deltas: Vec::new(),
@@ -4392,8 +4394,8 @@ fn emit_chat_completions_partial_clear<W: Write>(
             }),
             response_stats: None,
             originator: prompt.originator.clone(),
-        },
-    )))?;
+        }),
+    ))?;
     writer.flush()?;
     Ok(())
 }
@@ -4425,8 +4427,8 @@ where
         .compact(agent_prompt_id, config, request, retry_ctx)
     {
         CompactOutcome::Finished(output_items) => {
-            writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                ProviderResponseFinished {
+            writer.write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(ProviderResponseFinished {
                     agent_prompt_id: agent_prompt_id.into(),
                     agent_id: prompt.agent_id.clone(),
                     output_items,
@@ -4446,8 +4448,8 @@ where
                     )),
                     provider_response_id: None,
                     ws_pool_delta: None,
-                },
-            )))?;
+                }),
+            ))?;
             writer.flush()?;
             Ok(None)
         }
@@ -4661,9 +4663,9 @@ fn emit_chatgpt_connecting_update<W: Write>(
         response_stats: None,
         originator: originator.clone(),
     };
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        update,
-    )));
+    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(update),
+    ));
     let _ = writer.flush();
 }
 
@@ -4816,8 +4818,8 @@ fn emit_chatgpt_stream_update<W: Write>(
     {
         return false;
     }
-    let Ok(()) = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
+    let Ok(()) = writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
             agent_id: agent_id.clone(),
             deltas,
@@ -4825,8 +4827,8 @@ fn emit_chatgpt_stream_update<W: Write>(
             status: None,
             response_stats: Some(response_stats),
             originator: originator.clone(),
-        },
-    ))) else {
+        }),
+    )) else {
         return false;
     };
     writer.flush().is_ok()
@@ -4912,13 +4914,13 @@ fn finish_stream<W: Write>(
     );
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
     if let Some(diagnostic) = diagnostic {
-        writer.write_message(&HarnessInputMessage::emit(
-            Event::ProviderCacheMissDiagnostic(diagnostic),
+        writer.write_message(&HarnessInputMessage::emit_transient(
+            Event::ProviderCacheMissDiagnosticReported(diagnostic),
         ))?;
     }
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        finished,
-    )))?;
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(finished),
+    ))?;
     writer.flush()?;
     Ok(())
 }
@@ -4997,9 +4999,9 @@ fn finish_error<W: Write>(
         debug_provider_requests,
         None,
     );
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        finished,
-    )))?;
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(finished),
+    ))?;
     writer.flush()?;
     Ok(())
 }
@@ -5014,8 +5016,8 @@ fn emit_repetition_detected_update<W: Write>(
     let text = bounded_provider_error(&format!(
         "provider stream repetition detected; aborting response ({repetition})"
     ));
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
-        ProviderResponseUpdated {
+    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
             agent_id: agent_id.clone(),
             deltas: Vec::new(),
@@ -5027,8 +5029,8 @@ fn emit_repetition_detected_update<W: Write>(
             }),
             response_stats: None,
             originator: originator.clone(),
-        },
-    )));
+        }),
+    ));
     let _ = writer.flush();
 }
 
