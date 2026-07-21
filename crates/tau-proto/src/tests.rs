@@ -45,6 +45,49 @@ fn metadata_mutation_id_rejects_empty_and_oversized_values() {
     );
 }
 
+/// Metadata mutation requests have distinct transient wire names while their
+/// canonical successor facts retain durable defaults.
+#[test]
+fn metadata_requests_have_distinct_transient_wire_names() {
+    let agent_id = AgentId::parse("metadata-agent").expect("agent id");
+    let set = AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: AgentMetadataKey::new("ext_test_value"),
+        value: CborValue::Text("value".to_owned()),
+        mutation_id: None,
+        inheritable: true,
+    };
+    let unset = AgentMetadataUnset {
+        agent_id,
+        key: AgentMetadataKey::new("ext_test_value"),
+    };
+    for (event, name) in [
+        (
+            Event::AgentMetadataSetRequest(set.clone()),
+            EventName::AGENT_METADATA_SET_REQUEST,
+        ),
+        (
+            Event::AgentMetadataUnsetRequest(unset.clone()),
+            EventName::AGENT_METADATA_UNSET_REQUEST,
+        ),
+    ] {
+        assert_eq!(event.name(), name);
+        assert!(event.defaults_to_transient());
+        let encoded = serde_json::to_value(&event).expect("encode request");
+        let expected_name = name.to_string();
+        assert_eq!(
+            encoded.get("event").and_then(serde_json::Value::as_str),
+            Some(expected_name.as_str())
+        );
+        assert_eq!(
+            serde_json::from_value::<Event>(encoded).expect("decode request"),
+            event
+        );
+    }
+    assert!(!Event::AgentMetadataSet(set).defaults_to_transient());
+    assert!(!Event::AgentMetadataUnset(unset).defaults_to_transient());
+}
+
 /// Prefix syntax rejects ambiguous separators and non-provider-safe bytes.
 #[test]
 fn tool_prefix_validation_is_segmented_ascii() {
@@ -932,6 +975,17 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             key: "cwd".into(),
         }),
+        Event::AgentMetadataSetRequest(AgentMetadataSet {
+            agent_id: agent_id("engineer_abcd1234"),
+            key: "cwd".into(),
+            value: CborValue::Text("/tmp".to_owned()),
+            inheritable: true,
+            mutation_id: None,
+        }),
+        Event::AgentMetadataUnsetRequest(AgentMetadataUnset {
+            agent_id: agent_id("engineer_abcd1234"),
+            key: "cwd".into(),
+        }),
         Event::AgentReplayComplete(AgentReplayComplete {
             agent_id: agent_id("engineer_abcd1234"),
             session_id: Some("s1".into()),
@@ -1758,6 +1812,8 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtInternalPromptSubmitRequest(_)
                 | Event::StartAgentRequest(_)
+                | Event::AgentMetadataSetRequest(_)
+                | Event::AgentMetadataUnsetRequest(_)
                 | Event::ShellCommandProgress(_)
                 | Event::UiPromptSubmitted(_)
                 | Event::AgentPromptQueued(_)
@@ -1790,7 +1846,9 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.message_received",
         "agent.message_sent",
         "agent.metadata_set",
+        "agent.metadata_set_request",
         "agent.metadata_unset",
+        "agent.metadata_unset_request",
         "agent.prompt_created",
         "agent.prompt_prewarm_requested",
         "agent.prompt_queued",

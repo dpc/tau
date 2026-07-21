@@ -80,6 +80,14 @@ stdio stream is a hostile availability boundary or process sandbox. Operation
 quotas do not promise to bound protocol deserialization; see
 [`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md#extension-data)
 and [`ARCH-tau-supervisor`](crates/tau-supervisor/specs/ARCH-tau-supervisor.md#child-environment).
+Every configured extension kind may request per-agent metadata mutations, while
+attached socket UIs have the same narrow authority. Requests commit before
+target/key/value validation, then the exact still-live extension generation or
+attached UI is revalidated before the harness publishes a durable canonical
+fact. Other socket peers and peer-authored canonical facts are rejected. Metadata
+is extension-visible coordination state, not a secret store; invalid requests
+currently have no outcome event. See
+[`SPEC-agent-metadata-requests-and-canonical-facts`](specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 Only authenticated configured Tool/Core peers may publish transient tool
 registration/unregistration declarations; canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the

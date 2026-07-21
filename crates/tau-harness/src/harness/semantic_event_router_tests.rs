@@ -11,6 +11,36 @@ use tau_proto::{
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
 use crate::parse_agent_id;
 
+/// Metadata requests never enter semantic history for either caller-selected
+/// transient bit, while their canonical successors remain durable.
+#[test]
+fn metadata_requests_are_never_semantically_persisted() {
+    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
+    let set = tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: tau_proto::AgentMetadataKey::new("ext_test_value"),
+        value: CborValue::Text("value".to_owned()),
+        mutation_id: None,
+        inheritable: true,
+    };
+    let unset = tau_proto::AgentMetadataUnset {
+        agent_id,
+        key: tau_proto::AgentMetadataKey::new("ext_test_value"),
+    };
+    for request in [
+        Event::AgentMetadataSetRequest(set.clone()),
+        Event::AgentMetadataUnsetRequest(unset.clone()),
+    ] {
+        assert!(!should_persist_event(&request, false));
+        assert!(!should_persist_event(&request, true));
+    }
+    assert!(should_persist_event(&Event::AgentMetadataSet(set), false));
+    assert!(should_persist_event(
+        &Event::AgentMetadataUnset(unset),
+        false
+    ));
+}
+
 /// Provider declaration and canonical model snapshots are reconstructed current
 /// state, never durable semantic history.
 #[test]

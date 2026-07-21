@@ -17,7 +17,8 @@ read-write commands and no access-mode chip is published for UI display. User
 participate in locking.
 
 The top-level `workdir(path)` setter changes the remembered workdir by emitting
-`agent.metadata_set` and completing only after its committed echo. Explicit
+transient `agent.metadata_set_request` and completing only after the matching
+harness-authored `agent.metadata_set` commit. Explicit
 generic `shell.cwd` and ChatGPT-facing `shell_command.workdir` arguments are
 call-local and never update metadata.
 Relative paths for filesystem tools

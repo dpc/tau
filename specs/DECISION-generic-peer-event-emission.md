@@ -11,6 +11,11 @@ event before ordinary publication. The intended transition removes those
 semantics from `Emit` intake and moves them to committed-event consumers or
 explicit point-to-point protocol messages.
 
+The agent-metadata row has completed its request-to-canonical-fact split under
+[SPEC-agent-metadata-requests-and-canonical-facts](SPEC-agent-metadata-requests-and-canonical-facts.md).
+Its rejection-outcome interface remains unspecified; current validation
+failures produce no canonical successor, so this row is not yet fully complete.
+
 This decision applies to `Emit` from every peer kind, including extensions,
 providers, UI clients, external peers, and harness-connected core components.
 

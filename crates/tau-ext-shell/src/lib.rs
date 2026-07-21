@@ -1293,15 +1293,15 @@ fn schedule_tool_started(
         let mutation_id =
             cwd_state.pending_workdir_mutation_id(&invoke.agent_id, &wire_invoke.call_id);
         if tx
-            .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-                tau_proto::AgentMetadataSet {
+            .send(HarnessInputMessage::emit_transient(
+                Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                     agent_id: invoke.agent_id,
                     key: cwd_state.key(),
                     value: CborValue::Text(path.display().to_string()),
                     mutation_id,
                     inheritable: true,
-                },
-            )))
+                }),
+            ))
             .is_err()
         {
             cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
@@ -1796,14 +1796,14 @@ fn dispatch_tool_invoke(
         let agent_id = invoke.agent_id.clone();
         if let Some(path) = cwd_state.pending_workdir_target(&agent_id, &invoke.call_id) {
             if cwd_state.mark_pending_workdir_awaiting_echo(&agent_id, &invoke.call_id) {
-                let metadata = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                let metadata = Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                     agent_id,
                     key: cwd_state.key(),
                     value: CborValue::Text(path.display().to_string()),
                     mutation_id: None,
                     inheritable: true,
                 });
-                let _ = tx.send(HarnessInputMessage::emit(metadata));
+                let _ = tx.send(HarnessInputMessage::emit_transient(metadata));
             }
             return;
         }
@@ -2147,15 +2147,15 @@ fn dispatch_session_agent_loaded(
     let Ok(cwd) = cwd_state.process_default() else {
         return;
     };
-    let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-        tau_proto::AgentMetadataSet {
+    let _ = tx.send(HarnessInputMessage::emit_transient(
+        Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,
             key: cwd_state.key(),
             value: CborValue::Text(cwd.display().to_string()),
             mutation_id: None,
             inheritable: true,
-        },
-    )));
+        }),
+    ));
 }
 
 fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path, cwd_state: &CwdState) -> Event {

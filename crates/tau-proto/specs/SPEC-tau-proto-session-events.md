@@ -60,7 +60,15 @@ Required and optional fields express only the current protocol semantics.
 
 ## Agent metadata protocol
 
-`agent.metadata_set` and `agent.metadata_unset` are durable, extension-visible agent facts. Metadata keys are strings; values are arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and `metadata_set.inheritable` controls child-agent copies. Do not classify these events as transient defaults: extensions may subscribe to them for live state, and replay uses the latest folded snapshot before `session.agent_loaded`.
+`agent.metadata_set_request` and `agent.metadata_unset_request` are
+transient-by-default peer mutation requests. They reuse the canonical payload
+shapes but never enter semantic replay for either Emit metadata value.
+`agent.metadata_set` and `agent.metadata_unset` are separate harness-authored,
+durable, extension-visible agent facts. Metadata keys are strings; values are
+arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and
+`metadata_set.inheritable` controls child-agent copies. Replay uses the latest
+folded canonical snapshot before `session.agent_loaded`. See
+[SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 
 ## Subscription replay protocol
 

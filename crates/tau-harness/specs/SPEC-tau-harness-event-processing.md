@@ -90,13 +90,16 @@ UI clients are local UI/control peers, not providers. Client `emit` intake must
 preserve provider ownership by routing provider-category events through the
 extension/provider event path, where provider-source and prompt-owner validation
 still apply. Non-provider client events are partitioned into harness-owned UI
-commands, validated per-agent metadata set/unset facts, and a narrow fallback
-allowlist. UI command handlers keep their existing keep-going result at the
-dispatch-helper boundary; the outer client-message layer remains responsible for
-connection lifetime. Metadata writes are validated and enqueued through the normal
-publish path; fallback publication is limited to explicitly allowed UI/live
-events. Prompt-draft, focus, and extension-owned custom events use exact attached-UI authority rather
+commands, per-agent metadata set/unset requests, and a narrow fallback allowlist.
+UI command handlers keep their existing keep-going result at the dispatch-helper
+boundary; the outer client-message layer remains responsible for connection
+lifetime. Metadata requests use exact attached-socket-UI authority, commit before
+validation, and produce separate harness-authored canonical facts; fallback
+publication is limited to explicitly allowed UI/live events. Prompt-draft, focus,
+and extension-owned custom events use exact attached-UI authority rather
 than fallback and preserve the explicit transient override or event default.
+Metadata request replacements preserve correlation identity where applicable,
+then commit and validate downstream.
 Tool lifecycle/terminal facts and harness-owned lifecycle,
 membership, transcript, and status facts must not be accepted through client
 fallback.

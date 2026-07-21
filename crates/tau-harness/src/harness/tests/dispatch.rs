@@ -23830,11 +23830,9 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         agent_id: agent_id.clone(),
         action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
     });
-    assert!(
-        h.handle_extension_agent_event("extension-test", extension_event)
-            .expect("extension intake")
-            .is_none()
-    );
+    connect_test_tool(&mut h, "extension-test");
+    h.handle_extension_event_inner("extension-test", extension_event)
+        .expect("extension intake");
     assert_eq!(
         h.agent_navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Suspended)

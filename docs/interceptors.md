@@ -27,8 +27,18 @@ The relevant messages are:
   not-yet-emitted event
 - `intercept_reply` — interceptor → harness decision for that request
 
-The event inside `emit` or `intercept_request` is the fact being processed. The
+The event inside `emit` or `intercept_request` is the event being processed. The
 message itself is not the emitted fact.
+
+Some peer events are requests rather than canonical facts. For example,
+`agent.metadata_set_request` commits through this pipeline before the harness
+validates it and publishes a distinct `agent.metadata_set` fact. Interceptors can
+therefore observe both commits. A set request carrying `mutation_id` is
+non-droppable and retains its agent, key, correlation, and inheritance identity
+across replacement. Request replacements commit and undergo downstream
+validation. Interception alone cannot drop or retarget a correlated request.
+Downstream validation, stale-source rejection, or store failure may still
+produce no canonical echo.
 
 ## Registering an interceptor
 

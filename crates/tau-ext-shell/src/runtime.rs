@@ -376,17 +376,15 @@ impl ShellRuntime {
             return;
         }
         if let Ok(cwd) = self.cwd_state.process_default() {
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-                    tau_proto::AgentMetadataSet {
-                        agent_id: unset.agent_id,
-                        key: self.cwd_state.key(),
-                        value: CborValue::Text(cwd.display().to_string()),
-                        mutation_id: None,
-                        inheritable: true,
-                    },
-                )));
+            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+                Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
+                    agent_id: unset.agent_id,
+                    key: self.cwd_state.key(),
+                    value: CborValue::Text(cwd.display().to_string()),
+                    mutation_id: None,
+                    inheritable: true,
+                }),
+            ));
         }
     }
 
@@ -457,17 +455,15 @@ impl ShellRuntime {
             self.cwd_state.take_pending_ready(&done.agent_id);
             return;
         };
-        let _ = self
-            .tx
-            .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-                tau_proto::AgentMetadataSet {
-                    agent_id: done.agent_id.clone(),
-                    key: self.cwd_state.key(),
-                    value: CborValue::Text(cwd.display().to_string()),
-                    mutation_id: None,
-                    inheritable: true,
-                },
-            )));
+        let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
+                agent_id: done.agent_id.clone(),
+                key: self.cwd_state.key(),
+                value: CborValue::Text(cwd.display().to_string()),
+                mutation_id: None,
+                inheritable: true,
+            }),
+        ));
         self.cwd_state.set_pending_ready(done.agent_id, session_id);
     }
 

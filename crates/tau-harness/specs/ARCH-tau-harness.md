@@ -5,10 +5,13 @@
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
-terminal-output, and custom-event slices now use generic `Emit` publication, immutable authenticated
-publisher snapshots, source-aware admission, and downstream processing as required by
+terminal-output, custom-event, attached-UI-liveness, and metadata-request slices
+now use generic `Emit` publication, immutable authenticated
+publisher snapshots, source-aware admission, and downstream processing as
+required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
-The attached-UI liveness slice now uses the same generic publication boundary.
+The metadata slice covers request-to-canonical publication; rejection outcomes
+remain unspecified and preserve silent rejection.
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 
@@ -24,6 +27,10 @@ submission, and stale publisher generations cannot submit work. See
 Start-agent requests likewise commit before role/parent validation, duplicate
 route rebinding, acceptance/result routing, or child creation. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
+Metadata set/unset requests commit before target and payload validation. Exact
+live extension/UI checks prevent parked stale requests from publishing
+harness-sourced durable canonical facts. See
+[SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 Terminal-output events commit and broadcast before attached UIs act. They never
 enter semantic replay, and replay-marked deliveries cannot repeat terminal side
 effects. See

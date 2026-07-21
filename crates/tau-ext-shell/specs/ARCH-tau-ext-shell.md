@@ -31,14 +31,19 @@ its own instance-derived key and keeps an independent cwd map.
 
 An absent key initializes from the validated process cwd frozen after startup
 configuration. The CLI and harness do not seed a built-in instance or copy paths
-between namespaces. Committed `agent.metadata_set` / `agent.metadata_unset`
-events are the source of truth. The extension updates its in-memory cache only
-after seeing those events, publishes fresh `agent_context.workdir` after each committed change, and
-emits `extension.context_ready` only after publishing the initial cwd context for
-a loaded agent. Both publications use transient wire metadata and commit before
-the harness updates prompt projection or releases readiness. Metadata values are inheritable so child agents start in the
-parent's remembered workdir. Stored stale or malformed values remain
+between namespaces. The extension publishes transient
+`agent.metadata_set_request` events; committed harness-authored
+`agent.metadata_set` / `agent.metadata_unset` facts are the source of truth. The
+extension updates its in-memory cache only after seeing those events, publishes
+fresh `agent_context.workdir` after each committed change, and emits
+`extension.context_ready` only after publishing the initial cwd context for a
+loaded agent. Both publications use transient wire metadata and commit before
+the harness updates prompt projection or releases readiness. Metadata values are
+inheritable so child agents start in the parent's remembered workdir. Stored
+stale or malformed values remain
 authoritative and fail closed until an explicit absolute setter repairs them.
+See
+[SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 
 Every tool invocation snapshots the committed workdir at admission. Relative
 resolution, command execution, and directory-lock setup retain that snapshot

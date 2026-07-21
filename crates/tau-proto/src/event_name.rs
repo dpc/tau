@@ -446,6 +446,10 @@ impl EventName {
     pub const AGENT_METADATA_SET: Self = Self::from_static(EventCategory::Agent, "metadata_set");
     pub const AGENT_METADATA_UNSET: Self =
         Self::from_static(EventCategory::Agent, "metadata_unset");
+    pub const AGENT_METADATA_SET_REQUEST: Self =
+        Self::from_static(EventCategory::Agent, "metadata_set_request");
+    pub const AGENT_METADATA_UNSET_REQUEST: Self =
+        Self::from_static(EventCategory::Agent, "metadata_unset_request");
     pub const AGENT_REPLAY_COMPLETE: Self =
         Self::from_static(EventCategory::Agent, "replay_complete");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");

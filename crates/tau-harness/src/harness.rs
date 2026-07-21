@@ -4683,7 +4683,7 @@ impl Harness {
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
-        self.process_committed_peer_event(peer_context, &event);
+        self.process_committed_peer_event(source, peer_context, &event);
         self.with_derived_publish_source(source.map(Into::into), |harness| {
             harness.react_to_committed_event(source, &event);
         });
@@ -5985,6 +5985,8 @@ impl Harness {
             Event::AgentDisplayNameSet(name) => Some(name.agent_id.clone()),
             Event::AgentMetadataSet(set) => Some(set.agent_id.clone()),
             Event::AgentMetadataUnset(unset) => Some(unset.agent_id.clone()),
+            Event::AgentMetadataSetRequest(set) => Some(set.agent_id.clone()),
+            Event::AgentMetadataUnsetRequest(unset) => Some(unset.agent_id.clone()),
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
@@ -8821,6 +8823,34 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(
+            event,
+            Event::AgentMetadataSetRequest(_) | Event::AgentMetadataUnsetRequest(_)
+        ) {
+            // Metadata mutation is configured extension authority only. The
+            // committed request is validated and canonicalized downstream.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks agent metadata request authority"
+                );
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
@@ -8834,9 +8864,6 @@ impl Harness {
             return Ok(());
         };
         let Some(event) = self.handle_extension_shell_event(source_id, event) else {
-            return Ok(());
-        };
-        let Some(event) = self.handle_extension_agent_event(source_id, event)? else {
             return Ok(());
         };
         self.handle_extension_fallback_event(source_id, event, transient_override);
@@ -8853,6 +8880,7 @@ impl Harness {
     /// architectural problem that decision prohibits.
     fn process_committed_peer_event(
         &mut self,
+        source: Option<&str>,
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
@@ -8919,6 +8947,13 @@ impl Harness {
         }
         if let Event::StartAgentRequest(request) = event {
             self.process_committed_start_agent_request(peer_context, request);
+            return;
+        }
+        if matches!(
+            event,
+            Event::AgentMetadataSetRequest(_) | Event::AgentMetadataUnsetRequest(_)
+        ) {
+            self.process_committed_agent_metadata_request(source, peer_context, event);
             return;
         }
         if matches!(
@@ -9044,6 +9079,58 @@ impl Harness {
         if let Err(error) = self.handle_start_agent_request(source_id.as_str(), request.clone()) {
             self.pending_publish_error.get_or_insert(error);
         }
+    }
+
+    /// Validate one committed metadata request and publish its canonical fact.
+    ///
+    /// Extension requests retain their exact configured connection generation
+    /// through interception. UI requests retain their run-local socket
+    /// connection id and must still come from an attached UI when
+    /// downstream processing runs. Invalid or stale requests return without a
+    /// canonical successor; canonical store failure likewise prevents an echo.
+    fn process_committed_agent_metadata_request(
+        &mut self,
+        source: Option<&str>,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let source_is_current = if let Some(extension) = peer_context.extension.as_ref() {
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.connection_id == extension.source
+                        && entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && entry.kind == extension.kind
+                        && entry.state != ExtensionState::Disconnected
+                })
+                && self
+                    .bus
+                    .connection(extension.source.as_str())
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket)
+        } else {
+            source.is_some_and(|source_id| self.is_attached_socket_ui(source_id))
+        };
+        if !source_is_current {
+            return;
+        }
+        let canonical = match event {
+            Event::AgentMetadataSetRequest(set) => {
+                if self.validate_agent_metadata_set(set).is_err() {
+                    return;
+                }
+                Event::AgentMetadataSet(set.clone())
+            }
+            Event::AgentMetadataUnsetRequest(unset) => {
+                if self.validate_agent_metadata_unset(unset).is_err() {
+                    return;
+                }
+                Event::AgentMetadataUnset(unset.clone())
+            }
+            _ => return,
+        };
+        self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, false, None);
     }
 
     /// Apply one per-agent context declaration, value, or readiness
@@ -10356,41 +10443,6 @@ impl Harness {
         }
     }
 
-    fn handle_extension_agent_event(
-        &mut self,
-        source_id: &str,
-        event: Event,
-    ) -> Result<Option<Event>, HarnessError> {
-        match event {
-            Event::AgentMetadataSet(set) => {
-                if self.validate_agent_metadata_set(&set).is_ok() {
-                    self.enqueue_publish(
-                        Some(source_id),
-                        Event::AgentMetadataSet(set),
-                        false,
-                        false,
-                        None,
-                    );
-                }
-                Ok(None)
-            }
-            Event::AgentMetadataUnset(unset) => {
-                if self.validate_agent_metadata_unset(&unset).is_ok() {
-                    self.enqueue_publish(
-                        Some(source_id),
-                        Event::AgentMetadataUnset(unset),
-                        false,
-                        false,
-                        None,
-                    );
-                }
-                Ok(None)
-            }
-            Event::UiSetAgentNavigationMode(_) => Ok(None),
-            other => Ok(Some(other)),
-        }
-    }
-
     fn handle_extension_fallback_event(
         &mut self,
         source_id: &str,
@@ -10624,9 +10676,13 @@ impl Harness {
         let Some(event) = event else {
             return Ok(keep_going);
         };
-        let Some(event) = self.handle_client_agent_metadata_event(client_id, event) else {
+        if matches!(
+            event,
+            Event::AgentMetadataSetRequest(_) | Event::AgentMetadataUnsetRequest(_)
+        ) {
+            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
             return Ok(true);
-        };
+        }
         if matches!(event, Event::UiPromptDraft(_) | Event::UiFocusChanged(_)) {
             self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
             return Ok(true);
@@ -10940,40 +10996,6 @@ impl Harness {
         });
         let frame = HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::now(), event);
         let _ = self.bus.send_to(client_id, None, frame);
-    }
-
-    fn handle_client_agent_metadata_event(
-        &mut self,
-        client_id: &str,
-        event: Event,
-    ) -> Option<Event> {
-        match event {
-            Event::AgentMetadataSet(set) => {
-                if self.validate_agent_metadata_set(&set).is_ok() {
-                    self.enqueue_publish(
-                        Some(client_id),
-                        Event::AgentMetadataSet(set),
-                        false,
-                        false,
-                        None,
-                    );
-                }
-                None
-            }
-            Event::AgentMetadataUnset(unset) => {
-                if self.validate_agent_metadata_unset(&unset).is_ok() {
-                    self.enqueue_publish(
-                        Some(client_id),
-                        Event::AgentMetadataUnset(unset),
-                        false,
-                        false,
-                        None,
-                    );
-                }
-                None
-            }
-            other => Some(other),
-        }
     }
 
     fn handle_client_fallback_event(
@@ -14054,7 +14076,14 @@ impl Harness {
         self.validate_agent_metadata_key(&unset.key)
     }
 
-    pub(crate) fn validate_agent_metadata_event(&mut self, event: &Event) -> Result<(), String> {
+    /// Validate canonical metadata replacements before commit.
+    ///
+    /// Request replacements deliberately bypass this validation and run the
+    /// full metadata policy only after their request commit.
+    fn validate_agent_metadata_interceptor_replacement(
+        &mut self,
+        event: &Event,
+    ) -> Result<(), String> {
         match event {
             Event::AgentMetadataSet(set) => self.validate_agent_metadata_set(set),
             Event::AgentMetadataUnset(unset) => self.validate_agent_metadata_unset(unset),

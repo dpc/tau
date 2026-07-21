@@ -38,6 +38,10 @@ Configured extensions also publish transient internal-prompt requests before
 the harness validates loaded-agent correlation and derives prompt facts, as
 specified by
 [SPEC-internal-prompt-submit-requests](SPEC-internal-prompt-submit-requests.md).
+Configured extensions and attached socket UIs request per-agent metadata
+mutations before validation; only the harness publishes durable canonical
+metadata facts, as specified by
+[SPEC-agent-metadata-requests-and-canonical-facts](SPEC-agent-metadata-requests-and-canonical-facts.md).
 They publish transient start-agent requests through the same commit boundary
 before role, parent, duplicate-route, and child-creation processing, as specified
 by [SPEC-start-agent-requests](SPEC-start-agent-requests.md).

@@ -215,8 +215,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
   name; UIs use it when rendering agent chips and history.
+- **`agent.metadata_set_request`** / **`agent.metadata_unset_request`** —
+  Transient-by-default mutation requests accepted from configured extensions and
+  attached socket UIs. Valid requests produce separate harness-authored canonical
+  facts; invalid requests currently have no successor.
 - **`agent.metadata_set`** / **`agent.metadata_unset`** — Durable,
-  interceptable per-agent metadata updates. Keys are strings, values are
+  interceptable harness-authored per-agent metadata facts. Keys are strings, values are
   arbitrary CBOR capped at 64 KiB, and `metadata_set` carries an optional opaque
   mutation correlation id plus an `inheritable`
   flag copied to child agents at creation time. Extensions use these facts for
@@ -225,6 +229,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   value, but cannot drop it or change its agent, key, correlation id, or
   inheritance flag. Durable state and replay omit the transient mutation id, so
   replay can reconstruct current metadata without impersonating a live commit.
+  See
+  [`SPEC-agent-metadata-requests-and-canonical-facts`](../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 - **`agent.started`** — Creation fact for an agent. Durable agents write it to
   their event log; ephemeral agents replay it from memory only. It carries
   optional `parent_agent`; inheritable metadata from that parent is copied into

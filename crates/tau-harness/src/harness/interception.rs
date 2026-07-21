@@ -271,10 +271,12 @@ fn sanitize_harness_notice_replacement(original: &Event, replacement: &mut Event
 }
 
 fn preserve_agent_metadata_mutation_id(original: &Event, replacement: &mut Event) {
-    let (Event::AgentMetadataSet(original), Event::AgentMetadataSet(replacement)) =
-        (original, replacement)
-    else {
-        return;
+    let (original, replacement) = match (original, replacement) {
+        (Event::AgentMetadataSet(original), Event::AgentMetadataSet(replacement))
+        | (Event::AgentMetadataSetRequest(original), Event::AgentMetadataSetRequest(replacement)) => {
+            (original, replacement)
+        }
+        _ => return,
     };
     if original.mutation_id.is_some() {
         replacement.agent_id = original.agent_id.clone();
@@ -1122,7 +1124,9 @@ impl Harness {
                              publishing original instead",
                         );
                         Some(original_event)
-                    } else if let Err(error) = self.validate_agent_metadata_event(&new_event) {
+                    } else if let Err(error) =
+                        self.validate_agent_metadata_interceptor_replacement(&new_event)
+                    {
                         tracing::warn!(
                             target: "tau_harness::interception",
                             event = %event_name,
@@ -1150,7 +1154,9 @@ impl Harness {
                         || mandatory_harness_notice(&original_event)
                         || matches!(
                             &original_event,
-                            Event::AgentMetadataSet(set) if set.mutation_id.is_some()
+                            Event::AgentMetadataSet(set)
+                                | Event::AgentMetadataSetRequest(set)
+                                if set.mutation_id.is_some()
                         );
                     if must_pass || must_pass_default {
                         tracing::warn!(

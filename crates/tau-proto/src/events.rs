@@ -3,8 +3,9 @@
 //! Every [`Event`] variant is declared here; cohesive payload DTOs may live in
 //! dedicated modules.
 //!
-//! Events are facts — each component broadcasts what happened.
-//! There are no requests or responses, only announcements.
+//! Broadcast events include canonical facts plus peer-authored requests,
+//! reports, and declarations that commit before downstream handling.
+//! Point-to-point responses remain protocol messages rather than events.
 //!
 //! The event-name, routing, replay, and selected payload contracts are
 //! specified by `SPEC-tau-proto-session-events`.
@@ -2322,30 +2323,30 @@ pub struct AgentUserInteractionRecorded {
     pub agent_id: AgentId,
 }
 
-/// Durable per-agent metadata value update.
+/// Payload shared by a metadata-set request and its durable canonical fact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetadataSet {
-    /// Agent whose metadata map is updated.
+    /// Target agent for the requested or recorded metadata operation.
     pub agent_id: AgentId,
-    /// Metadata key to replace.
+    /// Metadata key requested or recorded as replaced.
     pub key: AgentMetadataKey,
-    /// Arbitrary CBOR metadata value.
+    /// Arbitrary CBOR metadata value requested or recorded.
     pub value: CborValue,
-    /// Optional opaque mutation correlation echoed unchanged with the committed
-    /// fact.
+    /// Optional opaque mutation correlation echoed unchanged if a canonical
+    /// fact is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation_id: Option<crate::AgentMetadataMutationId>,
-    /// Whether this key is copied to newly-created child agents.
+    /// Requested or recorded child-agent inheritance behavior for this key.
     #[serde(default, skip_serializing_if = "is_false")]
     pub inheritable: bool,
 }
 
-/// Durable per-agent metadata deletion.
+/// Payload shared by a metadata-unset request and its durable canonical fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetadataUnset {
-    /// Agent whose metadata map is updated.
+    /// Target agent for the requested or recorded metadata operation.
     pub agent_id: AgentId,
-    /// Metadata key to delete.
+    /// Metadata key requested or recorded as deleted.
     pub key: AgentMetadataKey,
 }
 
@@ -4881,10 +4882,24 @@ pub enum Event {
     AgentUserInteractionRecorded(AgentUserInteractionRecorded),
     #[serde(rename = "agent.display_name_set")]
     AgentDisplayNameSet(AgentDisplayNameSet),
+    /// Durable harness-authored canonical metadata-set fact.
     #[serde(rename = "agent.metadata_set")]
     AgentMetadataSet(AgentMetadataSet),
+    /// Durable harness-authored canonical metadata-unset fact.
     #[serde(rename = "agent.metadata_unset")]
     AgentMetadataUnset(AgentMetadataUnset),
+    /// Transient-by-default peer request whose commit does not imply
+    /// acceptance.
+    ///
+    /// A valid request may produce [`Event::AgentMetadataSet`].
+    #[serde(rename = "agent.metadata_set_request")]
+    AgentMetadataSetRequest(AgentMetadataSet),
+    /// Transient-by-default peer request whose commit does not imply
+    /// acceptance.
+    ///
+    /// A valid request may produce [`Event::AgentMetadataUnset`].
+    #[serde(rename = "agent.metadata_unset_request")]
+    AgentMetadataUnsetRequest(AgentMetadataUnset),
     #[serde(rename = "agent.replay_complete")]
     AgentReplayComplete(AgentReplayComplete),
 
@@ -5248,6 +5263,8 @@ impl Event {
             Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
             Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
             Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
+            Self::AgentMetadataSetRequest(_) => EventName::AGENT_METADATA_SET_REQUEST,
+            Self::AgentMetadataUnsetRequest(_) => EventName::AGENT_METADATA_UNSET_REQUEST,
             Self::AgentReplayComplete(_) => EventName::AGENT_REPLAY_COMPLETE,
             _ => return None,
         }
@@ -5343,6 +5360,8 @@ impl Event {
                 | Self::ExtAgentContextPublish(_)
                 | Self::ExtInternalPromptSubmitRequest(_)
                 | Self::StartAgentRequest(_)
+                | Self::AgentMetadataSetRequest(_)
+                | Self::AgentMetadataUnsetRequest(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)

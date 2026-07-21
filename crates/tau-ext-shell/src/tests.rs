@@ -480,7 +480,7 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
         let event = reader.read_event().expect("read").expect("result");
         match event {
             Event::ToolResult(result) => break result,
-            Event::AgentMetadataSet(metadata) => {
+            Event::AgentMetadataSetRequest(metadata) => {
                 panic!("workdir read emitted metadata: {metadata:?}")
             }
             Event::AgentUserMessageInjected(notice) => {
@@ -2832,7 +2832,8 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd metadata publish") else {
         panic!("expected cwd metadata publish");
     };
-    let Event::AgentMetadataSet(metadata) = *emit.event else {
+    assert!(emit.transient, "metadata mutations are transient requests");
+    let Event::AgentMetadataSetRequest(metadata) = *emit.event else {
         panic!("expected cwd metadata publish");
     };
     assert_eq!(metadata.key.as_str(), "ext_core-shell_cwd");
@@ -3315,7 +3316,7 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
     writer.flush().expect("flush");
     let metadata = loop {
         let event = reader.read_event().expect("read").expect("metadata event");
-        if let Event::AgentMetadataSet(metadata) = event {
+        if let Event::AgentMetadataSetRequest(metadata) = event {
             break metadata;
         }
     };
@@ -8169,7 +8170,7 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
             writer.flush().expect("flush shell call");
             loop {
                 match reader.read_event().expect("read").expect("event") {
-                    Event::AgentMetadataSet(metadata) => {
+                    Event::AgentMetadataSetRequest(metadata) => {
                         panic!("call-local shell directory emitted metadata: {metadata:?}")
                     }
                     Event::AgentUserMessageInjected(notice) => {
@@ -8199,7 +8200,7 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
     writer.flush().expect("flush read");
     loop {
         match reader.read_event().expect("read").expect("event") {
-            Event::AgentMetadataSet(metadata) => {
+            Event::AgentMetadataSetRequest(metadata) => {
                 panic!("call-local shell directory emitted metadata: {metadata:?}")
             }
             Event::ToolResult(result)
@@ -8279,7 +8280,7 @@ fn malformed_gpt_workdir_fails_without_side_effects_through_full_dispatch() {
 
     loop {
         match reader.read_event().expect("read").expect("event") {
-            Event::AgentMetadataSet(metadata) => {
+            Event::AgentMetadataSetRequest(metadata) => {
                 panic!("malformed call-local workdir emitted metadata: {metadata:?}")
             }
             Event::AgentUserMessageInjected(notice) => {
@@ -8386,7 +8387,7 @@ fn workdir_without_path_reports_current_status_without_mutation() {
         let event = reader.read_event().expect("read").expect("result");
         match event {
             Event::ToolResult(result) => break result,
-            Event::AgentMetadataSet(metadata) => {
+            Event::AgentMetadataSetRequest(metadata) => {
                 panic!("workdir read emitted metadata: {metadata:?}")
             }
             Event::AgentUserMessageInjected(notice) => {
@@ -8443,7 +8444,7 @@ fn absolute_workdir_setter_repairs_malformed_metadata() {
     writer.flush().expect("flush repair");
     let metadata = loop {
         match reader.read_event().expect("read").expect("event") {
-            Event::AgentMetadataSet(metadata) => break metadata,
+            Event::AgentMetadataSetRequest(metadata) => break metadata,
             Event::ToolResult(result) => panic!("repair completed before commit: {result:?}"),
             _ => {}
         }
@@ -8544,7 +8545,7 @@ fn workdir_setter_waits_for_committed_metadata_before_notice_and_result() {
             !matches!(event, Event::AgentUserMessageInjected(_)),
             "cd notice before metadata commit"
         );
-        if let Event::AgentMetadataSet(metadata) = event {
+        if let Event::AgentMetadataSetRequest(metadata) = event {
             break metadata;
         }
     };
@@ -8609,7 +8610,7 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
     writer.flush().expect("flush first cd");
     let first_metadata = loop {
         match reader.read_event().expect("read").expect("event") {
-            Event::AgentMetadataSet(metadata) => break metadata,
+            Event::AgentMetadataSetRequest(metadata) => break metadata,
             Event::ToolResult(result) => panic!("first cd completed before commit: {result:?}"),
             _ => {}
         }
@@ -8630,7 +8631,7 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
                 assert!(error.message.contains("workdir change is already pending"));
                 break;
             }
-            Event::AgentMetadataSet(metadata) => {
+            Event::AgentMetadataSetRequest(metadata) => {
                 panic!("second cd emitted metadata while first was pending: {metadata:?}");
             }
             Event::ToolResult(result) if result.call_id.as_str() == "call-cd-one" => {
@@ -8769,7 +8770,7 @@ fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
     loop {
         let event = reader.read_event().expect("read").expect("event");
         match event {
-            Event::AgentMetadataSet(metadata) if metadata.agent_id == agent_id => {
+            Event::AgentMetadataSetRequest(metadata) if metadata.agent_id == agent_id => {
                 panic!("default cwd metadata emitted before stored cwd replay: {metadata:?}");
             }
             Event::ExtAgentContextPublish(publish)
@@ -8824,7 +8825,7 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 
     loop {
         let event = reader.read_event().expect("read").expect("event");
-        if let Event::AgentMetadataSet(metadata) = event
+        if let Event::AgentMetadataSetRequest(metadata) = event
             && metadata.agent_id == agent_id
         {
             assert_eq!(metadata.key.as_str(), "ext_test-extension_cwd");
@@ -8884,7 +8885,7 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
             continue;
         };
         match *emit.event {
-            Event::AgentMetadataSet(metadata) if metadata.agent_id == agent_id => {
+            Event::AgentMetadataSetRequest(metadata) if metadata.agent_id == agent_id => {
                 panic!("errored replay must not synthesize cwd metadata: {metadata:?}");
             }
             Event::ExtAgentContextPublish(publish) if publish.agent_id == agent_id => {
