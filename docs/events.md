@@ -625,8 +625,6 @@ intent.
   model/provider fallback behavior. For `set_tools`, an empty list is an
   explicit empty tool allow-list; the enable/disable vector setters replace
   their corresponding lists, including with empty lists.
-- **`ui.detach_request`** — UI is detaching but wants the daemon to keep
-  running so a later `tau --attach` can reconnect.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`
   (UI-only) shell command. Carries command id, command, session id,
   `include_in_context` flag.

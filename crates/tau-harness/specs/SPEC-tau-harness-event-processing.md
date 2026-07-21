@@ -127,6 +127,20 @@ non-extension client receives exactly one requester-directed, content-free
 `ui.command_error`; configured extensions are silently denied without a response,
 warning, or disconnection.
 
+UI detach is a payload-free `ui_detach_request` input message from an attached
+socket UI. During startup it records that the initial UI requested detach;
+during the runtime serve loop it clears `exit_on_disconnect`. The request does
+not enter publication, interception, subscriptions, semantic persistence, or
+replay. It remains visible as a point-to-point input frame in local debug JSONL
+and is metered as `message.ui_detach_request`.
+
+Detach authority uses the same exact `is_attached_socket_ui` classification as
+UI diagnostics. Other client origins are silently denied without changing
+connection-control state or publishing a diagnostic. Configured extensions are
+also silently denied after normal phase validation and metering but before
+activation staging, so repeated requests cannot consume activation quota,
+disconnect the extension, or fail required startup.
+
 ## Harness-owned tool-call id scoping
 
 The harness-owned `wait` and `cancel` tools treat explicit `tool_call_id`

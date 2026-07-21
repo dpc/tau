@@ -40,6 +40,14 @@ fn protocol_io_input_message_key_uses_ui_debug_request_message_name() {
     );
 }
 
+/// Dedicated UI detach requests use their flat message name for metering.
+#[test]
+fn protocol_io_input_message_key_uses_ui_detach_request_message_name() {
+    let message = HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest::default());
+
+    assert_eq!(input_message_key(&message), "message.ui_detach_request");
+}
+
 /// Cumulative protocol I/O counters must survive sample draining because debug
 /// dumps are lifetime counters while rolling samples drive transient status.
 #[test]

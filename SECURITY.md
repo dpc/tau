@@ -94,6 +94,12 @@ non-UI sockets, and embedded/non-socket UIs receive only a content-free
 authorization error. The request is omitted from debug JSONL and its result is a
 requester-directed, non-published notice. Configured extensions are silently denied
 without a response, warning, or disconnection.
+Only an attached socket UI may send the payload-free `ui_detach_request` that
+keeps the daemon alive after that UI disconnects. Other socket peers,
+embedded/non-socket UIs, dedicated external-message peers, and configured
+extensions are silently denied; they cannot mutate the daemon's
+exit-on-disconnect control. Configured extension attempts retain normal protocol
+phase validation and metering but are denied before activation staging.
 Only authenticated configured Tool/Core peers may publish transient tool
 registration/unregistration declarations; canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the

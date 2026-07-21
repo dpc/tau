@@ -82,7 +82,7 @@ pub struct ServeOptions {
     /// When set, the daemon exits as soon as the last attached UI
     /// socket disconnects. When clear, the daemon keeps running with
     /// no attached UIs — a later `tau --attach` can pick up the
-    /// session. The `ui.detach_request` event flips this at runtime.
+    /// session. The `ui_detach_request` message flips this at runtime.
     ///
     /// Default `false`: daemon is long-lived unless explicitly told
     /// otherwise.
@@ -1403,7 +1403,7 @@ fn run_component_with_internal_tools_and_initial_client(
             &config,
             &eager_session_id,
             // Exit once the spawning UI leaves. A UI that wants the
-            // daemon to outlive it sends `ui.detach_request`, which
+            // daemon to outlive it sends `ui_detach_request`, which
             // flips this to `false` at runtime.
             ServeOptions {
                 exit_on_disconnect: true,

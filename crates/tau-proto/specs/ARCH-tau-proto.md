@@ -192,5 +192,7 @@ requests. Only harness-authored `agent.metadata_set` and
 
 `ui_debug_event_stats_request` is a flat peer-to-harness message rather than a
 bus event. Its payload selects one configured extension by name; authorization
-and the directed notice response remain harness concerns. The other dedicated UI
-request candidates remain event-based pending migration.
+and the directed notice response remain harness concerns.
+`ui_detach_request` is likewise a flat payload-free peer-to-harness message; its
+authorized effect is local connection control rather than event publication.
+The tree request candidate remains event-based pending migration.

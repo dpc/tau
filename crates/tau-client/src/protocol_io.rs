@@ -395,6 +395,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::GetCurrentSession(_) => "get_current_session",
         HarnessInputMessage::GetSessionAgentList(_) => "get_session_agent_list",
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "ui_debug_event_stats_request",
+        HarnessInputMessage::UiDetachRequest(_) => "ui_detach_request",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",

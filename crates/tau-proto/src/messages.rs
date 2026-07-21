@@ -991,6 +991,13 @@ pub struct UiDebugEventStatsRequest {
     pub extension_name: ExtensionName,
 }
 
+/// Dedicated UI input requesting that the daemon outlive this UI connection.
+///
+/// The harness consumes this connection-control request directly. It is not a
+/// session fact and must not be broadcast to extensions.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiDetachRequest {}
+
 /// Messages the harness accepts from connected peers (UI clients and
 /// extensions).
 ///
@@ -1015,6 +1022,7 @@ pub enum HarnessInputMessage {
     GetCurrentSession(GetCurrentSession),
     GetSessionAgentList(GetSessionAgentList),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
+    UiDetachRequest(UiDetachRequest),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),

@@ -163,6 +163,7 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::GetCurrentSession(_) => "GetCurrentSession",
         HarnessInputMessage::GetSessionAgentList(_) => "GetSessionAgentList",
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "UiDebugEventStatsRequest",
+        HarnessInputMessage::UiDetachRequest(_) => "UiDetachRequest",
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
         HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "ExternalAgentMessageAuth",

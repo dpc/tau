@@ -14,8 +14,10 @@ The metadata slice covers request-to-canonical publication; rejection outcomes
 remain unspecified and preserve silent rejection.
 UI extension-counter inspection now uses the dedicated
 `ui_debug_event_stats_request` message with attached-socket-UI authority and a
-directed, non-published notice result. The tree and detach members of that
-dedicated-request row remain event-based.
+directed, non-published notice result. UI detach now uses the dedicated
+`ui_detach_request` message with the same authority and direct
+connection-control behavior. The tree member of that dedicated-request row
+remains event-based.
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 

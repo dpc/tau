@@ -94,7 +94,7 @@ is done.
   surfaces the message just like a `harness.yaml` parse error so the user can
   see why their per-extension config was rejected.
 
-## UI diagnostics (UI → harness)
+## UI point-to-point requests (UI → harness)
 
 - **`ui_debug_event_stats_request`** — An attached local UI requests cumulative
   protocol frame I/O counters for one configured extension. The harness replies
@@ -103,6 +103,12 @@ is done.
   is omitted from debug JSONL. Other socket peers and embedded/non-socket UIs
   receive a content-free authorization error. Configured extensions are silently
   denied without a response, warning, or disconnection.
+- **`ui_detach_request`** — An attached local UI asks the daemon to remain
+  running after that UI disconnects, so a later `tau --attach` can reconnect.
+  The payload is empty. The harness consumes the request as direct
+  connection-control input; it is not published, intercepted, subscribed, or
+  replayed. Other client origins and configured extensions are silently denied.
+  The input frame remains visible in local debug JSONL and protocol metering.
 
 ## Emission and interception (peer ↔ harness)
 

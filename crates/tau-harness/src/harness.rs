@@ -3566,11 +3566,8 @@ impl Harness {
         let origin = self.bus.connection(connection_id).map(|m| m.origin.clone());
         let subscribed = match origin {
             Some(ConnectionOrigin::Socket) => {
-                let detach_requested = matches!(
-                    &message,
-                    HarnessInputMessage::Emit(emit)
-                        if matches!(emit.event.as_ref(), Event::UiDetachRequest(_))
-                );
+                let detach_requested =
+                    self.is_authorized_ui_detach_request(connection_id, &message);
                 let subscribed = matches!(&message, HarnessInputMessage::Subscribe(_));
                 if detach_requested {
                     self.startup_detach_requested = true;
@@ -6460,7 +6457,7 @@ impl Harness {
             Some(ConnectionOrigin::Socket) => {
                 // `/detach` → stay alive even after this UI leaves; a later
                 // `tau --attach` can pick up right here.
-                if Self::is_ui_detach_request(&message) {
+                if self.is_authorized_ui_detach_request(&connection_id, &message) {
                     *exit_on_disconnect = false;
                 }
                 let keep = self.handle_client_message(&connection_id, *message)?;
@@ -6475,12 +6472,13 @@ impl Harness {
         Ok(())
     }
 
-    fn is_ui_detach_request(message: &HarnessInputMessage) -> bool {
-        matches!(
-            message,
-            HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::UiDetachRequest(_))
-        )
+    fn is_authorized_ui_detach_request(
+        &self,
+        connection_id: &str,
+        message: &HarnessInputMessage,
+    ) -> bool {
+        matches!(message, HarnessInputMessage::UiDetachRequest(_))
+            && self.is_attached_socket_ui(connection_id)
     }
 
     fn handle_runtime_disconnect(
@@ -8130,6 +8128,7 @@ impl Harness {
                         | HarnessInputMessage::GetAgentPromptCreated(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
+                        | HarnessInputMessage::UiDetachRequest(_)
                 )
             } else {
                 matches!(
@@ -8145,7 +8144,8 @@ impl Harness {
                                 | HarnessInputMessage::InterceptReply(_)
                                 | HarnessInputMessage::GetAgentPromptCreated(_)
                                 | HarnessInputMessage::ExtensionDataRequest(_)
-                                | HarnessInputMessage::UiDebugEventStatsRequest(_),
+                                | HarnessInputMessage::UiDebugEventStatsRequest(_)
+                                | HarnessInputMessage::UiDetachRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
                         )
                 )
@@ -8160,13 +8160,17 @@ impl Harness {
                 );
             }
         }
-        if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
-            && self.extensions.entries.contains_key(source_id)
+        if matches!(
+            &message,
+            HarnessInputMessage::UiDebugEventStatsRequest(_)
+                | HarnessInputMessage::UiDetachRequest(_)
+        ) && self.extensions.entries.contains_key(source_id)
         {
-            // This request belongs exclusively to attached socket UIs. Configured
-            // extensions are silently denied after normal phase validation and
-            // metering, before activation staging can turn repeated requests into
-            // a quota warning, disconnect, or startup failure.
+            // These requests belong exclusively to attached socket UIs.
+            // Configured extensions are silently denied after normal phase
+            // validation and metering, before activation staging can turn
+            // repeated requests into a quota warning, disconnect, or startup
+            // failure.
             return Ok(());
         }
         let activation_pending = self
@@ -8355,6 +8359,7 @@ impl Harness {
             | HarnessInputMessage::GetCurrentSession(_)
             | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::UiDebugEventStatsRequest(_)
+            | HarnessInputMessage::UiDetachRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
             | HarnessInputMessage::PeerSessionProbe(_) => {}
@@ -10606,6 +10611,9 @@ impl Harness {
                 self.handle_ui_debug_event_stats_request(client_id, request);
                 Ok(true)
             }
+            // Connection-control behavior is applied only by startup/runtime
+            // routing after exact attached-socket-UI authorization.
+            HarnessInputMessage::UiDetachRequest(_) => Ok(true),
             HarnessInputMessage::ExternalAgentMessage(request) => {
                 if !self
                     .external_message_peers
@@ -13336,7 +13344,7 @@ impl Harness {
     }
 
     fn is_client_fallback_emit_allowed(event: &Event) -> bool {
-        matches!(event, Event::UiDetachRequest(_) | Event::UiShellCommand(_))
+        matches!(event, Event::UiShellCommand(_))
     }
 
     fn requires_tool_event_intake(event: &Event) -> bool {

@@ -474,6 +474,227 @@ fn debug_event_stats_request(extension_name: &str) -> HarnessInputMessage {
     })
 }
 
+fn detach_request() -> HarnessInputMessage {
+    HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {})
+}
+
+/// An attached socket UI may disable exit-on-disconnect without publishing,
+/// delivering, or persisting a bus event. The point-to-point frame remains
+/// visible in the local debug JSONL trace.
+#[test]
+fn detach_request_controls_runtime_without_publication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let debug_log_path = h
+        .enable_debug_log(&td.path().join("debug"))
+        .expect("enable debug log");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let (_observer_id, mut observer) = connect_socket_ui(&mut h);
+    let baseline_seq = h.event_log.next_seq();
+    let event = HarnessEvent::FromConnection {
+        connection_id: ui_id,
+        message: Box::new(detach_request()),
+    };
+    h.log_event(&event);
+
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = true;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("handle detach request");
+
+    assert!(!exit_on_disconnect);
+    assert_eq!(served_clients, 0);
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+    assert_no_message(&mut ui);
+    assert_no_message(&mut observer);
+
+    let lines = std::fs::read_to_string(debug_log_path).expect("read debug log");
+    let entries = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("debug JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["event_name"], "<message>");
+    assert_eq!(entries[0]["event"]["message"], "ui_detach_request");
+    assert_eq!(entries[0]["event"]["payload"], serde_json::json!({}));
+}
+
+/// Startup gating recognizes detach only from an exact attached socket UI.
+/// Socket origin alone must not grant connection-control authority.
+#[test]
+fn detach_request_controls_startup_only_for_attached_socket_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    connect_test_client_with_origin(
+        &mut h,
+        "socket-tool",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+
+    assert!(
+        !h.handle_startup_from_connection("socket-tool", detach_request())
+            .expect("deny socket tool detach")
+    );
+    assert!(!h.startup_detach_requested);
+
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    assert!(
+        !h.handle_startup_from_connection(ui_id.as_str(), detach_request())
+            .expect("handle attached UI detach")
+    );
+    assert!(h.startup_detach_requested);
+    assert_no_message(&mut ui);
+}
+
+/// Non-UI sockets, dedicated external-message peers, and embedded UIs cannot
+/// mutate the runtime exit-on-disconnect control.
+#[test]
+fn detach_request_is_silently_denied_for_other_client_origins() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let socket_tool = connect_test_client_with_origin(
+        &mut h,
+        "socket-tool",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+    let embedded_ui = connect_test_client(&mut h, "embedded-ui", tau_proto::ClientKind::Ui);
+    let (external_id, mut external) = connect_socket_ui(&mut h);
+    h.handle_client_message(
+        external_id.as_str(),
+        HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_kind: tau_proto::ClientKind::External,
+            capabilities: Default::default(),
+        }),
+    )
+    .expect("external-agent message hello");
+    let baseline_seq = h.event_log.next_seq();
+
+    for connection_id in [
+        tau_proto::ConnectionId::from("socket-tool"),
+        tau_proto::ConnectionId::from("embedded-ui"),
+        external_id,
+    ] {
+        let mut served_clients = 0;
+        let mut exit_on_disconnect = true;
+        let mut ever_attached = false;
+        h.handle_runtime_event(
+            HarnessEvent::FromConnection {
+                connection_id,
+                message: Box::new(detach_request()),
+            },
+            &mut served_clients,
+            &mut exit_on_disconnect,
+            &mut ever_attached,
+        )
+        .expect("silently deny detach request");
+        assert!(exit_on_disconnect);
+        assert_eq!(served_clients, 0);
+    }
+
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+    assert!(socket_tool.lock().expect("socket tool frames").is_empty());
+    assert!(embedded_ui.lock().expect("embedded UI frames").is_empty());
+    assert_no_message(&mut external);
+}
+
+/// Configured extensions are metered and silently denied after phase
+/// validation, before activation staging can turn repeated detach attempts into
+/// a quota failure.
+#[test]
+fn detach_request_is_silently_denied_for_configured_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let ready = connect_ready_configured_extension(
+        &mut h,
+        "ready-requester",
+        "ready-requester",
+        tau_proto::ClientKind::Tool,
+    );
+    ready.lock().expect("ready requester frames").clear();
+    let handshaking = connect_handshaking_tool(&mut h, "handshaking-requester");
+    let notice_count = h.replayable_harness_notices.len();
+
+    for connection_id in ["ready-requester", "handshaking-requester"] {
+        h.handle_extension_message(connection_id, detach_request())
+            .expect("silently deny configured extension detach");
+        let stats = h.extensions.entries[connection_id]
+            .protocol_io
+            .cumulative_stats();
+        assert_eq!(
+            stats.uplink["message.ui_detach_request"].count, 1,
+            "dedicated detach frame must use the message metering key"
+        );
+    }
+
+    assert_eq!(
+        h.extensions.entries["ready-requester"].state,
+        ExtensionState::Ready
+    );
+    assert_eq!(
+        h.extensions.entries["handshaking-requester"].state,
+        ExtensionState::Handshaking
+    );
+    assert!(h.bus.connection("ready-requester").is_some());
+    assert!(h.bus.connection("handshaking-requester").is_some());
+    assert!(
+        !h.extensions
+            .activation_staging
+            .contains_key("handshaking-requester")
+    );
+    assert!(ready.lock().expect("ready requester frames").is_empty());
+    assert!(
+        handshaking
+            .lock()
+            .expect("handshaking requester frames")
+            .is_empty()
+    );
+    assert_eq!(h.replayable_harness_notices.len(), notice_count);
+}
+
+/// Silent configured-extension denial happens only after ordinary phase
+/// validation: a detach request before Hello is metered, then follows normal
+/// runtime protocol-failure isolation.
+#[test]
+fn detach_request_preserves_configured_extension_phase_validation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    h.initial_extension_tool_preflight_complete = true;
+    connect_handshaking_tool(&mut h, "spawning-requester");
+    h.extensions
+        .entries
+        .get_mut("spawning-requester")
+        .expect("spawning requester")
+        .state = ExtensionState::Spawning;
+    let notice_count = h.replayable_harness_notices.len();
+
+    h.handle_extension_message("spawning-requester", detach_request())
+        .expect("isolate out-of-phase requester");
+
+    let entry = &h.extensions.entries["spawning-requester"];
+    assert_eq!(
+        entry.protocol_io.cumulative_stats().uplink["message.ui_detach_request"].count,
+        1
+    );
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(h.bus.connection("spawning-requester").is_none());
+    assert_eq!(h.replayable_harness_notices.len(), notice_count + 1);
+}
+
 /// A UI debug event-stats request should receive a directed, non-persisted
 /// notice for the requested live extension only; other UIs must not see the
 /// response merely because they are connected.

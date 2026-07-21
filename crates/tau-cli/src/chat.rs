@@ -205,6 +205,26 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &durable_emit_message(event))
 }
 
+/// Send the point-to-point connection-control request used by `/detach`.
+fn send_ui_detach_request(writer: &WriterHandle) -> io::Result<()> {
+    send_frame(
+        writer,
+        &HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {}),
+    )
+}
+
+/// Consume `/detach`, send its connection-control request, and select the
+/// daemon-preserving exit path.
+fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<InputLoopExit> {
+    if text != "/detach" {
+        return None;
+    }
+    // If the write fails we still exit — the daemon will notice the disconnect
+    // and fall back to its default behavior.
+    let _ = send_ui_detach_request(writer);
+    Some(InputLoopExit::Detach)
+}
+
 /// Wrap an event in the interactive UI's durable-by-default Emit message.
 fn durable_emit_message(event: &Event) -> HarnessInputMessage {
     HarnessInputMessage::emit(event.clone())
@@ -583,6 +603,38 @@ mod ui_io_tests {
             ))
         );
         assert!(usage.is_empty());
+    }
+
+    /// `/detach` selects the daemon-preserving exit path and writes exactly one
+    /// dedicated connection-control frame rather than an emitted event.
+    #[test]
+    fn detach_command_sends_dedicated_request_frame() {
+        let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+        harness_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+
+        assert_eq!(
+            handle_ui_detach_command_text("/detach", &writer),
+            Some(InputLoopExit::Detach)
+        );
+
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+        assert_eq!(
+            reader.read_message().expect("read request"),
+            Some(HarnessInputMessage::UiDetachRequest(
+                tau_proto::UiDetachRequest {},
+            ))
+        );
+        match reader.read_message() {
+            Err(tau_proto::DecodeError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("unexpected second detach frame: {other:?}"),
+        }
     }
 
     #[test]
@@ -1357,7 +1409,7 @@ pub(crate) fn run_chat(
 }
 
 /// How the input loop ended. Controls daemon disposition on exit.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputLoopExit {
     /// User typed `/quit`, hit Ctrl-D, or the socket dropped. The
     /// daemon should be killed (if we own it) or just disconnected
@@ -2261,16 +2313,9 @@ impl<'a> TerminalInputSession<'a> {
             self.output.system_info("usage: /retry");
             return Ok(CommandOutcome::Continue);
         }
-        if text == "/detach" {
-            // Tell the harness to stay alive after we leave,
-            // then exit the UI. If the write fails we still
-            // exit — the daemon will notice the disconnect
-            // and fall back to its default behavior.
-            let _ = send_event(
-                self.writer,
-                &Event::UiDetachRequest(tau_proto::UiDetachRequest {}),
-            );
-            return Ok(CommandOutcome::Exit(InputLoopExit::Detach));
+        if let Some(exit) = handle_ui_detach_command_text(text, self.writer) {
+            // Tell the harness to stay alive after we leave, then exit the UI.
+            return Ok(CommandOutcome::Exit(exit));
         }
         if text == "/session" || text.starts_with("/session ") {
             self.handle_session_namespace(text)?;

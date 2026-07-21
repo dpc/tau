@@ -381,7 +381,6 @@ impl EventName {
     pub const UI_AGENT_MODEL_SELECT: Self =
         Self::from_static(EventCategory::Ui, "agent_model_select");
     pub const UI_ROLE_UPDATE: Self = Self::from_static(EventCategory::Ui, "role_update");
-    pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_CREATE_AGENT: Self = Self::from_static(EventCategory::Ui, "create_agent");

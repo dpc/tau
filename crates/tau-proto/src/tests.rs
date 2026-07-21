@@ -1288,7 +1288,6 @@ fn representative_events() -> Vec<Event> {
                 verbosity: Some(Verbosity::High),
             },
         }),
-        Event::UiDetachRequest(UiDetachRequest {}),
         Event::UiShellCommand(UiShellCommand {
             session_id: "s1".into(),
             command_id: "shell-1".into(),
@@ -1486,6 +1485,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             session_id: "s1".into(),
             scope: SessionAgentListScope::History,
         }),
+        HarnessInputMessage::UiDetachRequest(UiDetachRequest {}),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
@@ -1949,7 +1949,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "ui.cancel_prompt",
         "ui.compact_request",
         "ui.create_agent",
-        "ui.detach_request",
         "ui.focus_changed",
         "ui.navigate_tree",
         "ui.prompt_draft",
@@ -2437,6 +2436,34 @@ fn ui_debug_event_stats_request_uses_dedicated_input_message() {
     );
     assert!(decode_harness_output_from_slice(&bytes).is_err());
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+}
+
+/// UI detach uses a flat dedicated input message and cannot decode as an event
+/// or harness output.
+#[test]
+fn ui_detach_request_uses_dedicated_input_message() {
+    let input = HarnessInputMessage::UiDetachRequest(UiDetachRequest {});
+    let json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(json["message"], "ui_detach_request");
+    assert_eq!(json["payload"], serde_json::json!({}));
+
+    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert_eq!(
+        decode_harness_input_from_slice(&bytes).expect("decode input"),
+        input
+    );
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
+    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+}
+
+/// The superseded dotted detach event has no compatibility decoder.
+#[test]
+fn removed_ui_detach_request_event_has_no_decoder() {
+    let removed = serde_json::json!({
+        "event": "ui.detach_request",
+        "payload": {}
+    });
+    assert!(serde_json::from_value::<Event>(removed).is_err());
 }
 
 /// Ensures raw events are not accepted where directional protocol messages are

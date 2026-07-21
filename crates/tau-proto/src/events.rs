@@ -2947,13 +2947,6 @@ pub struct UiFocusChanged {
     pub focused: bool,
 }
 
-/// The UI is detaching and wants the daemon to stay alive after it
-/// leaves, so a later `tau --attach` can pick up the same
-/// session. The harness flips its `exit_on_disconnect` flag to
-/// `false` on receipt.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiDetachRequest {}
-
 /// The user requests switching to an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleSelect {
@@ -4786,8 +4779,6 @@ pub enum Event {
     UiAgentModelSelect(UiAgentModelSelect),
     #[serde(rename = "ui.role_update")]
     UiRoleUpdate(UiRoleUpdate),
-    #[serde(rename = "ui.detach_request")]
-    UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
     UiShellCommand(UiShellCommand),
     #[serde(rename = "ui.switch_session")]
@@ -5186,7 +5177,6 @@ impl Event {
             Self::UiRoleSelect(_) => EventName::UI_ROLE_SELECT,
             Self::UiAgentModelSelect(_) => EventName::UI_AGENT_MODEL_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
-            Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
