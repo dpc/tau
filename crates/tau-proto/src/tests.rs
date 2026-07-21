@@ -1368,6 +1368,22 @@ fn representative_events() -> Vec<Event> {
             exit_code: Some(0),
             cancelled: false,
         }),
+        Event::ShellCommandProgressReported(ShellCommandProgress {
+            command_id: "shell-report-1".into(),
+            stream: ShellStream::Stderr,
+            chunk: "working\n".to_owned(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::ShellCommandFinishedReported(ShellCommandFinished {
+            command_id: "shell-report-1".into(),
+            session_id: "s1".into(),
+            command: "pwd".to_owned(),
+            include_in_context: true,
+            target_agent_id: Some(agent_id("agent-1")),
+            output: "/tmp\n".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+        }),
     ];
     let reports = events
         .iter()
@@ -1811,7 +1827,9 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::StartAgentRequest(_)
                 | Event::AgentMetadataSetRequest(_)
                 | Event::AgentMetadataUnsetRequest(_)
+                | Event::ShellCommandProgressReported(_)
                 | Event::ShellCommandProgress(_)
+                | Event::ShellCommandFinishedReported(_)
                 | Event::UiPromptSubmitted(_)
                 | Event::AgentPromptQueued(_)
                 | Event::AgentPromptRecalled(_)
@@ -1923,7 +1941,9 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "session.shutdown",
         "session.started",
         "shell.command_finished",
+        "shell.command_finished_reported",
         "shell.command_progress",
+        "shell.command_progress_reported",
         "term.bell",
         "term.osc1337_set_user_var",
         "tool.background_error",
@@ -3408,6 +3428,22 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             message: Some("provider running".to_owned()),
             progress: None,
             display: None,
+        }),
+        Event::ShellCommandProgressReported(ShellCommandProgress {
+            command_id: "shell-progress".into(),
+            stream: ShellStream::Stdout,
+            chunk: "provider running".to_owned(),
+            target_agent_id: Some(agent_id("worker")),
+        }),
+        Event::ShellCommandFinishedReported(ShellCommandFinished {
+            command_id: "shell-finished".into(),
+            session_id: "s1".into(),
+            command: "pwd".to_owned(),
+            include_in_context: false,
+            target_agent_id: Some(agent_id("worker")),
+            output: "/tmp\n".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
         }),
         Event::ToolError(ToolError {
             call_id: "call-1".into(),

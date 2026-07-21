@@ -2,8 +2,10 @@
 //! store, and the live extensions; routes every event between the agent,
 //! tools, and clients.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -1697,6 +1699,8 @@ struct PendingUiShellCommand {
     provider_id: tau_proto::ConnectionId,
     /// Canonical request after the harness resolves its target agent.
     command: tau_proto::UiShellCommand,
+    /// Whether this route's target requires ephemeral debug suppression.
+    targets_ephemeral: bool,
 }
 
 /// Harness-private provider execution identity for one UI shell route.
@@ -1715,6 +1719,12 @@ impl UiShellRouteId {
 
     /// Borrow the protocol id sent to and echoed by the selected provider.
     fn as_protocol_id(&self) -> &tau_proto::ShellCommandId {
+        &self.0
+    }
+}
+
+impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
+    fn borrow(&self) -> &tau_proto::ShellCommandId {
         &self.0
     }
 }
@@ -1826,9 +1836,25 @@ pub struct Harness {
     /// Harness-private provider route id → selected provider and canonical UI
     /// request identity for commands awaiting a terminal extension event.
     pending_ui_shell_commands: HashMap<UiShellRouteId, PendingUiShellCommand>,
+    /// Process-lifetime private routes that targeted ephemeral agents.
+    ///
+    /// Retention keeps late or interception-replaced reports out of durable
+    /// debug JSONL. Opaque route ids are never reused after entering this set.
+    ephemeral_ui_shell_route_ids: HashSet<UiShellRouteId>,
+    /// Public UI shell ids whose next canonical fact targets an ephemeral
+    /// agent.
+    ///
+    /// Each marker lives only from canonical publication enqueue through
+    /// commit, so later reuse of the same UI id for a durable agent is
+    /// classified independently.
+    pending_ephemeral_ui_shell_canonical_events: HashMap<tau_proto::ShellCommandId, NonZeroUsize>,
     /// UI command ids reserved from admission through terminal event commit.
     /// This stays bounded by routed or interception-pending commands.
     active_ui_shell_command_ids: HashSet<tau_proto::ShellCommandId>,
+    /// Canonical user-shell completions that must inject output after commit.
+    ///
+    /// Harness-authored routing failures intentionally do not enter this set.
+    pending_ui_shell_output_injections: HashSet<tau_proto::ShellCommandId>,
     /// `invocation_id` → action provider/requester pair for UI-directed
     /// action result routing and source validation.
     pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
@@ -2658,7 +2684,10 @@ impl Harness {
             completed_tool_agents: HashMap::new(),
             pending_tool_providers: HashMap::new(),
             pending_ui_shell_commands: HashMap::new(),
+            ephemeral_ui_shell_route_ids: HashSet::new(),
+            pending_ephemeral_ui_shell_canonical_events: HashMap::new(),
             active_ui_shell_command_ids: HashSet::new(),
+            pending_ui_shell_output_injections: HashSet::new(),
             pending_action_invocations: HashMap::new(),
             pending_retry_prompts: HashMap::new(),
             seen_retry_prompt_requests: HashSet::new(),
@@ -3665,13 +3694,37 @@ impl Harness {
     }
 
     fn debug_harness_event_targets_ephemeral_agent(&self, harness_event: &HarnessEvent) -> bool {
-        let HarnessEvent::FromConnection { message, .. } = harness_event else {
+        let HarnessEvent::FromConnection {
+            connection_id,
+            message,
+        } = harness_event
+        else {
             return false;
         };
-        let tau_proto::HarnessInputMessage::Emit(emit) = message.as_ref() else {
-            return false;
-        };
-        self.event_targets_ephemeral_agent(&emit.event, None)
+        match message.as_ref() {
+            tau_proto::HarnessInputMessage::Emit(emit) => {
+                self.event_targets_ephemeral_agent(&emit.event, None)
+            }
+            tau_proto::HarnessInputMessage::InterceptReply(reply) => {
+                let Some(pending) = self
+                    .pending_intercept
+                    .as_ref()
+                    .filter(|pending| pending.conn_id == connection_id.as_str())
+                else {
+                    return false;
+                };
+                let replacement_targets_ephemeral = match &reply.action {
+                    tau_proto::InterceptAction::Pass(Some(replacement)) => {
+                        self.debug_intercept_event_targets_ephemeral(replacement)
+                    }
+                    _ => false,
+                };
+                pending.original_shell_report_targets_ephemeral()
+                    || self.debug_intercept_event_targets_ephemeral(&pending.event)
+                    || replacement_targets_ephemeral
+            }
+            _ => false,
+        }
     }
 
     fn queue_extension_connect(
@@ -4496,7 +4549,11 @@ impl Harness {
         // outbound copy. Offline cache/cost analysis tools that read
         // `events.jsonl` would otherwise see zeros where the running
         // session totals belong.
-        let skip_debug_log = self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
+        let skip_debug_log = peer_context
+            .extension
+            .as_ref()
+            .is_some_and(|extension| extension.shell_report_targets_ephemeral)
+            || self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
@@ -4680,9 +4737,19 @@ impl Harness {
         } else {
             let _ = self.bus.publish_from(source, observer_frame);
         }
+        if let Event::ShellCommandProgress(progress) = &event {
+            self.release_pending_ephemeral_shell_canonical_marker(&progress.command_id);
+        }
         if let Event::ShellCommandFinished(finished) = &event {
+            self.release_pending_ephemeral_shell_canonical_marker(&finished.command_id);
             self.active_ui_shell_command_ids
                 .remove(&finished.command_id);
+            if self
+                .pending_ui_shell_output_injections
+                .remove(&finished.command_id)
+            {
+                self.inject_user_shell_output(finished);
+            }
         }
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
@@ -5888,8 +5955,94 @@ impl Harness {
     }
 
     fn agent_addressed_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        let shell_report_route_id = match event {
+            Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
+            Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
+            _ => None,
+        };
+        if shell_report_route_id
+            .is_some_and(|command_id| self.ephemeral_ui_shell_route_ids.contains(command_id))
+        {
+            return true;
+        }
+        let canonical_shell_command_id = match event {
+            Event::ShellCommandProgress(progress) => Some(&progress.command_id),
+            Event::ShellCommandFinished(finished) => Some(&finished.command_id),
+            _ => None,
+        };
+        if canonical_shell_command_id.is_some_and(|command_id| {
+            self.pending_ephemeral_ui_shell_canonical_events
+                .contains_key(command_id)
+        }) {
+            return true;
+        }
         Self::agent_addressed_event_agent_id(event)
             .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+    }
+
+    /// Classify interceptor payloads without allowing mutable shell target
+    /// fields to suppress raw debug audit.
+    fn debug_intercept_event_targets_ephemeral(&self, event: &Event) -> bool {
+        match event {
+            Event::ShellCommandProgressReported(progress) => self
+                .ephemeral_ui_shell_route_ids
+                .contains(&progress.command_id),
+            Event::ShellCommandFinishedReported(finished) => self
+                .ephemeral_ui_shell_route_ids
+                .contains(&finished.command_id),
+            Event::ShellCommandProgress(progress) => self
+                .pending_ephemeral_ui_shell_canonical_events
+                .contains_key(&progress.command_id),
+            Event::ShellCommandFinished(finished) => self
+                .pending_ephemeral_ui_shell_canonical_events
+                .contains_key(&finished.command_id),
+            _ => self.event_targets_ephemeral_agent(event, None),
+        }
+    }
+
+    /// Release ephemeral debug classification when mutable canonical shell
+    /// progress is dropped before commit.
+    fn discard_uncommitted_shell_canonical_marker(
+        &mut self,
+        command_id: &tau_proto::ShellCommandId,
+    ) {
+        self.release_pending_ephemeral_shell_canonical_marker(command_id);
+    }
+
+    /// Reserve one ephemeral debug-classification marker for a canonical shell
+    /// event that has entered publication.
+    fn mark_pending_ephemeral_shell_canonical(&mut self, command_id: tau_proto::ShellCommandId) {
+        self.pending_ephemeral_ui_shell_canonical_events
+            .entry(command_id)
+            .and_modify(|count| {
+                *count = NonZeroUsize::new(
+                    count
+                        .get()
+                        .checked_add(1)
+                        .expect("pending shell canonical count overflow"),
+                )
+                .expect("incremented count stays nonzero");
+            })
+            .or_insert(NonZeroUsize::MIN);
+    }
+
+    /// Release one committed or dropped canonical shell event's marker.
+    fn release_pending_ephemeral_shell_canonical_marker(
+        &mut self,
+        command_id: &tau_proto::ShellCommandId,
+    ) {
+        let Some(count) = self
+            .pending_ephemeral_ui_shell_canonical_events
+            .get_mut(command_id)
+        else {
+            return;
+        };
+        if count.get() == 1 {
+            self.pending_ephemeral_ui_shell_canonical_events
+                .remove(command_id);
+        } else {
+            *count = NonZeroUsize::new(count.get() - 1).expect("decremented count remains nonzero");
+        }
     }
 
     fn agent_addressed_event_agent_id(event: &Event) -> Option<&tau_proto::AgentId> {
@@ -8505,6 +8658,42 @@ impl Harness {
             self.handle_extension_fallback_event(source_id, event, transient_override);
             return Ok(());
         }
+        if matches!(
+            event,
+            Event::ShellCommandProgress(_) | Event::ShellCommandFinished(_)
+        ) {
+            // Canonical shell command state is harness-authored. Tool/Core
+            // extensions publish the corresponding `_reported` observation.
+            return Ok(());
+        }
+        if matches!(
+            event,
+            Event::ShellCommandProgressReported(_) | Event::ShellCommandFinishedReported(_)
+        ) {
+            // This is configured report-authority admission only. The committed
+            // consumer revalidates the exact extension generation and routed
+            // command ownership before publishing canonical shell state.
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                    && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "extension lacks shell command report authority"
+                );
+                return Ok(());
+            }
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                transient_override,
+                admission,
+            );
+            return Ok(());
+        }
         if let Event::ToolRequest(request) = &event {
             // This is only structural and authoring-authority admission. Per
             // `specs/DECISION-generic-peer-event-emission.md`, duplicate
@@ -8899,9 +9088,6 @@ impl Harness {
         let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
             return Ok(());
         };
-        let Some(event) = self.handle_extension_shell_event(source_id, event) else {
-            return Ok(());
-        };
         self.handle_extension_fallback_event(source_id, event, transient_override);
         Ok(())
     }
@@ -8951,6 +9137,13 @@ impl Harness {
                 | Event::ToolCancelledReported(_)
         ) {
             self.process_committed_tool_terminal_report(peer_context, event);
+            return;
+        }
+        if matches!(
+            event,
+            Event::ShellCommandProgressReported(_) | Event::ShellCommandFinishedReported(_)
+        ) {
+            self.process_committed_shell_command_report(peer_context, event);
             return;
         }
         if matches!(
@@ -10401,9 +10594,44 @@ impl Harness {
         }
     }
 
-    fn handle_extension_shell_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
+    /// Validate one committed shell report against its captured extension
+    /// generation before consulting mutable routed-command state.
+    fn process_committed_shell_command_report(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
+        else {
+            return;
+        };
+        let source_is_current =
+            self.extensions
+                .entries
+                .get(&extension.source)
+                .is_some_and(|entry| {
+                    entry.connection_id == extension.source
+                        && extension.admission.session_id == self.current_session_id
+                        && extension.admission.session_generation == self.current_session_generation
+                        && entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
+                        && entry.kind == extension.kind
+                        && entry.state != ExtensionState::Disconnected
+                });
+        if !source_is_current {
+            return;
+        }
+        self.canonicalize_committed_shell_command_report(extension.source.as_str(), event.clone());
+    }
+
+    /// Validate routed-command ownership and publish one canonical shell fact.
+    fn canonicalize_committed_shell_command_report(&mut self, source_id: &str, event: Event) {
         match event {
-            Event::ShellCommandProgress(mut progress) => {
+            Event::ShellCommandProgressReported(progress) => {
+                let mut progress = progress;
                 let route_id = UiShellRouteId::new(progress.command_id.clone());
                 let Some(pending) = self.pending_ui_shell_commands.get(&route_id) else {
                     tracing::warn!(
@@ -10412,7 +10640,7 @@ impl Harness {
                         source_id,
                         "discarding stale or unknown shell command progress"
                     );
-                    return None;
+                    return;
                 };
                 if pending.provider_id.as_str() != source_id
                     || progress.target_agent_id != pending.command.target_agent_id
@@ -10424,14 +10652,20 @@ impl Harness {
                         expected_provider = %pending.provider_id,
                         "discarding shell command progress with invalid ownership or identity"
                     );
-                    return None;
+                    return;
                 }
                 progress.command_id = pending.command.command_id.clone();
                 progress.target_agent_id = pending.command.target_agent_id.clone();
-                self.publish_event(Some(source_id), Event::ShellCommandProgress(progress));
-                None
+                if pending.targets_ephemeral {
+                    self.mark_pending_ephemeral_shell_canonical(progress.command_id.clone());
+                }
+                self.publish_event(
+                    Some(HARNESS_CONNECTION_ID),
+                    Event::ShellCommandProgress(progress),
+                );
             }
-            Event::ShellCommandFinished(mut finished) => {
+            Event::ShellCommandFinishedReported(finished) => {
+                let mut finished = finished;
                 let route_id = UiShellRouteId::new(finished.command_id.clone());
                 let Some(pending) = self.pending_ui_shell_commands.get(&route_id).cloned() else {
                     tracing::warn!(
@@ -10440,7 +10674,7 @@ impl Harness {
                         source_id,
                         "discarding stale or duplicate shell command completion"
                     );
-                    return None;
+                    return;
                 };
                 let command = &pending.command;
                 if pending.provider_id.as_str() != source_id
@@ -10456,7 +10690,7 @@ impl Harness {
                         expected_provider = %pending.provider_id,
                         "discarding shell command completion with invalid ownership or identity"
                     );
-                    return None;
+                    return;
                 }
                 self.pending_ui_shell_commands.remove(&route_id);
                 finished.command_id = command.command_id.clone();
@@ -10464,18 +10698,21 @@ impl Harness {
                 finished.command.clone_from(&command.command);
                 finished.include_in_context = command.include_in_context;
                 finished.target_agent_id = command.target_agent_id.clone();
-                // Publish first so the UI finalizes its render block regardless
-                // of whether we inject into history.
-                self.publish_event(
-                    Some(source_id),
-                    Event::ShellCommandFinished(finished.clone()),
-                );
-                if finished.include_in_context {
-                    self.inject_user_shell_output(&finished);
+                if pending.targets_ephemeral {
+                    self.mark_pending_ephemeral_shell_canonical(finished.command_id.clone());
                 }
-                None
+                if finished.include_in_context {
+                    self.pending_ui_shell_output_injections
+                        .insert(finished.command_id.clone());
+                }
+                // The canonical completion commits before any transcript
+                // injection, so the UI always finalizes its render block first.
+                self.publish_event(
+                    Some(HARNESS_CONNECTION_ID),
+                    Event::ShellCommandFinished(finished),
+                );
             }
-            other => Some(other),
+            _ => unreachable!("caller filters shell command reports"),
         }
     }
 
@@ -10484,6 +10721,40 @@ impl Harness {
         source_id: &str,
         event: Event,
         transient_override: Option<bool>,
+    ) {
+        self.handle_extension_fallback_event_with_optional_admission(
+            source_id,
+            event,
+            transient_override,
+            None,
+        );
+    }
+
+    /// Publish one fallback event while preserving its original frame-admission
+    /// session across activation staging.
+    fn handle_extension_fallback_event_with_admission(
+        &mut self,
+        source_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+        admission: ExtensionFrameAdmission,
+    ) {
+        self.handle_extension_fallback_event_with_optional_admission(
+            source_id,
+            event,
+            transient_override,
+            Some(admission),
+        );
+    }
+
+    /// Shared fallback publication implementation with optional captured
+    /// frame-admission metadata.
+    fn handle_extension_fallback_event_with_optional_admission(
+        &mut self,
+        source_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+        admission: Option<ExtensionFrameAdmission>,
     ) {
         if !Self::is_extension_fallback_emit_allowed(&event) {
             return;
@@ -10499,6 +10770,15 @@ impl Harness {
         let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
         if self.should_stage_extension_capabilities(source_id) {
             self.stage_extension_publish(source_id, event, transient);
+        } else if let Some(admission) = admission {
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                transient,
+                false,
+                None,
+                admission,
+            );
         } else {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
         }
@@ -10825,7 +11105,9 @@ impl Harness {
                 self.ui_shell_route_rng.next_u64(),
                 self.ui_shell_route_rng.next_u64()
             )));
-            if !self.pending_ui_shell_commands.contains_key(&route_id) {
+            if !self.pending_ui_shell_commands.contains_key(&route_id)
+                && !self.ephemeral_ui_shell_route_ids.contains(&route_id)
+            {
                 return route_id;
             }
         }
@@ -10859,7 +11141,11 @@ impl Harness {
             );
         }
         if command.session_id != self.current_session_id {
-            self.finish_unroutable_ui_shell(command, "the shell command targets a stale session");
+            self.finish_unroutable_ui_shell(
+                command,
+                "the shell command targets a stale session",
+                false,
+            );
             return;
         }
         let providers = ui_shell_provider_ids(&self.registry);
@@ -10869,7 +11155,7 @@ impl Harness {
             } else {
                 "multiple shell extension instances are available; select one explicitly before using ! or !!"
             };
-            self.finish_unroutable_ui_shell(command, reason);
+            self.finish_unroutable_ui_shell(command, reason, false);
             return;
         }
         let target_agent_id = if let Some(agent_id) = command.target_agent_id.as_ref() {
@@ -10886,12 +11172,20 @@ impl Harness {
                 .map(|(_, agent_id)| agent_id)
         };
         let Some(target_agent_id) = target_agent_id else {
-            self.finish_unroutable_ui_shell(command, "no unambiguous target agent is available");
+            self.finish_unroutable_ui_shell(
+                command,
+                "no unambiguous target agent is available",
+                false,
+            );
             return;
         };
         command.target_agent_id = Some(target_agent_id);
         let provider = providers.into_iter().next().expect("one provider");
         let route_id = self.next_ui_shell_route_id();
+        let targets_ephemeral = command
+            .target_agent_id
+            .as_ref()
+            .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
         let mut provider_command = command.clone();
         provider_command.command_id = route_id.as_protocol_id().clone();
         let delivered = self.bus.send_to(
@@ -10900,11 +11194,15 @@ impl Harness {
             HarnessOutputMessage::deliver(Event::UiShellCommand(provider_command)),
         );
         if delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
+            if targets_ephemeral {
+                self.ephemeral_ui_shell_route_ids.insert(route_id.clone());
+            }
             self.pending_ui_shell_commands.insert(
                 route_id,
                 PendingUiShellCommand {
                     provider_id: provider,
                     command,
+                    targets_ephemeral,
                 },
             );
             return;
@@ -10912,6 +11210,7 @@ impl Harness {
         self.finish_unroutable_ui_shell(
             command,
             "the selected shell extension instance became unavailable",
+            targets_ephemeral,
         );
     }
 
@@ -10924,7 +11223,7 @@ impl Harness {
             .collect::<Vec<_>>();
         for command_id in failed {
             if let Some(pending) = self.pending_ui_shell_commands.remove(&command_id) {
-                self.finish_unroutable_ui_shell(pending.command, reason);
+                self.finish_unroutable_ui_shell(pending.command, reason, pending.targets_ephemeral);
             }
         }
     }
@@ -10932,11 +11231,24 @@ impl Harness {
     fn fail_all_pending_ui_shell_commands(&mut self, reason: &str) {
         let pending = std::mem::take(&mut self.pending_ui_shell_commands);
         for (_, pending) in pending {
-            self.finish_unroutable_ui_shell(pending.command, reason);
+            self.finish_unroutable_ui_shell(pending.command, reason, pending.targets_ephemeral);
         }
     }
 
-    fn finish_unroutable_ui_shell(&mut self, command: tau_proto::UiShellCommand, reason: &str) {
+    fn finish_unroutable_ui_shell(
+        &mut self,
+        command: tau_proto::UiShellCommand,
+        reason: &str,
+        targets_ephemeral: bool,
+    ) {
+        if targets_ephemeral
+            || command
+                .target_agent_id
+                .as_ref()
+                .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+        {
+            self.mark_pending_ephemeral_shell_canonical(command.command_id.clone());
+        }
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
@@ -13348,6 +13660,8 @@ impl Harness {
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
+                | Event::ShellCommandProgressReported(_)
+                | Event::ShellCommandFinishedReported(_)
                 | Event::ProviderQuotaReplaceReported(_)
                 | Event::ProviderQuotaPatchReported(_)
                 | Event::ProviderQuotaClearReported(_)

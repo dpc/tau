@@ -22,6 +22,8 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
+                | Event::ShellCommandProgressReported(_)
+                | Event::ShellCommandFinishedReported(_)
                 | Event::ProviderQuotaReplaceReported(_)
                 | Event::ProviderQuotaPatchReported(_)
                 | Event::ProviderQuotaClearReported(_)

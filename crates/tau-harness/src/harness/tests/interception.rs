@@ -4,6 +4,7 @@ mod internal_prompt;
 mod metadata_request;
 mod prompt_fragment;
 mod session_discovery;
+mod shell_report;
 mod start_agent;
 mod terminal_output;
 mod tool_lifecycle;
@@ -4063,7 +4064,10 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         exit_code: Some(0),
         cancelled: false,
     };
-    h.handle_extension_shell_event(provider_id.as_str(), Event::ShellCommandFinished(terminal));
+    h.canonicalize_committed_shell_command_report(
+        provider_id.as_str(),
+        Event::ShellCommandFinishedReported(terminal),
+    );
     let _ = intercepted_payload(&interceptor);
     assert!(h.pending_ui_shell_commands.is_empty());
     assert!(h.active_ui_shell_command_ids.contains(&command.command_id));
@@ -4114,9 +4118,9 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         .next()
         .expect("second route")
         .clone();
-    h.handle_extension_shell_event(
+    h.canonicalize_committed_shell_command_report(
         provider_id.as_str(),
-        Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+        Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: second_route.as_protocol_id().clone(),
             session_id: command.session_id,
             command: command.command,

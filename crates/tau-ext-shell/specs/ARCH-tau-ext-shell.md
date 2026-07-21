@@ -70,6 +70,16 @@ shutdown. Configure-time tool re-registration deliberately uses synchronous
 defaults and flushes the configured override before `Ready`. Tests can use an
 mpsc-backed adapter for direct state-machine coverage.
 
+## User-shell reports
+
+For harness-routed `!`/`!!` work, the extension echoes the private command route
+and immutable request fields through transient
+`shell.command_progress_reported` / `shell.command_finished_reported` events.
+It never authors the canonical event names. The harness commits and validates
+these reports before mapping the private route back to the UI lifecycle id and
+publishing canonical progress/completion. See
+[SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
+
 ## Scheduler and shutdown ordering
 
 Tool invocations run through a fixed native-thread `WorkScheduler` with bounded

@@ -359,6 +359,43 @@ fn tool_progress_never_enters_semantic_history() {
     }
 }
 
+/// Peer shell reports never enter semantic history, while the existing
+/// canonical progress/completion classifications stay unchanged.
+#[test]
+fn shell_reports_never_enter_semantic_history() {
+    let progress = tau_proto::ShellCommandProgress {
+        command_id: "shell-route".into(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: "chunk".to_owned(),
+        target_agent_id: Some(parse_agent_id("agent-1")),
+    };
+    let finished = tau_proto::ShellCommandFinished {
+        command_id: "shell-route".into(),
+        session_id: "session-1".into(),
+        command: "pwd".to_owned(),
+        include_in_context: true,
+        target_agent_id: Some(parse_agent_id("agent-1")),
+        output: "/tmp\n".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    };
+    for report in [
+        Event::ShellCommandProgressReported(progress.clone()),
+        Event::ShellCommandFinishedReported(finished.clone()),
+    ] {
+        assert!(!should_persist_event(&report, false));
+        assert!(!should_persist_event(&report, true));
+    }
+    assert!(!should_persist_event(
+        &Event::ShellCommandProgress(progress),
+        true
+    ));
+    assert!(should_persist_event(
+        &Event::ShellCommandFinished(finished),
+        false
+    ));
+}
+
 /// Ensures ordinary transient facts remain live-only so progress/status updates
 /// cannot accidentally enter durable session or agent replay logs.
 #[test]

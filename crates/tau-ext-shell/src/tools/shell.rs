@@ -473,8 +473,8 @@ fn send_user_shell_finished(
     cancelled: bool,
     tx: &Output,
 ) {
-    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
-        tau_proto::ShellCommandFinished {
+    let _ = tx.send(HarnessInputMessage::emit(
+        Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,
             command: cmd.command,
@@ -483,8 +483,8 @@ fn send_user_shell_finished(
             output,
             exit_code,
             cancelled,
-        },
-    )));
+        }),
+    ));
 }
 
 #[derive(Default)]
@@ -597,14 +597,14 @@ fn read_available_user_shell<R: std::io::Read>(
                 let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                 capture.push_chunk(&chunk);
                 if let Some(chunk) = capture.progress_chunk(&chunk) {
-                    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
-                        tau_proto::ShellCommandProgress {
+                    let _ = tx.send(HarnessInputMessage::emit(
+                        Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
                             command_id: command_id.clone(),
                             stream,
                             chunk,
                             target_agent_id: target_agent_id.clone(),
-                        },
-                    )));
+                        }),
+                    ));
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -1042,12 +1042,14 @@ fn dispatch_user_shell_command_blocking(
                                 break;
                             }
                             let _ = tx.send(HarnessInputMessage::emit(
-                                Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-                                    command_id: command_id.clone(),
-                                    stream,
-                                    chunk,
-                                    target_agent_id: target_agent_id.clone(),
-                                }),
+                                Event::ShellCommandProgressReported(
+                                    tau_proto::ShellCommandProgress {
+                                        command_id: command_id.clone(),
+                                        stream,
+                                        chunk,
+                                        target_agent_id: target_agent_id.clone(),
+                                    },
+                                ),
                             ));
                         }
                     }

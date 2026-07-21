@@ -702,7 +702,7 @@ fn wait_for_user_shell_progress(reader: &mut TestExtensionReader, command_id: &s
             "timed out waiting for user shell progress"
         );
         match reader.read_event().expect("read progress") {
-            Some(Event::ShellCommandProgress(progress))
+            Some(Event::ShellCommandProgressReported(progress))
                 if progress.command_id == command_id && progress.chunk.contains(text) =>
             {
                 return;
@@ -724,7 +724,9 @@ fn wait_for_user_shell_finished(
             "timed out waiting for user shell finish"
         );
         match reader.read_event().expect("read finish") {
-            Some(Event::ShellCommandFinished(finished)) if finished.command_id == command_id => {
+            Some(Event::ShellCommandFinishedReported(finished))
+                if finished.command_id == command_id =>
+            {
                 return finished;
             }
             Some(_) => {}
@@ -6528,7 +6530,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
     let mut finished = None;
     for message in rx.try_iter() {
         if let HarnessInputMessage::Emit(emit) = message
-            && let Event::ShellCommandFinished(event) = *emit.event
+            && let Event::ShellCommandFinishedReported(event) = *emit.event
         {
             finished = Some(event);
         }
@@ -8934,7 +8936,7 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     assert!(matches!(
         failure,
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+            if matches!(emit.event.as_ref(), Event::ShellCommandFinishedReported(finished)
                 if finished.output.contains("replay failed"))
     ));
     runtime.final_shutdown();

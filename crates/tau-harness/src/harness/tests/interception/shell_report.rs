@@ -1,0 +1,966 @@
+use super::*;
+use crate::harness::{PendingUiShellCommand, UiShellRouteId};
+
+/// Register one configured Tool/Core peer as the only generic shell provider
+/// and route a user-shell command to it.
+fn seed_routed_shell_command(
+    harness: &mut Harness,
+    source: &str,
+    kind: tau_proto::ClientKind,
+    ui_command_id: &str,
+    include_in_context: bool,
+) -> (tau_proto::UiShellCommand, UiShellRouteId) {
+    for provider in super::super::super::ui_shell_provider_ids(&harness.registry) {
+        harness.registry.unregister_connection(provider.as_str());
+    }
+    connect_ready_configured_extension(harness, source, source, kind);
+    harness
+        .bus
+        .set_subscriptions(
+            source,
+            Vec::new(),
+            vec![EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND)],
+        )
+        .expect("subscribe shell provider");
+    harness.registry.register(
+        source,
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new("shell"),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:exec:generic")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+    let cid = ensure_test_user_agent(harness);
+    let agent_id = crate::parse_agent_id(
+        harness.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    let command = tau_proto::UiShellCommand {
+        session_id: harness.current_session_id.clone(),
+        command_id: ui_command_id.into(),
+        command: "pwd".to_owned(),
+        include_in_context,
+        target_agent_id: Some(agent_id),
+    };
+    harness.handle_ui_shell_command("ui", command.clone());
+    let route_id = harness
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("routed shell command")
+        .clone();
+    (command, route_id)
+}
+
+/// Build one progress report using the private provider route id.
+fn progress_report(
+    route_id: &UiShellRouteId,
+    target_agent_id: Option<tau_proto::AgentId>,
+    chunk: &str,
+) -> Event {
+    Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
+        command_id: route_id.as_protocol_id().clone(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: chunk.to_owned(),
+        target_agent_id,
+    })
+}
+
+/// Build one terminal report by echoing the immutable routed request identity.
+fn finished_report(
+    route_id: &UiShellRouteId,
+    command: &tau_proto::UiShellCommand,
+    output: &str,
+) -> Event {
+    Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
+        command_id: route_id.as_protocol_id().clone(),
+        session_id: command.session_id.clone(),
+        command: command.command.clone(),
+        include_in_context: command.include_in_context,
+        target_agent_id: command.target_agent_id.clone(),
+        output: output.to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    })
+}
+
+/// Collect shell reports, canonical facts, and user-shell transcript injection
+/// in their runtime commit order.
+fn committed_shell_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
+    let mut events = Vec::new();
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = harness.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if matches!(
+            entry.event,
+            Event::ShellCommandProgressReported(_)
+                | Event::ShellCommandProgress(_)
+                | Event::ShellCommandFinishedReported(_)
+                | Event::ShellCommandFinished(_)
+                | Event::AgentUserMessageInjected(_)
+        ) {
+            events.push((entry.source, entry.event));
+        }
+    }
+    events
+}
+
+/// A Tool-authored terminal report commits before its protected canonical fact,
+/// and transcript injection waits for that canonical commit.
+#[test]
+fn terminal_report_commits_before_canonical_completion_and_injection() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-terminal",
+        true,
+    );
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![
+                    EventSelector::Exact(tau_proto::EventName::SHELL_COMMAND_FINISHED_REPORTED),
+                    EventSelector::Exact(tau_proto::EventName::SHELL_COMMAND_FINISHED),
+                ],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register shell interceptor");
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(finished_report(&route_id, &command, "original")),
+        )
+        .expect("park report");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(finished_report(
+                    &route_id,
+                    &command,
+                    "replacement",
+                )))),
+            })),
+        )
+        .expect("commit replacement report");
+
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [(Some(source), Event::ShellCommandFinishedReported(finished))]
+            if source == "shell-owner" && finished.output == "replacement"
+    ));
+    assert!(matches!(
+        harness
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::ShellCommandFinished(_))
+    ));
+
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("canonical completion must pass");
+
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [
+            (Some(report_source), Event::ShellCommandFinishedReported(report)),
+            (Some(canonical_source), Event::ShellCommandFinished(canonical)),
+            (_, Event::AgentUserMessageInjected(injected)),
+        ] if report_source == "shell-owner"
+            && canonical_source == HARNESS_CONNECTION_ID
+            && report.output == "replacement"
+            && canonical.command_id == command.command_id
+            && canonical.output == "replacement"
+            && injected.text.contains("replacement")
+    ));
+}
+
+/// A Core shell provider uses the same report boundary, with the harness
+/// mapping the private route id back to the public UI lifecycle id.
+#[test]
+fn core_progress_report_derives_harness_sourced_canonical_progress() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "core-shell",
+        tau_proto::ClientKind::Core,
+        "shell-progress",
+        false,
+    );
+
+    harness
+        .handle_extension_event(
+            "core-shell",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id.clone(),
+                "chunk",
+            )),
+        )
+        .expect("commit progress report");
+
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [
+            (Some(report_source), Event::ShellCommandProgressReported(report)),
+            (Some(canonical_source), Event::ShellCommandProgress(canonical)),
+        ] if report_source == "core-shell"
+            && canonical_source == HARNESS_CONNECTION_ID
+            && report.command_id == *route_id.as_protocol_id()
+            && canonical.command_id == command.command_id
+            && canonical.chunk == "chunk"
+    ));
+}
+
+/// Configured non-Tool/Core peers cannot publish reports, and Tool/Core peers
+/// cannot directly author either canonical shell fact.
+#[test]
+fn shell_report_authority_rejects_wrong_kind_and_canonical_spoofs() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-authority",
+        false,
+    );
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let report = progress_report(&route_id, command.target_agent_id.clone(), "forged");
+
+    harness
+        .handle_extension_event("provider", TestProtocolItem::Event(report))
+        .expect("reject wrong-kind report");
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(Event::ShellCommandProgress(
+                tau_proto::ShellCommandProgress {
+                    command_id: command.command_id.clone(),
+                    stream: tau_proto::ShellStream::Stdout,
+                    chunk: "forged canonical".to_owned(),
+                    target_agent_id: command.target_agent_id,
+                },
+            )),
+        )
+        .expect("reject canonical spoof");
+
+    assert!(committed_shell_events(&harness).is_empty());
+    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+}
+
+/// A report parked across an extension generation replacement remains an
+/// observable report but cannot consume the successor's route or derive a fact.
+#[test]
+fn parked_stale_shell_report_cannot_publish_canonical_fact() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-stale",
+        false,
+    );
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_PROGRESS_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register report interceptor");
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(&route_id, command.target_agent_id, "stale")),
+        )
+        .expect("park report");
+    harness
+        .extensions
+        .entries
+        .get_mut("shell-owner")
+        .expect("replacement generation")
+        .instance_id = tau_proto::ExtensionInstanceId::new(43);
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("commit stale report");
+
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [(Some(source), Event::ShellCommandProgressReported(_))]
+            if source == "shell-owner"
+    ));
+    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+}
+
+/// Immutable publication context preserves an ephemeral original route even
+/// when interception rewrites the committed report to an unknown route id.
+#[test]
+fn intercepted_route_replacement_cannot_leak_ephemeral_report_to_debug_jsonl() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-replaced-route",
+        false,
+    );
+    harness
+        .pending_ui_shell_commands
+        .get_mut(&route_id)
+        .expect("pending route")
+        .targets_ephemeral = true;
+    harness
+        .ephemeral_ui_shell_route_ids
+        .insert(route_id.clone());
+    let debug_dir = tmp.path().join("debug");
+    harness.debug_log =
+        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_PROGRESS_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register report interceptor");
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id.clone(),
+                "private output",
+            )),
+        )
+        .expect("park report");
+    let replacement_secret = "private replacement output";
+    let reply = InterceptReply {
+        action: InterceptAction::Pass(Some(Box::new(progress_report(
+            &UiShellRouteId::new("unknown-route".into()),
+            command.target_agent_id,
+            replacement_secret,
+        )))),
+    };
+    harness.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "interceptor".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
+            reply.clone(),
+        )),
+    });
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(reply)),
+        )
+        .expect("commit replaced report");
+
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [(Some(source), Event::ShellCommandProgressReported(progress))]
+            if source == "shell-owner" && progress.command_id.as_str() == "unknown-route"
+    ));
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    assert!(
+        !jsonl.contains("\"event_name\":\"shell.command_progress_reported\""),
+        "immutable original-route classification must suppress the replaced report"
+    );
+    assert!(
+        !jsonl.contains(replacement_secret),
+        "raw intercept reply must use the pending publication's immutable classification"
+    );
+}
+
+/// Immutable original-route privacy survives multiple interceptor replacements,
+/// so a later reply cannot log an earlier ephemeral report's replacement
+/// output.
+#[test]
+fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-multi-replacement",
+        false,
+    );
+    harness
+        .pending_ui_shell_commands
+        .get_mut(&route_id)
+        .expect("pending route")
+        .targets_ephemeral = true;
+    harness
+        .ephemeral_ui_shell_route_ids
+        .insert(route_id.clone());
+    let debug_dir = tmp.path().join("debug");
+    harness.debug_log =
+        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+    for (interceptor, priority) in [("interceptor-a", 0), ("interceptor-b", 1)] {
+        connect_test_tool(&mut harness, interceptor);
+        harness
+            .handle_extension_event(
+                interceptor,
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::SHELL_COMMAND_PROGRESS_REPORTED,
+                    )],
+                    priority: InterceptionPriority::new(priority),
+                })),
+            )
+            .expect("register report interceptor");
+    }
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id.clone(),
+                "original private output",
+            )),
+        )
+        .expect("park original report");
+    let unknown_route = UiShellRouteId::new("unknown-route".into());
+    let first_secret = "first private replacement";
+    let first_reply = InterceptReply {
+        action: InterceptAction::Pass(Some(Box::new(progress_report(
+            &unknown_route,
+            command.target_agent_id.clone(),
+            first_secret,
+        )))),
+    };
+    harness.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "interceptor-a".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
+            first_reply.clone(),
+        )),
+    });
+    harness
+        .handle_extension_event(
+            "interceptor-a",
+            TestProtocolItem::Message(TestMessage::InterceptReply(first_reply)),
+        )
+        .expect("advance to second interceptor");
+
+    let second_secret = "second private replacement";
+    let second_reply = InterceptReply {
+        action: InterceptAction::Pass(Some(Box::new(progress_report(
+            &unknown_route,
+            command.target_agent_id,
+            second_secret,
+        )))),
+    };
+    harness.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "interceptor-b".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
+            second_reply.clone(),
+        )),
+    });
+    harness
+        .handle_extension_event(
+            "interceptor-b",
+            TestProtocolItem::Message(TestMessage::InterceptReply(second_reply)),
+        )
+        .expect("commit second replacement");
+
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    assert!(!jsonl.contains(first_secret));
+    assert!(!jsonl.contains(second_secret));
+}
+
+/// A canonical shell replacement cannot forge an ephemeral target to suppress
+/// the raw reply audit when its harness-owned UI id is durable.
+#[test]
+fn canonical_shell_replacement_target_cannot_suppress_raw_reply_audit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let forged_ephemeral_target =
+        crate::parse_agent_id(harness.agents[&cid].agent_id.as_deref().expect("agent id"));
+    harness.agents.get_mut(&cid).expect("agent").persistence =
+        tau_core::AgentPersistenceMode::Ephemeral;
+    let debug_dir = tmp.path().join("debug");
+    harness.debug_log =
+        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_PROGRESS,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register canonical interceptor");
+    let command_id: tau_proto::ShellCommandId = "durable-canonical-ui-id".into();
+    harness.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+            command_id: command_id.clone(),
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "original".to_owned(),
+            target_agent_id: None,
+        }),
+    );
+    let replacement_secret = "auditable durable replacement";
+    let reply = InterceptReply {
+        action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandProgress(
+            tau_proto::ShellCommandProgress {
+                command_id,
+                stream: tau_proto::ShellStream::Stderr,
+                chunk: replacement_secret.to_owned(),
+                target_agent_id: Some(forged_ephemeral_target),
+            },
+        )))),
+    };
+    harness.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "interceptor".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
+            reply.clone(),
+        )),
+    });
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(reply)),
+        )
+        .expect("commit durable replacement");
+
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    assert!(jsonl.contains(replacement_secret));
+}
+
+/// Pre-Ready shell reports remain bounded operational traffic and preserve
+/// activation ordering before their report/canonical pair is released.
+#[test]
+fn pre_ready_shell_report_is_deferred_until_activation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-deferred",
+        false,
+    );
+    harness
+        .extensions
+        .entries
+        .get_mut("shell-owner")
+        .expect("shell owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    let report = progress_report(&route_id, command.target_agent_id, "deferred");
+    let expected_bytes = Harness::encoded_emit_size(&report, true);
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(report),
+                transient: true,
+            })),
+        )
+        .expect("defer pre-Ready report");
+    assert!(committed_shell_events(&harness).is_empty());
+    assert_eq!(
+        harness.extensions.activation_staging["shell-owner"].retained_message_bytes,
+        expected_bytes
+    );
+
+    harness
+        .handle_extension_message("shell-owner", TestMessage::Ready(Default::default()))
+        .expect("activate shell owner");
+    assert!(matches!(
+        committed_shell_events(&harness).as_slice(),
+        [
+            (_, Event::ShellCommandProgressReported(_)),
+            (Some(source), Event::ShellCommandProgress(_)),
+        ] if source == HARNESS_CONNECTION_ID
+    ));
+}
+
+/// A pre-Ready report retains its frame-admission session across activation and
+/// cannot bind to a replacement-session route that reuses its private id.
+#[test]
+fn pre_ready_shell_report_cannot_bind_after_session_rollover() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (mut command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-old-session",
+        false,
+    );
+    harness
+        .extensions
+        .entries
+        .get_mut("shell-owner")
+        .expect("shell owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id.clone(),
+                "old session",
+            )),
+        )
+        .expect("defer old-session report");
+    harness
+        .switch_session(
+            "replacement-session".into(),
+            tau_proto::SessionStartReason::New,
+        )
+        .expect("switch session");
+    command.session_id = harness.current_session_id.clone();
+    harness.pending_ui_shell_commands.insert(
+        route_id,
+        PendingUiShellCommand {
+            provider_id: "shell-owner".into(),
+            command,
+            targets_ephemeral: false,
+        },
+    );
+
+    harness
+        .handle_extension_message("shell-owner", TestMessage::Ready(Default::default()))
+        .expect("activate old report");
+
+    assert!(
+        committed_shell_events(&harness)
+            .iter()
+            .any(|(_, event)| matches!(event, Event::ShellCommandProgressReported(_)))
+    );
+    assert!(
+        !committed_shell_events(&harness)
+            .iter()
+            .any(|(_, event)| matches!(event, Event::ShellCommandProgress(_)))
+    );
+    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+}
+
+/// Ephemeral classification uses harness-owned pending-route state rather than
+/// a peer-controlled target field.
+#[test]
+fn shell_report_ephemeral_classification_uses_private_route_identity() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let route_id = UiShellRouteId::new("ephemeral-shell-route".into());
+    harness.pending_ui_shell_commands.insert(
+        route_id.clone(),
+        PendingUiShellCommand {
+            provider_id: "shell-owner".into(),
+            command: tau_proto::UiShellCommand {
+                session_id: harness.current_session_id.clone(),
+                command_id: "ephemeral-shell-ui".into(),
+                command: "pwd".to_owned(),
+                include_in_context: false,
+                target_agent_id: None,
+            },
+            targets_ephemeral: true,
+        },
+    );
+    harness
+        .ephemeral_ui_shell_route_ids
+        .insert(route_id.clone());
+    harness
+        .pending_ephemeral_ui_shell_canonical_events
+        .insert("ephemeral-shell-ui".into(), std::num::NonZeroUsize::MIN);
+    let report = progress_report(&route_id, None, "private output");
+    let canonical = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+        command_id: "ephemeral-shell-ui".into(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: "private output".to_owned(),
+        target_agent_id: None,
+    });
+
+    assert!(harness.event_targets_ephemeral_agent(&report, None));
+    assert!(harness.event_targets_ephemeral_agent(&canonical, None));
+    assert!(harness.pending_ui_shell_commands.contains_key(&route_id));
+}
+
+/// Unknown routes are not misclassified as ephemeral before or after rollover;
+/// they retain ordinary durable debug audit treatment.
+#[test]
+fn unknown_shell_report_route_is_not_classified_ephemeral_across_rollover() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let route_id = UiShellRouteId::new("parked-ephemeral-shell-route".into());
+    let report = progress_report(&route_id, None, "old private output");
+    assert!(!harness.event_targets_ephemeral_agent(&report, None));
+    harness
+        .switch_session(
+            "replacement-session".into(),
+            tau_proto::SessionStartReason::New,
+        )
+        .expect("switch session");
+    assert!(!harness.event_targets_ephemeral_agent(&report, None));
+}
+
+/// Process-lifetime ephemeral route tombstones survive session rollover so a
+/// previously admitted or late report cannot leak ephemeral output.
+#[test]
+fn ephemeral_shell_route_tombstone_survives_session_rollover() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let route_id = UiShellRouteId::new("ephemeral-old-route".into());
+    harness
+        .ephemeral_ui_shell_route_ids
+        .insert(route_id.clone());
+    let report = progress_report(&route_id, None, "old private output");
+    harness
+        .switch_session(
+            "replacement-session".into(),
+            tau_proto::SessionStartReason::New,
+        )
+        .expect("switch session");
+
+    assert!(harness.event_targets_ephemeral_agent(&report, None));
+}
+
+/// A report cannot suppress debug JSONL by claiming an unrelated ephemeral
+/// target; only the harness-private route identity controls report
+/// classification.
+#[test]
+fn shell_report_ephemeral_classification_ignores_peer_target_claim() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let claimed_agent_id =
+        crate::parse_agent_id(harness.agents[&cid].agent_id.as_deref().expect("agent id"));
+    harness.agents.get_mut(&cid).expect("agent").persistence =
+        tau_core::AgentPersistenceMode::Ephemeral;
+    let route_id = UiShellRouteId::new("durable-route".into());
+    harness.pending_ui_shell_commands.insert(
+        route_id.clone(),
+        PendingUiShellCommand {
+            provider_id: "shell-owner".into(),
+            command: tau_proto::UiShellCommand {
+                session_id: harness.current_session_id.clone(),
+                command_id: "durable-ui-id".into(),
+                command: "pwd".to_owned(),
+                include_in_context: false,
+                target_agent_id: None,
+            },
+            targets_ephemeral: false,
+        },
+    );
+    let report = progress_report(&route_id, Some(claimed_agent_id), "untrusted");
+
+    assert!(!harness.event_targets_ephemeral_agent(&report, None));
+}
+
+/// Unknown reports retain their ordinary auditable committed debug line and are
+/// not mislabeled as ephemeral by a peer-chosen route id.
+#[test]
+fn unknown_shell_report_retains_ordinary_debug_audit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "shell-peer",
+        "shell-peer",
+        tau_proto::ClientKind::Tool,
+    );
+    let debug_dir = tmp.path().join("debug");
+    harness.debug_log =
+        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+    let secret = "secret-output-that-must-not-enter-debug";
+
+    harness
+        .handle_extension_event(
+            "shell-peer",
+            TestProtocolItem::Event(progress_report(
+                &UiShellRouteId::new("unknown-route".into()),
+                None,
+                secret,
+            )),
+        )
+        .expect("commit unknown report");
+
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    assert!(jsonl.contains("\"event_name\":\"shell.command_progress_reported\""));
+    assert!(jsonl.contains(secret));
+}
+
+/// Dropping mutable canonical progress releases its short-lived ephemeral
+/// marker so later UI-id reuse receives independent debug classification.
+#[test]
+fn dropping_canonical_progress_releases_ephemeral_marker() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_PROGRESS,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register progress interceptor");
+    let command_id: tau_proto::ShellCommandId = "reusable-ui-id".into();
+    harness
+        .pending_ephemeral_ui_shell_canonical_events
+        .insert(command_id.clone(), std::num::NonZeroUsize::MIN);
+    harness.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+            command_id: command_id.clone(),
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "ephemeral".to_owned(),
+            target_agent_id: None,
+        }),
+    );
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("drop progress");
+
+    assert!(
+        !harness
+            .pending_ephemeral_ui_shell_canonical_events
+            .contains_key(&command_id)
+    );
+}
+
+/// A parked ephemeral progress fact and the rollover failure queued behind it
+/// retain independent debug-classification markers for the same UI id.
+#[test]
+fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "ephemeral-rollover",
+        false,
+    );
+    harness
+        .pending_ui_shell_commands
+        .get_mut(&route_id)
+        .expect("pending route")
+        .targets_ephemeral = true;
+    harness
+        .ephemeral_ui_shell_route_ids
+        .insert(route_id.clone());
+    let debug_dir = tmp.path().join("debug");
+    harness.debug_log =
+        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_PROGRESS,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register progress interceptor");
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id,
+                "ephemeral output",
+            )),
+        )
+        .expect("park canonical progress");
+    harness
+        .switch_session(
+            "replacement-session".into(),
+            tau_proto::SessionStartReason::New,
+        )
+        .expect("queue rollover terminal");
+    assert_eq!(
+        harness
+            .pending_ephemeral_ui_shell_canonical_events
+            .get(&command.command_id)
+            .map(|count| count.get()),
+        Some(2)
+    );
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("commit queued shell facts");
+
+    assert!(
+        !harness
+            .pending_ephemeral_ui_shell_canonical_events
+            .contains_key(&command.command_id)
+    );
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    let shell_lines = jsonl
+        .lines()
+        .filter(|line| line.contains("\"event_name\":\"shell.command_"))
+        .collect::<Vec<_>>();
+    assert!(
+        shell_lines.is_empty(),
+        "ephemeral report and both canonical facts must stay out of debug JSONL: {shell_lines:?}"
+    );
+}

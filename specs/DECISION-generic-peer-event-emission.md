@@ -141,7 +141,7 @@ The following exact authority and wire-name mapping governs the migration:
 | `extension.skill_available`, `extension.agents_md_available`, context-provider registration/readiness, and agent-context publication | Existing names remain declarations, values, or acknowledgements | Configured extension or core component owning the declaration slot | Post-commit consumers update projections and publish derived state where needed |
 | `agent.start_request`, `extension.internal_prompt_submit_request` | Existing request names remain | Configured extension or core component | Harness publishes acceptance/rejection and canonical agent or prompt facts |
 | `agent.metadata_set`, `agent.metadata_unset` | `agent.metadata_set_request`, `agent.metadata_unset_request` | Configured extension or attached UI | Harness publishes canonical metadata facts or rejection outcomes |
-| `shell.command_progress`, `shell.command_finished` | `shell.command_progress_reported`, `shell.command_finished_reported` | Configured shell extension | Harness validates routed-command ownership and publishes canonical progress/completion; transcript injection follows completion commit |
+| `shell.command_progress`, `shell.command_finished` | `shell.command_progress_reported`, `shell.command_finished_reported` | Configured Tool or Core extension | Harness validates selected shell-provider ownership and publishes canonical progress/completion; transcript injection follows completion commit |
 | State-changing `ui.*` commands | Existing request names remain | Attached local UI | Harness performs the request downstream and publishes canonical state/outcome events |
 | `ui.prompt_draft`, `ui.focus_changed` | unchanged | Attached local UI | Live-only consumers react after commit |
 | `ui.debug_event_stats_request`, `ui.tree_request`, `ui.detach_request` | Dedicated request messages, not events | Attached local UI | Directed result or connection-control behavior |
@@ -254,3 +254,5 @@ The attached-UI prompt-draft and focus row is implemented by
 [SPEC-ui-prompt-draft-and-focus-events](SPEC-ui-prompt-draft-and-focus-events.md).
 The dedicated attached-UI request row is implemented by
 [SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
+The user-shell report-to-canonical-fact row is implemented by
+[SPEC-shell-command-reports-and-canonical-facts](SPEC-shell-command-reports-and-canonical-facts.md).

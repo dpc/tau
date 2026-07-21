@@ -3396,11 +3396,15 @@ pub struct UiShellCommand {
 /// A chunk of output from a running user-initiated shell command.
 /// Correlated to the request by `command_id`.
 ///
-/// The selected provider echoes the opaque command id received from the
-/// harness; the harness maps that provider route id back to the UI lifecycle id
-/// before publishing this event.
+/// The selected provider submits this payload as
+/// [`Event::ShellCommandProgressReported`] with the opaque command id received
+/// from the harness. After commit and routed-owner validation, the harness maps
+/// that provider route id back to the UI lifecycle id and publishes
+/// [`Event::ShellCommandProgress`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandProgress {
+    /// Private provider route id in reports; public UI lifecycle id in
+    /// canonical facts.
     pub command_id: crate::ShellCommandId,
     pub stream: ShellStream,
     pub chunk: String,
@@ -3415,11 +3419,14 @@ pub struct ShellCommandProgress {
 /// The extension echoes `command`, `session_id`, `include_in_context`, and the
 /// resolved target from the originating `UiShellCommand`. The harness validates
 /// those immutable fields and the event source against its pending-command
-/// route before accepting one terminal event. The provider also echoes the
-/// opaque harness route id it received; the harness maps that id back to the UI
-/// lifecycle id before publishing the immutable, must-pass terminal event.
+/// route after the extension's [`Event::ShellCommandFinishedReported`] commits.
+/// The provider also echoes the opaque harness route id it received; the
+/// harness maps that id back to the UI lifecycle id before publishing the
+/// immutable, must-pass [`Event::ShellCommandFinished`] fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandFinished {
+    /// Private provider route id in reports; public UI lifecycle id in
+    /// canonical facts.
     pub command_id: crate::ShellCommandId,
     pub session_id: SessionId,
     pub command: String,
@@ -4800,8 +4807,16 @@ pub enum Event {
     TermBell(TermBell),
 
     // Shell (user-initiated)
+    /// Peer-authored progress awaiting routed-command validation.
+    #[serde(rename = "shell.command_progress_reported")]
+    ShellCommandProgressReported(ShellCommandProgress),
+    /// Harness-authored canonical progress fact.
     #[serde(rename = "shell.command_progress")]
     ShellCommandProgress(ShellCommandProgress),
+    /// Peer-authored completion awaiting routed-command validation.
+    #[serde(rename = "shell.command_finished_reported")]
+    ShellCommandFinishedReported(ShellCommandFinished),
+    /// Harness-authored canonical completion fact.
     #[serde(rename = "shell.command_finished")]
     ShellCommandFinished(ShellCommandFinished),
 
@@ -5187,7 +5202,9 @@ impl Event {
         match self {
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::TermBell(_) => EventName::TERM_BELL,
+            Self::ShellCommandProgressReported(_) => EventName::SHELL_COMMAND_PROGRESS_REPORTED,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
+            Self::ShellCommandFinishedReported(_) => EventName::SHELL_COMMAND_FINISHED_REPORTED,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             _ => return None,
         }
@@ -5323,7 +5340,9 @@ impl Event {
                 | Self::StartAgentRequest(_)
                 | Self::AgentMetadataSetRequest(_)
                 | Self::AgentMetadataUnsetRequest(_)
+                | Self::ShellCommandProgressReported(_)
                 | Self::ShellCommandProgress(_)
+                | Self::ShellCommandFinishedReported(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)
                 | Self::AgentPromptRecalled(_)

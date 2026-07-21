@@ -38,6 +38,13 @@ canonical terminal and provider projections. Reports and canonical facts reuse
 the existing terminal payload DTOs; the event names establish authorship and
 commit stage. See
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+User-shell progress/completion likewise separates transient Tool/Core
+`shell.command_progress_reported` / `shell.command_finished_reported` inputs
+from harness-authored canonical `shell.command_progress` /
+`shell.command_finished` facts. Reports and facts reuse the existing shell
+payload DTOs; `command_id` is the private provider route in reports and the
+public UI lifecycle id in canonical facts. See
+[SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 The unchanged `tool.request` name is a peer routing intent from configured
 Provider/Tool/Core extensions. Its enclosing `Emit.transient` selects live-only
 or session-restore publication; durable replay carries stable configured

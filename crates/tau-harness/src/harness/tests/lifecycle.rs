@@ -4689,12 +4689,13 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
                 include_in_context: false,
                 target_agent_id: None,
             },
+            targets_ephemeral: false,
         },
     );
 
     h.handle_extension_event(
         "operational-owner",
-        TestProtocolItem::Event(Event::ShellCommandFinished(
+        TestProtocolItem::Event(Event::ShellCommandFinishedReported(
             tau_proto::ShellCommandFinished {
                 command_id: "startup-shell".into(),
                 session_id: "s1".into(),
@@ -4716,7 +4717,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         "operational-owner",
         |event| matches!(
             event,
-            Event::ShellCommandFinished(finished)
+            Event::ShellCommandFinishedReported(finished)
                 if finished.command_id.as_str() == "startup-shell"
         )
     ));
@@ -4727,6 +4728,15 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
     assert!(event_log_contains_source_event(
         &h,
         "operational-owner",
+        |event| matches!(
+            event,
+            Event::ShellCommandFinishedReported(finished)
+                if finished.command_id.as_str() == "startup-shell"
+        )
+    ));
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::ShellCommandFinished(finished)

@@ -25,6 +25,10 @@ setter admission/commit/cancellation, concurrent rejection, and call-local
 `cwd`/`workdir` behavior. Harness-boundary tests cover provider cardinality,
 stale-session rejection, targeted execution, multi-UI projection, delivery loss,
 bounded IDs, delayed events, and exactly one terminal result.
+Protocol tests assert that every user-shell producer emits the `_reported`
+progress/completion names; harness-boundary tests separately lock report commit,
+canonical mapping, exact generation/route authority, activation ordering, and
+post-completion-commit transcript injection.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.

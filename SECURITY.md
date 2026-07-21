@@ -134,6 +134,21 @@ while existing provider/cancellation/background transcript persistence is
 unchanged. Ephemeral-agent classification suppresses raw reports and every
 projection from durable debug JSONL. See
 [`SPEC-terminal-tool-reports-and-canonical-outcomes`](specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Tool/Core shell providers use the same captured-generation boundary
+for `shell.command_progress_reported` and `shell.command_finished_reported`.
+Reports commit before exact private-route and echoed-identity validation; only
+the harness publishes canonical shell progress/completion. A stale, replaced,
+non-owning, or identity-altered report cannot consume a route or inject
+transcript output, and injection follows immutable canonical completion commit.
+The publication envelope captures original-route ephemerality before
+interception, replacement routes are reclassified from harness-owned pending
+state or process-lifetime harness-generated ephemeral-route tombstones, and
+unknown peer-chosen routes retain ordinary debug audit treatment. The tombstone
+set grows only with accepted ephemeral user-shell routes until process exit.
+The original frame-admission session must still match before a staged report
+can derive canonical state.
+See
+[`SPEC-shell-command-reports-and-canonical-facts`](specs/SPEC-shell-command-reports-and-canonical-facts.md).
 Configured Provider/Tool/Core peers may also publish `tool.request` routing
 intents. The request commits before live generation, call-id correlation, and
 registry routing checks; only harness-sourced derived facts assert acceptance

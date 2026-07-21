@@ -655,8 +655,9 @@ intent.
 
 ## Shell (shell extension, user-initiated commands)
 
-Emitted by `tau-ext-shell` (or any extension implementing `!`/`!!`
-commands) in response to a `ui.shell_command`.
+`tau-ext-shell` (or another registered Tool/Core shell provider) reports
+progress and completion in response to a `ui.shell_command`; the harness
+publishes the canonical UI-facing facts.
 
 The harness routes each request point-to-point to exactly one registered generic
 shell instance. Zero instances fail the command; multiple instances fail as
@@ -667,9 +668,10 @@ attached UIs so progress and the single terminal result have a display block.
 The selected extension snapshots that target agent's per-instance workdir at
 admission. The harness records the selected provider and canonical request
 identity. It accepts progress and exactly one terminal event only from that
-provider with matching immutable fields; stale, duplicate, non-owner, or altered
-events are discarded. Provider disconnect and session shutdown consume pending
-routes with a harness-owned terminal failure. UI command ids must be non-empty,
+provider with matching immutable fields. Stale, duplicate, non-owner, or altered
+reports remain committed observations but are rejected for canonicalization.
+Provider disconnect and session shutdown consume pending routes with a
+harness-owned terminal failure. UI command ids must be non-empty,
 at most 256 bytes, and unique while in flight; invalid or concurrent duplicate
 ids are rejected before projection. For provider execution, the harness replaces
 the UI id with a fresh internal route id and maps accepted progress/terminal
@@ -682,15 +684,26 @@ progress/terminal correlation and target identity remain harness-owned. A
 validated terminal is immutable and must-pass so its UI projection and optional
 transcript injection cannot diverge.
 
-- **`shell.command_progress`** — A chunk of stdout/stderr from a running
-  user-initiated shell command, correlated by `command_id`. Transient.
-- **`shell.command_finished`** — A user-initiated shell command exited
+- **`shell.command_progress_reported`** — A peer-authored chunk of stdout/stderr
+  from a running user-initiated shell command. The harness commits the report
+  before validating the private provider route. Invalid, stale, or non-owning
+  reports remain committed observations but produce no canonical fact.
+  Transient and never stored.
+- **`shell.command_progress`** — Harness-authored canonical progress, mapped to
+  the UI lifecycle `command_id`. Transient.
+- **`shell.command_finished_reported`** — A peer-authored terminal observation
+  carrying the private provider route id and echoed request identity. The
+  harness commits it before exact generation, ownership, and identity validation.
+  Invalid reports remain committed observations but do not consume a route.
+  Transient and never stored.
+- **`shell.command_finished`** — A harness-authored user-initiated shell command exited
   or was cancelled. Echoes session id, command, optional target agent id,
   and `include_in_context` flag from the originating request, plus the
   truncated combined output, exit code, and `cancelled` flag. When
   `include_in_context` is set, the harness injects the output only into the
-  harness-recorded target agent for that session after provider and identity
-  validation.
+  harness-recorded target agent for that session after the canonical completion
+  commits. See
+  [`SPEC-shell-command-reports-and-canonical-facts`](../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 
 ## Term (terminal-output side effects)
 

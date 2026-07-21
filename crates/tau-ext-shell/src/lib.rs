@@ -1657,8 +1657,8 @@ fn dispatch_locked_tool_invoke(
 }
 
 fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: String, tx: &Output) {
-    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
-        tau_proto::ShellCommandFinished {
+    let _ = tx.send(HarnessInputMessage::emit(
+        Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,
             command: cmd.command,
@@ -1667,8 +1667,8 @@ fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: Stri
             output: message,
             exit_code: None,
             cancelled: false,
-        },
-    )));
+        }),
+    ));
 }
 
 fn send_tool_failure(

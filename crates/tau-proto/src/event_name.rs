@@ -411,8 +411,14 @@ impl EventName {
 
     pub const SHELL_COMMAND_PROGRESS: Self =
         Self::from_static(EventCategory::Shell, "command_progress");
+    /// Peer-authored user-shell progress awaiting routed-command validation.
+    pub const SHELL_COMMAND_PROGRESS_REPORTED: Self =
+        Self::from_static(EventCategory::Shell, "command_progress_reported");
     pub const SHELL_COMMAND_FINISHED: Self =
         Self::from_static(EventCategory::Shell, "command_finished");
+    /// Peer-authored user-shell completion awaiting routed-command validation.
+    pub const SHELL_COMMAND_FINISHED_REPORTED: Self =
+        Self::from_static(EventCategory::Shell, "command_finished_reported");
 
     pub const AGENT_PROMPT_SUBMITTED: Self =
         Self::from_static(EventCategory::Agent, "prompt_submitted");

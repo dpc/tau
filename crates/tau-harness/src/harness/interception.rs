@@ -76,6 +76,18 @@ pub(crate) struct PendingIntercept {
     pub(crate) cursor: InterceptorCursor,
 }
 
+impl PendingIntercept {
+    /// Return immutable original-route privacy captured before any interceptor
+    /// replacement in this publication chain.
+    pub(crate) fn original_shell_report_targets_ephemeral(&self) -> bool {
+        self.source
+            .peer_context
+            .extension
+            .as_ref()
+            .is_some_and(|extension| extension.shell_report_targets_ephemeral)
+    }
+}
+
 /// Immutable authenticated configured-extension publication identity.
 #[derive(Clone)]
 pub(crate) struct AuthenticatedExtensionPublication {
@@ -89,6 +101,11 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
     /// Session binding current when the peer frame originally arrived.
     pub(super) admission: ExtensionFrameAdmission,
+    /// Whether the original shell-report route targeted an ephemeral agent.
+    ///
+    /// This immutable bit keeps debug suppression safe when interception
+    /// replaces the report's peer-controlled route id.
+    pub(crate) shell_report_targets_ephemeral: bool,
     /// Activation-stage reservation made before interception.
     pub(crate) activation_reservation: Option<ActivationReservation>,
 }
@@ -846,6 +863,12 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
         admission: Option<ExtensionFrameAdmission>,
     ) {
+        let shell_report_targets_ephemeral = match &event {
+            Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
+            Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
+            _ => None,
+        }
+        .is_some_and(|command_id| self.ephemeral_ui_shell_route_ids.contains(command_id));
         let extension = source.and_then(|source_id| self.extensions.entries.get(source_id));
         let activation_reservation = extension
             .filter(|entry| entry.state != crate::extension::ExtensionState::Ready)
@@ -883,6 +906,7 @@ impl Harness {
                     session_id: self.current_session_id.clone(),
                     session_generation: self.current_session_generation,
                 }),
+                shell_report_targets_ephemeral,
                 activation_reservation,
             }),
         };
@@ -1075,6 +1099,10 @@ impl Harness {
         } = pending;
 
         let event_name = original_event.name();
+        let shell_progress_command_id = match &original_event {
+            Event::ShellCommandProgress(progress) => Some(progress.command_id.clone()),
+            _ => None,
+        };
         let next_event = match action {
             InterceptAction::Pass(None) => Some(original_event),
             InterceptAction::Pass(Some(boxed)) => {
@@ -1181,6 +1209,9 @@ impl Harness {
         };
 
         let Some(event) = next_event else {
+            if let Some(command_id) = shell_progress_command_id.as_ref() {
+                self.discard_uncommitted_shell_canonical_marker(command_id);
+            }
             self.discard_peer_activation_reservation(&source.peer_context);
             return;
         };

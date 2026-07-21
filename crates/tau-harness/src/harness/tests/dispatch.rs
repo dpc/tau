@@ -878,20 +878,23 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         chunk: "forged".to_owned(),
         target_agent_id: target_agent_id.clone(),
     };
-    h.handle_extension_shell_event(
+    h.canonicalize_committed_shell_command_report(
         "shell-non-owner",
-        Event::ShellCommandProgress(progress.clone()),
+        Event::ShellCommandProgressReported(progress.clone()),
     );
     let mut altered_progress = progress;
     altered_progress.target_agent_id = Some(crate::parse_agent_id("other_agent"));
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandProgress(altered_progress));
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandProgressReported(altered_progress),
+    );
     assert!(!event_log_events(&h).iter().any(
         |event| matches!(event, Event::ShellCommandProgress(progress)
             if progress.command_id == command.command_id)
     ));
-    h.handle_extension_shell_event(
+    h.canonicalize_committed_shell_command_report(
         "shell-owner",
-        Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+        Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
             command_id: first_route_id.as_protocol_id().clone(),
             stream: tau_proto::ShellStream::Stdout,
             chunk: "mapped".to_owned(),
@@ -915,13 +918,16 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         exit_code: Some(0),
         cancelled: false,
     };
-    h.handle_extension_shell_event(
+    h.canonicalize_committed_shell_command_report(
         "shell-non-owner",
-        Event::ShellCommandFinished(finished.clone()),
+        Event::ShellCommandFinishedReported(finished.clone()),
     );
     let mut altered_finished = finished.clone();
     altered_finished.include_in_context = false;
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(altered_finished));
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandFinishedReported(altered_finished),
+    );
     assert!(
         !event_log_events(&h)
             .iter()
@@ -929,8 +935,14 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
             if done.command_id == command.command_id))
     );
 
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandFinishedReported(finished.clone()),
+    );
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandFinishedReported(finished.clone()),
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -954,7 +966,10 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         .expect("second provider route")
         .clone();
     assert_ne!(first_route_id, second_route_id);
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(finished.clone()));
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandFinishedReported(finished.clone()),
+    );
     assert_eq!(
         h.pending_ui_shell_commands.len(),
         1,
@@ -963,7 +978,10 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
     let mut second_finished = finished;
     second_finished.command_id = second_route_id.as_protocol_id().clone();
     second_finished.output = "second".to_owned();
-    h.handle_extension_shell_event("shell-owner", Event::ShellCommandFinished(second_finished));
+    h.canonicalize_committed_shell_command_report(
+        "shell-owner",
+        Event::ShellCommandFinishedReported(second_finished),
+    );
     assert!(h.pending_ui_shell_commands.is_empty());
     let provider_ids = owner
         .lock()

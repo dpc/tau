@@ -766,7 +766,7 @@ mod tests {
         assert!(matches!(
             event,
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+                if matches!(emit.event.as_ref(), Event::ShellCommandFinishedReported(finished)
                     if finished.command_id.as_str() == "command-1"
                         && finished.output.contains("invalid"))
         ));
@@ -796,7 +796,7 @@ mod tests {
         assert!(matches!(
             event,
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::ShellCommandFinished(finished)
+                if matches!(emit.event.as_ref(), Event::ShellCommandFinishedReported(finished)
                     if finished.output.contains("replay is not complete"))
         ));
     }

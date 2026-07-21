@@ -3,7 +3,7 @@
 ## Status
 
 The external-message, provider-model, provider-quota, provider-execution,
-tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
+tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
 terminal-output, custom-event, attached-UI-liveness, and metadata-request slices
 now use generic `Emit` publication, immutable authenticated
@@ -96,6 +96,16 @@ generation and exact routed-call owner before applying existing terminal
 processing and publishing protected harness-sourced terminal, provider, or
 background projections; see
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Configured Tool/Core shell providers likewise submit
+`shell.command_progress_reported` and `shell.command_finished_reported` through
+generic publication. The post-commit consumer revalidates the captured
+generation, frame-admission session, and private routed command before publishing
+harness-sourced canonical progress/completion; transcript injection follows
+canonical completion commit. Immutable original-route classification and
+process-lifetime harness-route tombstones keep ephemeral report payloads out of
+durable debug JSONL across interception and session rollover; unknown
+peer-chosen routes retain ordinary audit treatment. See
+[SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 Configured Provider/Tool/Core peers submit `tool.request` through generic
 publication before routing. The post-commit consumer revalidates the captured
 generation and call-id correlation, installs terminal ownership, and publishes

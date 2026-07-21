@@ -145,6 +145,12 @@ prompt text events, replacements may edit text but cannot change routing identit
 fields such as agent id or prompt metadata. The original
 transient metadata is preserved.
 
+Peer-authored `shell.command_progress_reported` and
+`shell.command_finished_reported` remain ordinary mutable, droppable
+observations. Only after one commits does the harness validate its captured
+configured generation and routed-command identity, then publish the protected
+canonical shell fact.
+
 ## Same-priority chaining
 
 Suppose the ordered interceptors for an event are:

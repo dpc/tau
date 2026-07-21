@@ -43,6 +43,11 @@ Attached-UI prompt-draft and focus observations likewise use ordinary
 interception and commit before live subscriber reaction. Both remain outside
 semantic history for either caller transience value. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
+Tool/Core user-shell reports also cross ordinary interception and commit before
+the downstream consumer revalidates captured generation/session and private
+route identity. Reports remain outside semantic history; only the harness
+publishes canonical progress/completion. See
+[SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as
@@ -62,6 +67,10 @@ diagnostics (critical notices
 and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
+Canonical `shell.command_finished` is likewise immutable and must-pass so UI
+completion and optional post-commit transcript injection cannot diverge.
+Canonical shell progress retains its harness-owned mapped command/target
+identity while allowing the established chunk/stream interception changes.
 
 `tool.request` and `tool.started` are eligible session-scoped execution restore
 facts. Non-transient facts are persisted in each session's
