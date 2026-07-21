@@ -8681,6 +8681,32 @@ impl Harness {
             );
             return Ok(());
         }
+        if matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
+            // Terminal-output events are live side-effect requests. This is
+            // configured event-authority admission only; the terminal UI reacts
+            // to the event after ordinary interception, commit, and broadcast.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks terminal-output event authority"
+                );
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -10557,6 +10583,18 @@ impl Harness {
         let Some(event) = self.handle_client_agent_metadata_event(client_id, event) else {
             return Ok(true);
         };
+        if matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
+            if self.bus.connection(client_id).is_some_and(|connection| {
+                connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
+            }) && !self
+                .external_message_peers
+                .contains(&tau_proto::ConnectionId::from(client_id))
+            {
+                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+                self.enqueue_publish(Some(client_id), event, transient, false, None);
+            }
+            return Ok(true);
+        }
         self.handle_client_fallback_event(client_id, event, transient_override);
         Ok(true)
     }
@@ -13189,8 +13227,6 @@ impl Harness {
             event,
             Event::ExtensionEvent(_)
                 | Event::HarnessNotice(_)
-                | Event::Osc1337SetUserVar(_)
-                | Event::TermBell(_)
                 | Event::MessageDeliveredReported(_)
                 | Event::MessageEditedReported(_)
                 | Event::MessageDeletedReported(_)

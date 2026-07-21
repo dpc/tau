@@ -162,6 +162,13 @@ and admission session, then applies role, parent/tool-owner, duplicate rebinding
 and child-creation logic. Unconfigured/socket peers are denied; stale generations
 or sessions are observation-only, and raw requests never enter semantic replay. See
 [SPEC-start-agent-requests](specs/SPEC-start-agent-requests.md).
+Every live configured extension kind and attached local UI may publish terminal
+bell and OSC side-effect events through ordinary interception and commit.
+Unconfigured, disconnected, and dedicated external-message peers cannot. The
+events never enter semantic stores, and terminal UIs independently reject replay
+delivery before writing terminal bytes. OSC name validation and bounded,
+base64-encoded values remain defense in depth. See
+[SPEC-terminal-output-side-effect-events](specs/SPEC-terminal-output-side-effect-events.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

@@ -259,13 +259,17 @@ pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMe
     })
 }
 
-/// Builds the production chat subscription without replaying transient
-/// `tool.started` state that would briefly resurrect already-terminal calls.
+/// Builds the production chat subscription with `tool.started` and terminal
+/// side effects restricted to live delivery.
 pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
     let live_selectors = chat_subscription_selectors();
     let historical_selectors = live_selectors
         .iter()
-        .filter(|selector| **selector != EventSelector::Exact(EventName::TOOL_STARTED))
+        .filter(|selector| {
+            **selector != EventSelector::Exact(EventName::TOOL_STARTED)
+                && **selector != EventSelector::Exact(EventName::TERM_OSC1337_SET_USER_VAR)
+                && **selector != EventSelector::Exact(EventName::TERM_BELL)
+        })
         .cloned()
         .collect();
     HarnessInputMessage::Subscribe(Subscribe {

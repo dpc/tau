@@ -111,6 +111,22 @@ fn internal_prompt_requests_never_enter_semantic_history() {
     assert!(!should_persist_event(&event, true));
 }
 
+/// Terminal-output events are live side effects and never enter semantic
+/// history, regardless of caller-selected transient metadata.
+#[test]
+fn terminal_output_events_never_enter_semantic_history() {
+    for event in [
+        Event::TermBell(tau_proto::TermBell {}),
+        Event::Osc1337SetUserVar(tau_proto::Osc1337SetUserVar {
+            name: "status".to_owned(),
+            value: "ready".to_owned(),
+        }),
+    ] {
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

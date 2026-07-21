@@ -79,6 +79,11 @@ interception and commit before any acceptance, rejection, rebinding, or side-age
 work. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 
+Terminal-output events are the same globally ordered operational traffic rather
+than activation declarations. Pre-Ready bells and OSC requests remain deferred
+until activation, then enter ordinary publication in original arrival order. See
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
 `&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and

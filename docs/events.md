@@ -684,8 +684,13 @@ transcript injection cannot diverge.
 ## Term (terminal-output side effects)
 
 Targeted at whichever UI is attached and capable of writing escape
-sequences to a real terminal. Harness-owned code and extensions may emit these;
-the UI is the only consumer. Components without a terminal silently no-op.
+sequences to a real terminal. Harness-owned code, authenticated configured
+extensions of any kind, and attached local UIs may emit these; unconfigured,
+disconnected, and dedicated external-message peers may not. They cross ordinary
+interception and commit but never enter semantic history. Terminal UIs subscribe
+live-only and reject replay-marked delivery before acting. Components without a
+terminal silently no-op. See
+[`SPEC-terminal-output-side-effect-events`](../specs/SPEC-terminal-output-side-effect-events.md).
 
 - **`term.osc1337_set_user_var`** — Ask the UI to write an iTerm2
   OSC 1337 `SetUserVar` escape sequence. Producers should validate

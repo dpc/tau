@@ -3,6 +3,7 @@ mod internal_prompt;
 mod prompt_fragment;
 mod session_discovery;
 mod start_agent;
+mod terminal_output;
 mod tool_lifecycle;
 mod tool_progress;
 mod tool_request;

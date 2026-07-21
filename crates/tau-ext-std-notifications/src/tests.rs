@@ -687,6 +687,49 @@ fn bell_mode_emits_only_completion_bell() {
     );
 }
 
+/// Terminal-output hooks preserve their existing caller-selected durable wire
+/// bit; the harness classifies the committed events as no-store live side
+/// effects independently of this metadata.
+#[test]
+fn terminal_output_hooks_preserve_non_transient_emit_metadata() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [
+                    { "bell": true },
+                    { "osc1337": { "key": "status", "value": "started" } },
+                ],
+                "agent_end": [],
+                "agent_idle": [],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "hello",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
+    let mut reader = EventReader::new(Cursor::new(output));
+    for expected_name in [
+        tau_proto::EventName::TERM_BELL,
+        tau_proto::EventName::TERM_OSC1337_SET_USER_VAR,
+    ] {
+        let emit = reader.read_emit().expect("read").expect("terminal emit");
+        assert!(
+            !emit.transient,
+            "{expected_name} must preserve the existing non-transient wire bit"
+        );
+        assert_eq!(emit.event.name(), expected_name);
+    }
+}
+
 /// Configured hook arrays must allow multiple actions and render
 /// templates with the current agent id/name. This locks in the new
 /// structured hook schema instead of the old single global mode.

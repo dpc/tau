@@ -291,6 +291,43 @@ mod ui_io_tests {
         assert_eq!(tau_client::input_message_key(&message), "term.bell");
     }
 
+    /// Replayed terminal-output events must never reach the renderer and repeat
+    /// an old bell or terminal escape side effect.
+    #[test]
+    fn renderer_drops_replayed_terminal_output_events() {
+        let recorded_at = UnixMicros::new(123);
+        for event in [
+            Event::TermBell(tau_proto::TermBell {}),
+            Event::Osc1337SetUserVar(tau_proto::Osc1337SetUserVar {
+                name: "status".to_owned(),
+                value: "ready".to_owned(),
+            }),
+        ] {
+            let delivery = tau_proto::EventDelivery::replay(recorded_at, event);
+            assert!(renderer_event_from_delivery(delivery).is_none());
+        }
+    }
+
+    /// Live terminal-output events still reach the renderer after the harness
+    /// commits and broadcasts them.
+    #[test]
+    fn renderer_keeps_live_terminal_output_events() {
+        let recorded_at = UnixMicros::new(123);
+        for event in [
+            Event::TermBell(tau_proto::TermBell {}),
+            Event::Osc1337SetUserVar(tau_proto::Osc1337SetUserVar {
+                name: "status".to_owned(),
+                value: "ready".to_owned(),
+            }),
+        ] {
+            let delivery = tau_proto::EventDelivery::live(recorded_at, event.clone());
+            assert_eq!(
+                renderer_event_from_delivery(delivery),
+                Some((event, recorded_at))
+            );
+        }
+    }
+
     /// Breakdown logging should put the largest contributors first so a noisy
     /// one-second sample immediately shows the best optimization target.
     #[test]
@@ -845,6 +882,16 @@ pub(crate) fn retarget_prompt_draft_snapshot(
     queue_prompt_draft_snapshot(handle, session_id, target_agent_id, text);
 }
 
+/// Convert one delivery into renderer input while suppressing replayed
+/// terminal-output side effects.
+fn renderer_event_from_delivery(delivery: tau_proto::EventDelivery) -> Option<(Event, UnixMicros)> {
+    let (event, replay, recorded_at) = delivery.into_parts();
+    if replay && matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
+        return None;
+    }
+    Some((event, recorded_at.unwrap_or_else(UnixMicros::now)))
+}
+
 fn encode_binding_action(action: &CliBindingAction) -> String {
     let Some(command) = action.command.as_deref().filter(|c| !c.is_empty()) else {
         return action.action.clone();
@@ -955,12 +1002,13 @@ pub(crate) fn run_chat(
                     socket_ui_io_meter.record_downlink_frame(&message);
                     let cmd = match message {
                         HarnessOutputMessage::Deliver(delivery) => {
-                            // The renderer folds replay frames like live ones:
-                            // the UI renders state, so history is welcome.
-                            let (event, _replay, recorded_at) = delivery.into_parts();
+                            let Some((event, recorded_at)) = renderer_event_from_delivery(delivery)
+                            else {
+                                continue;
+                            };
                             RendererCmd::Remote {
                                 event: Box::new(event),
-                                recorded_at: recorded_at.unwrap_or_else(UnixMicros::now),
+                                recorded_at,
                             }
                         }
                         HarnessOutputMessage::Disconnect(d) => {

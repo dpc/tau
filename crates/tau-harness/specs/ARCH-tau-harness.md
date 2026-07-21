@@ -4,7 +4,8 @@
 
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
-session-discovery, per-agent-context, internal-prompt-request, and start-agent-request slices now use generic `Emit` publication, immutable authenticated
+session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
+and terminal-output slices now use generic `Emit` publication, immutable authenticated
 internal publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
@@ -22,6 +23,10 @@ submission, and stale publisher generations cannot submit work. See
 Start-agent requests likewise commit before role/parent validation, duplicate
 route rebinding, acceptance/result routing, or child creation. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
+Terminal-output events commit and broadcast before attached UIs act. They never
+enter semantic replay, and replay-marked deliveries cannot repeat terminal side
+effects. See
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,

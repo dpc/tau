@@ -101,10 +101,10 @@ fn chat_subscription_uses_no_prefix_selectors() {
     assert_eq!(subscription.live_selectors, selectors);
 }
 
-/// Ensures chat does not request the unused tool admission fact and cold replay
-/// cannot paint a completed historical tool as newly pending.
+/// Ensures chat omits the unused tool request, keeps transient starts and
+/// terminal side effects live-only, and still requests durable terminal facts.
 #[test]
-fn chat_subscription_excludes_unused_request_and_historical_started() {
+fn chat_subscription_keeps_runtime_side_effects_live_only() {
     let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
         panic!("chat subscription must produce Subscribe")
     };
@@ -115,6 +115,12 @@ fn chat_subscription_excludes_unused_request_and_historical_started() {
     let started = EventSelector::Exact(EventName::TOOL_STARTED);
     assert!(!subscription.historical_selectors.contains(&started));
     assert!(subscription.live_selectors.contains(&started));
+
+    for event in [EventName::TERM_OSC1337_SET_USER_VAR, EventName::TERM_BELL] {
+        let selector = EventSelector::Exact(event);
+        assert!(!subscription.historical_selectors.contains(&selector));
+        assert!(subscription.live_selectors.contains(&selector));
+    }
 
     for event in [
         EventName::PROVIDER_RESPONSE_FINISHED,

@@ -166,3 +166,8 @@ The three per-agent context DTOs likewise retain their wire names and default to
 transient: provider registration, keyed agent context publication, and agent
 readiness. Their commit-before-effects contract is
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
+
+`term.osc1337_set_user_var` and `term.bell` retain their existing DTOs, wire
+names, and caller-selected Emit metadata. The harness excludes both from semantic
+stores, and terminal consumers act only on live delivery. See
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).

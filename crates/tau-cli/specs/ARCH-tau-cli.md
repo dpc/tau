@@ -12,6 +12,11 @@ only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
 provider clear keeps live and late clients converged on neutral unknown.
 
+Terminal bells and OSC user-variable writes are live-only side effects. The CLI
+requests their event names only in its live selector set and independently drops
+replay-marked terminal-output deliveries before rendering. See
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+
 The terminal UI executes trusted local configuration and environment-derived
 commands, including key-binding shell snippets, completion commands, `$EDITOR`,
 and `$VISUAL`. Treat `cli.yaml`, inherited environment variables, and PATH as

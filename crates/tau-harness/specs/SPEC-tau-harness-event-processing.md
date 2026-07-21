@@ -31,6 +31,10 @@ Start-agent requests also commit before validation, duplicate rebinding,
 acceptance/result routing, and child creation. Raw requests remain outside
 semantic history for either caller transience value. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
+Terminal-output events likewise use ordinary interception and commit before a
+subscribed UI acts. They remain outside semantic history for either caller
+transience value, and terminal consumers reject replay delivery. See
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as

@@ -41,6 +41,8 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ExtensionContextReady(_)
                 | Event::ExtInternalPromptSubmitRequest(_)
                 | Event::StartAgentRequest(_)
+                | Event::Osc1337SetUserVar(_)
+                | Event::TermBell(_)
         )
         || is_raw_tool_terminal_event(event)
     {

@@ -3921,6 +3921,120 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     h.shutdown().expect("shutdown");
 }
 
+/// Pre-Ready terminal-output events are operational traffic that commits in
+/// original wire order only after the configured extension activates.
+#[test]
+fn terminal_output_events_are_deferred_in_order_until_ready() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "terminal-output-owner";
+    connect_handshaking_tool(&mut h, conn_id);
+    let observer = connect_test_client(
+        &mut h,
+        "terminal-output-observer",
+        tau_proto::ClientKind::Ui,
+    );
+    h.bus
+        .set_subscriptions(
+            "terminal-output-observer",
+            Vec::new(),
+            vec![
+                EventSelector::Exact(tau_proto::EventName::TERM_BELL),
+                EventSelector::Exact(tau_proto::EventName::TERM_OSC1337_SET_USER_VAR),
+            ],
+        )
+        .expect("subscribe to terminal output");
+
+    for (event, transient) in [
+        (Event::TermBell(tau_proto::TermBell {}), false),
+        (
+            Event::Osc1337SetUserVar(tau_proto::Osc1337SetUserVar {
+                name: "status".to_owned(),
+                value: "ready".to_owned(),
+            }),
+            true,
+        ),
+    ] {
+        h.handle_extension_message(
+            conn_id,
+            TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(event),
+                transient,
+            }),
+        )
+        .expect("defer terminal output");
+    }
+
+    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::TermBell(_) | Event::Osc1337SetUserVar(_))
+    }));
+
+    h.handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
+        .expect("activate terminal-output owner");
+
+    let committed: Vec<_> = {
+        let mut names = Vec::new();
+        let mut seq = crate::event_log::EventLogSeq::new(0);
+        while let Some(entry) = h.event_log.get_next_from(seq) {
+            seq = entry.seq.next();
+            if entry.source.as_deref() == Some(conn_id)
+                && matches!(
+                    entry.event,
+                    Event::TermBell(_) | Event::Osc1337SetUserVar(_)
+                )
+            {
+                names.push(entry.event.name());
+            }
+        }
+        names
+    };
+    assert_eq!(
+        committed,
+        [
+            tau_proto::EventName::TERM_BELL,
+            tau_proto::EventName::TERM_OSC1337_SET_USER_VAR,
+        ]
+    );
+    let delivered: Vec<_> = observer
+        .lock()
+        .expect("observer")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(
+                    delivery.event.as_ref(),
+                    Event::TermBell(_) | Event::Osc1337SetUserVar(_)
+                ) =>
+            {
+                Some((
+                    routed.source_id.clone(),
+                    delivery.replay,
+                    delivery.event.name(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delivered,
+        [
+            (
+                Some(tau_proto::ConnectionId::from(conn_id)),
+                false,
+                tau_proto::EventName::TERM_BELL,
+            ),
+            (
+                Some(tau_proto::ConnectionId::from(conn_id)),
+                false,
+                tau_proto::EventName::TERM_OSC1337_SET_USER_VAR,
+            ),
+        ]
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
     let td = TempDir::new().expect("tempdir");

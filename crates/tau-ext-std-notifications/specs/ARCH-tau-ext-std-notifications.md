@@ -2,6 +2,11 @@
 
 `std-notifications` is a user-facing side-effect bridge. It listens to harness events and emits terminal-facing notification actions; it does not own agent execution.
 
+Bell and OSC hook actions retain their existing non-transient Emit metadata. The
+harness nevertheless classifies both event names as no-store live side effects,
+and terminal UIs reject replay before acting, under
+[SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+
 The extension runs on `tau-client`'s manual-loop runtime. Tau-client owns the
 startup prelude, exact event subscriptions, `Ready`, raw configuration dispatch,
 live-only event dispatch, and outbound writer thread. This crate owns the policy
