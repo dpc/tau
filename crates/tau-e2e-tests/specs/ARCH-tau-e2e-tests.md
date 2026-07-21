@@ -6,7 +6,9 @@
 Cargo-built, test-only provider subprocess through normal extension supervision,
 publishes and routes `fake/test`, and normally starts only the no-side-effect
 `tau-ext-test-dummy` wrapper. Gate 2 instead starts the exact universal Tau
-binary as bundled `component ext-shell`. Generated configuration, durable session state,
+binary as bundled `component ext-shell`. The S1 session-restore mode installs
+the production harness-owned internal handlers but exposes only `agent_start`
+to its exact main role and no tools to its worker role. Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
 configuration; V2 uses bounded exact-correlation lanes and clean-resume cursor
@@ -27,7 +29,10 @@ The deterministic fixture covers Tau's subprocess lifecycle, CBOR protocol,
 Configure/Ready gate, model publication/selection/routing, prompt construction,
 provider event validation, tool dispatch/continuation, typed failures,
 cancellation, fatal provider disconnect, concurrent lane isolation, clean
-restore, durable projection, and headless shutdown. It does not cover the
+restore, durable projection, and headless shutdown. Its two-agent restore gate
+also proves that one completed production-started durable worker remains
+addressable with its own transcript and route while the daemon-lifetime
+automatic watch is dropped. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's

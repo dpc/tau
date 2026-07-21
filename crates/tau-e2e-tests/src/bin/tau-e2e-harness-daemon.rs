@@ -40,7 +40,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_current_dir(cwd)?;
         allowed_extensions.insert("core-shell".into());
     }
-    tau_harness::run_daemon(
+    tau_harness::run_daemon_with_internal_tools(
         PathBuf::from(socket),
         PathBuf::from(harness_state),
         "deterministic-e2e-session",
@@ -55,6 +55,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ignore_startup_environment(true)
             .allowed_extensions(allowed_extensions)
             .build(),
+        tau_harness_tools::builtin_handlers(),
     )?;
     Ok(())
 }

@@ -166,9 +166,12 @@ Count every `agent_start` call/result continuation and every watch-driven main
 turn, not only visible user turns. Split a scenario that exceeds a bound; do not
 raise a fixture limit just to preserve this ladder.
 
-S1 budgets two lanes: at most four main actions (start call/result, the
-post-completion watch-driven turn, and Boot B's fresh prompt) and two worker
-actions. S2 omits S1's fresh main prompt and budgets at most seven main actions:
+S1 budgets two lanes: exactly four main lane actions (start call/result, the
+post-completion watch action, and Boot B's fresh prompt) and two worker lane
+actions. The three ordered Running/response/Idle records in the watch action
+each cause a real provider turn, so the typed execution oracle requires exactly
+six main provider turns and two worker provider turns across both boots. S2
+omits S1's fresh main prompt and budgets at most seven main actions:
 the Boot A start pair/watch-driven turn, Boot B watch call/result, and the two
 fresh watch-driven turns whose prompt/running and response/idle facts are
 steered together by serialized harness ordering. It uses two worker actions. Add
@@ -240,7 +243,10 @@ Assert:
 
 This scenario proves restoration, not persistence of the original
 `agent_start` request's transient ownership. The completed worker remains an
-addressable loaded conversation.
+addressable loaded conversation. The same governed lifecycle applies to a
+completed explicit-parent typed `agent.start_request` without a `tool_call_id`;
+parentless non-tool typed starts remain one-shot, and peer entrypoints remain
+ordinary loaded agents.
 
 ### S2 — Explicit watch recreation after resume
 

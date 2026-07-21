@@ -76,6 +76,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     let mut barriers: HashMap<&str, (usize, std::collections::HashSet<&str>)> = HashMap::new();
     let mut dummy_call_ids = std::collections::HashSet::new();
     let mut core_call_ids = std::collections::HashSet::new();
+    let mut agent_start_call_ids = std::collections::HashSet::new();
     for lane in &scenario.lanes {
         if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
             return Err(ClientError::handler(
@@ -117,6 +118,65 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 {
                     return Err(ClientError::handler(
                         "dummy tool result must have a 1..=256 byte id and matching prior call",
+                    ));
+                }
+                ScenarioActionV2::AgentStartCall {
+                    call_id,
+                    prompt,
+                    role,
+                    task_name,
+                    ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || prompt.is_empty()
+                    || prompt.len() > 4 * 1024
+                    || task_name.is_empty()
+                    || task_name.len() > 256
+                    || role
+                        .as_ref()
+                        .is_some_and(|role| role.is_empty() || role.len() > 256)
+                    || !agent_start_call_ids.insert(call_id.as_str())
+                    || agent_start_call_ids.len() > 1
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::AgentStartResult {
+                            call_id: result_id,
+                            ..
+                        }) if result_id == call_id
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "scenario requires exactly one unique bounded adjacent agent_start call/result pair",
+                    ));
+                }
+                ScenarioActionV2::AgentStartResult { call_id, .. }
+                    if call_id.is_empty()
+                        || call_id.len() > 256
+                        || !matches!(
+                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                            Some(ScenarioActionV2::AgentStartCall {
+                                call_id: request_id,
+                                ..
+                            }) if request_id == call_id
+                        ) =>
+                {
+                    return Err(ClientError::handler(
+                        "agent_start result must have a bounded matching prior call",
+                    ));
+                }
+                ScenarioActionV2::WatchNotifications { notifications, .. }
+                    if notifications.is_empty()
+                        || notifications.len() > 4
+                        || notifications.iter().any(|notification| match notification {
+                            crate::WatchNotificationV2::Response { content }
+                            | crate::WatchNotificationV2::Prompt { content } => {
+                                content.is_empty() || content.len() > 4 * 1024
+                            }
+                            crate::WatchNotificationV2::TurnState { .. } => false,
+                        }) =>
+                {
+                    return Err(ClientError::handler(
+                        "watch notification batches require 1..=4 bounded notifications",
                     ));
                 }
                 ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }

@@ -4,9 +4,9 @@
 mod tests;
 mod validation;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -15,18 +15,21 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension, TauExtensionRunner};
 use tau_proto::{
-    CborValue, ClientKind, ContentPart, ContextItem, ContextRecoveryDisposition, ContextRole,
-    Effort, Event, EventName, InputModality, MessageItem, ProviderModelInfo,
-    ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
+    AgentMessageReceived, CborValue, ClientKind, ContentPart, ContextItem,
+    ContextRecoveryDisposition, ContextRole, Effort, Event, EventName, InputModality, MessageItem,
+    ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
     ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
     ToolCallItem, ToolName, ToolType, Verbosity,
 };
 use validation::{validate_v1, validate_v2};
 
-use crate::scenario::{FAKE_MODEL_ID, ScenarioActionV2, ScenarioTurnV1, ScenarioV1, ScenarioV2};
+use crate::scenario::{
+    FAKE_MODEL_ID, ScenarioActionV2, ScenarioTurnV1, ScenarioV1, ScenarioV2, WatchNotificationV2,
+};
 
 const MAX_TURNS: usize = 8;
 const MAX_SCENARIO_BYTES: usize = 16 * 1024;
+const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
 const MAX_DELTAS: usize = 8;
 
 /// Runs the deterministic provider over standard input/output.
@@ -78,6 +81,23 @@ struct FakeState {
     holds: HashMap<tau_proto::AgentPromptId, PendingHold>,
     /// Pending deterministic barrier participants.
     barriers: HashMap<String, Vec<BarrierParticipant>>,
+    /// Non-initial model-visible watch deliveries awaiting one provider prompt.
+    watch_notifications: HashMap<tau_proto::AgentId, VecDeque<AgentMessageReceived>>,
+    /// Child identities learned from exact successful `agent_start` results.
+    child_agents: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
+    /// Count of exact watch notifications consumed by a staged action.
+    watch_progress: HashMap<tau_proto::AgentId, usize>,
+    /// Subscription/generation correlation retained across staged watch
+    /// prompts.
+    watch_turn_correlations: HashMap<tau_proto::AgentId, WatchTurnCorrelation>,
+}
+
+/// Stable correlation shared by one action's non-initial turn notifications.
+struct WatchTurnCorrelation {
+    /// Harness-minted watch subscription identity.
+    subscription_id: String,
+    /// Harness-minted watched-agent outer-turn generation.
+    turn_generation: u64,
 }
 
 struct PendingHold {
@@ -125,6 +145,8 @@ struct CursorCheckpoint {
     cursors: Vec<usize>,
     /// Durable immutable agent-to-lane associations.
     agent_lanes: Vec<AgentLaneCheckpoint>,
+    /// Durable parent-to-child identities learned from successful starts.
+    child_agents: Vec<ChildAgentCheckpoint>,
 }
 
 /// One immutable durable agent-to-lane association.
@@ -137,12 +159,25 @@ struct AgentLaneCheckpoint {
     lane_index: usize,
 }
 
+/// One immutable parent-to-child association learned from an `agent_start`
+/// result.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChildAgentCheckpoint {
+    /// Parent agent that issued the exact start call.
+    parent_agent_id: tau_proto::AgentId,
+    /// Harness-minted child agent returned by the tool.
+    child_agent_id: tau_proto::AgentId,
+}
+
 /// Validated state loaded from a checkpoint or initialized empty.
 struct RestoredScenarioState {
     /// Validated next action index for each lane.
     cursors: Vec<usize>,
     /// Validated immutable live-agent lane associations.
     agent_lanes: HashMap<tau_proto::AgentId, usize>,
+    /// Validated immutable parent-to-child associations.
+    child_agents: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
 }
 
 impl TauExtension for FakeProvider {
@@ -173,6 +208,7 @@ impl TauExtension for FakeProvider {
                 cx.state.scenario = Some(cx.config.scenario);
                 cx.state.lane_cursors = restored.cursors;
                 cx.state.agent_lanes = restored.agent_lanes;
+                cx.state.child_agents = restored.child_agents;
                 cx.state.checkpoint = checkpoint;
                 cx.state.trace = Some(Arc::new(Mutex::new(trace)));
                 cx.handle
@@ -187,6 +223,15 @@ impl TauExtension for FakeProvider {
                         return Ok(());
                     };
                     cx.state.handle_prompt(prompt, &handle)
+                },
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_MESSAGE_RECEIVED),
+                |cx| {
+                    let Event::AgentMessageReceived(message) = cx.delivery.event() else {
+                        return Ok(());
+                    };
+                    cx.state.record_watch_notification(message)
                 },
             )
             .on_raw_live(
@@ -235,6 +280,275 @@ fn model_snapshot() -> ProviderModelsDeclared {
 }
 
 impl FakeState {
+    fn record_watch_notification(&mut self, message: &AgentMessageReceived) -> ClientResult<()> {
+        let model_visible = match message.kind {
+            tau_proto::AgentMessageKind::WatchResponse
+            | tau_proto::AgentMessageKind::WatchPrompt => true,
+            tau_proto::AgentMessageKind::WatchTurnState => message
+                .watch_turn_state
+                .as_ref()
+                .is_some_and(|state| !state.initial),
+            _ => false,
+        };
+        if !model_visible {
+            return Ok(());
+        }
+        let Some(expected_child) = self.child_agents.get(&message.recipient_id) else {
+            return Err(ClientError::handler(
+                "unexpected model-visible watch recipient",
+            ));
+        };
+        if expected_child != &message.sender_id {
+            return Err(ClientError::handler(
+                "unexpected model-visible watch sender",
+            ));
+        }
+        let Some(lane_index) = self.agent_lanes.get(&message.recipient_id).copied() else {
+            return Err(ClientError::handler(
+                "watch recipient has no validated scenario lane",
+            ));
+        };
+        let cursor = self.lane_cursors.get(lane_index).copied().unwrap_or(0);
+        let progress = self
+            .watch_progress
+            .get(&message.recipient_id)
+            .copied()
+            .unwrap_or_default();
+        let queued = self
+            .watch_notifications
+            .get(&message.recipient_id)
+            .map(VecDeque::len)
+            .unwrap_or_default();
+        let next = progress + queued;
+        let expected_notification = self
+            .v2()?
+            .lanes
+            .get(lane_index)
+            .and_then(|lane| lane.actions.get(cursor))
+            .and_then(|action| match action {
+                ScenarioActionV2::WatchNotifications { notifications, .. } => {
+                    notifications.get(next).cloned()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| ClientError::handler("watch delivery has no current closed action"))?;
+        self.validate_watch_notification_payload(
+            cursor,
+            &message.recipient_id,
+            message,
+            &expected_notification,
+        )?;
+        self.watch_notifications
+            .entry(message.recipient_id.clone())
+            .or_default()
+            .push_back(message.clone());
+        Ok(())
+    }
+
+    fn validate_watch_notification_payload(
+        &mut self,
+        cursor: usize,
+        recipient_id: &tau_proto::AgentId,
+        message: &AgentMessageReceived,
+        expected: &WatchNotificationV2,
+    ) -> ClientResult<()> {
+        match expected {
+            WatchNotificationV2::Response { content }
+                if message.kind == tau_proto::AgentMessageKind::WatchResponse
+                    && message.watch_turn_state.is_none()
+                    && message.watch_provider_status.is_none()
+                    && &message.message == content =>
+            {
+                Ok(())
+            }
+            WatchNotificationV2::Prompt { content }
+                if message.kind == tau_proto::AgentMessageKind::WatchPrompt
+                    && message.watch_turn_state.is_none()
+                    && message.watch_provider_status.is_none()
+                    && &message.message == content =>
+            {
+                Ok(())
+            }
+            WatchNotificationV2::TurnState { state }
+                if message.kind == tau_proto::AgentMessageKind::WatchTurnState
+                    && message.watch_provider_status.is_none() =>
+            {
+                let Some(notification) = &message.watch_turn_state else {
+                    return Err(self.mismatch(cursor, "watch turn state lacks typed payload"));
+                };
+                if notification.initial || notification.state != *state {
+                    return Err(self.mismatch(cursor, "watch turn state payload mismatch"));
+                }
+                match self.watch_turn_correlations.get(recipient_id) {
+                    Some(correlation)
+                        if correlation.subscription_id != notification.subscription_id
+                            || correlation.turn_generation != notification.turn_generation =>
+                    {
+                        Err(self.mismatch(cursor, "watch turn correlation changed in batch"))
+                    }
+                    Some(_) => Ok(()),
+                    None => {
+                        self.watch_turn_correlations.insert(
+                            recipient_id.clone(),
+                            WatchTurnCorrelation {
+                                subscription_id: notification.subscription_id.clone(),
+                                turn_generation: notification.turn_generation,
+                            },
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            _ => Err(self.mismatch(cursor, "watch notification typed payload mismatch")),
+        }
+    }
+
+    fn handle_watch_batch_prompt(
+        &mut self,
+        lane_index: usize,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        expected: Vec<WatchNotificationV2>,
+        response: String,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
+        let progress = self
+            .watch_progress
+            .get(&prompt.agent_id)
+            .copied()
+            .unwrap_or_default();
+        let queued_len = self
+            .watch_notifications
+            .get(&prompt.agent_id)
+            .map(VecDeque::len)
+            .unwrap_or_default();
+        if queued_len == 0 || progress >= expected.len() {
+            return Err(self.mismatch(cursor, "watch batch stage is empty or over-consumed"));
+        }
+        self.validate_watch_notification_messages(
+            cursor,
+            prompt,
+            &expected[progress..progress + 1],
+        )?;
+        self.agent_lanes
+            .entry(prompt.agent_id.clone())
+            .or_insert(lane_index);
+        let queued = self
+            .watch_notifications
+            .get_mut(&prompt.agent_id)
+            .expect("validated watch queue exists");
+        queued.pop_front();
+        if queued.is_empty() {
+            self.watch_notifications.remove(&prompt.agent_id);
+        }
+        handle.emit_transient(Event::ProviderPromptSubmittedReported(
+            ProviderPromptSubmitted {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                originator: prompt.originator.clone(),
+            },
+        ))?;
+        let next_progress = progress + 1;
+        let terminal_response = if next_progress == expected.len() {
+            self.watch_progress.remove(&prompt.agent_id);
+            self.watch_turn_correlations.remove(&prompt.agent_id);
+            self.lane_cursors[lane_index] += 1;
+            self.persist_cursors()?;
+            response
+        } else {
+            self.watch_progress
+                .insert(prompt.agent_id.clone(), next_progress);
+            "watch notification accepted".to_owned()
+        };
+        handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![assistant_message(terminal_response)],
+            ProviderStopReason::EndTurn,
+        )))
+    }
+
+    fn validate_watch_notification_messages(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        expected: &[WatchNotificationV2],
+    ) -> ClientResult<()> {
+        let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id).cloned() else {
+            return Err(self.mismatch(cursor, "watch prompt has no validated child identity"));
+        };
+        let actual = self
+            .watch_notifications
+            .get(&prompt.agent_id)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .take(expected.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if actual.len() != expected.len() {
+            self.trace(&format!(
+                "watch batch expected={} actual={:?}",
+                expected.len(),
+                actual
+                    .iter()
+                    .map(|message| (
+                        message.kind,
+                        message.watch_turn_state.as_ref().map(|state| (
+                            state.state,
+                            state.initial,
+                            state.turn_generation
+                        ))
+                    ))
+                    .collect::<Vec<_>>()
+            ))?;
+            return Err(self.mismatch(cursor, "watch notification batch length mismatch"));
+        }
+        let mut expected_user_text = Vec::new();
+        for (message, expected) in actual.iter().zip(expected) {
+            if message.sender_id != child_agent_id || message.recipient_id != prompt.agent_id {
+                return Err(self.mismatch(cursor, "watch notification agent identity mismatch"));
+            }
+            let text = match expected {
+                WatchNotificationV2::Response { content } => {
+                    format!(
+                        "[tau-internal]: Watched agent {child_agent_id} emitted a response\n\n\
+                         <response>\n{}\n</response>",
+                        xml_escape(content)
+                    )
+                }
+                WatchNotificationV2::Prompt { content } => {
+                    format!(
+                        "[tau-internal]: Watched agent {child_agent_id} received a user prompt\n\n\
+                         <prompt>\n{}\n</prompt>",
+                        xml_escape(content)
+                    )
+                }
+                WatchNotificationV2::TurnState { state } => match state {
+                    tau_proto::AgentRuntimeState::Running => {
+                        format!(
+                            "[tau-internal]: Watched agent {child_agent_id} started an agent turn"
+                        )
+                    }
+                    tau_proto::AgentRuntimeState::Idle => {
+                        format!(
+                            "[tau-internal]: Watched agent {child_agent_id} stopped its agent turn"
+                        )
+                    }
+                },
+            };
+            expected_user_text.push(text);
+        }
+        let actual_user_text = user_texts(prompt);
+        if !actual_user_text.ends_with(&expected_user_text) {
+            self.trace(&format!(
+                "watch markup expected={expected_user_text:?} actual={actual_user_text:?}"
+            ))?;
+            return Err(self.mismatch(cursor, "watch notification prompt markup mismatch"));
+        }
+        Ok(())
+    }
+
     fn handle_prompt(
         &mut self,
         prompt: &tau_proto::AgentPromptCreated,
@@ -382,24 +696,7 @@ impl FakeState {
         {
             return Err(self.mismatch(0, "model/operation mismatch"));
         }
-        let lane_index = if let Some(lane) = self.agent_lanes.get(&prompt.agent_id) {
-            *lane
-        } else if let Some(ctx_id) = prompt.ctx_id.as_deref() {
-            let scenario = self.v2()?;
-            scenario
-                .lanes
-                .iter()
-                .position(|lane| lane.ctx_id == ctx_id)
-                .ok_or_else(|| {
-                    ClientError::handler("scenario first mismatch: unknown lane ctx_id")
-                })?
-        } else if self.v2()?.lanes.len() == 1 {
-            0
-        } else {
-            return Err(ClientError::handler(
-                "scenario first mismatch: initial prompt without ctx_id requires one lane",
-            ));
-        };
+        let lane_index = self.select_v2_lane(prompt)?;
         let cursor = self.lane_cursors.get(lane_index).copied().unwrap_or(0);
         let (action, action_count, lane_id) = {
             let scenario = self.v2()?;
@@ -415,6 +712,40 @@ impl FakeState {
                 "scenario first mismatch: lane {lane_id} already consumed"
             )));
         };
+        if let ScenarioActionV2::WatchNotifications {
+            notifications,
+            response,
+        } = action
+        {
+            self.trace(&format!(
+                "lane={lane_id} action={cursor} prompt_id={}",
+                prompt.agent_prompt_id
+            ))?;
+            let before = self.lane_cursors[lane_index];
+            self.handle_watch_batch_prompt(
+                lane_index,
+                cursor,
+                prompt,
+                notifications,
+                response,
+                handle,
+            )?;
+            if self.lane_cursors[lane_index] != before {
+                self.trace(&format!(
+                    "lane={lane_id} action={cursor} matched remaining={}",
+                    action_count - self.lane_cursors[lane_index]
+                ))?;
+            } else {
+                self.trace(&format!(
+                    "lane={lane_id} action={cursor} staged watch_progress={}",
+                    self.watch_progress
+                        .get(&prompt.agent_id)
+                        .copied()
+                        .unwrap_or_default()
+                ))?;
+            }
+            return Ok(());
+        }
         self.validate_and_commit_v2_action(lane_index, cursor, prompt, &action)?;
         self.trace(&format!(
             "lane={lane_id} action={cursor} prompt_id={}",
@@ -432,6 +763,74 @@ impl FakeState {
         ))?;
 
         self.emit_v2_action(prompt, handle, action)
+    }
+
+    fn select_v2_lane(&self, prompt: &tau_proto::AgentPromptCreated) -> ClientResult<usize> {
+        if let Some(lane) = self.agent_lanes.get(&prompt.agent_id) {
+            return Ok(*lane);
+        }
+        let lane_index = if let Some(ctx_id) = prompt.ctx_id.as_deref() {
+            let scenario = self.v2()?;
+            scenario
+                .lanes
+                .iter()
+                .position(|lane| lane.ctx_id == ctx_id)
+                .ok_or_else(|| {
+                    ClientError::handler("scenario first mismatch: unknown lane ctx_id")
+                })?
+        } else if self.v2()?.lanes.len() == 1 {
+            0
+        } else {
+            if !self
+                .child_agents
+                .values()
+                .any(|child_agent_id| child_agent_id == &prompt.agent_id)
+            {
+                return Err(ClientError::handler(
+                    "scenario first mismatch: no-context agent is not the validated child",
+                ));
+            }
+            let actual = latest_user_text(prompt);
+            let candidates = self
+                .v2()?
+                .lanes
+                .iter()
+                .enumerate()
+                .filter(|(index, lane)| {
+                    self.lane_cursors.get(*index) == Some(&0)
+                        && !self.agent_lanes.values().any(|bound| bound == index)
+                        && lane
+                            .actions
+                            .first()
+                            .and_then(ScenarioActionV2::binding_user_text)
+                            == actual.as_deref()
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [index] => *index,
+                [] => {
+                    return Err(ClientError::handler(
+                        "scenario first mismatch: initial prompt matched no unbound lane",
+                    ));
+                }
+                _ => {
+                    return Err(ClientError::handler(
+                        "scenario first mismatch: initial prompt matched ambiguous lanes",
+                    ));
+                }
+            }
+        };
+        if self
+            .agent_lanes
+            .values()
+            .any(|bound_lane| *bound_lane == lane_index)
+        {
+            return Err(ClientError::handler(
+                "scenario first mismatch: lane is already bound to another agent",
+            ));
+        }
+        Ok(lane_index)
     }
 
     fn emit_v2_action(
@@ -467,6 +866,30 @@ impl FakeState {
                 call_id, response, ..
             } => {
                 let _ = call_id;
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
+            ScenarioActionV2::AgentStartCall {
+                call_id,
+                prompt: child_prompt,
+                role,
+                task_name,
+                ..
+            } => {
+                let mut fields = vec![
+                    ("task_name", CborValue::Text(task_name)),
+                    ("prompt", CborValue::Text(child_prompt)),
+                ];
+                if let Some(role) = role {
+                    fields.push(("role", CborValue::Text(role)));
+                }
+                emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
+            }
+            ScenarioActionV2::AgentStartResult { response, .. }
+            | ScenarioActionV2::WatchNotifications { response, .. } => {
                 handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
                     prompt,
                     vec![assistant_message(response)],
@@ -741,6 +1164,90 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
             }
+            ScenarioActionV2::AgentStartCall { .. } => {
+                let expected_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_name": {
+                            "type": "string",
+                            "description": "Short user-visible label for the sub-task (a few words)."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Self-contained task for the sub-agent."
+                        },
+                        "role": {
+                            "type": "string",
+                            "description": "Optional sub-agent role to use."
+                        }
+                    },
+                    "required": ["task_name", "prompt"],
+                    "additionalProperties": false
+                });
+                if prompt.tools.len() != 1
+                    || prompt.tools[0].name.as_str() != "agent_start"
+                    || prompt.tools[0].tool_type != ToolType::Function
+                    || prompt.tools[0].parameters.as_ref() != Some(&expected_schema)
+                {
+                    self.trace(&format!(
+                        "agent_start tools={}",
+                        serde_json::to_string(&prompt.tools)
+                            .unwrap_or_else(|_| "<unserializable>".to_owned())
+                    ))?;
+                    return Err(self.mismatch(cursor, "agent_start tool snapshot mismatch"));
+                }
+            }
+            ScenarioActionV2::AgentStartResult { call_id, .. } => {
+                let results = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if results.len() != 1
+                    || results[0].call_id != *call_id
+                    || results[0].tool_type != ToolType::Function
+                    || results[0].status != tau_proto::ToolResultStatus::Success
+                {
+                    return Err(self.mismatch(cursor, "agent_start result continuity mismatch"));
+                }
+                let Some(self_agent_id) =
+                    cbor_map_text_field(&results[0].output.raw, "self_agent_id")
+                else {
+                    return Err(self.mismatch(cursor, "agent_start result lacks self_agent_id"));
+                };
+                let Some(child_agent_id) =
+                    cbor_map_text_field(&results[0].output.raw, "sub_agent_id")
+                else {
+                    return Err(self.mismatch(cursor, "agent_start result lacks sub_agent_id"));
+                };
+                let self_agent_id = tau_proto::AgentId::parse(self_agent_id)
+                    .map_err(|_| self.mismatch(cursor, "agent_start returned invalid self id"))?;
+                let child_agent_id = tau_proto::AgentId::parse(child_agent_id)
+                    .map_err(|_| self.mismatch(cursor, "agent_start returned invalid child id"))?;
+                let CborValue::Map(entries) = &results[0].output.raw else {
+                    return Err(self.mismatch(cursor, "agent_start result is not a map"));
+                };
+                if entries.len() != 2
+                    || self_agent_id != prompt.agent_id
+                    || child_agent_id == self_agent_id
+                {
+                    return Err(self.mismatch(cursor, "agent_start result identity mismatch"));
+                }
+                if self
+                    .child_agents
+                    .get(&self_agent_id)
+                    .is_some_and(|existing| existing != &child_agent_id)
+                {
+                    return Err(self.mismatch(cursor, "agent_start child identity changed"));
+                }
+                self.child_agents.insert(self_agent_id, child_agent_id);
+            }
+            ScenarioActionV2::WatchNotifications { .. } => {
+                return Err(self.mismatch(cursor, "watch batch bypassed bounded release"));
+            }
             ScenarioActionV2::CoreShellWorkdirCall { .. }
             | ScenarioActionV2::CoreShellResumeEditCall { .. } => {
                 let mut names = prompt
@@ -802,7 +1309,9 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         action: &ScenarioActionV2,
     ) -> ClientResult<()> {
-        self.require_v2_user_text(prompt, action.user_text())?;
+        if let Some(user_text) = action.binding_user_text() {
+            self.require_v2_user_text(prompt, user_text)?;
+        }
         self.validate_v2_action(cursor, prompt, action)?;
         self.agent_lanes
             .entry(prompt.agent_id.clone())
@@ -833,6 +1342,14 @@ impl FakeState {
                     lane_index: *lane_index,
                 })
                 .collect(),
+            child_agents: self
+                .child_agents
+                .iter()
+                .map(|(parent_agent_id, child_agent_id)| ChildAgentCheckpoint {
+                    parent_agent_id: parent_agent_id.clone(),
+                    child_agent_id: child_agent_id.clone(),
+                })
+                .collect(),
         };
         std::fs::write(
             &tmp,
@@ -850,24 +1367,11 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         expected: &str,
     ) -> ClientResult<()> {
-        let actual = prompt
-            .context
-            .flatten()
-            .into_iter()
-            .rev()
-            .find_map(|item| match item {
-                ContextItem::Message(message) if message.role == ContextRole::User => Some(
-                    message
-                        .content
-                        .into_iter()
-                        .map(|part| match part {
-                            ContentPart::Text { text } => text,
-                        })
-                        .collect::<String>(),
-                ),
-                _ => None,
-            });
+        let actual = latest_user_text(prompt);
         if actual.as_deref() != Some(expected) {
+            self.trace(&format!(
+                "last user expected={expected:?} actual={actual:?}"
+            ))?;
             return Err(self.mismatch(index, "last user text mismatch"));
         }
         Ok(())
@@ -923,11 +1427,13 @@ impl FakeState {
 }
 
 impl ScenarioActionV2 {
-    fn user_text(&self) -> &str {
+    fn binding_user_text(&self) -> Option<&str> {
         match self {
             Self::Text { user_text, .. }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
+            | Self::AgentStartCall { user_text, .. }
+            | Self::AgentStartResult { user_text, .. }
             | Self::CoreShellWorkdirCall { user_text, .. }
             | Self::CoreShellWorkdirResult { user_text, .. }
             | Self::CoreShellCreateResult { user_text, .. }
@@ -936,9 +1442,60 @@ impl ScenarioActionV2 {
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
-            | Self::BarrierText { user_text, .. } => user_text,
+            | Self::BarrierText { user_text, .. } => Some(user_text),
+            Self::WatchNotifications { .. } => None,
         }
     }
+}
+
+fn latest_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
+    user_texts(prompt).pop()
+}
+
+fn user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
+    prompt
+        .context
+        .flatten()
+        .into_iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(message) if message.role == ContextRole::User => Some(
+                message
+                    .content
+                    .into_iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+/// Mirrors the production watch-prompt XML escaping in `tau-harness::prompt`.
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn cbor_map(fields: Vec<(&str, CborValue)>) -> CborValue {
@@ -999,16 +1556,27 @@ impl ScenarioConfig {
             return Ok(RestoredScenarioState {
                 cursors: Vec::new(),
                 agent_lanes: HashMap::new(),
+                child_agents: HashMap::new(),
             });
         };
         let Some(path) = path else {
             return Ok(RestoredScenarioState {
                 cursors: vec![0; scenario.lanes.len()],
                 agent_lanes: HashMap::new(),
+                child_agents: HashMap::new(),
             });
         };
-        match std::fs::read(path) {
-            Ok(bytes) => {
+        match File::open(path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(MAX_CHECKPOINT_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| ClientError::handler(format!("read cursor: {error}")))?;
+                if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+                    return Err(ClientError::handler(
+                        "cursor checkpoint exceeds 65536 bytes",
+                    ));
+                }
                 let checkpoint: CursorCheckpoint = serde_json::from_slice(&bytes)
                     .map_err(|error| ClientError::handler(format!("decode cursor: {error}")))?;
                 if checkpoint.scenario != *scenario
@@ -1024,8 +1592,10 @@ impl ScenarioConfig {
                     ));
                 }
                 let mut agent_lanes = HashMap::new();
+                let mut bound_lanes = std::collections::HashSet::new();
                 for binding in checkpoint.agent_lanes {
                     if binding.lane_index >= scenario.lanes.len()
+                        || !bound_lanes.insert(binding.lane_index)
                         || agent_lanes
                             .insert(binding.agent_id, binding.lane_index)
                             .is_some()
@@ -1035,15 +1605,72 @@ impl ScenarioConfig {
                         ));
                     }
                 }
+                let consumed_start_parents = agent_lanes
+                    .iter()
+                    .filter_map(|(agent_id, lane_index)| {
+                        scenario.lanes[*lane_index]
+                            .actions
+                            .iter()
+                            .enumerate()
+                            .any(|(action_index, action)| {
+                                matches!(action, ScenarioActionV2::AgentStartResult { .. })
+                                    && checkpoint.cursors[*lane_index] > action_index
+                            })
+                            .then_some(agent_id.clone())
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                if checkpoint.child_agents.len() > 1
+                    || checkpoint.child_agents.len() != consumed_start_parents.len()
+                {
+                    return Err(ClientError::handler(
+                        "cursor checkpoint child bindings do not match consumed starts",
+                    ));
+                }
+                let mut child_agents = HashMap::new();
+                let mut children = std::collections::HashSet::new();
+                for binding in checkpoint.child_agents {
+                    let parent_lane = agent_lanes.get(&binding.parent_agent_id).copied();
+                    let consumed_start_result = parent_lane.is_some_and(|lane_index| {
+                        scenario.lanes[lane_index].actions.iter().enumerate().any(
+                            |(action_index, action)| {
+                                matches!(action, ScenarioActionV2::AgentStartResult { .. })
+                                    && checkpoint.cursors[lane_index] > action_index
+                            },
+                        )
+                    });
+                    let child_lane = agent_lanes.get(&binding.child_agent_id).copied();
+                    if binding.parent_agent_id == binding.child_agent_id
+                        || !consumed_start_result
+                        || child_lane == parent_lane
+                        || !children.insert(binding.child_agent_id.clone())
+                        || child_agents
+                            .insert(binding.parent_agent_id, binding.child_agent_id)
+                            .is_some()
+                    {
+                        return Err(ClientError::handler(
+                            "cursor checkpoint contains invalid child agent bindings",
+                        ));
+                    }
+                }
+                if child_agents
+                    .keys()
+                    .any(|parent| !consumed_start_parents.contains(parent))
+                {
+                    return Err(ClientError::handler(
+                        "cursor checkpoint child parent does not own a consumed start",
+                    ));
+                }
                 Ok(RestoredScenarioState {
                     cursors: checkpoint.cursors,
                     agent_lanes,
+                    child_agents,
                 })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(RestoredScenarioState {
                     cursors: vec![0; scenario.lanes.len()],
                     agent_lanes: HashMap::new(),
+                    child_agents: HashMap::new(),
                 })
             }
             Err(error) => Err(ClientError::handler(format!("read cursor: {error}"))),

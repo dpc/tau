@@ -47,12 +47,20 @@ impl DaemonGuard {
                 }
             }
         };
-        reap_process_group(self.pgid)?;
+        let clean_group_exit = wait_for_process_group_exit(self.pgid, Duration::from_secs(2));
+        if !clean_group_exit {
+            force_process_group_cleanup(self.pgid)?;
+        }
         if self.socket_path.exists() {
             return Err("daemon socket survived process-group cleanup".to_owned());
         }
         self.child.take();
         self.completed = true;
+        if !clean_group_exit {
+            return Err(
+                "daemon process group required forced cleanup after parent exit".to_owned(),
+            );
+        }
         if status.success() {
             Ok(())
         } else {
@@ -139,29 +147,53 @@ fn process_group_exists(pgid: nix::unistd::Pid) -> bool {
     nix::sys::signal::killpg(pgid, None).is_ok()
 }
 
-fn reap_process_group(pgid: nix::unistd::Pid) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_for_process_group_exit(pgid: nix::unistd::Pid, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline && process_group_exists(pgid) {
         thread::sleep(Duration::from_millis(5));
     }
-    if process_group_exists(pgid) {
-        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && process_group_exists(pgid) {
-            thread::sleep(Duration::from_millis(5));
-        }
+    !process_group_exists(pgid)
+}
+
+fn force_process_group_cleanup(pgid: nix::unistd::Pid) -> Result<(), String> {
+    let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
+    if wait_for_process_group_exit(pgid, Duration::from_secs(2)) {
+        return Ok(());
     }
-    if process_group_exists(pgid) {
-        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && process_group_exists(pgid) {
-            thread::sleep(Duration::from_millis(5));
-        }
+    let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+    if wait_for_process_group_exit(pgid, Duration::from_secs(2)) {
+        return Ok(());
     }
-    if process_group_exists(pgid) {
-        return Err("daemon process group survived SIGKILL cleanup".to_owned());
-    }
-    Ok(())
+    Err("daemon process group survived SIGKILL cleanup".to_owned())
+}
+
+/// Proves successful `finish` never repairs a leaked process-group member and
+/// reports success; forced termination remains failure containment only.
+#[test]
+fn daemon_finish_rejects_a_lingering_process_group_member() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let stderr_path = tempdir.path().join("daemon.stderr");
+    std::fs::write(&stderr_path, b"").expect("stderr file");
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30 & exit 0")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn lingering process group");
+    let pgid = nix::unistd::Pid::from_raw(child.id().try_into().expect("child pid fits i32"));
+    let guard = DaemonGuard {
+        child: Some(child),
+        completed: false,
+        stderr_path,
+        pgid,
+        socket_path: tempdir.path().join("absent.sock"),
+    };
+    let error = guard.finish().expect_err("lingering member must fail");
+    assert!(error.contains("required forced cleanup"), "{error}");
+    assert!(!process_group_exists(pgid));
 }
 
 pub(super) fn status_label(status: tau_harness::SessionLaunchStatus) -> &'static str {

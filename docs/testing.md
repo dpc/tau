@@ -64,7 +64,11 @@ real deterministic `tau-ext-test-dummy` tool continuation. `ScenarioV2` adds
 bounded exact-correlation lanes for typed failures, cancellation/timeout and
 same-agent post-cancel liveness,
 barriers, fatal disconnect, quiescent same-agent restore, and one closed
-`restart_test_dummy` call/result pair. Embedded and
+`restart_test_dummy` call/result pair. Its session-restore grammar also has one
+exact production `agent_start` pair, a harness-minted child binding, and bounded
+typed automatic-watch matching. The corresponding two-agent gate proves a
+completed durable worker cold-restores with its own route and transcript while
+the daemon-lifetime watch is absent. Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption
 acknowledgement retain the private generated configuration, scenario, durable

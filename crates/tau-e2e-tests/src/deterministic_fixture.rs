@@ -39,6 +39,13 @@ pub struct DeterministicFixture {
     failed: Cell<bool>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixtureMode {
+    Standard,
+    CoreShell,
+    SessionRestore,
+}
+
 impl DeterministicFixture {
     /// Creates a fixture using exact Cargo-built subprocess paths.
     ///
@@ -62,7 +69,7 @@ impl DeterministicFixture {
             1,
             fake_provider_bin,
             dummy_tool_bin,
-            false,
+            FixtureMode::Standard,
         )
     }
 
@@ -85,7 +92,30 @@ impl DeterministicFixture {
             scenario.lanes.len(),
             fake_provider_bin,
             None,
-            false,
+            FixtureMode::Standard,
+        )
+    }
+
+    /// Creates the two-role production-`agent_start` cold-resume fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, the exact provider binary,
+    /// generated role configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_session_restore(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            None,
+            FixtureMode::SessionRestore,
         )
     }
 
@@ -103,7 +133,7 @@ impl DeterministicFixture {
             scenario.lanes.len(),
             fake_provider_bin,
             None,
-            true,
+            FixtureMode::CoreShell,
         )
     }
 
@@ -114,8 +144,9 @@ impl DeterministicFixture {
         expected_lanes: usize,
         fake_provider_bin: impl AsRef<Path>,
         dummy_tool_bin: Option<PathBuf>,
-        core_shell_enabled: bool,
+        mode: FixtureMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let core_shell_enabled = mode == FixtureMode::CoreShell;
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
         let config_dir = root.join("config");
@@ -214,8 +245,27 @@ impl DeterministicFixture {
         } else {
             tools
         };
-        let config = serde_json::json!({
-            "agents": {
+        let role_config = if mode == FixtureMode::SessionRestore {
+            serde_json::json!({
+                "default_role": "deterministic-main",
+                "id_template": "main",
+                "role_groups": {
+                    "e2e": {
+                        "roles": {
+                            "deterministic-main": {
+                                "model": "fake/test",
+                                "tools": ["agent_start"],
+                            },
+                            "deterministic-worker": {
+                                "model": "fake/test",
+                                "tools": [],
+                            }
+                        }
+                    }
+                }
+            })
+        } else {
+            serde_json::json!({
                 "default_role": "deterministic-e2e",
                 "id_template": "main",
                 "role_groups": {
@@ -228,7 +278,10 @@ impl DeterministicFixture {
                         }
                     }
                 }
-            },
+            })
+        };
+        let config = serde_json::json!({
+            "agents": role_config,
             "extensions": extensions,
         });
         let config_bytes = serde_json::to_vec_pretty(&config)?;
@@ -353,6 +406,31 @@ impl DeterministicFixture {
     /// Reads the bounded provider semantic trace.
     pub fn trace(&self) -> Result<String, std::io::Error> {
         std::fs::read_to_string(&self.trace_path)
+    }
+
+    /// Verifies the generated S1 main/worker role, model, and tool projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated configuration differs from the
+    /// closed production-`agent_start` fixture surface.
+    pub fn assert_session_restore_roles(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            self.root().join("artifacts/harness-config.json"),
+        )?)?;
+        let agents = &config["agents"];
+        let roles = &agents["role_groups"]["e2e"]["roles"];
+        if agents["default_role"] != "deterministic-main"
+            || agents["id_template"] != "main"
+            || roles.as_object().is_none_or(|roles| roles.len() != 2)
+            || roles["deterministic-main"]["model"] != "fake/test"
+            || roles["deterministic-main"]["tools"] != serde_json::json!(["agent_start"])
+            || roles["deterministic-worker"]["model"] != "fake/test"
+            || roles["deterministic-worker"]["tools"] != serde_json::json!([])
+        {
+            return Err("generated session-restore role configuration changed".into());
+        }
+        Ok(())
     }
 
     /// Marks an intentionally asserted negative-case error as handled.

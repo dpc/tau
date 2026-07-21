@@ -1,7 +1,7 @@
 //! Strict, versioned scenarios understood by the deterministic fake provider.
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ProviderFailureKind, ToolCallId, ToolName};
+use tau_proto::{AgentRuntimeState, ProviderFailureKind, ToolCallId, ToolName};
 
 /// Fully-qualified model published by every deterministic scenario.
 pub const FAKE_MODEL_ID: &str = "fake/test";
@@ -36,7 +36,9 @@ pub struct ScenarioV2 {
 #[serde(deny_unknown_fields)]
 pub struct ScenarioLaneV2 {
     /// Exact `ctx_id` copied from the lane's initial UI submission. A one-lane
-    /// public-PTY scenario may bind its first agent when the UI supplies no id.
+    /// public-PTY scenario may bind its first agent when the UI supplies no id;
+    /// a multi-lane session-restore scenario may instead bind only the exact
+    /// harness-minted child by unique configured first-prompt text.
     pub ctx_id: String,
     /// Exact ordered actions for this lane.
     pub actions: Vec<ScenarioActionV2>,
@@ -67,6 +69,36 @@ pub enum ScenarioActionV2 {
         /// Exact provider-authored call identity.
         call_id: ToolCallId,
         /// Complete assistant response after the tool result.
+        response: String,
+    },
+    /// Request the production harness-owned `agent_start` tool.
+    AgentStartCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact self-contained child prompt.
+        prompt: String,
+        /// Optional exact child role.
+        role: Option<String>,
+        /// Exact user-visible child task name.
+        task_name: String,
+    },
+    /// Accept the correlated immediate `agent_start` result and finish with
+    /// text.
+    AgentStartResult {
+        /// Exact latest user text retained in the provider continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant response after the tool result.
+        response: String,
+    },
+    /// Match one complete model-visible batch of automatic watch notifications.
+    WatchNotifications {
+        /// Ordered logical batch consumed one notification per provider prompt.
+        notifications: Vec<WatchNotificationV2>,
+        /// Complete assistant response after consuming the batch.
         response: String,
     },
     /// Request the closed Gate 2 relative `workdir("project")` operation.
@@ -147,6 +179,27 @@ pub enum ScenarioActionV2 {
         participants: usize,
         /// Lane-local assistant response.
         response: String,
+    },
+}
+
+/// One closed automatic watch notification expected by a V2 action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WatchNotificationV2 {
+    /// The watched child produced its final response.
+    Response {
+        /// Exact unescaped child response content.
+        content: String,
+    },
+    /// The watched child accepted a direct user prompt.
+    Prompt {
+        /// Exact unescaped child prompt content.
+        content: String,
+    },
+    /// The watched child changed outer-turn state.
+    TurnState {
+        /// Exact non-initial runtime state.
+        state: AgentRuntimeState,
     },
 }
 

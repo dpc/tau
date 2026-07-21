@@ -60,9 +60,9 @@ pub use crate::daemon::{
     run_component_with_internal_tools,
     run_component_with_internal_tools_and_extension_cli_overrides,
     run_component_with_internal_tools_and_initial_ui_stdio, run_daemon, run_daemon_with_config,
-    run_embedded_message, run_embedded_message_with_options, run_embedded_message_with_trace,
-    run_harness_daemon, run_harness_daemon_with_internal_tools, send_daemon_message,
-    send_daemon_message_with_trace,
+    run_daemon_with_internal_tools, run_embedded_message, run_embedded_message_with_options,
+    run_embedded_message_with_trace, run_harness_daemon, run_harness_daemon_with_internal_tools,
+    send_daemon_message, send_daemon_message_with_trace,
 };
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};

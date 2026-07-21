@@ -3708,6 +3708,7 @@ dependencies = [
  "tau-core",
  "tau-ext-test-dummy",
  "tau-harness",
+ "tau-harness-tools",
  "tau-proto",
  "tau-socket",
  "tau-vcr",

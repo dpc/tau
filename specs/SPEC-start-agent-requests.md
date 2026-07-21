@@ -64,13 +64,20 @@ agent, session, and restore journals for either caller-supplied
 Canonical child lifecycle, membership, transcript, acceptance, and result
 behavior retains its existing classification.
 
-After a tool-backed worker completes, its durable child lifecycle remains
-loaded and addressable independently of the completed request. Cold restore
-preserves historical prompt/result provenance but does not reconstruct the
-run-local request owner or result route. A fresh user turn is ordinary agent
-work: its terminal response neither emits another `agent.start_result` nor
-unloads the worker. The immutable `agent.started` parent supplies the restored
-delegated navigation default. See
+After a parented worker completes, its durable child lifecycle remains loaded
+and addressable independently of the completed request. This includes both a
+tool-backed start and an explicit-parent typed `agent.start_request` with no
+`tool_call_id`. Completion emits exactly one terminal result, detaches the
+run-local request owner and result route, and does not emit
+`session.agent_unloaded`. Cold restore applies the same state when termination
+occurred after durable terminal evidence but before warm detachment. A fresh
+user turn is ordinary agent work: its terminal response neither emits another
+`agent.start_result` nor unloads the worker. The immutable `agent.started`
+parent supplies the restored delegated navigation default.
+
+A parentless non-tool typed start remains a one-shot side query and unloads
+after its terminal result. Peer auto-start entrypoints retain their separate
+ordinary loaded-agent lifecycle and never enter side-query completion. See
 [DECISION-cold-restored-completed-worker-ownership](DECISION-cold-restored-completed-worker-ownership.md).
 
 `tau-ext-std-notifications` explicitly emits transient requests for idle-summary

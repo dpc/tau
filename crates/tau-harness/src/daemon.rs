@@ -673,6 +673,24 @@ pub fn run_daemon(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
+    run_daemon_with_internal_tools(
+        socket_path,
+        state_dir,
+        eager_session_id,
+        options,
+        Vec::new(),
+    )
+}
+
+/// Runs a foreground socket daemon with harness-owned tool handlers installed
+/// before agent rehydration and configured-extension readiness.
+pub fn run_daemon_with_internal_tools(
+    socket_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
+    eager_session_id: &str,
+    options: ServeOptions,
+    internal_tool_handlers: crate::InternalToolHandlers,
+) -> Result<(), HarnessError> {
     validate_serve_options(&options)?;
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
@@ -702,25 +720,26 @@ pub fn run_daemon(
         }
     };
     validate_allowed_extensions(&config, options.allowed_extensions.as_ref())?;
-    let mut harness = if options.ignore_startup_environment {
-        Harness::from_config_without_startup_environment(
-            &config,
-            state_dir,
-            dirs,
-            eager_session_id,
-            session_start_reason(options.session_status),
-            options.session_persistence,
-        )
-    } else {
-        Harness::from_config(
-            &config,
-            state_dir,
-            dirs,
-            eager_session_id,
-            session_start_reason(options.session_status),
-            options.session_persistence,
-        )
-    }?;
+    let mut initial_client_error_stream = None;
+    let project_root = std::env::current_dir()?.canonicalize()?;
+    let (mut harness, initial_client_id) = Harness::from_config_with_initial_client(
+        &config,
+        state_dir,
+        dirs,
+        eager_session_id,
+        HarnessSessionLaunch {
+            reason: session_start_reason(options.session_status),
+            session_persistence: options.session_persistence,
+        },
+        HarnessStartupInputs {
+            initial_client: None,
+            internal_tool_handlers,
+            ignore_startup_environment: options.ignore_startup_environment,
+            project_root,
+        },
+        &mut initial_client_error_stream,
+    )?;
+    debug_assert!(initial_client_id.is_none());
 
     let tx = harness.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;

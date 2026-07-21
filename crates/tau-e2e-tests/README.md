@@ -20,7 +20,9 @@ The acceptance cases cover streaming/final text, a successful tool round
 through `tau-ext-test-dummy`, typed errors followed by an explicit later turn,
 exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
 provider disconnect without restart,
-clean resume, concurrent lane isolation, and startup rejection of invalid
+clean resume, concurrent lane isolation, one production-`agent_start`
+main/worker cold resume with a preserved worker route and dropped automatic
+watch, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
@@ -37,6 +39,11 @@ The independent headless `cancellation_liveness` gate holds two exact provider
 lanes, cancels each harness-minted prompt id once, and then completes a fresh
 prompt on the second selected agent's existing lane. It does not exercise PTY
 restore or core-shell.
+The `session_restore` case uses the production harness-owned `agent_start`
+built-in under exact two-role policy. It cleanly replaces the daemon, restores
+the completed durable worker as an idle independently addressable
+conversation, and proves the old automatic watch does not re-fan out fresh
+worker activity.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

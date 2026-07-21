@@ -181,6 +181,348 @@ fn v2_dummy_tool_actions_require_an_adjacent_matching_pair() {
     );
 }
 
+/// Ensures production `agent_start` remains one exact, bounded, adjacent
+/// call/result pair rather than a generic harness-tool grammar.
+#[test]
+fn v2_agent_start_actions_require_one_bounded_adjacent_pair() {
+    let pair = agent_start_scenario();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(pair.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let mut mismatched = pair.clone();
+    let ScenarioActionV2::AgentStartResult { call_id, .. } = &mut mismatched.lanes[0].actions[1]
+    else {
+        unreachable!()
+    };
+    *call_id = "other".into();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(mismatched)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut unpaired = pair.clone();
+    unpaired.lanes[0].actions.pop();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(unpaired)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut repeated = pair.clone();
+    repeated.lanes[0]
+        .actions
+        .extend(pair.lanes[0].actions.clone());
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(repeated)
+        }
+        .validate()
+        .is_err()
+    );
+
+    for invalid in [String::new(), "x".repeat(4 * 1024 + 1)] {
+        let mut bounded = pair.clone();
+        let ScenarioActionV2::AgentStartCall { prompt, .. } = &mut bounded.lanes[0].actions[0]
+        else {
+            unreachable!()
+        };
+        *prompt = invalid;
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(bounded)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+/// Ensures automatic-watch batches reject empty, oversized, or unbounded
+/// content before the provider can subscribe to live traffic.
+#[test]
+fn v2_watch_notification_actions_are_closed_and_bounded() {
+    let action = |notifications| ScenarioActionV2::WatchNotifications {
+        notifications,
+        response: "complete".to_owned(),
+    };
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(v2_action(action(vec![
+                WatchNotificationV2::TurnState {
+                    state: tau_proto::AgentRuntimeState::Running,
+                },
+                WatchNotificationV2::Response {
+                    content: "done".to_owned(),
+                },
+                WatchNotificationV2::TurnState {
+                    state: tau_proto::AgentRuntimeState::Idle,
+                },
+            ])))
+        }
+        .validate()
+        .is_ok()
+    );
+    for notifications in [
+        Vec::new(),
+        vec![
+            WatchNotificationV2::TurnState {
+                state: tau_proto::AgentRuntimeState::Running,
+            };
+            5
+        ],
+        vec![WatchNotificationV2::Response {
+            content: String::new(),
+        }],
+        vec![WatchNotificationV2::Prompt {
+            content: "x".repeat(4 * 1024 + 1),
+        }],
+    ] {
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(v2_action(action(notifications)))
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+/// Rejects unrelated, malformed, re-correlated, and excess live watch records
+/// without advancing the lane cursor or admitting the bad record.
+#[test]
+fn v2_watch_runtime_mismatches_leave_the_action_unconsumed() {
+    let notifications = vec![
+        WatchNotificationV2::TurnState {
+            state: tau_proto::AgentRuntimeState::Running,
+        },
+        WatchNotificationV2::Response {
+            content: "done".to_owned(),
+        },
+        WatchNotificationV2::TurnState {
+            state: tau_proto::AgentRuntimeState::Idle,
+        },
+    ];
+    let scenario = v2_action(ScenarioActionV2::WatchNotifications {
+        notifications,
+        response: "complete".to_owned(),
+    });
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![0];
+    state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
+    state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+
+    let mut wrong_sender = watch_turn(
+        &parent,
+        &tau_proto::AgentId::parse("other").expect("other id"),
+        tau_proto::AgentRuntimeState::Running,
+        7,
+    );
+    assert!(state.record_watch_notification(&wrong_sender).is_err());
+    assert!(state.watch_notifications.is_empty());
+
+    wrong_sender.sender_id = child.clone();
+    state
+        .record_watch_notification(&wrong_sender)
+        .expect("exact running notification");
+    assert_eq!(state.watch_notifications[&parent].len(), 1);
+
+    let mut wrong_content = watch_response(&parent, &child, "other");
+    assert!(state.record_watch_notification(&wrong_content).is_err());
+    assert_eq!(state.watch_notifications[&parent].len(), 1);
+    wrong_content.message = "done".to_owned();
+    state
+        .record_watch_notification(&wrong_content)
+        .expect("exact response notification");
+
+    let wrong_generation = watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 8);
+    assert!(state.record_watch_notification(&wrong_generation).is_err());
+    assert_eq!(state.watch_notifications[&parent].len(), 2);
+    let idle = watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 7);
+    state
+        .record_watch_notification(&idle)
+        .expect("exact idle notification");
+    assert!(state.record_watch_notification(&idle).is_err());
+    assert_eq!(state.watch_notifications[&parent].len(), 3);
+    assert_eq!(state.lane_cursors, [0]);
+    assert_eq!(state.agent_lanes.get(&parent), Some(&0));
+}
+
+/// Allows no-context multi-lane binding only for the exact retained child and
+/// only when its first prompt selects one unique unbound lane.
+#[test]
+fn v2_no_context_lane_binding_requires_the_unique_retained_child() {
+    let scenario = ScenarioV2::new(
+        "child-binding",
+        vec![
+            ScenarioLaneV2 {
+                ctx_id: "main".to_owned(),
+                actions: vec![ScenarioActionV2::Text {
+                    user_text: "main".to_owned(),
+                    response: "main".to_owned(),
+                }],
+            },
+            ScenarioLaneV2 {
+                ctx_id: "worker".to_owned(),
+                actions: vec![ScenarioActionV2::Text {
+                    user_text: "worker".to_owned(),
+                    response: "worker".to_owned(),
+                }],
+            },
+        ],
+    );
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![0, 0];
+    state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
+    state.child_agents = HashMap::from([(parent, child.clone())]);
+    assert_eq!(
+        state
+            .select_v2_lane(&prompt_for(&child, "worker", None))
+            .expect("unique retained child binds"),
+        1
+    );
+    let other = tau_proto::AgentId::parse("other").expect("other id");
+    assert!(
+        state
+            .select_v2_lane(&prompt_for(&other, "worker", None))
+            .is_err()
+    );
+    assert!(
+        state
+            .select_v2_lane(&prompt_for(&other, "main", Some("main")))
+            .is_err()
+    );
+
+    let ScenarioConfig::V2(scenario) = state.scenario.as_mut().expect("scenario") else {
+        unreachable!()
+    };
+    scenario.lanes.push(ScenarioLaneV2 {
+        ctx_id: "worker-duplicate".to_owned(),
+        actions: vec![ScenarioActionV2::Text {
+            user_text: "worker".to_owned(),
+            response: "duplicate".to_owned(),
+        }],
+    });
+    state.lane_cursors.push(0);
+    assert!(
+        state
+            .select_v2_lane(&prompt_for(&child, "worker", None))
+            .is_err()
+    );
+    assert!(!state.agent_lanes.contains_key(&child));
+    assert_eq!(state.lane_cursors, [0, 0, 0]);
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let checkpoint = tempdir.path().join("cursor.json");
+    let mut sole = FakeState::default();
+    sole.scenario = Some(ScenarioConfig::V2(v2_action(ScenarioActionV2::Text {
+        user_text: "next".to_owned(),
+        response: "next".to_owned(),
+    })));
+    sole.lane_cursors = vec![0];
+    sole.agent_lanes = HashMap::from([(tau_proto::AgentId::parse("first").expect("first id"), 0)]);
+    sole.checkpoint = Some(checkpoint.clone());
+    assert!(
+        sole.select_v2_lane(&prompt_for(&other, "next", None))
+            .is_err()
+    );
+    assert_eq!(sole.lane_cursors, [0]);
+    assert_eq!(sole.agent_lanes.len(), 1);
+    assert!(!checkpoint.exists());
+}
+
+/// Rejects an `agent_start` schema mismatch and unrelated extra tool results
+/// before committing the cursor, lane, child association, or checkpoint.
+#[test]
+fn v2_agent_start_runtime_mismatches_leave_state_unconsumed() {
+    let scenario = agent_start_scenario();
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let call = scenario.lanes[0].actions[0].clone();
+    let result = scenario.lanes[0].actions[1].clone();
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let checkpoint = tempdir.path().join("cursor.json");
+    let mut call_state = FakeState::default();
+    call_state.scenario = Some(ScenarioConfig::V2(scenario.clone()));
+    call_state.lane_cursors = vec![0];
+    call_state.checkpoint = Some(checkpoint.clone());
+    let call_prompt = prompt_for(&parent, "start", Some("lane"));
+    assert!(
+        call_state
+            .validate_and_commit_v2_action(0, 0, &call_prompt, &call)
+            .is_err()
+    );
+    assert_eq!(call_state.lane_cursors, [0]);
+    assert!(call_state.agent_lanes.is_empty());
+    assert!(call_state.child_agents.is_empty());
+    assert!(!checkpoint.exists());
+
+    let mut result_state = FakeState::default();
+    result_state.scenario = Some(ScenarioConfig::V2(scenario));
+    result_state.lane_cursors = vec![1];
+    result_state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
+    result_state.checkpoint = Some(checkpoint.clone());
+    let mut result_prompt = prompt_for(&parent, "start", None);
+    result_prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![
+                    start_result("call", &parent, &child),
+                    tau_proto::ToolResultItem {
+                        call_id: "unrelated".into(),
+                        tool_type: ToolType::Function,
+                        status: tau_proto::ToolResultStatus::Success,
+                        output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(
+                            "unrelated".to_owned(),
+                        )),
+                        provider_content: Vec::new(),
+                    },
+                ],
+            },
+        ));
+    assert!(
+        result_state
+            .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+            .is_err()
+    );
+    assert_eq!(result_state.lane_cursors, [1]);
+    assert!(result_state.child_agents.is_empty());
+    assert!(!checkpoint.exists());
+
+    let tau_proto::ContextBlock::ToolResults(results) = result_prompt
+        .context
+        .blocks
+        .last_mut()
+        .expect("result block")
+    else {
+        unreachable!()
+    };
+    results.items.pop();
+    result_state
+        .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+        .expect("exact sole result commits");
+    assert_eq!(result_state.lane_cursors, [2]);
+    assert_eq!(result_state.child_agents.get(&parent), Some(&child));
+    assert!(checkpoint.exists());
+}
+
 /// Ensures a dummy schema mismatch is rejected before any durable cursor or
 /// agent-lane binding can be advanced.
 #[test]
@@ -345,6 +687,131 @@ fn v2_action(action: ScenarioActionV2) -> ScenarioV2 {
     )
 }
 
+fn agent_start_scenario() -> ScenarioV2 {
+    ScenarioV2::new(
+        "agent-start-validation",
+        vec![ScenarioLaneV2 {
+            ctx_id: "lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::AgentStartCall {
+                    user_text: "start".to_owned(),
+                    call_id: "call".into(),
+                    prompt: "work".to_owned(),
+                    role: Some("worker".to_owned()),
+                    task_name: "worker task".to_owned(),
+                },
+                ScenarioActionV2::AgentStartResult {
+                    user_text: "start".to_owned(),
+                    call_id: "call".into(),
+                    response: "started".to_owned(),
+                },
+            ],
+        }],
+    )
+}
+
+fn watch_response(
+    parent: &tau_proto::AgentId,
+    child: &tau_proto::AgentId,
+    content: &str,
+) -> AgentMessageReceived {
+    AgentMessageReceived {
+        message_id: "watch-response".into(),
+        sender_id: child.clone(),
+        sender_session_id: None,
+        recipient_id: parent.clone(),
+        kind: tau_proto::AgentMessageKind::WatchResponse,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        message: content.to_owned(),
+    }
+}
+
+fn watch_turn(
+    parent: &tau_proto::AgentId,
+    child: &tau_proto::AgentId,
+    state: tau_proto::AgentRuntimeState,
+    turn_generation: u64,
+) -> AgentMessageReceived {
+    AgentMessageReceived {
+        message_id: format!("watch-turn-{turn_generation}").into(),
+        sender_id: child.clone(),
+        sender_session_id: None,
+        recipient_id: parent.clone(),
+        kind: tau_proto::AgentMessageKind::WatchTurnState,
+        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+            session_id: "session".into(),
+            subscription_id: "subscription".to_owned(),
+            state,
+            initial: false,
+            turn_generation,
+        }),
+        watch_provider_status: None,
+        message: String::new(),
+    }
+}
+
+fn prompt_for(
+    agent_id: &tau_proto::AgentId,
+    user_text: &str,
+    ctx_id: Option<&str>,
+) -> tau_proto::AgentPromptCreated {
+    tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-test".into(),
+        agent_id: agent_id.clone(),
+        session_id: "session".into(),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext {
+            blocks: vec![tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: user_text.to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                },
+            )],
+        },
+        tools: Vec::new(),
+        tools_ref: None,
+        model: FAKE_MODEL_ID.into(),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: ctx_id.map(ToOwned::to_owned),
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    }
+}
+
+fn start_result(
+    call_id: &str,
+    parent: &tau_proto::AgentId,
+    child: &tau_proto::AgentId,
+) -> tau_proto::ToolResultItem {
+    let raw = CborValue::Map(vec![
+        (
+            CborValue::Text("self_agent_id".to_owned()),
+            CborValue::Text(parent.to_string()),
+        ),
+        (
+            CborValue::Text("sub_agent_id".to_owned()),
+            CborValue::Text(child.to_string()),
+        ),
+    ]);
+    tau_proto::ToolResultItem {
+        call_id: call_id.into(),
+        tool_type: ToolType::Function,
+        status: tau_proto::ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&raw),
+        provider_content: Vec::new(),
+    }
+}
+
 /// Rejects out-of-range hold deadlines and ambiguous lane correlation ids.
 #[test]
 fn v2_validation_bounds_holds_and_lane_identity() {
@@ -505,6 +972,7 @@ fn v2_checkpoint_rejects_changed_scenario_and_invalid_bindings() {
             scenario: changed,
             cursors: vec![0],
             agent_lanes: Vec::new(),
+            child_agents: Vec::new(),
         })
         .expect("checkpoint serializes"),
     )
@@ -524,6 +992,7 @@ fn v2_checkpoint_rejects_changed_scenario_and_invalid_bindings() {
                 agent_id: tau_proto::AgentId::parse("agent").expect("valid agent id"),
                 lane_index: 1,
             }],
+            child_agents: Vec::new(),
         })
         .expect("checkpoint serializes"),
     )
@@ -552,6 +1021,7 @@ fn v2_checkpoint_rejects_changed_scenario_and_invalid_bindings() {
                 scenario: scenario.clone(),
                 cursors,
                 agent_lanes: Vec::new(),
+                child_agents: Vec::new(),
             })
             .expect("checkpoint serializes"),
         )
@@ -579,10 +1049,106 @@ fn v2_checkpoint_rejects_changed_scenario_and_invalid_bindings() {
                     lane_index: 0,
                 },
             ],
+            child_agents: Vec::new(),
         })
         .expect("checkpoint serializes"),
     )
     .expect("write checkpoint");
+    assert!(
+        ScenarioConfig::V2(scenario)
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+}
+
+/// Rejects oversized or relationally invalid child checkpoints while accepting
+/// the one parent/child association produced by the closed start pair.
+#[test]
+fn v2_checkpoint_bounds_and_correlates_child_bindings() {
+    let scenario = agent_start_scenario();
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let checkpoint_path = tempdir.path().join("cursor.json");
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let base = || CursorCheckpoint {
+        scenario: scenario.clone(),
+        cursors: vec![2],
+        agent_lanes: vec![AgentLaneCheckpoint {
+            agent_id: parent.clone(),
+            lane_index: 0,
+        }],
+        child_agents: vec![ChildAgentCheckpoint {
+            parent_agent_id: parent.clone(),
+            child_agent_id: child.clone(),
+        }],
+    };
+    let write = |checkpoint: &CursorCheckpoint| {
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_vec(checkpoint).expect("checkpoint serializes"),
+        )
+        .expect("write checkpoint");
+    };
+
+    write(&base());
+    let restored = ScenarioConfig::V2(scenario.clone())
+        .restore_state(Some(&checkpoint_path))
+        .expect("valid child checkpoint restores");
+    assert_eq!(restored.child_agents.get(&parent), Some(&child));
+
+    let mut missing_child = base();
+    missing_child.child_agents.clear();
+    write(&missing_child);
+    assert!(
+        ScenarioConfig::V2(scenario.clone())
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+
+    let mut self_link = base();
+    self_link.child_agents[0].child_agent_id = parent.clone();
+    write(&self_link);
+    assert!(
+        ScenarioConfig::V2(scenario.clone())
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+
+    let mut missing_parent = base();
+    missing_parent.agent_lanes.clear();
+    write(&missing_parent);
+    assert!(
+        ScenarioConfig::V2(scenario.clone())
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+
+    let mut unconsumed = base();
+    unconsumed.cursors[0] = 1;
+    write(&unconsumed);
+    assert!(
+        ScenarioConfig::V2(scenario.clone())
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+
+    let mut repeated = base();
+    repeated.child_agents.push(ChildAgentCheckpoint {
+        parent_agent_id: tau_proto::AgentId::parse("other-parent").expect("other parent id"),
+        child_agent_id: child,
+    });
+    write(&repeated);
+    assert!(
+        ScenarioConfig::V2(scenario.clone())
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+
+    std::fs::write(
+        &checkpoint_path,
+        vec![b'x'; MAX_CHECKPOINT_BYTES as usize + 1],
+    )
+    .expect("write oversized checkpoint");
     assert!(
         ScenarioConfig::V2(scenario)
             .restore_state(Some(&checkpoint_path))

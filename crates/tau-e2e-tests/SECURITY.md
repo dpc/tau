@@ -19,11 +19,32 @@ bounded; Nix additionally runs the exact lane in a network-denied build sandbox.
 Children still inherit the ordinary process environment, but the closed fake
 does not read provider credentials or use environment values as control.
 
+The session-restore fixture enables the production harness-owned `agent_start`
+built-in only for its closed main role; the worker role has no tools. Its one
+bounded start action requires the exact production schema and fixture-authored
+arguments, then records only the distinct self/child identities minted by the
+harness. Because a production-started worker has no initial `ctx_id`, its first
+prompt may bind only the unique unconsumed lane with identical configured text;
+zero or multiple candidates fail closed. That immutable binding and the
+parent/child association are checkpointed with the scenario cursors.
+
+Automatic-watch actions admit only live, model-visible records for the current
+closed action with the exact retained child sender, parent recipient, bounded
+configured content or typed runtime state, and stable subscription/generation
+correlation. Unrelated and excess records fail before queue admission. Each
+accepted live record releases one provider prompt; there is no general scheduler
+or arbitrary message-routing control. Replay cannot release an action. This fixture proves a
+clean, quiescent resume of one completed worker and non-persistence of its
+daemon-lifetime watch. It does not prove interrupted-request recovery, watch
+persistence, or crash-exact provider/harness checkpoint coordination.
+
 Mismatch, startup, or exact-consumption errors retain the private root and print
 its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.
 Artifacts contain only synthetic fixture data but remain private by default.
 The harness owns supervised extension termination; a killable test-only child
-wrapper owns daemon process cleanup on early test failure. Daemon tests cover
+wrapper owns daemon process cleanup on early test failure. Successful daemon
+finish requires the entire process group to disappear without a signal; forced
+TERM/KILL containment is reported as test failure. Daemon tests cover
 typed failure, cancellation/timeout, same-agent post-cancel liveness,
 concurrency, fatal disconnect, and clean restore. The cancellation gate accepts
 only harness-minted prompt ids already held by its two bounded lanes; it cannot

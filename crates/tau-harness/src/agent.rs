@@ -286,16 +286,14 @@ pub(crate) struct Agent {
     /// tool-backed side agents. `None` for user agents and for non-tool
     /// ext-queries (e.g. notifications' idle summary).
     pub(crate) parent_tool_call_id: Option<ToolCallId>,
-    /// Direct parent agent resolved when this side agent is
-    /// spawned. Kept alongside `parent_tool_call_id` because the tool-call
-    /// routing map can be cleared before teardown needs to hand background
-    /// completions back to the parent.
+    /// Direct parent resolved from a tool owner or an explicit-parent typed
+    /// start. Teardown uses it after tool routing disappears, and completed
+    /// parented starts use its presence to retain and detach the worker.
     pub(crate) parent_agent_id: Option<AgentId>,
     /// Human-friendly name shown in UIs. Falls back to the stable agent id.
     pub(crate) display_name: Option<String>,
-    /// Display name supplied by the parent agent for the delegated
-    /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
-    /// set when `parent_tool_call_id` is.
+    /// Optional request task label surfaced in the UI for a side agent.
+    /// Populated independently of whether the request is tool-backed.
     pub(crate) task_name: Option<String>,
     /// Line and byte stats for the user-provided delegate prompt.
     /// Excludes any hidden prefix added by the delegate extension.

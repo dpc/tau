@@ -2,13 +2,13 @@
 
 Authority: confirmed, 2026-07-21, dpc
 
-A completed durable worker created through harness-owned `agent_start` or the
-typed start-agent request path restores as an ordinary loaded, idle, addressable
-conversation. The harness must not reconstruct ownership by the completed
-transient request from durable prompt or response provenance. Historical
-originators, creation ancestry, task metadata, and tool-call transcript facts
-remain unchanged; only the run-local request owner, connection, correlation,
-and result/teardown responsibility end with the completed request.
+A completed durable worker created through harness-owned `agent_start` or an
+explicit-parent typed start-agent request restores as an ordinary loaded, idle,
+addressable conversation. The harness must not reconstruct ownership by the
+completed transient request from durable prompt or response provenance.
+Historical originators, creation ancestry, task metadata, and tool-call
+transcript facts remain unchanged; only the run-local request owner, connection,
+correlation, and result/teardown responsibility end with the completed request.
 
 The immutable `agent.started` creation fact remains the cold-recovery authority
 for ancestry and default navigation classification. A restored completed worker
@@ -17,6 +17,10 @@ without reviving the completed request. A fresh user turn uses ordinary runtime
 ownership, emits neither another `agent.start_result` nor
 `session.agent_unloaded`, and leaves the worker loaded and addressable after its
 terminal response.
+
+A parentless non-tool typed start remains a one-shot side query and unloads
+after its terminal result. Peer entrypoints retain their separate ordinary
+loaded-agent lifecycle.
 
 This choice preserves the existing journals and protocol: it adds no durable
 fact, schema, replay, or request recovery. It does not decide recovery behavior

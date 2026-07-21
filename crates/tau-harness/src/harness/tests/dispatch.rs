@@ -1218,6 +1218,109 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures daemon-style injected handlers observe restored activation dispatch
+/// because they are installed before rehydration and provider readiness.
+#[test]
+fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
+    struct PromptObserver(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl crate::InternalToolHandler for PromptObserver {
+        fn tool_specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+
+        fn handles(&self, _internal_tool_name: &ToolName) -> bool {
+            false
+        }
+
+        fn handle_event(
+            &self,
+            _host: &mut crate::InternalToolHost<'_>,
+            event: &Event,
+        ) -> Result<(), HarnessError> {
+            if matches!(event, Event::AgentPromptCreated(_)) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("restored-main").expect("agent id");
+    {
+        let sessions_dir = tau_config::settings::sessions_dir_of(&state);
+        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        sessions
+            .append_session_event(
+                "s1",
+                None,
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    session_id: "s1".into(),
+                    agent_id: agent_id.clone(),
+                    ephemeral: false,
+                }),
+            )
+            .expect("seed membership");
+        let mut agents = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+        agents
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::AgentStarted(tau_proto::AgentStarted {
+                    agent_id: agent_id.clone(),
+                    parent_agent: None,
+                    role: "engineer".to_owned(),
+                    display_name: None,
+                    metadata: Vec::new(),
+                    ephemeral: false,
+                }),
+            )
+            .expect("seed creation");
+        agents
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    agent_id: agent_id.clone(),
+                    text: "resume outstanding activation".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    internal_kind: None,
+                    originator: tau_proto::PromptOriginator::User,
+                    inference_activation: true,
+                    submission_source: Default::default(),
+                    display_name: None,
+                    ctx_id: None,
+                }),
+            )
+            .expect("seed outstanding prompt");
+    }
+
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state.join("config")),
+        state_dir: Some(state.join("runtime")),
+    };
+    let mut harness = Harness::new_with_provider_and_internal_tools(
+        &state,
+        dirs,
+        echo_runner,
+        Vec::new(),
+        crate::harness::TestProviderHarnessStartup {
+            session_id: "s1",
+            reason: tau_proto::SessionStartReason::Resume,
+            persistence: tau_core::SessionPersistenceMode::Durable,
+            internal_tool_handlers: vec![std::sync::Arc::new(PromptObserver(observed.clone()))],
+        },
+    )
+    .expect("resume harness");
+    assert!(
+        observed.load(std::sync::atomic::Ordering::SeqCst),
+        "restored activation dispatched before injected handler installation"
+    );
+    harness.shutdown().expect("shutdown");
+}
+
 #[test]
 fn resume_rehydrates_delegated_agent_role_from_agent_log() {
     // Regression: resumed delegated agents must keep the role selected when the
@@ -2572,6 +2675,7 @@ fn side_agent_repetition_response_propagates_error_result() {
             (prompt_cid.as_str() != "default").then(|| (spid.clone(), prompt_cid.clone()))
         })
         .expect("side prompt id");
+    let side_agent_id = durable_agent_id_for_conversation(&h, &side_cid);
     let mut response = provider_repetition_response(
         &side_spid,
         tau_proto::AgentId::parse("side").expect("agent id"),
@@ -2586,6 +2690,17 @@ fn side_agent_repetition_response_propagates_error_result() {
         .expect("side response handled");
 
     assert!(!h.agents.contains_key(&side_cid));
+    assert!(!h.session_loaded_agents.contains(&side_agent_id));
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("session events")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == side_agent_id
+            ))
+    );
     let result = frames
         .lock()
         .expect("frames")
@@ -15021,6 +15136,105 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     h.shutdown().expect("shutdown resumed boot");
 }
 
+/// A process can stop after the terminal provider event is durable but before
+/// the warm completion path returns the result and detaches the request owner.
+/// Explicit-parent typed starts have no tool-call id, so cold classification
+/// must still converge on the retained ordinary-worker state.
+#[test]
+fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        let parent_cid = ensure_test_user_agent(&mut h);
+        let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
+        let mut query = ext_query("q-explicit-parent-cut");
+        query.parent_agent = Some(parent_agent_id);
+        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+            .expect("start explicit-parent worker");
+        let worker_cid = ext_query_cid(&h, "q-explicit-parent-cut").expect("worker conversation");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        let worker_prompt_id = h.agents[&worker_cid]
+            .in_flight_prompt
+            .clone()
+            .expect("worker prompt");
+        let mut terminal = provider_text_response(
+            &worker_prompt_id,
+            worker_agent_id.clone(),
+            "worker complete",
+        );
+        terminal.originator = tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: "q-explicit-parent-cut".to_owned(),
+        };
+
+        // Deliberately persist only the terminal provider fact. This models the
+        // crash cut before handle_finished_response_side_conversation can return
+        // StartAgentResult and call complete_finished_side_conversation.
+        h.publish_finished_response_for_agent(&worker_cid, None, &terminal);
+        assert!(matches!(
+            h.agents[&worker_cid].originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ));
+        assert!(h.agents[&worker_cid].parent_agent_id.is_some());
+        assert!(h.session_loaded_agents.contains(&worker_agent_id));
+        h.shutdown().expect("shutdown at terminal cut");
+        worker_agent_id
+    };
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume terminal cut");
+    h.selected_model = Some("test/model".into());
+    let worker_cid = h
+        .agent_routes
+        .get(worker_agent_id.as_str())
+        .cloned()
+        .expect("restored worker route");
+    let worker = h.agents.get(&worker_cid).expect("restored worker");
+    assert!(worker.originator.is_user());
+    assert!(worker.source_connection.is_none());
+    assert!(worker.parent_agent_id.is_none());
+    assert!(worker.parent_tool_call_id.is_none());
+    assert!(matches!(worker.turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        h.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "fresh after terminal cut".to_owned(),
+        agent_id: worker_agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("submit fresh worker turn");
+    let fresh_prompt_id = h.agents[&worker_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("fresh worker prompt");
+    h.handle_provider_response_finished(provider_text_response(
+        &fresh_prompt_id,
+        worker_agent_id.clone(),
+        "fresh response",
+    ))
+    .expect("complete fresh worker turn");
+
+    assert!(h.agents.contains_key(&worker_cid));
+    assert!(h.session_loaded_agents.contains(&worker_agent_id));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::StartAgentResult(result) if result.query_id == "q-explicit-parent-cut"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+    )));
+    h.shutdown().expect("shutdown resumed worker");
+}
+
 /// A no-tool response is not request-terminal while an accepted agent message
 /// still awaits its continuation turn. Cold restore must retain the historical
 /// extension ownership rather than classify this interrupted request as a
@@ -15141,11 +15355,11 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
 }
 
 /// A non-cancelled standalone-compaction failure is a warm terminal path even
-/// though it has no final inference response. Cold restore must recognize that
-/// durable terminal evidence and keep the detached worker addressable through a
-/// fresh ordinary turn.
+/// though it has no final inference response. An explicit-parent typed start
+/// has no tool-call discriminator, so warm completion and cold restore must
+/// both use its durable ancestry and keep the detached worker addressable.
 #[test]
-fn cold_restored_compaction_failed_worker_remains_loaded() {
+fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let worker_agent_id = {
@@ -15155,10 +15369,9 @@ fn cold_restored_compaction_failed_worker_remains_loaded() {
             .expect("test model")
             .supports_standalone_compaction = true;
         let parent_cid = ensure_test_user_agent(&mut h);
-        h.tool_agents
-            .insert("compaction-failure-call".into(), parent_cid);
+        let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
         let mut query = ext_query("q-compaction-failure");
-        query.tool_call_id = Some("compaction-failure-call".into());
+        query.parent_agent = Some(parent_agent_id);
         h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
             .expect("start worker");
         let worker_cid = ext_query_cid(&h, "q-compaction-failure").expect("worker");
@@ -15170,7 +15383,20 @@ fn cold_restored_compaction_failed_worker_remains_loaded() {
         h.handle_provider_response_finished(context_overflow_response(&compact))
             .expect("fail reactive compaction");
         assert!(h.agents[&worker_cid].originator.is_user());
+        assert!(h.agents[&worker_cid].parent_agent_id.is_none());
+        assert!(h.agents[&worker_cid].parent_tool_call_id.is_none());
         assert!(h.session_loaded_agents.contains(&worker_agent_id));
+        assert_eq!(
+            event_log_count(&h, |event| matches!(
+                event,
+                Event::StartAgentResult(result) if result.query_id == "q-compaction-failure"
+            )),
+            1
+        );
+        assert!(!event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+        )));
         h.shutdown().expect("shutdown completed failure");
         worker_agent_id
     };
@@ -23659,12 +23885,16 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
     h.shutdown().expect("shutdown");
 }
 
+/// An explicit-parent typed start inherits only eligible metadata, then returns
+/// exactly one result and detaches into a loaded ordinary worker. A fresh user
+/// turn must preserve membership without reviving the completed request.
 #[test]
-fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
+fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_completion() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    let result_frames = connect_test_tool(&mut h, "conn-delegate");
     h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
         .expect("submit parent");
     let parent_agent_id = h
@@ -23706,20 +23936,16 @@ fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
     )
     .expect("start child");
     let child_cid = ext_query_cid(&h, "q-inherit").expect("child conversation");
-    let child_agent_id = h
-        .agents
-        .get(&child_cid)
-        .and_then(|conversation| conversation.agent_id.clone())
-        .expect("child agent id");
+    let child_agent_id = durable_agent_id_for_conversation(&h, &child_cid);
 
     let child_events = h
         .agent_store
-        .agent_events(&child_agent_id)
+        .agent_events(child_agent_id.as_str())
         .expect("child events");
     assert!(child_events.iter().any(|entry| matches!(
         &entry.event,
         Event::AgentMetadataSet(set)
-            if set.agent_id.as_str() == child_agent_id
+            if set.agent_id == child_agent_id
                 && set.key == inherit_key
                 && set.value == CborValue::Text("inherited".to_owned())
                 && set.inheritable
@@ -23727,6 +23953,96 @@ fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
     assert!(child_events.iter().all(|entry| !matches!(
         &entry.event,
         Event::AgentMetadataSet(set) if set.key.as_str() == "local-key"
+    )));
+
+    let child_prompt_id = h
+        .prompt_agents
+        .iter()
+        .find_map(|(prompt_id, cid)| (cid == &child_cid).then_some(prompt_id.clone()))
+        .expect("child prompt");
+    let mut response =
+        provider_text_response(&child_prompt_id, child_agent_id.clone(), "side result");
+    response.originator = tau_proto::PromptOriginator::Extension {
+        name: "conn-delegate".into(),
+        query_id: "q-inherit".to_owned(),
+    };
+    h.handle_provider_response_finished(response)
+        .expect("complete explicit-parent child");
+
+    let child = h.agents.get(&child_cid).expect("completed child retained");
+    assert!(child.originator.is_user());
+    assert!(child.source_connection.is_none());
+    assert!(child.parent_tool_call_id.is_none());
+    assert!(child.parent_agent_id.is_none());
+    assert_eq!(
+        h.agent_navigation_modes.get(&child_agent_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+    );
+    assert_eq!(
+        result_frames
+            .lock()
+            .expect("result frames")
+            .iter()
+            .filter(|frame| matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::StartAgentResult(result)) if result.query_id == "q-inherit"
+            ))
+            .count(),
+        1
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "fresh child turn".to_owned(),
+        agent_id: child_agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("submit fresh child turn");
+    let fresh_prompt_id = h
+        .agents
+        .get(&child_cid)
+        .and_then(|child| child.in_flight_prompt.clone())
+        .expect("fresh child prompt");
+    h.handle_provider_response_finished(provider_text_response(
+        &fresh_prompt_id,
+        child_agent_id.clone(),
+        "fresh result",
+    ))
+    .expect("complete fresh child turn");
+
+    assert!(h.agents.contains_key(&child_cid));
+    assert!(h.session_loaded_agents.contains(&child_agent_id));
+    assert_eq!(
+        result_frames
+            .lock()
+            .expect("result frames")
+            .iter()
+            .filter(|frame| matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::StartAgentResult(result)) if result.query_id == "q-inherit"
+            ))
+            .count(),
+        1,
+        "a fresh user turn must not complete the old start request again"
+    );
+    let session_events = h.store.session_events("s1").expect("session events");
+    assert_eq!(
+        session_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::SessionAgentLoaded(loaded)
+                    if loaded.agent_id == child_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert!(session_events.iter().all(|record| !matches!(
+        &record.event,
+        Event::SessionAgentUnloaded(unloaded)
+            if unloaded.agent_id == child_agent_id
     )));
 
     h.shutdown().expect("shutdown");

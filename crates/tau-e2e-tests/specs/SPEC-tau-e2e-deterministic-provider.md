@@ -1,5 +1,14 @@
 # SPEC-tau-e2e-deterministic-provider: Deterministic provider acceptance contract
 
+## Record justification
+
+This cross-cutting contract coordinates generated role and extension
+configuration, the fake provider's scenario grammar and durable checkpoint,
+daemon-side production-tool injection, typed multi-agent store snapshots,
+replay-aware socket observation, and the exact deterministic CI lane. Keeping
+the acceptance boundary here prevents those independently maintained pieces
+from silently broadening fixture authority or weakening the claimed oracle.
+
 Deterministic harness acceptance uses a test-only supervised provider subprocess
 inside `tau-e2e-tests`. It is launched by exact path as a required custom
 provider and is never added to the universal binary, built-in registry, normal
@@ -15,9 +24,11 @@ actions fail closed with bounded synthetic diagnostics.
 
 The fixture uses fresh private config, state, session, and artifact directories.
 It disables every unrelated built-in extension and normally enables only the
-no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is the sole controlled
+no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
 exception: the exact universal `component ext-shell` may expose only `workdir`
-and `edit` to a closed scratch-only scenario. The fake has no network,
+and `edit` to a closed scratch-only scenario. S1 is the other: its main role
+exposes only the production harness-owned `agent_start` built-in while its
+worker role exposes no tools. The fake has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
 
@@ -36,13 +47,36 @@ terminal errors, exact cancellation holds with hard timeouts, deliberate
 disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
-tool names, arguments, and results remain outside the grammar. A barrier is the lane's sole action, appears once per distinct
+tool names, arguments, and results remain outside the grammar. S1 adds one
+distinct adjacent `AgentStartCall`/`AgentStartResult` pair. The fake requires
+exact bounded instruction, optional role, task name, call id, production tool
+name/type/schema, one sole successful result with an exact two-field payload,
+and harness-minted distinct
+self/child identities. It retains that parent/child association for later
+watch matching. No other harness-owned tool enters the grammar.
+
+S1 also adds one bounded `WatchNotifications` action containing one to four
+typed `Response`, `Prompt`, or non-initial `TurnState` records. Each provider
+prompt consumes exactly one already-delivered live record; intermediate stages
+return fixed text without advancing the lane action. The action requires the
+retained child identity, exact sender/recipient, kind, content or runtime state,
+and one stable subscription-id/turn-generation pair across its turn-state
+records. It also checks the exact escaped model-visible prompt projection.
+Only records for the current closed action enter the queue; unrelated and excess
+live traffic fails before admission. Replayed deliveries cannot populate this
+live queue.
+
+A barrier is the lane's sole action, appears once per distinct
 participant lane, and has one consistent bounded participant count, preventing
 same-lane and cyclic barrier plans. Initial `ctx_id` binds an agent to one lane.
 The public terminal UI supplies no initial `ctx_id`, so an unbound first prompt
-may select the sole configured lane; multi-lane scenarios still require an exact
-`ctx_id`. Continuations cannot change that binding. The fake subscribes only to live prompt/cancel
-traffic, so restored event replay cannot consume actions.
+may select the sole configured lane. S1's production-started worker also has no
+initial `ctx_id`; its exact first user text must select exactly one unconsumed,
+unbound lane. Zero or multiple candidates fail closed. Every selected binding
+is immutable and checkpointed. Other multi-lane scenarios still require an
+exact `ctx_id`. Continuations cannot change that binding. The fake subscribes
+only to live prompt/cancel/watch traffic, so restored event replay cannot
+consume actions.
 
 The core-shell action family is likewise closed rather than generic: it can set
 only relative `project`, edit only `resume-sentinel.txt` with the two fixed
@@ -50,9 +84,11 @@ line-range shapes, and vary only bounded call IDs, nonce text, prompts, and fina
 markers. Its result continuations require success; the resumed provider prompt
 must contain both the old nonce-bearing transcript and restored workdir context.
 
-V2 cursors and immutable agent-to-lane bindings are atomically checkpointed in
-the harness-assigned extension state directory and restored only after validating
-the complete scenario identity, binding uniqueness, and bounds. This supports
+V2 cursors, immutable agent-to-lane bindings, and S1 harness-minted
+parent-to-child associations are atomically checkpointed in the harness-assigned
+extension state directory and restored only after validating the complete
+scenario identity, a 64 KiB checkpoint ceiling, binding uniqueness,
+parent/start-result correlation, and cardinality bounds. This supports
 clean, quiescent daemon stop/resume with no in-flight action. The checkpoint and
 harness journal are not transactionally committed together, so this fixture
 makes no crash-exact action-replay claim; such a claim requires a provider
@@ -82,7 +118,12 @@ terminal error projection, exact cancellation with same-agent post-cancel
 liveness, bounded provider stalls, fatal
 provider-disconnect handling without restart, lane isolation, durable session
 projection, clean restore/shutdown, and the spawned public terminal's completed
-tool projection across one quiescent cold resume. Sequential error then success is two
+tool projection across one quiescent cold resume. S1 specifically spends four
+main-lane actions and two worker-lane actions, producing exactly six main
+provider turns and two worker provider turns, to prove that a completed,
+production-started durable worker cold-restores as an independently addressable
+idle conversation; its daemon-lifetime automatic watch does not restore.
+Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,
 production retry scheduling, crash-exact replay, universal packaging beyond

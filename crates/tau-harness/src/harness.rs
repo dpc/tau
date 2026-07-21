@@ -1636,6 +1636,19 @@ pub(crate) struct HarnessStartupInputs {
     pub(crate) project_root: PathBuf,
 }
 
+#[cfg(any(test, feature = "echo-agent"))]
+/// Inputs used to construct a harness around an in-process test provider.
+pub(crate) struct TestProviderHarnessStartup<'a> {
+    /// Session restored or eagerly created during startup.
+    pub(crate) session_id: &'a str,
+    /// Reason reported for the eager session start.
+    pub(crate) reason: tau_proto::SessionStartReason,
+    /// Persistence policy applied to the eager session.
+    pub(crate) persistence: tau_core::SessionPersistenceMode,
+    /// Harness-owned handlers installed before session restoration.
+    pub(crate) internal_tool_handlers: InternalToolHandlers,
+}
+
 /// Output path used before an initial UI has been accepted by the normal bus.
 pub(crate) enum InitialClientStartupErrorOutput {
     #[cfg(test)]
@@ -2859,6 +2872,34 @@ impl Harness {
         eager_session_start_reason: tau_proto::SessionStartReason,
         session_persistence: tau_core::SessionPersistenceMode,
     ) -> Result<Self, HarnessError> {
+        Self::new_with_provider_and_internal_tools(
+            state_dir,
+            dirs,
+            provider_runner,
+            tools,
+            TestProviderHarnessStartup {
+                session_id: eager_session_id,
+                reason: eager_session_start_reason,
+                persistence: session_persistence,
+                internal_tool_handlers: Vec::new(),
+            },
+        )
+    }
+
+    #[cfg(any(test, feature = "echo-agent"))]
+    pub(crate) fn new_with_provider_and_internal_tools(
+        state_dir: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
+        provider_runner: ProviderRunner,
+        tools: Vec<InProcessTool>,
+        startup: TestProviderHarnessStartup<'_>,
+    ) -> Result<Self, HarnessError> {
+        let TestProviderHarnessStartup {
+            session_id: eager_session_id,
+            reason: eager_session_start_reason,
+            persistence: session_persistence,
+            internal_tool_handlers,
+        } = startup;
         let project_root = std::env::current_dir()?.canonicalize()?;
         let launch = HarnessSessionLaunch {
             reason: eager_session_start_reason,
@@ -3019,6 +3060,7 @@ impl Harness {
             harness.store.record_session_meta(eager_session_id)?;
         }
 
+        harness.install_internal_tool_handlers(internal_tool_handlers);
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
@@ -14785,9 +14827,10 @@ impl Harness {
             initial_head,
             Some(source_id.into()),
         );
-        // For tool-backed extensions (currently just `agent_start`) record the
-        // parent call id and task metadata for teardown/background ownership and
-        // child display metadata.
+        // Record parent request state and task metadata for teardown/background
+        // ownership and child display metadata. Explicit-parent typed starts have
+        // no tool call, but still retain their completed child after returning the
+        // request result.
         conv.parent_tool_call_id = parent_call_id;
         conv.parent_agent_id = parent_agent_id;
         conv.display_name = display_name;
@@ -14838,13 +14881,14 @@ impl Harness {
         Ok(())
     }
 
-    fn detach_completed_tool_backed_start_agent(&mut self, cid: &AgentId) {
+    fn detach_completed_parented_start_agent(&mut self, cid: &AgentId) {
         if let Some(conv) = self.agents.get_mut(cid) {
-            // A completed delegate remains addressable by its `agent_id`, but
-            // it is no longer fulfilling the parent tool call or owned by the
-            // extension query that started it. Clearing the side-query fields
-            // makes later user prompts behave like a normal active conversation
-            // on the same branch.
+            // A completed parented worker remains addressable by its `agent_id`,
+            // but it is no longer fulfilling the parent request or owned by the
+            // extension query that started it. Clearing the transient side-query
+            // fields makes later user prompts behave like a normal active
+            // conversation on the same branch. The durable AgentStarted event
+            // retains ancestry.
             conv.originator = tau_proto::PromptOriginator::User;
             conv.source_connection = None;
             conv.parent_tool_call_id = None;
@@ -21867,11 +21911,10 @@ impl Harness {
         cid: &AgentId,
         completed_prompt_id: Option<&AgentPromptId>,
     ) {
-        let keep_tool_backed_conversation = self
-            .agents
-            .get(cid)
-            .is_some_and(|conv| conv.parent_tool_call_id.is_some());
-        let replacement_prompt_in_flight = keep_tool_backed_conversation
+        let keep_parented_conversation = self.agents.get(cid).is_some_and(|conv| {
+            conv.parent_tool_call_id.is_some() || conv.parent_agent_id.is_some()
+        });
+        let replacement_prompt_in_flight = keep_parented_conversation
             && self
                 .agents
                 .get(cid)
@@ -21886,8 +21929,8 @@ impl Harness {
             self.set_agent_turn_state(cid, AgentTurnState::Idle);
         }
         self.release_start_agent_request(cid);
-        if keep_tool_backed_conversation {
-            self.detach_completed_tool_backed_start_agent(cid);
+        if keep_parented_conversation {
+            self.detach_completed_parented_start_agent(cid);
         } else {
             self.transfer_background_completion_target_before_teardown(cid);
             self.remove_agent(cid);
