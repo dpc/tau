@@ -16,9 +16,9 @@ use tau_client::{
 };
 use tau_proto::{
     AgentId, AgentPromptSteered, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event,
-    EventName, EventSelector, ExtInternalPromptSubmitRequest, SessionAgentUnloaded,
-    SessionShutdown, SessionStarted, ToolError, ToolResult, ToolResultKind, ToolSpec, ToolStarted,
-    ToolType, ToolUseState, ToolUseStatus, UnixMicros,
+    EventName, EventSelector, ExtInternalPromptSubmitRequest, HarnessInputMessage,
+    SessionAgentUnloaded, SessionShutdown, SessionStarted, ToolError, ToolResult, ToolResultKind,
+    ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStatus, UnixMicros,
 };
 
 /// Protocol/logging name for the utility extension.
@@ -206,6 +206,19 @@ struct FireRecord {
     ctx_id: String,
 }
 
+impl FireRecord {
+    /// Convert one due timer into its explicitly transient wire request.
+    fn into_internal_prompt_message(self) -> HarnessInputMessage {
+        HarnessInputMessage::emit_transient(Event::ExtInternalPromptSubmitRequest(
+            ExtInternalPromptSubmitRequest {
+                agent_id: self.agent_id,
+                text: self.prompt,
+                ctx_id: Some(self.ctx_id),
+            },
+        ))
+    }
+}
+
 impl TimerRuntime {
     fn new(handle: ClientHandle) -> Self {
         Self {
@@ -268,13 +281,7 @@ impl TimerRuntime {
             let Some(handle) = &self.handle else {
                 continue;
             };
-            handle.emit(Event::ExtInternalPromptSubmitRequest(
-                ExtInternalPromptSubmitRequest {
-                    agent_id: fire.agent_id,
-                    text: fire.prompt,
-                    ctx_id: Some(fire.ctx_id),
-                },
-            ))?;
+            handle.send(fire.into_internal_prompt_message())?;
         }
         Ok(())
     }
@@ -939,6 +946,30 @@ mod tests {
             pending_invocations: HashMap::new(),
             replay_complete_agents: HashSet::new(),
         }
+    }
+
+    /// Due timer wakeups must explicitly request transient wire publication so
+    /// first-party behavior does not depend only on the event default.
+    #[test]
+    fn timer_wakeup_message_is_explicitly_transient() {
+        let message = FireRecord {
+            agent_id: AgentId::parse("agent-one").expect("agent id"),
+            timer_id: "wake".to_owned(),
+            prompt: "wake now".to_owned(),
+            ctx_id: "timer:wake:1".to_owned(),
+        }
+        .into_internal_prompt_message();
+        assert!(matches!(
+            message,
+            HarnessInputMessage::Emit(emit)
+                if emit.transient
+                    && matches!(
+                        emit.event.as_ref(),
+                        Event::ExtInternalPromptSubmitRequest(request)
+                            if request.text == "wake now"
+                                && request.ctx_id.as_deref() == Some("timer:wake:1")
+                    )
+        ));
     }
 
     /// Timer schemas describe the runtime byte limit without a large grammar

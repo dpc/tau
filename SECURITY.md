@@ -150,6 +150,12 @@ current-session `extension.context_ready` also preserves the legacy ability to
 release the source from session initialization. Treat these as trusted-local
 compatibility surfaces when reviewing changes. See
 [SPEC-per-agent-context-declarations-and-readiness](specs/SPEC-per-agent-context-declarations-and-readiness.md).
+Every configured extension kind may publish transient internal-prompt requests.
+The harness commits them before loaded-agent validation, revalidates the exact
+connection generation, and excludes raw requests from semantic replay. Invalid
+targets remain observable but cannot create prompt facts; stale generations
+cannot submit work. See
+[SPEC-internal-prompt-submit-requests](specs/SPEC-internal-prompt-submit-requests.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

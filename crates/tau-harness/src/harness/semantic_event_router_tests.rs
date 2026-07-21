@@ -97,6 +97,20 @@ fn per_agent_context_events_never_enter_semantic_history() {
     }
 }
 
+/// Raw internal-prompt requests are runtime-only inputs even when a peer asks
+/// for durable publication; only harness-owned prompt facts enter history.
+#[test]
+fn internal_prompt_requests_never_enter_semantic_history() {
+    let event = Event::ExtInternalPromptSubmitRequest(tau_proto::ExtInternalPromptSubmitRequest {
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        text: "wake".to_owned(),
+        ctx_id: Some("timer:1".to_owned()),
+    });
+    assert!(event.defaults_to_transient());
+    assert!(!should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, true));
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

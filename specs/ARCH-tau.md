@@ -34,6 +34,10 @@ specified by
 The same configured-kind authority and commit-before-effects boundary governs
 per-agent context registration, values, and readiness under
 [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
+Configured extensions also publish transient internal-prompt requests before
+the harness validates loaded-agent correlation and derives prompt facts, as
+specified by
+[SPEC-internal-prompt-submit-requests](SPEC-internal-prompt-submit-requests.md).
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 

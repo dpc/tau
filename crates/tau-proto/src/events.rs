@@ -2002,6 +2002,10 @@ pub struct ExtPromptFragmentPublish {
 /// Request from an extension to submit a hidden internal prompt to a loaded
 /// agent.
 ///
+/// Requests default to transient delivery and never enter semantic history. The
+/// harness commits an admitted request before validating its target or
+/// submitting the prompt.
+///
 /// The harness owns validation and transcript publication for this request;
 /// extensions must not publish `agent.prompt_submitted` directly. These prompts
 /// are hidden from ordinary user-facing UI and latest-user-prompt metadata.
@@ -5329,6 +5333,7 @@ impl Event {
                 | Self::ExtensionContextProviderRegister(_)
                 | Self::ExtensionContextReady(_)
                 | Self::ExtAgentContextPublish(_)
+                | Self::ExtInternalPromptSubmitRequest(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)

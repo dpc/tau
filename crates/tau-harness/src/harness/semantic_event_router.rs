@@ -39,6 +39,7 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ExtensionContextProviderRegister(_)
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtensionContextReady(_)
+                | Event::ExtInternalPromptSubmitRequest(_)
         )
         || is_raw_tool_terminal_event(event)
     {

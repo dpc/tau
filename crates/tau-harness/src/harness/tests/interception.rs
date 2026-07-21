@@ -1,4 +1,5 @@
 mod agent_context;
+mod internal_prompt;
 mod prompt_fragment;
 mod session_discovery;
 mod tool_lifecycle;

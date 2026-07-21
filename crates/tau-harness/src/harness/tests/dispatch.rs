@@ -23018,6 +23018,12 @@ fn extension_internal_prompt_submit_request_routes_as_internal_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "utils-ext",
+        "utils-ext",
+        tau_proto::ClientKind::Tool,
+    );
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -23053,6 +23059,12 @@ fn extension_internal_prompt_submit_request_rejects_unknown_agent() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "utils-ext",
+        "utils-ext",
+        tau_proto::ClientKind::Tool,
+    );
 
     h.handle_extension_event(
         "utils-ext",
@@ -23086,6 +23098,12 @@ fn queued_extension_internal_prompt_submit_request_preserves_ctx_id_when_steered
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "utils-ext",
+        "utils-ext",
+        tau_proto::ClientKind::Tool,
+    );
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -23128,6 +23146,12 @@ fn queued_extension_internal_prompt_submit_requests_preserve_individual_ctx_ids(
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "utils-ext",
+        "utils-ext",
+        tau_proto::ClientKind::Tool,
+    );
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.set_agent_turn_state(

@@ -97,7 +97,9 @@ harness-authored `provider.models_updated` snapshots derived downstream from
 provider `provider.models_declared` events.
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
-with `agent_id`, `text`, and optional `ctx_id`.
+with `agent_id`, `text`, and optional `ctx_id`. It defaults transient; its
+commit-before-effects contract is
+[SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 The protocol deliberately provides no generic transport registration, ingress
 acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB

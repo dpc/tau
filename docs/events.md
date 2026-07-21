@@ -518,13 +518,16 @@ transient runtime observations and never enter semantic replay. See
   interception before the harness replaces the source/name prompt-assembly slot;
   declarations are not replayed or synthesized for late subscribers.
 - **`extension.internal_prompt_submit_request`** — A narrow extension request to
-  submit hidden internal control text to an already loaded agent. The harness
-  validates the target agent and, when accepted, publishes an internal
+  submit hidden internal control text to an already loaded agent. Every
+  authenticated configured extension kind may publish it; unconfigured/socket
+  peers may not. The transient request commits before the harness validates the
+  exact live publisher generation and target agent and, when accepted, publishes an internal
   `agent.prompt_submitted` fact; queued prompts folded into an in-flight turn
   preserve the request `ctx_id` on `agent.prompt_steered`. It has no user-message
   class. `tau-ext-utils` uses it for timer wakeups. External user messages instead
   enter through bridge `message.delivered_reported` events and the resulting
   canonical `message.delivered` facts.
+  See [`SPEC-internal-prompt-submit-requests`](../specs/SPEC-internal-prompt-submit-requests.md).
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call

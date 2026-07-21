@@ -8603,6 +8603,32 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(event, Event::ExtInternalPromptSubmitRequest(_)) {
+            // This is configured request-authority admission only. Loaded-agent
+            // validation and prompt submission happen after ordinary commit under
+            // `SPEC-internal-prompt-submit-requests`.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks internal-prompt request authority"
+                );
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -8783,6 +8809,10 @@ impl Harness {
             self.process_committed_prompt_fragment(peer_context, event);
             return;
         }
+        if let Event::ExtInternalPromptSubmitRequest(request) = event {
+            self.process_committed_internal_prompt_submit_request(peer_context, request);
+            return;
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -8851,6 +8881,32 @@ impl Harness {
         }
         if extension.activation_reservation.is_some() {
             self.finish_pending_provider_model_declaration(source_id.as_str());
+        }
+    }
+
+    /// Validate and submit one internal-prompt request only after generic peer
+    /// publication commits for the exact configured connection generation.
+    fn process_committed_internal_prompt_submit_request(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        request: &tau_proto::ExtInternalPromptSubmitRequest,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref() else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
+                && entry.kind == extension.kind
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            return;
+        }
+        if let Err(error) = self.handle_extension_internal_prompt_submit_request(request) {
+            self.pending_publish_error.get_or_insert(error);
         }
     }
 
@@ -10170,10 +10226,6 @@ impl Harness {
         event: Event,
     ) -> Result<Option<Event>, HarnessError> {
         match event {
-            Event::ExtInternalPromptSubmitRequest(request) => {
-                self.handle_extension_internal_prompt_submit_request(request)?;
-                Ok(None)
-            }
             Event::AgentMetadataSet(set) => {
                 if self.validate_agent_metadata_set(&set).is_ok() {
                     self.enqueue_publish(
@@ -10966,7 +11018,7 @@ impl Harness {
 
     fn handle_extension_internal_prompt_submit_request(
         &mut self,
-        request: tau_proto::ExtInternalPromptSubmitRequest,
+        request: &tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
         let Some(cid) = self.agent_routes.get(&agent_id).cloned() else {
@@ -10981,7 +11033,8 @@ impl Harness {
             ));
             return Ok(());
         };
-        let prompt = PendingPrompt::internal(request.text).with_ctx_id(request.ctx_id);
+        let prompt =
+            PendingPrompt::internal(request.text.clone()).with_ctx_id(request.ctx_id.clone());
         self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
         Ok(())
     }

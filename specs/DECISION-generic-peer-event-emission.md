@@ -234,3 +234,5 @@ The session-discovery declaration/readiness flow is specified by
 [SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).
 The per-agent context declaration/value/readiness flow is specified by
 [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
+The internal prompt request flow is specified by
+[SPEC-internal-prompt-submit-requests](SPEC-internal-prompt-submit-requests.md).

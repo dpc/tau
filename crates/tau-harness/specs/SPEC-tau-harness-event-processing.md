@@ -23,6 +23,10 @@ Per-agent context registration, value projection, and readiness release also
 run only after ordinary commit. The three raw events are excluded from semantic
 persistence for either caller transience value. See
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
+Internal-prompt requests likewise cross ordinary commit before target
+validation and prompt submission. Raw requests remain outside semantic history
+for either caller transience value. See
+[SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as
