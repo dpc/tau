@@ -1329,13 +1329,23 @@ fn connect_test_client(
     name: &str,
     kind: tau_proto::ClientKind,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    connect_test_client_with_origin(h, name, kind, ConnectionOrigin::InMemory)
+}
+
+/// Connect one test peer with an explicit harness-assigned origin.
+fn connect_test_client_with_origin(
+    h: &mut Harness,
+    name: &str,
+    kind: tau_proto::ClientKind,
+    origin: ConnectionOrigin,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
         ConnectionMetadata {
             id: name.into(),
             name: name.to_owned(),
             kind,
-            origin: ConnectionOrigin::InMemory,
+            origin,
         },
         Box::new(TestSink {
             events: Arc::clone(&events),

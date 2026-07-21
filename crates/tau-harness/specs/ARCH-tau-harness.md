@@ -5,7 +5,7 @@
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
-and terminal-output slices now use generic `Emit` publication, immutable authenticated
+terminal-output, and custom-event slices now use generic `Emit` publication, immutable authenticated
 internal publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
@@ -27,6 +27,10 @@ Terminal-output events commit and broadcast before attached UIs act. They never
 enter semantic replay, and replay-marked deliveries cannot repeat terminal side
 effects. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+Custom extension-owned events likewise cross ordinary interception and commit
+before direct live subscriber delivery. They have no harness semantic consumer
+and never enter semantic replay. See
+[SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,

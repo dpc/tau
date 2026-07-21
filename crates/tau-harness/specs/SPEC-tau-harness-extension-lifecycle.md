@@ -84,6 +84,11 @@ than activation declarations. Pre-Ready bells and OSC requests remain deferred
 until activation, then enter ordinary publication in original arrival order. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
 
+Custom extension-owned emits are also globally ordered operational traffic.
+Their complete pre-Ready frames remain deferred until activation, and disconnect
+drops unreleased frames. See
+[SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
+
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
 `&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and

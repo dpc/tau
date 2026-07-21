@@ -127,6 +127,22 @@ fn terminal_output_events_never_enter_semantic_history() {
     }
 }
 
+/// Opaque custom extension events are runtime subscriber traffic and never
+/// enter semantic history for either caller-selected transient value.
+#[test]
+fn custom_extension_events_never_enter_semantic_history() {
+    let event = Event::ExtensionEvent(
+        tau_proto::CustomEvent::try_new(
+            "demo.observation".parse().expect("event name"),
+            Some("s1".into()),
+            CborValue::Text("opaque".to_owned()),
+        )
+        .expect("custom event"),
+    );
+    assert!(!should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, true));
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

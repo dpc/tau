@@ -171,3 +171,9 @@ readiness. Their commit-before-effects contract is
 names, and caller-selected Emit metadata. The harness excludes both from semantic
 stores, and terminal consumers act only on live delivery. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
+
+`extension.event` carries an extension-owned nested event name, optional session
+metadata, and opaque CBOR. Reserved first-party categories remain structurally
+unrepresentable. Custom events are live subscriber traffic rather than semantic
+history; authenticated publisher identity is not yet present on wire delivery.
+See [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).

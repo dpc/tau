@@ -1,4 +1,5 @@
 mod agent_context;
+mod custom_event;
 mod internal_prompt;
 mod prompt_fragment;
 mod session_discovery;

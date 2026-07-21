@@ -569,9 +569,14 @@ transient runtime observations and never enter semantic replay. See
   extension-owned dotted name and CBOR payload. The nested name must have
   non-empty category and call segments, and must not use reserved first-party
   categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`,
-  `ui`, `shell`, `session`, or `term`). The harness
-  routes it like any other event. It is runtime/debug-log state unless a typed
-  semantic event is added for a durable use case.
+  `ui`, `shell`, `session`, or `term`). Every authenticated live configured
+  extension kind and attached local UI may publish one; unconfigured,
+  disconnected, non-UI socket, and dedicated external-message peers may not.
+  The harness commits it through ordinary interception for exact/prefix live
+  subscribers. It remains runtime/debug-log state for either transient value and
+  has no semantic or historical replay unless a separately approved typed event
+  is added. Wire delivery does not yet carry authenticated publisher identity.
+  See [`SPEC-custom-extension-events`](../specs/SPEC-custom-extension-events.md).
 
 ## UI
 

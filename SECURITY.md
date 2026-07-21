@@ -169,6 +169,13 @@ events never enter semantic stores, and terminal UIs independently reject replay
 delivery before writing terminal bytes. OSC name validation and bounded,
 base64-encoded values remain defense in depth. See
 [SPEC-terminal-output-side-effect-events](specs/SPEC-terminal-output-side-effect-events.md).
+Every live configured extension kind and attached local UI may also publish
+custom events under extension-owned categories. Unconfigured, disconnected,
+non-UI socket, and dedicated external-message peers cannot. Structural name
+validation prevents custom payloads from spoofing typed first-party event names;
+opaque payloads remain live/debug-only and never enter semantic stores. Existing
+trusted-local frame, activation, and diagnostics-cardinality bounds apply. See
+[SPEC-custom-extension-events](specs/SPEC-custom-extension-events.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

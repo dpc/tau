@@ -8707,6 +8707,32 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(event, Event::ExtensionEvent(_)) {
+            // Custom events assert only extension-owned names and payloads.
+            // Ordinary subscribers consume them after generic interception,
+            // commit, and broadcast; no harness semantic work happens here.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks custom-event authority"
+                );
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -10396,6 +10422,12 @@ impl Harness {
             .is_some_and(|connection| connection.kind == ClientKind::Ui)
     }
 
+    fn is_attached_socket_ui(&self, client_id: &str) -> bool {
+        self.bus.connection(client_id).is_some_and(|connection| {
+            connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
+        }) && !self.external_message_peers.contains(client_id)
+    }
+
     fn handle_client_message(
         &mut self,
         client_id: &str,
@@ -10584,12 +10616,14 @@ impl Harness {
             return Ok(true);
         };
         if matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
-            if self.bus.connection(client_id).is_some_and(|connection| {
-                connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
-            }) && !self
-                .external_message_peers
-                .contains(&tau_proto::ConnectionId::from(client_id))
-            {
+            if self.is_attached_socket_ui(client_id) {
+                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+                self.enqueue_publish(Some(client_id), event, transient, false, None);
+            }
+            return Ok(true);
+        }
+        if matches!(event, Event::ExtensionEvent(_)) {
+            if self.is_attached_socket_ui(client_id) {
                 let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
                 self.enqueue_publish(Some(client_id), event, transient, false, None);
             }
@@ -13225,8 +13259,7 @@ impl Harness {
     fn is_extension_fallback_emit_allowed(event: &Event) -> bool {
         matches!(
             event,
-            Event::ExtensionEvent(_)
-                | Event::HarnessNotice(_)
+            Event::HarnessNotice(_)
                 | Event::MessageDeliveredReported(_)
                 | Event::MessageEditedReported(_)
                 | Event::MessageDeletedReported(_)
@@ -13255,13 +13288,6 @@ impl Harness {
                 | Event::UiFocusChanged(_)
                 | Event::UiDetachRequest(_)
                 | Event::UiShellCommand(_)
-                // UI clients drive stateful extensions (e.g. the task factory's
-                // request/snapshot exchange) by emitting extension-owned custom
-                // events. `CustomEvent`'s deserialize path re-runs `try_new`, so
-                // the name is guaranteed to use an extension-owned category and
-                // cannot spoof a first-party `harness`/`agent`/`tool` fact; the
-                // event only reaches extensions that opted in by subscribing.
-                | Event::ExtensionEvent(_)
         )
     }
 

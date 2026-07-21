@@ -23497,7 +23497,12 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
             vec![EventSelector::Prefix("factory.".to_owned())],
         )
         .expect("extension subscription");
-    let _ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+    let _ui = connect_test_client_with_origin(
+        &mut h,
+        "ui",
+        tau_proto::ClientKind::Ui,
+        ConnectionOrigin::Socket,
+    );
 
     h.handle_client_event_inner(
         "ui",

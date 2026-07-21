@@ -240,3 +240,5 @@ The start-agent request part of the same row is implemented by
 [SPEC-start-agent-requests](SPEC-start-agent-requests.md).
 The live terminal-output row is implemented by
 [SPEC-terminal-output-side-effect-events](SPEC-terminal-output-side-effect-events.md).
+The custom extension-owned event row is implemented by
+[SPEC-custom-extension-events](SPEC-custom-extension-events.md).
