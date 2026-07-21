@@ -120,6 +120,9 @@ Because the shell extension registers as a session context provider, after it
 has sent the session-wide skill and AGENTS.md announcements for a
 `session.started` event, it emits `extension.session_context_ready` so the
 harness can safely run startup role required-skill validation.
+Its startup `shell.workdir` prompt-fragment event is a transient declaration that
+the harness commits before activating prompt assembly state, as specified by
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 `tau-skills` deduplicates files found by this extension before announcement; the
 harness still owns skill-name validation at the protocol boundary, canonical
 winner selection among announced candidates from all sources, model/user

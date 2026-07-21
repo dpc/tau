@@ -11,6 +11,10 @@ All ordinary event publication should flow through the central publish path:
 single runtime sequence/timestamp, writes debug/event-log records, persists
 eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
+Extension prompt-fragment projection runs only after this ordinary commit.
+Declarations are excluded from semantic persistence and replay for either
+caller-supplied transience value; see
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as

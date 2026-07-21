@@ -108,6 +108,8 @@ pub(crate) enum ActivationDeclarationFamily {
     ProviderModels,
     /// Tool registration or unregistration declaration.
     ToolLifecycle,
+    /// Extension-level prompt-fragment declaration.
+    PromptFragment,
 }
 
 /// Immutable authenticated metadata carried beside one generic peer publish.
@@ -811,6 +813,9 @@ impl Harness {
                     Event::ProviderModelsDeclared(_) => ActivationDeclarationFamily::ProviderModels,
                     Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_) => {
                         ActivationDeclarationFamily::ToolLifecycle
+                    }
+                    Event::ExtPromptFragmentPublish(_) => {
+                        ActivationDeclarationFamily::PromptFragment
                     }
                     _ => return None,
                 };

@@ -7090,7 +7090,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     let contributor = tau_proto::ConnectionId::from("ctx-ext");
     let agent_id = crate::parse_agent_id("agent-1");
 
-    h.publish_extension_prompt_fragment(
+    h.apply_extension_prompt_fragment(
         "ctx-ext",
         tau_proto::ExtPromptFragmentPublish {
             fragment: tau_proto::PromptFragment::new(
@@ -7131,7 +7131,7 @@ fn switch_session_clears_session_scoped_extension_context() {
     let contributor = tau_proto::ConnectionId::from("ctx-ext");
     let agent_id = crate::parse_agent_id("agent-1");
 
-    h.publish_extension_prompt_fragment(
+    h.apply_extension_prompt_fragment(
         "ctx-ext",
         tau_proto::ExtPromptFragmentPublish {
             fragment: tau_proto::PromptFragment::new(

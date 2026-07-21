@@ -7260,7 +7260,7 @@ impl Harness {
         );
     }
 
-    fn publish_extension_prompt_fragment(
+    fn apply_extension_prompt_fragment(
         &mut self,
         source_id: &str,
         publish: tau_proto::ExtPromptFragmentPublish,
@@ -7269,8 +7269,7 @@ impl Harness {
         self.extension_prompt_fragments
             .entry(contributor)
             .or_default()
-            .insert(publish.fragment.name.clone(), publish.fragment.clone());
-        self.publish_event(Some(source_id), Event::ExtPromptFragmentPublish(publish));
+            .insert(publish.fragment.name.clone(), publish.fragment);
     }
 
     fn publish_extension_skill_available(
@@ -7674,7 +7673,7 @@ impl Harness {
             self.publish_agent_context_publish(source_id, publish);
         }
         for fragment in stage.prompt_fragments.into_values() {
-            self.publish_extension_prompt_fragment(
+            self.apply_extension_prompt_fragment(
                 source_id,
                 tau_proto::ExtPromptFragmentPublish { fragment },
             );
@@ -7723,6 +7722,10 @@ impl Harness {
             && self
                 .extensions
                 .pending_tool_lifecycle_declarations
+                .is_empty()
+            && self
+                .extensions
+                .pending_prompt_fragment_declarations
                 .is_empty()
             && self
                 .extensions
@@ -7932,6 +7935,10 @@ impl Harness {
             || self
                 .extensions
                 .pending_tool_lifecycle_declarations
+                .contains_key(source_id)
+            || self
+                .extensions
+                .pending_prompt_fragment_declarations
                 .contains_key(source_id)
         {
             return Ok(());
@@ -8601,6 +8608,38 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(event, Event::ExtPromptFragmentPublish(_)) {
+            // This is only configured event-authority admission. Every
+            // authenticated configured extension kind owns its source/name
+            // fragment slots. Projection replacement and prompt assembly happen
+            // only after ordinary interception and commit. Configured peers are
+            // trusted local executables under `SECURITY.md#local-ipc-and-external-ingress`;
+            // see `SPEC-prompt-fragment-declarations-and-projection`.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks prompt-fragment declaration authority"
+                );
+                return Ok(());
+            }
+            if self.should_stage_extension_capabilities(source_id) {
+                *self
+                    .extensions
+                    .pending_prompt_fragment_declarations
+                    .entry(source_id.into())
+                    .or_default() += 1;
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
@@ -8690,6 +8729,10 @@ impl Harness {
                 | Event::ProviderCacheMissDiagnosticReported(_)
         ) {
             self.process_committed_provider_execution_report(peer_context, event);
+            return;
+        }
+        if matches!(event, Event::ExtPromptFragmentPublish(_)) {
+            self.process_committed_prompt_fragment(peer_context, event);
             return;
         }
         let Event::ProviderModelsDeclared(declaration) = event else {
@@ -9225,6 +9268,45 @@ impl Harness {
         }
     }
 
+    /// Apply one committed prompt-fragment declaration to the exact configured
+    /// connection generation that authored it.
+    fn process_committed_prompt_fragment(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Event::ExtPromptFragmentPublish(publish) = event else {
+            unreachable!("caller filters prompt-fragment declarations");
+        };
+        let Some(extension) = peer_context.extension.as_ref() else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.kind == extension.kind
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            return;
+        }
+        if let Some(reservation) = extension.activation_reservation
+            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+        {
+            self.finish_pending_prompt_fragment_declaration(source_id.as_str());
+            return;
+        }
+        if self.should_stage_extension_capabilities(source_id.as_str()) {
+            self.stage_extension_prompt_fragment(source_id.as_str(), publish.clone());
+        } else {
+            self.apply_extension_prompt_fragment(source_id.as_str(), publish.clone());
+        }
+        if extension.activation_reservation.is_some() {
+            self.finish_pending_prompt_fragment_declaration(source_id.as_str());
+        }
+    }
+
     /// Validate and apply one committed tool lifecycle declaration.
     fn process_committed_tool_declaration(
         &mut self,
@@ -9365,6 +9447,9 @@ impl Harness {
             interception::ActivationDeclarationFamily::ToolLifecycle => {
                 self.finish_pending_tool_lifecycle_declaration(extension.source.as_str());
             }
+            interception::ActivationDeclarationFamily::PromptFragment => {
+                self.finish_pending_prompt_fragment_declaration(extension.source.as_str());
+            }
         }
     }
 
@@ -9384,6 +9469,15 @@ impl Harness {
         );
     }
 
+    /// Release one admitted pre-`Ready` prompt-fragment declaration and retry
+    /// activation.
+    fn finish_pending_prompt_fragment_declaration(&mut self, source_id: &str) {
+        self.finish_pending_activation_declaration(
+            source_id,
+            interception::ActivationDeclarationFamily::PromptFragment,
+        );
+    }
+
     /// Release one family-specific pending count and retry extension
     /// activation.
     fn finish_pending_activation_declaration(
@@ -9398,6 +9492,9 @@ impl Harness {
             }
             interception::ActivationDeclarationFamily::ToolLifecycle => {
                 &mut self.extensions.pending_tool_lifecycle_declarations
+            }
+            interception::ActivationDeclarationFamily::PromptFragment => {
+                &mut self.extensions.pending_prompt_fragment_declarations
             }
         };
         let remove = if let Some(count) = pending.get_mut(&source_id) {
@@ -9904,14 +10001,6 @@ impl Harness {
                     self.stage_agent_context_publish(source_id, publish);
                 } else {
                     self.publish_agent_context_publish(source_id, publish);
-                }
-                Ok(None)
-            }
-            Event::ExtPromptFragmentPublish(publish) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_prompt_fragment(source_id, publish);
-                } else {
-                    self.publish_extension_prompt_fragment(source_id, publish);
                 }
                 Ok(None)
             }
@@ -11996,6 +12085,9 @@ impl Harness {
             .remove(connection_id);
         self.extensions
             .pending_tool_lifecycle_declarations
+            .remove(connection_id);
+        self.extensions
+            .pending_prompt_fragment_declarations
             .remove(connection_id);
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);

@@ -1,3 +1,4 @@
+mod prompt_fragment;
 mod tool_lifecycle;
 mod tool_progress;
 mod tool_request;

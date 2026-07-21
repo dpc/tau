@@ -3,9 +3,9 @@
 ## Status
 
 The external-message, provider-model, provider-quota, provider-execution,
-tool-lifecycle, tool-request, tool-progress, and terminal-tool-outcome slices
-now use generic `Emit` publication, immutable authenticated internal publisher
-snapshots, source-aware admission, and downstream canonicalization as required by
+tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, and
+prompt-fragment slices now use generic `Emit` publication, immutable authenticated
+internal publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
@@ -192,6 +192,13 @@ authority, not hostile transport peers. The controlling boundary is linked from
 [`SPEC-tau-harness-session-state`](SPEC-tau-harness-session-state.md#extension-data).
 Reviews must not conflate that boundary with external adapter payloads or
 cooperative cross-harness messaging.
+
+Extension prompt-fragment declarations cross ordinary interception and commit
+before the harness replaces the exact configured connection's runtime
+source/name projection. Pre-Ready declarations reserve activation capacity and
+block Ready while parked; prompt assembly consumes only committed active
+fragments. See
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 
 The harness daemon listener is local IPC for trusted same-user Tau clients and
 runtime discovery. Listener ownership and cleanup must preserve the socket

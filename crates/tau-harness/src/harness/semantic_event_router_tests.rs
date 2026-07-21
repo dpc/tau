@@ -27,6 +27,23 @@ fn provider_model_state_never_enters_semantic_history() {
     }
 }
 
+/// Extension prompt-fragment declarations are runtime prompt-assembly inputs,
+/// never semantic history, even when a peer requests durable publication.
+#[test]
+fn prompt_fragment_declarations_never_enter_semantic_history() {
+    let event = Event::ExtPromptFragmentPublish(tau_proto::ExtPromptFragmentPublish {
+        fragment: tau_proto::PromptFragment::new(
+            "extension.instructions",
+            tau_proto::PromptPriority::new(10),
+            "runtime instructions",
+        ),
+    });
+
+    assert!(event.defaults_to_transient());
+    assert!(!should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, true));
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

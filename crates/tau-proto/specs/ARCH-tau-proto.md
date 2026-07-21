@@ -18,6 +18,9 @@ payloads identify the configured extension and its harness-assigned logical
 instance; this is stable across supervised process respawn rather than a
 process-connection generation. See
 [SPEC-tool-declarations-and-canonical-state](../../../specs/SPEC-tool-declarations-and-canonical-state.md).
+`extension.prompt_fragment_publish` remains the extension-authored declaration
+name but now defaults to transient and never enters semantic history. See
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 Tool progress likewise separates transient Tool/Core
 `tool.progress_reported` observations from protected harness-authored canonical
 `tool.progress` facts. Both share the `ToolProgress` payload, but the event names

@@ -5305,6 +5305,7 @@ impl Event {
                 | Self::ActionInvoke(_)
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
+                | Self::ExtPromptFragmentPublish(_)
                 | Self::ExtensionSessionContextReady(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)

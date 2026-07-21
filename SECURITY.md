@@ -123,6 +123,13 @@ exact routed owner; every accepted terminal or routed-owner disconnect clears
 live request state and retains the completed-call tombstone. Re-check
 request-to-terminal and internal-route closure tests whenever pending-call
 ownership or report consumers change.
+Every authenticated configured extension kind may publish transient prompt-fragment
+declarations without a separate capability. The declaration commits before the
+harness updates prompt assembly state; interception drop and stale connection
+generations cannot mutate that projection. Pre-Ready declarations reserve bounded
+activation capacity until commit, drop, or disconnect, and no declaration enters semantic
+history or replay. See
+[SPEC-prompt-fragment-declarations-and-projection](specs/SPEC-prompt-fragment-declarations-and-projection.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

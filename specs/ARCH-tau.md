@@ -26,6 +26,11 @@ Provider extensions similarly report bounded quota replacements, patches, and
 clears before validation; only the harness publishes accepted current snapshots,
 as specified by
 [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
+Every authenticated configured extension kind may publish transient-by-default
+prompt-fragment declarations. The harness commits each surviving declaration
+before replacing its exact live connection's runtime prompt projection, as
+specified by
+[SPEC-prompt-fragment-declarations-and-projection](SPEC-prompt-fragment-declarations-and-projection.md).
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 

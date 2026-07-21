@@ -1748,6 +1748,7 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ActionInvoke(_)
                 | Event::ActionResult(_)
                 | Event::ActionError(_)
+                | Event::ExtPromptFragmentPublish(_)
                 | Event::ExtensionSessionContextReady(_)
                 | Event::ShellCommandProgress(_)
                 | Event::UiPromptSubmitted(_)
@@ -3282,6 +3283,13 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             action_id: "email.out.list".to_owned(),
             message: "nope".to_owned(),
             details: None,
+        }),
+        Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
+            fragment: PromptFragment::new(
+                "extension.instructions",
+                PromptPriority::new(10),
+                "runtime instructions",
+            ),
         }),
         Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),

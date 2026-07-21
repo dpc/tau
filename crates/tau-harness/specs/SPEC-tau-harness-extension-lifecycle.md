@@ -127,6 +127,10 @@ Only the exhaustive set of capability declarations enters activation staging;
 all other emitted events are classified as operational by default. This keeps
 new state-mutating, reply, progress, and terminal events behind the barrier
 unless the protocol explicitly promotes them to declarations.
+Pre-Ready prompt-fragment declarations reserve count and encoded bytes before
+interception, block Ready until pass/drop/disconnect settles, and stage only the
+committed survivor. See
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 Harness-internal tool handlers are installed before this preflight, so their names
 participate as reserved owners. Per-connection retained activation traffic is
 bounded by message-count and encoded-byte quotas; overflow follows the same

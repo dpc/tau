@@ -129,7 +129,8 @@ The following exact authority and wire-name mapping governs the migration:
 | `action.schema_published` | `action.schema_declared` | Configured action or core extension | Harness publishes canonical `action.schema_published` or a rejection diagnostic |
 | `action.result`, `action.error` | `action.result_reported`, `action.error_reported` | Configured action or core extension | Harness validates invocation ownership, sends the correlated outcome, and publishes a canonical fact only when shared observation is intended |
 | The six canonical `message.*` facts | Same name with `_reported` appended | Configured extension declaring `PeerCapability::MessageBridge` | Harness stamps provenance and publishes the canonical durable fact |
-| `extension.skill_available`, `extension.agents_md_available`, context-provider registration/readiness, agent-context publication, and prompt-fragment publication | Existing names remain declarations, values, or acknowledgements | Configured extension or core component owning the declaration slot | Post-commit consumers update projections and publish derived state where needed |
+| `extension.prompt_fragment_publish` | Existing declaration name remains | Every authenticated configured extension entry kind, including configured Core; no capability bit. Unconfigured/socket peers have no authority, and harness-internal direct publication remains outside peer admission | Post-commit consumer replaces the exact live connection generation's runtime source/name prompt projection |
+| `extension.skill_available`, `extension.agents_md_available`, context-provider registration/readiness, and agent-context publication | Existing names remain declarations, values, or acknowledgements | Configured extension or core component owning the declaration slot | Post-commit consumers update projections and publish derived state where needed |
 | `agent.start_request`, `extension.internal_prompt_submit_request` | Existing request names remain | Configured extension or core component | Harness publishes acceptance/rejection and canonical agent or prompt facts |
 | `agent.metadata_set`, `agent.metadata_unset` | `agent.metadata_set_request`, `agent.metadata_unset_request` | Configured extension or attached UI | Harness publishes canonical metadata facts or rejection outcomes |
 | `shell.command_progress`, `shell.command_finished` | `shell.command_progress_reported`, `shell.command_finished_reported` | Configured shell extension | Harness validates routed-command ownership and publishes canonical progress/completion; transcript injection follows completion commit |
@@ -227,3 +228,5 @@ The peer tool-request commit-to-routing flow is specified by
 [SPEC-tool-requests-and-routing](SPEC-tool-requests-and-routing.md).
 The provider-quota report-to-canonical-current-state flow is specified by
 [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
+The extension prompt-fragment declaration-to-projection flow is specified by
+[SPEC-prompt-fragment-declarations-and-projection](SPEC-prompt-fragment-declarations-and-projection.md).

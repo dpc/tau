@@ -187,9 +187,9 @@ impl<State> ExtensionBuilder<State> {
     /// startup.
     ///
     /// This helper preserves normal tau-client startup staging: the fragment is
-    /// emitted before `Ready`, alongside other startup events.
+    /// emitted transiently before `Ready`, alongside other startup events.
     pub fn publish_prompt_fragment(&mut self, fragment: tau_proto::PromptFragment) -> &mut Self {
-        self.startup_event(tau_proto::Event::ExtPromptFragmentPublish(
+        self.startup_transient_event(tau_proto::Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish { fragment },
         ))
     }

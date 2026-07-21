@@ -1491,6 +1491,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
     let Event::ExtPromptFragmentPublish(publish) = prompt_fragment_emit.event.as_ref() else {
         panic!("expected prompt fragment publish before Ready: {frames:?}");
     };
+    assert!(prompt_fragment_emit.transient);
     assert_eq!(publish.fragment.name, "shell.cwd");
     assert_eq!(publish.fragment.priority, PromptPriority::new(900));
     assert!(

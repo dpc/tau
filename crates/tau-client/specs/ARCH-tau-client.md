@@ -190,6 +190,10 @@ state they need, publish context values, and choose when to emit
 `extension.context_ready` or `extension.session_context_ready`. `ClientHandle`
 provides small readiness emit helpers for those two DTOs, but readiness policy
 and correlation remain extension-owned.
+Prompt-fragment startup events are transient declarations: the harness commits
+them through ordinary interception before activating their prompt projection.
+See
+[SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 
 Manual-loop extensions that need harness-owned extension-data storage can use the
 extension-data RPC helper. It generates a request id, sends the existing

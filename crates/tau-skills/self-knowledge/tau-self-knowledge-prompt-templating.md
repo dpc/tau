@@ -32,6 +32,11 @@ agents:
 
 `agents.prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
+Configured extensions can also publish runtime prompt-fragment declarations. Tau
+commits those transient events through interception before changing prompt
+assembly, removes a contributor's fragments when it disconnects, and does not
+replay them to late subscribers.
+
 Roles can also choose a full system prompt template with `prompt_override`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
 
 ## Variables for prompt fragments

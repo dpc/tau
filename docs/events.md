@@ -487,8 +487,11 @@ harness/agent.
   AGENTS.md files after `session.started`.
 - **`extension.agent_context_publish`** — The extension publishes context for a
   particular agent/session context provider slot.
-- **`extension.prompt_fragment_publish`** — The extension publishes a prompt
-  fragment contribution that prompt assembly may include according to config.
+- **`extension.prompt_fragment_publish`** — The extension publishes a
+  prompt-fragment declaration that defaults to transient. Every authenticated
+  configured extension kind may publish one. It commits through ordinary
+  interception before the harness replaces the source/name prompt-assembly slot;
+  declarations are not replayed or synthesized for late subscribers.
 - **`extension.internal_prompt_submit_request`** — A narrow extension request to
   submit hidden internal control text to an already loaded agent. The harness
   validates the target agent and, when accepted, publishes an internal
