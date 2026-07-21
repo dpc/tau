@@ -2,14 +2,6 @@
 
 Authority: confirmed, 2026-07-21, dpc
 
-## Status
-
-Cold restore currently reconstructs runtime request ownership from durable
-prompt or response provenance. The approved transition makes a completed
-durable start-agent worker ordinary runtime state after restart while preserving
-its historical facts. Remove this status when the implementation and linked
-functional specifications match the decision.
-
 A completed durable worker created through harness-owned `agent_start` or the
 typed start-agent request path restores as an ordinary loaded, idle, addressable
 conversation. The harness must not reconstruct ownership by the completed

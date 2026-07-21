@@ -503,6 +503,7 @@ This plan follows:
 - [`SPEC-terminal-tool-reports-and-canonical-outcomes`](../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md)
 - [`SPEC-provider-execution-reports-and-canonical-facts`](../specs/SPEC-provider-execution-reports-and-canonical-facts.md)
 - [`SPEC-compaction-and-context-recovery`](../specs/SPEC-compaction-and-context-recovery.md)
+- [`DECISION-cold-restored-completed-worker-ownership`](../specs/DECISION-cold-restored-completed-worker-ownership.md)
 - [`DECISION-harness-owned-agent-navigation-modes`](../specs/DECISION-harness-owned-agent-navigation-modes.md)
 - [`DECISION-persistence-and-extension-interface-change-approval`](../specs/DECISION-persistence-and-extension-interface-change-approval.md)
 - [`ARCH-tau-e2e-tests`](../crates/tau-e2e-tests/specs/ARCH-tau-e2e-tests.md)

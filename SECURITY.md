@@ -40,6 +40,15 @@ to publish derived metadata does not invalidate an already committed record.
 This is cooperative same-UID crash consistency, not tamper detection: arbitrary
 same-inode/same-size journal mutation is outside the append-only store contract.
 
+Cold restore detaches completed start-agent workers only from validated journal
+evidence that matches warm side-conversation terminalization. Explicitly
+continuing recovery is not completion; terminal compaction failures are
+completion when their originating side request matches. Histories without
+unambiguous terminal evidence retain prior behavior and do not recover transient
+result routes. Re-check this classifier and its two-boot positive/negative
+regressions whenever provider-response, compaction, or side-conversation
+terminalization changes.
+
 ## Agent display names
 
 Agent display/task names are presentation-only metadata, never routing or trust

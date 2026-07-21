@@ -277,6 +277,39 @@ fn default_navigation_mode(
     }
 }
 
+/// Renders one accepted cross-agent delivery as its model-visible prompt.
+///
+/// Initial or redundant watch observations return `None` because they do not
+/// create agent work.
+fn agent_message_received_prompt(message: &tau_proto::AgentMessageReceived) -> Option<String> {
+    let escaped_message = escape_agent_message_for_prompt(&message.message);
+    let sender_label = message
+        .sender_session_id
+        .as_ref()
+        .map(|session_id| format!("{session_id}/{}", message.sender_id))
+        .unwrap_or_else(|| message.sender_id.to_string());
+    match message.kind {
+        tau_proto::AgentMessageKind::Message => Some(format!(
+            "[tau-internal]: You have received a message from {sender_label}\n\n<message>\n{escaped_message}\n</message>"
+        )),
+        tau_proto::AgentMessageKind::WatchResponse => Some(format!(
+            "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{escaped_message}\n</response>"
+        )),
+        tau_proto::AgentMessageKind::WatchPrompt => Some(format!(
+            "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{escaped_message}\n</prompt>"
+        )),
+        tau_proto::AgentMessageKind::WatchTurnState => message
+            .watch_turn_state
+            .as_ref()
+            .and_then(|state| crate::prompt::watch_turn_transition_text(&sender_label, state)),
+        tau_proto::AgentMessageKind::WatchProviderStatus => {
+            let status = message.watch_provider_status.as_ref()?;
+            (!status.initial)
+                .then(|| crate::prompt::watch_provider_status_text(&sender_label, status))
+        }
+    }
+}
+
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
     // Provider-owned stats remain public content per
     // `DECISION-provider-response-stats`.
@@ -5560,42 +5593,8 @@ impl Harness {
             .pending_external_receive_acks
             .contains_key(&message.message_id)
             .then_some(message.message.len());
-        let escaped_message = escape_agent_message_for_prompt(&message.message);
-        let sender_label = message
-            .sender_session_id
-            .as_ref()
-            .map(|session_id| format!("{session_id}/{}", message.sender_id))
-            .unwrap_or_else(|| message.sender_id.to_string());
-        let text = match message.kind {
-            tau_proto::AgentMessageKind::Message => format!(
-                "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
-                sender_label, escaped_message
-            ),
-            tau_proto::AgentMessageKind::WatchResponse => format!(
-                "[tau-internal]: Watched agent {} emitted a response\n\n<response>\n{}\n</response>",
-                sender_label, escaped_message
-            ),
-            tau_proto::AgentMessageKind::WatchPrompt => format!(
-                "[tau-internal]: Watched agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
-                sender_label, escaped_message
-            ),
-            tau_proto::AgentMessageKind::WatchTurnState => {
-                let Some(text) = message.watch_turn_state.as_ref().and_then(|state| {
-                    crate::prompt::watch_turn_transition_text(&sender_label, state)
-                }) else {
-                    return;
-                };
-                text
-            }
-            tau_proto::AgentMessageKind::WatchProviderStatus => {
-                let Some(status) = message.watch_provider_status.as_ref() else {
-                    return;
-                };
-                if status.initial {
-                    return;
-                }
-                crate::prompt::watch_provider_status_text(&sender_label, status)
-            }
+        let Some(text) = agent_message_received_prompt(message) else {
+            return;
         };
         if let Some(cid) = self
             .agent_routes
@@ -18128,8 +18127,8 @@ impl Harness {
                 .agent(agent_id.as_str())
                 .and_then(|tree| tree.display_name().map(str::to_owned))
                 .or_else(|| meta.and_then(|meta| meta.display_name));
-            let role = self.agent_role_from_log(agent_id.as_str());
-            let originator = self.agent_originator_from_log(agent_id.as_str());
+            let (role, originator, navigation_mode) =
+                self.restored_agent_runtime_from_log(agent_id.as_str());
             let peer_entrypoint_endpoint = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -18175,6 +18174,7 @@ impl Harness {
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
+                conv.originator = originator;
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
                 conv.persistence = persistence;
@@ -18216,11 +18216,6 @@ impl Harness {
             }
             self.agent_routes
                 .insert(agent_id_string.clone(), cid.clone());
-            let navigation_mode = self
-                .agents
-                .get(&cid)
-                .map(|agent| default_navigation_mode(&agent.originator))
-                .unwrap_or_default();
             self.agent_navigation_modes
                 .entry(agent_id.clone())
                 .or_insert(navigation_mode);
@@ -18750,27 +18745,178 @@ impl Harness {
             .unwrap_or(false)
     }
 
-    fn agent_originator_from_log(&self, agent_id: &str) -> tau_proto::PromptOriginator {
-        self.agent_store
+    /// Restores durable descriptive facts while detaching a completed worker
+    /// from the run-local start request that created it.
+    fn restored_agent_runtime_from_log(
+        &self,
+        agent_id: &str,
+    ) -> (
+        Option<String>,
+        tau_proto::PromptOriginator,
+        tau_proto::AgentNavigationMode,
+    ) {
+        let events = self
+            .agent_store
             .agent_events(agent_id)
             .inspect_err(|error| {
-                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events for originator restore");
+                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events for runtime restore");
             })
-            .ok()
-            .and_then(|events| {
-                events.into_iter().find_map(|record| match record.event {
-                    Event::AgentPromptSubmitted(submitted) => Some(submitted.originator),
-                    Event::ProviderResponseFinished(finished) => Some(finished.originator),
-                    Event::ProviderToolResult(result) => Some(result.originator),
-                    Event::ToolBackgroundResult(result) => Some(result.originator),
-                    Event::ToolBackgroundError(error) => Some(error.originator),
-                    _ => None,
-                })
+            .unwrap_or_default();
+        let creation = events.iter().find_map(|record| match &record.event {
+            Event::AgentStarted(started) => Some(started),
+            _ => None,
+        });
+        let role = creation
+            .map(|started| started.role.clone())
+            .filter(|role| self.available_roles.contains_key(role));
+        let historical_originator = events
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::AgentPromptSubmitted(submitted) => Some(submitted.originator.clone()),
+                Event::ProviderResponseFinished(finished) => Some(finished.originator.clone()),
+                Event::ProviderToolResult(result) => Some(result.originator.clone()),
+                Event::ToolBackgroundResult(result) => Some(result.originator.clone()),
+                Event::ToolBackgroundError(error) => Some(error.originator.clone()),
+                _ => None,
             })
             .unwrap_or_else(|| tau_proto::PromptOriginator::Extension {
                 name: HARNESS_CONNECTION_ID.into(),
                 query_id: format!("restored-{agent_id}"),
-            })
+            });
+        let completed_worker = Self::journal_proves_completed_start_agent_worker(
+            &events,
+            creation,
+            &historical_originator,
+        );
+        if completed_worker {
+            (
+                role,
+                tau_proto::PromptOriginator::User,
+                tau_proto::AgentNavigationMode::ActiveAuto,
+            )
+        } else {
+            let navigation_mode = default_navigation_mode(&historical_originator);
+            (role, historical_originator, navigation_mode)
+        }
+    }
+
+    /// Returns whether durable events match a warm side-request terminal path.
+    fn journal_proves_completed_start_agent_worker(
+        events: &[tau_core::PersistedAgentEvent],
+        creation: Option<&tau_proto::AgentStarted>,
+        historical_originator: &tau_proto::PromptOriginator,
+    ) -> bool {
+        if !matches!(
+            (historical_originator, creation),
+            (
+                tau_proto::PromptOriginator::Extension { .. },
+                Some(tau_proto::AgentStarted {
+                    parent_agent: Some(_),
+                    ..
+                })
+            )
+        ) {
+            return false;
+        }
+        if events.iter().any(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptSubmitted(submitted) if submitted.originator.is_user()
+            )
+        }) {
+            return true;
+        }
+
+        let mut pending_message_prompts = VecDeque::new();
+        for (index, record) in events.iter().enumerate() {
+            match &record.event {
+                Event::AgentMessageReceived(message) => {
+                    if let Some(prompt) = agent_message_received_prompt(message) {
+                        pending_message_prompts.push_back(prompt);
+                    }
+                }
+                Event::AgentPromptSubmitted(prompt) => {
+                    Self::consume_restored_message_prompt(
+                        &mut pending_message_prompts,
+                        &prompt.text,
+                    );
+                }
+                Event::AgentPromptSteered(prompt) => {
+                    Self::consume_restored_message_prompt(
+                        &mut pending_message_prompts,
+                        &prompt.text,
+                    );
+                }
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason != tau_proto::StandaloneCompactionFailureReason::Cancelled
+                        && Self::compaction_failure_matches_originator(
+                            &events[..index],
+                            failed,
+                            historical_originator,
+                        ) =>
+                {
+                    return true;
+                }
+                Event::ProviderResponseFinished(finished)
+                    if finished.originator == *historical_originator
+                        && finished.recovery_disposition
+                            == tau_proto::ContextRecoveryDisposition::None
+                        && !finished
+                            .output_items
+                            .iter()
+                            .any(|item| matches!(item, ContextItem::ToolCall(_)))
+                        && pending_message_prompts.is_empty()
+                        && Self::response_checkpoint_is_inference(
+                            &events[..index],
+                            &finished.agent_prompt_id,
+                        ) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Confirms that a terminal compaction failure belongs to the side request
+    /// whose runtime ownership is being restored.
+    fn compaction_failure_matches_originator(
+        events: &[tau_core::PersistedAgentEvent],
+        failed: &tau_proto::AgentStandaloneCompactionFailed,
+        originator: &tau_proto::PromptOriginator,
+    ) -> bool {
+        events.iter().rev().any(|record| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.transaction_id == failed.transaction_id
+                        && &started.originator == originator
+            )
+        })
+    }
+
+    /// Removes one durable prompt that consumed a previously delivered message.
+    fn consume_restored_message_prompt(pending: &mut VecDeque<String>, text: &str) {
+        if let Some(position) = pending.iter().position(|prompt| prompt == text) {
+            pending.remove(position);
+        }
+    }
+
+    /// Confirms that one terminal response belongs to ordinary inference rather
+    /// than a standalone-compaction continuation.
+    fn response_checkpoint_is_inference(
+        events: &[tau_core::PersistedAgentEvent],
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        events.iter().rev().any(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if &started.agent_prompt_id == prompt_id
+                        && started.operation == Some(tau_proto::PromptOperation::Inference)
+            )
+        })
     }
 
     fn restored_agent_context_usage(
@@ -18797,21 +18943,6 @@ impl Harness {
             }
         }
         None
-    }
-
-    fn agent_role_from_log(&self, agent_id: &str) -> Option<String> {
-        self.agent_store
-            .agent_events(agent_id)
-            .inspect_err(|error| {
-                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events for role restore");
-            })
-            .ok()?
-            .into_iter()
-            .find_map(|record| match record.event {
-                Event::AgentStarted(started) => Some(started.role),
-                _ => None,
-            })
-            .filter(|role| self.available_roles.contains_key(role))
     }
 
     pub(crate) fn role_group_name_for_role(&self, role: &str) -> String {

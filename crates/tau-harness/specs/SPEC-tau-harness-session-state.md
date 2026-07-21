@@ -1,5 +1,12 @@
 # SPEC-tau-harness-session-state: Session State
 
+## Record justification
+
+Session state spans durable session and agent stores, harness cold restoration,
+runtime routing and navigation classification, UI roster projection, and
+extension-owned state. No component-local documentation can describe their
+shared lifecycle and recovery invariants coherently.
+
 ## Session and agent stores
 
 The session store owns durable membership facts such as
@@ -147,6 +154,14 @@ The harness owns a daemon-lifetime mode for every loaded current-session agent.
 UI disconnect preserves it; committed unload, session switch, and process exit
 forget it. Cold restore recomputes ordinary/delegated defaults and does not
 restore explicit overrides.
+
+A completed durable start-agent worker restores as an ordinary loaded, idle,
+addressable conversation rather than as work still owned by its transient
+request. Its immutable `AgentStarted.parent_agent` creation fact supplies the
+delegated `active_auto` default while historical prompt and response originators
+remain unchanged. A fresh user turn cannot emit another start result or unload
+the worker as request completion. See
+[DECISION-cold-restored-completed-worker-ownership](../../../specs/DECISION-cold-restored-completed-worker-ownership.md).
 
 ## Agent roster projection
 

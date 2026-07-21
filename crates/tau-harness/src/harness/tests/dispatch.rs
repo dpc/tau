@@ -14866,6 +14866,365 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// A completed durable worker must not recover the transient start request as
+/// the owner of future turns. This regression exercises a real tool-backed
+/// start, cold restoration, and a fresh targeted turn so a stale extension
+/// originator cannot emit a second result or unload the worker.
+#[test]
+fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        let _delegate_events = connect_test_tool(&mut h, "conn-cold-delegate");
+        let parent_cid = ensure_test_user_agent(&mut h);
+        let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
+        h.tool_agents
+            .insert("cold-delegate-call".into(), parent_cid);
+
+        let mut query = ext_query("q-cold-completed");
+        query.tool_call_id = Some("cold-delegate-call".into());
+        h.handle_start_agent_request("conn-cold-delegate", query)
+            .expect("start worker");
+        let worker_cid = ext_query_cid(&h, "q-cold-completed").expect("worker conversation");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        let worker_prompt_id = h
+            .prompt_agents
+            .iter()
+            .find_map(|(prompt_id, cid)| (cid == &worker_cid).then_some(prompt_id.clone()))
+            .expect("worker prompt");
+        let mut completed = provider_text_response(
+            &worker_prompt_id,
+            worker_agent_id.clone(),
+            "worker complete",
+        );
+        completed.originator = tau_proto::PromptOriginator::Extension {
+            name: "conn-cold-delegate".into(),
+            query_id: "q-cold-completed".to_owned(),
+        };
+        h.handle_provider_response_finished(completed)
+            .expect("complete worker");
+
+        let worker = h.agents.get(&worker_cid).expect("detached worker");
+        assert!(worker.originator.is_user());
+        assert!(worker.source_connection.is_none());
+        assert!(worker.parent_tool_call_id.is_none());
+        assert_eq!(
+            h.agent_navigation_modes.get(&worker_agent_id),
+            Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+        );
+        let creation = h
+            .agent_store
+            .agent_events(worker_agent_id.as_str())
+            .expect("worker journal")
+            .into_iter()
+            .find_map(|record| match record.event {
+                Event::AgentStarted(started) => Some(started),
+                _ => None,
+            })
+            .expect("worker creation");
+        assert_eq!(creation.parent_agent.as_ref(), Some(&parent_agent_id));
+        h.shutdown().expect("shutdown first boot");
+        worker_agent_id
+    };
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    h.selected_model = Some("test/model".into());
+    let worker_cid = h
+        .agent_routes
+        .get(worker_agent_id.as_str())
+        .cloned()
+        .expect("restored worker route");
+    let worker = h.agents.get(&worker_cid).expect("restored worker");
+    assert!(worker.originator.is_user());
+    assert!(matches!(worker.turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        h.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "fresh worker turn".to_owned(),
+        agent_id: worker_agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("submit fresh worker turn");
+    let fresh_prompt_id = h
+        .prompt_agents
+        .iter()
+        .find_map(|(prompt_id, cid)| (cid == &worker_cid).then_some(prompt_id.clone()))
+        .expect("fresh worker prompt");
+    assert!(
+        read_prompt_created(&h, &fresh_prompt_id)
+            .originator
+            .is_user()
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &fresh_prompt_id,
+        worker_agent_id.clone(),
+        "fresh worker response",
+    ))
+    .expect("finish fresh worker turn");
+
+    assert_eq!(
+        h.agent_routes.get(worker_agent_id.as_str()),
+        Some(&worker_cid)
+    );
+    assert!(h.session_loaded_agents.contains(&worker_agent_id));
+    assert!(matches!(
+        h.agents
+            .get(&worker_cid)
+            .expect("worker remains loaded")
+            .turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::StartAgentResult(result) if result.query_id == "q-cold-completed"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+    )));
+    let session_events = h.store.session_events("s1").expect("session events");
+    assert_eq!(
+        session_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::SessionAgentLoaded(loaded) if loaded.agent_id == worker_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+            ))
+            .count(),
+        0
+    );
+    assert!(
+        h.store
+            .session("s1")
+            .expect("folded session")
+            .contains_agent(&worker_agent_id)
+    );
+    h.shutdown().expect("shutdown resumed boot");
+}
+
+/// A no-tool response is not request-terminal while an accepted agent message
+/// still awaits its continuation turn. Cold restore must retain the historical
+/// extension ownership rather than classify this interrupted request as a
+/// completed worker.
+#[test]
+fn cold_restore_does_not_detach_worker_with_message_continuation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        let _delegate_events = connect_test_tool(&mut h, "conn-message-cut");
+        let parent_cid = ensure_test_user_agent(&mut h);
+        h.tool_agents.insert("message-cut-call".into(), parent_cid);
+        let mut query = ext_query("q-message-cut");
+        query.tool_call_id = Some("message-cut-call".into());
+        h.handle_start_agent_request("conn-message-cut", query)
+            .expect("start worker");
+        let worker_cid = ext_query_cid(&h, "q-message-cut").expect("worker");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        let first_prompt_id = h
+            .prompt_agents
+            .iter()
+            .find_map(|(prompt_id, cid)| (cid == &worker_cid).then_some(prompt_id.clone()))
+            .expect("first worker prompt");
+        h.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: "message-cut-delivery".into(),
+                sender_id: crate::parse_agent_id("sender"),
+                sender_session_id: None,
+                recipient_id: worker_agent_id.clone(),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                message: "continue before completion".to_owned(),
+            }),
+        );
+        let mut response =
+            provider_text_response(&first_prompt_id, worker_agent_id.clone(), "first answer");
+        response.originator = tau_proto::PromptOriginator::Extension {
+            name: "conn-message-cut".into(),
+            query_id: "q-message-cut".to_owned(),
+        };
+        h.handle_provider_response_finished(response)
+            .expect("finish first worker round");
+        assert!(matches!(
+            h.agents[&worker_cid].originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ));
+        assert!(
+            h.prompt_agents
+                .iter()
+                .any(|(prompt_id, cid)| cid == &worker_cid && prompt_id != &first_prompt_id)
+        );
+        h.shutdown().expect("shutdown continuation cut");
+        worker_agent_id
+    };
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume continuation cut");
+    let worker_cid = resumed
+        .agent_routes
+        .get(worker_agent_id.as_str())
+        .expect("interrupted worker remains routed");
+    assert!(matches!(
+        resumed.agents[worker_cid].originator,
+        tau_proto::PromptOriginator::Extension { .. }
+    ));
+    resumed.shutdown().expect("shutdown resumed cut");
+}
+
+/// Reactive context recovery is an explicit continuation, not evidence that a
+/// parented start request completed. A cold resume must retain the prior
+/// extension classification through the existing interrupted-recovery path.
+#[test]
+fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = quiet_provider_harness(&sp).expect("start");
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let parent_cid = ensure_test_user_agent(&mut h);
+        h.tool_agents.insert("reactive-cut-call".into(), parent_cid);
+        let mut query = ext_query("q-reactive-cut");
+        query.tool_call_id = Some("reactive-cut-call".into());
+        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+            .expect("start worker");
+        let worker_cid = ext_query_cid(&h, "q-reactive-cut").expect("worker");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        let inference = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(context_overflow_response(&inference))
+            .expect("start reactive recovery");
+        assert_eq!(
+            read_nth_prompt_created(&h, 1).operation,
+            tau_proto::PromptOperation::StandaloneCompaction
+        );
+        assert!(matches!(
+            h.agents[&worker_cid].originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ));
+        h.shutdown().expect("shutdown reactive cut");
+        worker_agent_id
+    };
+
+    let mut cold_reader =
+        echo_harness_for("classification-only", &sp).expect("open cold journal reader");
+    let (_, originator, _) = cold_reader.restored_agent_runtime_from_log(worker_agent_id.as_str());
+    assert!(matches!(
+        originator,
+        tau_proto::PromptOriginator::Extension { .. }
+    ));
+    cold_reader.shutdown().expect("shutdown cold reader");
+}
+
+/// A non-cancelled standalone-compaction failure is a warm terminal path even
+/// though it has no final inference response. Cold restore must recognize that
+/// durable terminal evidence and keep the detached worker addressable through a
+/// fresh ordinary turn.
+#[test]
+fn cold_restored_compaction_failed_worker_remains_loaded() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = quiet_provider_harness(&sp).expect("start");
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let parent_cid = ensure_test_user_agent(&mut h);
+        h.tool_agents
+            .insert("compaction-failure-call".into(), parent_cid);
+        let mut query = ext_query("q-compaction-failure");
+        query.tool_call_id = Some("compaction-failure-call".into());
+        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+            .expect("start worker");
+        let worker_cid = ext_query_cid(&h, "q-compaction-failure").expect("worker");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        let inference = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(context_overflow_response(&inference))
+            .expect("start reactive recovery");
+        let compact = read_nth_prompt_created(&h, 1);
+        h.handle_provider_response_finished(context_overflow_response(&compact))
+            .expect("fail reactive compaction");
+        assert!(h.agents[&worker_cid].originator.is_user());
+        assert!(h.session_loaded_agents.contains(&worker_agent_id));
+        h.shutdown().expect("shutdown completed failure");
+        worker_agent_id
+    };
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume completed failure");
+    resumed.selected_model = Some("test/model".into());
+    let worker_cid = resumed
+        .agent_routes
+        .get(worker_agent_id.as_str())
+        .cloned()
+        .expect("restored worker route");
+    assert!(resumed.agents[&worker_cid].originator.is_user());
+    assert!(matches!(
+        resumed.agents[&worker_cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    assert_eq!(
+        resumed.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+    );
+    resumed
+        .handle_ui_prompt_submitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "fresh after compaction failure".to_owned(),
+            agent_id: worker_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+        .expect("submit fresh worker turn");
+    assert!(
+        resumed.agents[&worker_cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.text == "fresh after compaction failure"),
+        "the durable blocked recovery may queue the turn, but restored request ownership must be ordinary"
+    );
+    assert_eq!(
+        resumed.agent_routes.get(worker_agent_id.as_str()),
+        Some(&worker_cid)
+    );
+    assert!(!event_log_contains_any_source(&resumed, |event| matches!(
+        event,
+        Event::StartAgentResult(result) if result.query_id == "q-compaction-failure"
+    )));
+    assert!(!event_log_contains_any_source(&resumed, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+    )));
+    resumed.shutdown().expect("shutdown resumed worker");
+}
+
 struct ReentrantDelegateCompletionPrompt {
     target_agent_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
