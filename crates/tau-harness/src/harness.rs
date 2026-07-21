@@ -95,8 +95,8 @@ use crate::harness::extension_data::{
     rename_extension_data_file, sanitize_extension_data_path,
 };
 use crate::harness::extensions::{
-    DeferredExtensionMessage, ExtensionActivationStage, ExtensionRuntimeState,
-    StagedExtensionPublish,
+    DeferredExtensionMessage, ExtensionActivationStage, ExtensionFrameAdmission,
+    ExtensionRuntimeState, StagedExtensionPublish,
 };
 use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
@@ -764,14 +764,6 @@ struct NormalizedFinishedToolCalls {
     invalid_errors: HashMap<ToolCallId, String>,
     /// Provider calls paired with their foreground/background support policy.
     calls: Vec<NormalizedFinishedToolCall>,
-}
-
-/// Deferred events released after one extension's staged capabilities activate.
-struct ActivatedExtensionEvents {
-    /// Extension-originated agent queries.
-    agent_queries: Vec<tau_proto::StartAgentRequest>,
-    /// Operational messages withheld behind the initial activation barrier.
-    deferred_messages: Vec<DeferredExtensionMessage>,
 }
 
 struct NormalizedFinishedToolCall {
@@ -7127,12 +7119,6 @@ impl Harness {
         self.extension_activation_stage_mut(source_id).intercept = Some(intercept);
     }
 
-    fn stage_start_agent_request(&mut self, source_id: &str, query: tau_proto::StartAgentRequest) {
-        self.extension_activation_stage_mut(source_id)
-            .agent_queries
-            .push(query);
-    }
-
     fn stage_extension_publish(&mut self, source_id: &str, event: Event, transient: bool) {
         self.extension_activation_stage_mut(source_id)
             .emitted_events
@@ -7560,12 +7546,9 @@ impl Harness {
     fn activate_staged_extension_capabilities(
         &mut self,
         source_id: &str,
-    ) -> ActivatedExtensionEvents {
+    ) -> Vec<DeferredExtensionMessage> {
         let Some(stage) = self.extensions.activation_staging.remove(source_id) else {
-            return ActivatedExtensionEvents {
-                agent_queries: Vec::new(),
-                deferred_messages: Vec::new(),
-            };
+            return Vec::new();
         };
         if let Some(intercept) = stage.intercept {
             self.register_extension_interceptor(source_id, intercept);
@@ -7636,23 +7619,21 @@ impl Harness {
         for staged in stage.emitted_events {
             self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
         }
-        ActivatedExtensionEvents {
-            agent_queries: stage.agent_queries,
-            deferred_messages: stage.deferred_messages,
-        }
+        stage.deferred_messages
     }
 
-    /// Activate one already-preflighted stage and publish its deferred events.
+    /// Release one ready extension's deferred operational messages.
     fn finish_staged_extension_activation(
         &mut self,
         source_id: &str,
-        activated: ActivatedExtensionEvents,
+        deferred_messages: Vec<DeferredExtensionMessage>,
     ) -> Result<(), HarnessError> {
-        for query in activated.agent_queries {
-            self.handle_start_agent_request(source_id, query)?;
-        }
-        for message in activated.deferred_messages {
-            self.handle_extension_message(source_id, message.message)?;
+        for deferred in deferred_messages {
+            self.handle_extension_message_with_admission(
+                source_id,
+                deferred.message,
+                deferred.admission,
+            )?;
         }
         Ok(())
     }
@@ -7936,9 +7917,9 @@ impl Harness {
             .cloned()
             .collect::<Vec<_>>();
         ready.sort();
-        let mut activated = Vec::with_capacity(ready.len());
+        let mut deferred_by_connection = Vec::with_capacity(ready.len());
         for connection_id in &ready {
-            activated.push((
+            deferred_by_connection.push((
                 connection_id.clone(),
                 self.activate_staged_extension_capabilities(connection_id.as_str()),
             ));
@@ -7951,19 +7932,20 @@ impl Harness {
             self.emit_extension_ready(connection_id.as_str());
         }
         let mut deferred_messages = Vec::new();
-        for (connection_id, events) in &mut activated {
+        for (connection_id, messages) in deferred_by_connection {
             deferred_messages.extend(
-                std::mem::take(&mut events.deferred_messages)
+                messages
                     .into_iter()
-                    .map(|deferred| (deferred.order, connection_id.clone(), deferred.message)),
+                    .map(|deferred| (deferred.order, connection_id.clone(), deferred)),
             );
         }
-        for (connection_id, events) in activated {
-            self.finish_staged_extension_activation(connection_id.as_str(), events)?;
-        }
         deferred_messages.sort_by_key(|(order, _, _)| *order);
-        for (_, connection_id, message) in deferred_messages {
-            self.handle_extension_message(connection_id.as_str(), message)?;
+        for (_, connection_id, deferred) in deferred_messages {
+            self.handle_extension_message_with_admission(
+                connection_id.as_str(),
+                deferred.message,
+                deferred.admission,
+            )?;
         }
         self.resolving_initial_extension_collisions = false;
         self.drain_pending_tool_invocations()?;
@@ -8080,13 +8062,18 @@ impl Harness {
         &mut self,
         source_id: &str,
         message: HarnessInputMessage,
+        admission: ExtensionFrameAdmission,
     ) {
         let order = self.next_deferred_extension_message_order;
         self.next_deferred_extension_message_order =
             self.next_deferred_extension_message_order.saturating_add(1);
         self.extension_activation_stage_mut(source_id)
             .deferred_messages
-            .push(DeferredExtensionMessage { order, message });
+            .push(DeferredExtensionMessage {
+                order,
+                admission,
+                message,
+            });
     }
 
     fn handle_extension_message(
@@ -8094,7 +8081,23 @@ impl Harness {
         source_id: &str,
         message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
-        let message = message.into();
+        let admission = self.current_extension_frame_admission();
+        self.handle_extension_message_with_admission(source_id, message.into(), admission)
+    }
+
+    fn current_extension_frame_admission(&self) -> ExtensionFrameAdmission {
+        ExtensionFrameAdmission {
+            session_id: self.current_session_id.clone(),
+            session_generation: self.current_session_generation,
+        }
+    }
+
+    fn handle_extension_message_with_admission(
+        &mut self,
+        source_id: &str,
+        message: HarnessInputMessage,
+        admission: ExtensionFrameAdmission,
+    ) -> Result<(), HarnessError> {
         if let Some(entry) = self.extensions.entries.get(source_id) {
             entry.protocol_io.record_uplink_frame(&message);
             let ready_received = self.extensions.ready_received.contains(source_id);
@@ -8197,7 +8200,7 @@ impl Harness {
         let declaration_after_ready =
             startup_declaration && self.extensions.ready_received.contains(source_id);
         if activation_pending && (operational_message || declaration_after_ready) {
-            self.defer_extension_activation_message(source_id, message);
+            self.defer_extension_activation_message(source_id, message, admission);
             return Ok(());
         }
         match message {
@@ -8299,10 +8302,11 @@ impl Harness {
                 // committed-event processing or a dedicated protocol message
                 // instead.
                 let (event, transient) = emit.into_parts();
-                self.handle_extension_event_inner_with_transient(
+                self.handle_extension_event_inner_with_admission(
                     source_id,
                     event,
                     Some(transient),
+                    admission,
                 )?;
             }
             HarnessInputMessage::InterceptReply(reply) => {
@@ -8343,6 +8347,21 @@ impl Harness {
         source_id: &str,
         event: Event,
         transient_override: Option<bool>,
+    ) -> Result<(), HarnessError> {
+        self.handle_extension_event_inner_with_admission(
+            source_id,
+            event,
+            transient_override,
+            self.current_extension_frame_admission(),
+        )
+    }
+
+    fn handle_extension_event_inner_with_admission(
+        &mut self,
+        source_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+        admission: ExtensionFrameAdmission,
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
         if event.is_message_report() {
@@ -8629,6 +8648,39 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(event, Event::StartAgentRequest(_)) {
+            // This is configured request-authority admission only. Role and
+            // parent validation, duplicate rebinding, acceptance/result routing,
+            // and agent creation happen after ordinary commit.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks start-agent request authority"
+                );
+                return Ok(());
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                transient,
+                false,
+                None,
+                admission,
+            );
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -8813,6 +8865,10 @@ impl Harness {
             self.process_committed_internal_prompt_submit_request(peer_context, request);
             return;
         }
+        if let Event::StartAgentRequest(request) = event {
+            self.process_committed_start_agent_request(peer_context, request);
+            return;
+        }
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
@@ -8906,6 +8962,34 @@ impl Harness {
             return;
         }
         if let Err(error) = self.handle_extension_internal_prompt_submit_request(request) {
+            self.pending_publish_error.get_or_insert(error);
+        }
+    }
+
+    /// Process one start-agent request only after generic peer publication
+    /// commits for the exact configured connection generation.
+    fn process_committed_start_agent_request(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        request: &tau_proto::StartAgentRequest,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref() else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            extension.admission.session_id == self.current_session_id
+                && extension.admission.session_generation == self.current_session_generation
+                && entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
+                && entry.kind == extension.kind
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            return;
+        }
+        if let Err(error) = self.handle_start_agent_request(source_id.as_str(), request.clone()) {
             self.pending_publish_error.get_or_insert(error);
         }
     }
@@ -10247,14 +10331,6 @@ impl Harness {
                         false,
                         None,
                     );
-                }
-                Ok(None)
-            }
-            Event::StartAgentRequest(query) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_start_agent_request(source_id, query);
-                } else {
-                    self.handle_start_agent_request(source_id, query)?;
                 }
                 Ok(None)
             }

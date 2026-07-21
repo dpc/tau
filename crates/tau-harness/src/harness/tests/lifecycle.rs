@@ -3793,20 +3793,23 @@ fn interceptor_registration_is_staged_until_ready() {
     h.shutdown().expect("shutdown");
 }
 
+/// Pre-Ready operational emits from multiple extensions remain globally
+/// deferred and commit in wire order before a start-agent request creates work.
 #[test]
-fn extension_emit_and_start_agent_request_are_staged_until_ready() {
-    // Generic emits are visible bus state, and StartAgentRequest starts prompt
-    // dispatch. Both are held until Ready so a handshaking extension cannot
-    // publish or start side-agent work early.
+fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
-    let conn_id = "conn-staged-emit-query";
-    let _sink = connect_handshaking_tool(&mut h, conn_id);
+    h.initial_extension_tool_preflight_complete = false;
+    let first_id = "ordering-first";
+    let second_id = "ordering-second";
+    let _first_sink = connect_handshaking_tool(&mut h, first_id);
+    let _second_sink = connect_handshaking_tool(&mut h, second_id);
     let custom_name: tau_proto::EventName = "demo.startup_state".parse().expect("event name");
+    let trailing_name: tau_proto::EventName = "demo.after_query".parse().expect("event name");
 
     h.handle_extension_message(
-        conn_id,
+        first_id,
         TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ExtensionEvent(
                 tau_proto::CustomEvent::try_new(
@@ -3821,7 +3824,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     )
     .expect("stage emit");
     h.handle_extension_event(
-        conn_id,
+        second_id,
         TestProtocolItem::Event(Event::StartAgentRequest(StartAgentRequest {
             parent_agent: None,
             query_id: "q-staged".to_owned(),
@@ -3833,8 +3836,20 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
         })),
     )
     .expect("stage query");
+    h.handle_extension_event(
+        first_id,
+        TestProtocolItem::Event(Event::ExtensionEvent(
+            tau_proto::CustomEvent::try_new(
+                trailing_name.clone(),
+                Some("s1".into()),
+                CborValue::Text("AFTER START REQUEST".to_owned()),
+            )
+            .expect("valid custom event"),
+        )),
+    )
+    .expect("stage trailing event");
 
-    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+    assert!(!event_log_contains_source_event(&h, first_id, |event| {
         event.name() == custom_name
     }));
     assert!(!h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
@@ -3845,16 +3860,51 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     );
 
     h.handle_extension_message(
-        conn_id,
+        second_id,
         TestMessage::Ready(tau_proto::Ready {
-            message: Some("ready".to_owned()),
+            message: Some("second ready first".to_owned()),
         }),
     )
-    .expect("ready");
+    .expect("second ready");
+    assert!(!event_log_contains_source_event(&h, second_id, |event| {
+        matches!(event, Event::StartAgentRequest(_))
+    }));
+    h.handle_extension_message(
+        first_id,
+        TestMessage::Ready(tau_proto::Ready {
+            message: Some("first ready second".to_owned()),
+        }),
+    )
+    .expect("first ready");
 
-    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+    assert!(event_log_contains_source_event(&h, first_id, |event| {
         event.name() == custom_name
     }));
+    let committed: Vec<_> = {
+        let mut events = Vec::new();
+        let mut seq = crate::event_log::EventLogSeq::new(0);
+        while let Some(entry) = h.event_log.get_next_from(seq) {
+            seq = entry.seq.next();
+            let relevant = entry.event.name() == custom_name
+                || entry.event.name() == tau_proto::EventName::AGENT_START_REQUEST
+                || entry.event.name() == trailing_name;
+            if relevant {
+                events.push((entry.source, entry.event.name()));
+            }
+        }
+        events
+    };
+    assert_eq!(
+        committed,
+        [
+            (Some(first_id.into()), custom_name),
+            (
+                Some(second_id.into()),
+                tau_proto::EventName::AGENT_START_REQUEST
+            ),
+            (Some(first_id.into()), trailing_name)
+        ]
+    );
     assert!(h.agents.iter().any(|(cid, conv)| {
         conv.agent_id.as_deref() == Some(cid.as_str())
             && matches!(

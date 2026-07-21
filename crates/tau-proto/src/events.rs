@@ -2389,7 +2389,10 @@ pub struct SessionAgentUnloaded {
     pub agent_id: AgentId,
 }
 
-/// Request to start a side-agent conversation.
+/// Transient request to start a side-agent conversation.
+///
+/// The harness commits configured peer requests before processing them, but raw
+/// requests never enter semantic history.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
     /// Requester-assigned correlation id, echoed back on accepted/result
@@ -5334,6 +5337,7 @@ impl Event {
                 | Self::ExtensionContextReady(_)
                 | Self::ExtAgentContextPublish(_)
                 | Self::ExtInternalPromptSubmitRequest(_)
+                | Self::StartAgentRequest(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)

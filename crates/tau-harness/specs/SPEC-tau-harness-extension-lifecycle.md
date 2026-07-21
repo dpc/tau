@@ -72,6 +72,13 @@ internal `agent.prompt_submitted`. External user messages use immutable
 Pre-Ready requests are operational traffic ordered behind activation. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 
+`agent.start_request` is also globally ordered operational traffic rather than
+an activation declaration. Its complete raw Emit remains in the bounded
+deferred-message queue until Ready and global activation, then crosses ordinary
+interception and commit before any acceptance, rejection, rebinding, or side-agent
+work. See
+[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
+
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
 `&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and

@@ -169,6 +169,23 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
     }
 }
 
+/// Distinct process generations must not reuse a live idle-summary correlation,
+/// even when both start at sequence zero and their requests overlap.
+#[test]
+fn idle_summary_query_ids_are_namespaced_by_process_generation() {
+    let mut first = SummaryQueryIds {
+        run_nonce: 1,
+        next: 0,
+    };
+    let mut respawned = SummaryQueryIds {
+        run_nonce: 2,
+        next: 0,
+    };
+
+    assert_ne!(first.next_id(), respawned.next_id());
+    assert_ne!(first.next_id(), respawned.next_id());
+}
+
 /// Install a `tracing` subscriber for tests. Pick up `TAU_LOG` (same
 /// env var the extension uses in production); default to off so a
 /// plain `cargo test` is silent. Run a hanging test like
@@ -223,6 +240,16 @@ impl<R: std::io::Read> EventReader<R> {
 
     fn read_frame(&mut self) -> Result<Option<HarnessInputMessage>, tau_proto::DecodeError> {
         self.inner.read_message()
+    }
+
+    fn read_emit(&mut self) -> Result<Option<tau_proto::Emit>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_message()? {
+                Some(HarnessInputMessage::Emit(emit)) => return Ok(Some(emit)),
+                Some(_) => {}
+                None => return Ok(None),
+            }
+        }
     }
 }
 
@@ -1585,9 +1612,13 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
         .expect("main idle");
     writer.flush().expect("flush");
 
-    let query = reader.read_event().expect("read").expect("summary query");
-    let Event::StartAgentRequest(query) = query else {
-        panic!("expected StartAgentRequest, got {query:?}");
+    let emit = reader.read_emit().expect("read").expect("summary query");
+    assert!(
+        emit.transient,
+        "idle-summary start requests must explicitly use transient delivery"
+    );
+    let Event::StartAgentRequest(query) = *emit.event else {
+        panic!("expected StartAgentRequest, got {:?}", emit.event);
     };
 
     writer

@@ -25,6 +25,7 @@ use tau_proto::{
 };
 
 use crate::harness::Harness;
+use crate::harness::extensions::ExtensionFrameAdmission;
 
 /// Condition that must become true before a parked prompt dispatch is safe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +87,8 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(crate) kind: tau_proto::ClientKind,
     /// Stable configured instance identity captured at admission.
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
+    /// Session binding current when the peer frame originally arrived.
+    pub(super) admission: ExtensionFrameAdmission,
     /// Activation-stage reservation made before interception.
     pub(crate) activation_reservation: Option<ActivationReservation>,
 }
@@ -809,6 +812,38 @@ impl Harness {
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        self.enqueue_publish_inner(source, event, transient, must_pass, sync_head_for, None);
+    }
+
+    /// Enqueue a peer publication with its immutable frame-admission session.
+    pub(super) fn enqueue_publish_with_admission(
+        &mut self,
+        source: Option<&str>,
+        event: Event,
+        transient: bool,
+        must_pass: bool,
+        sync_head_for: Option<ConversationHeadSync>,
+        admission: ExtensionFrameAdmission,
+    ) {
+        self.enqueue_publish_inner(
+            source,
+            event,
+            transient,
+            must_pass,
+            sync_head_for,
+            Some(admission),
+        );
+    }
+
+    fn enqueue_publish_inner(
+        &mut self,
+        source: Option<&str>,
+        event: Event,
+        transient: bool,
+        must_pass: bool,
+        sync_head_for: Option<ConversationHeadSync>,
+        admission: Option<ExtensionFrameAdmission>,
+    ) {
         let extension = source.and_then(|source_id| self.extensions.entries.get(source_id));
         let activation_reservation = extension
             .filter(|entry| entry.state != crate::extension::ExtensionState::Ready)
@@ -842,6 +877,10 @@ impl Harness {
                 source: entry.connection_id.clone(),
                 kind: entry.kind.clone(),
                 instance_id: entry.instance_id,
+                admission: admission.unwrap_or_else(|| ExtensionFrameAdmission {
+                    session_id: self.current_session_id.clone(),
+                    session_generation: self.current_session_generation,
+                }),
                 activation_reservation,
             }),
         };

@@ -335,6 +335,24 @@ fn raw_tool_terminal_events_are_not_persisted() {
     }
 }
 
+/// Start-agent requests are committed live observations, not replayable
+/// semantic facts, for either caller-supplied transient value.
+#[test]
+fn raw_start_agent_requests_are_not_persisted() {
+    let event = Event::StartAgentRequest(tau_proto::StartAgentRequest {
+        query_id: "query-1".to_owned(),
+        instruction: "delegate this".to_owned(),
+        role: None,
+        input_stats: tau_proto::ToolUseStats::default(),
+        tool_call_id: None,
+        task_name: None,
+        parent_agent: None,
+    });
+
+    assert!(!should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, true));
+}
+
 /// Canonical cancellation retains its existing semantic transcript/replay
 /// behavior even though the peer report that caused it is never persisted.
 #[test]

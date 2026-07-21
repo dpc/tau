@@ -732,8 +732,33 @@ struct NotificationLoop {
     /// Provider response prompt ids already consumed for end-of-turn
     /// notification logic.
     completed_response_prompts: HashSet<tau_proto::AgentPromptId>,
-    /// Monotonic suffix for idle-summary side-agent query ids.
-    next_query_id: u64,
+    /// Process-generation nonce and sequence for idle-summary query ids.
+    summary_query_ids: SummaryQueryIds,
+}
+
+/// Generates query ids that remain distinct across extension respawns.
+struct SummaryQueryIds {
+    /// Random process-generation nonce.
+    run_nonce: u128,
+    /// Monotonic request sequence within this process generation.
+    next: u64,
+}
+
+impl SummaryQueryIds {
+    /// Start one independently namespaced process-generation sequence.
+    fn new() -> Self {
+        Self {
+            run_nonce: rand::random(),
+            next: 0,
+        }
+    }
+
+    /// Mint the next idle-summary correlation id.
+    fn next_id(&mut self) -> String {
+        let query_id = format!("idle-{:032x}-{}", self.run_nonce, self.next);
+        self.next = self.next.saturating_add(1);
+        query_id
+    }
 }
 
 /// Input selected by the notification policy loop.
@@ -762,7 +787,7 @@ impl NotificationLoop {
             agent_prompt_agents: HashMap::new(),
             input_closed: false,
             completed_response_prompts: HashSet::new(),
-            next_query_id: 0,
+            summary_query_ids: SummaryQueryIds::new(),
         }
     }
 
@@ -1405,7 +1430,7 @@ impl NotificationLoop {
             &self.config,
             &self.agent_display_names,
             summary_timeout,
-            &mut self.next_query_id,
+            &mut self.summary_query_ids,
             "idle",
         )?;
         process_due_idle_hooks(
@@ -1415,7 +1440,7 @@ impl NotificationLoop {
             &self.config,
             &self.agent_display_names,
             summary_timeout,
-            &mut self.next_query_id,
+            &mut self.summary_query_ids,
             "all-idle",
         )?;
         Ok(())
@@ -1494,7 +1519,7 @@ fn process_due_idle_hooks(
     config: &ExtConfig,
     agent_display_names: &HashMap<tau_proto::AgentId, String>,
     summary_timeout: Duration,
-    next_query_id: &mut u64,
+    summary_query_ids: &mut SummaryQueryIds,
     log_prefix: &str,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(index) = pending_hooks
@@ -1505,8 +1530,7 @@ fn process_due_idle_hooks(
         let hook = configured_idle_hook(config, &pending);
         match pending.state {
             IdleState::WaitingIdle { .. } if hook.agent_summary => {
-                let query_id = format!("idle-{next_query_id}");
-                *next_query_id += 1;
+                let query_id = summary_query_ids.next_id();
                 tracing::info!(
                     target: LOG_TARGET,
                     query_id = %query_id,
@@ -1514,7 +1538,7 @@ fn process_due_idle_hooks(
                 );
                 let instruction =
                     summary_instruction(&pending.user_prompt, &pending.agent_response);
-                handle.emit(Event::StartAgentRequest(StartAgentRequest {
+                handle.emit_transient(Event::StartAgentRequest(StartAgentRequest {
                     parent_agent: None,
                     query_id: query_id.clone(),
                     instruction,

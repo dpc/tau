@@ -4,7 +4,7 @@
 
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
-session-discovery, per-agent-context, and internal-prompt-request slices now use generic `Emit` publication, immutable authenticated
+session-discovery, per-agent-context, internal-prompt-request, and start-agent-request slices now use generic `Emit` publication, immutable authenticated
 internal publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
@@ -19,6 +19,9 @@ session-init release performed by `extension.context_ready` are preserved under
 Internal-prompt requests commit before loaded-agent validation or hidden prompt
 submission, and stale publisher generations cannot submit work. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
+Start-agent requests likewise commit before role/parent validation, duplicate
+route rebinding, acceptance/result routing, or child creation. See
+[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,

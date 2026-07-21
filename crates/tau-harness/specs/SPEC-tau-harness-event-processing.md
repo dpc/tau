@@ -27,6 +27,10 @@ Internal-prompt requests likewise cross ordinary commit before target
 validation and prompt submission. Raw requests remain outside semantic history
 for either caller transience value. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
+Start-agent requests also commit before validation, duplicate rebinding,
+acceptance/result routing, and child creation. Raw requests remain outside
+semantic history for either caller transience value. See
+[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as

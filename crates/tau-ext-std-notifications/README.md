@@ -53,7 +53,8 @@ agent for a one-sentence summary before firing that hook:
 1. The extension sends an `agent.start_request` to the harness asking for a
    one-sentence summary. The request instruction includes a bounded copy of the
    captured user prompt and assistant response so the side conversation has the
-   turn context it is supposed to summarize.
+   turn context it is supposed to summarize. The producer explicitly marks this
+   operational request transient.
 2. The harness spawns a fresh side conversation, dispatches the explicit-context
    prompt to the agent, and routes the matching `agent.start_result` back
    point-to-point. Parent linkage, when used by the harness, is only for

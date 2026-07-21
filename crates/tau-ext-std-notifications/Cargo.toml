@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 handlebars.workspace = true
 libc.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true

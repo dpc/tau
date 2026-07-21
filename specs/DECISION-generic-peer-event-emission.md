@@ -236,3 +236,5 @@ The per-agent context declaration/value/readiness flow is specified by
 [SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).
 The internal prompt request flow is specified by
 [SPEC-internal-prompt-submit-requests](SPEC-internal-prompt-submit-requests.md).
+The start-agent request part of the same row is implemented by
+[SPEC-start-agent-requests](SPEC-start-agent-requests.md).

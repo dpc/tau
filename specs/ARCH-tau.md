@@ -38,6 +38,9 @@ Configured extensions also publish transient internal-prompt requests before
 the harness validates loaded-agent correlation and derives prompt facts, as
 specified by
 [SPEC-internal-prompt-submit-requests](SPEC-internal-prompt-submit-requests.md).
+They publish transient start-agent requests through the same commit boundary
+before role, parent, duplicate-route, and child-creation processing, as specified
+by [SPEC-start-agent-requests](SPEC-start-agent-requests.md).
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 

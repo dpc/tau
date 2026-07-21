@@ -28,8 +28,19 @@ pub(super) struct StagedExtensionPublish {
 pub(super) struct DeferredExtensionMessage {
     /// Monotonic harness-local arrival order.
     pub(super) order: u64,
+    /// Session binding current when this operational frame arrived.
+    pub(super) admission: ExtensionFrameAdmission,
     /// Owned protocol message replayed after activation.
     pub(super) message: HarnessInputMessage,
+}
+
+/// Immutable session binding captured when an extension frame arrives.
+#[derive(Clone, Debug)]
+pub(super) struct ExtensionFrameAdmission {
+    /// Session id active at frame admission.
+    pub(super) session_id: tau_proto::SessionId,
+    /// In-process generation of that session binding.
+    pub(super) session_generation: u64,
 }
 
 /// Extension-originated announcements accumulated until the extension reaches
@@ -62,8 +73,6 @@ pub(super) struct ExtensionActivationStage {
     /// Interceptor registration received before `Ready`. Registration is a
     /// replacement, so only the latest staged message matters.
     pub(super) intercept: Option<tau_proto::Intercept>,
-    /// Extension-started agent queries received before `Ready`, in wire order.
-    pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.
     pub(super) emitted_events: Vec<StagedExtensionPublish>,
     /// Operational protocol messages received after Ready but before the global

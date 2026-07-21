@@ -100,6 +100,10 @@ request is the narrow `extension.internal_prompt_submit_request` control path
 with `agent_id`, `text`, and optional `ctx_id`. It defaults transient; its
 commit-before-effects contract is
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
+`agent.start_request` is another transient-by-default configured-extension
+request. The raw event commits live but never enters semantic history; accepted
+and terminal outcomes retain their existing shared/directed routing. See
+[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 The protocol deliberately provides no generic transport registration, ingress
 acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB

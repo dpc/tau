@@ -60,6 +60,11 @@ their own result arrives.
 Idle summary side-agent requests include a bounded copy of the captured user
 prompt and assistant response in the instruction. Do not assume the side
 conversation has inherited the transcript that triggered the notification.
+The producer explicitly emits these requests transiently and namespaces its
+monotonic query ids with a random process-generation nonce so a respawn cannot
+rebind distinct summary work to an older live request. Their generic
+commit-before-effects and point-to-point result contract is
+[SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 
 ## Testing strategy
 

@@ -1757,6 +1757,7 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::ExtensionContextReady(_)
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtInternalPromptSubmitRequest(_)
+                | Event::StartAgentRequest(_)
                 | Event::ShellCommandProgress(_)
                 | Event::UiPromptSubmitted(_)
                 | Event::AgentPromptQueued(_)

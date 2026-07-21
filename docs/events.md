@@ -532,9 +532,15 @@ transient runtime observations and never enter semantic replay. See
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call
   attribution, and human-readable task name (used by the `agent_start` tool).
+  Configured extension requests default transient and commit through ordinary
+  interception before role/parent validation, duplicate route rebinding,
+  acceptance/rejection, or child creation. Unconfigured and socket peers may not
+  publish them; stale connection or session generations are observation-only.
+  Raw requests never enter semantic history.
   Tool-backed delegate requests default to `engineer` when `role` is
   absent; non-tool requests without `role` use the currently selected
   interactive role.
+  See [`SPEC-start-agent-requests`](../specs/SPEC-start-agent-requests.md).
 - **`agent.start_accepted`** — The harness accepted an agent-start request and
   created or reused the delegated agent route for the requested task.
 - **`agent.start_result`** — The agent's final answer to an

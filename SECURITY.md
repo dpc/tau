@@ -156,6 +156,12 @@ connection generation, and excludes raw requests from semantic replay. Invalid
 targets remain observable but cannot create prompt facts; stale generations
 cannot submit work. See
 [SPEC-internal-prompt-submit-requests](specs/SPEC-internal-prompt-submit-requests.md).
+Every configured extension kind may also publish transient start-agent requests.
+The harness commits the raw request before revalidating the exact live generation
+and admission session, then applies role, parent/tool-owner, duplicate rebinding,
+and child-creation logic. Unconfigured/socket peers are denied; stale generations
+or sessions are observation-only, and raw requests never enter semantic replay. See
+[SPEC-start-agent-requests](specs/SPEC-start-agent-requests.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,
