@@ -75,6 +75,28 @@ fn session_discovery_events_never_enter_semantic_history() {
     }
 }
 
+/// Per-agent context declarations and readiness remain runtime-only even when
+/// a raw peer asks for durable publication.
+#[test]
+fn per_agent_context_events_never_enter_semantic_history() {
+    for event in [
+        Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+        Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            key: "workdir".into(),
+            value: tau_proto::AgentContextValue(serde_json::json!("/tmp")),
+        }),
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "session-1".into(),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        }),
+    ] {
+        assert!(event.defaults_to_transient());
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

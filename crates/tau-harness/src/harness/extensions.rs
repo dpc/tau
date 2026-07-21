@@ -62,9 +62,6 @@ pub(super) struct ExtensionActivationStage {
     /// Interceptor registration received before `Ready`. Registration is a
     /// replacement, so only the latest staged message matters.
     pub(super) intercept: Option<tau_proto::Intercept>,
-    /// Per-agent context acknowledgements received before `Ready`, in wire
-    /// order.
-    pub(super) context_ready_events: Vec<tau_proto::ExtensionContextReady>,
     /// Extension-started agent queries received before `Ready`, in wire order.
     pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.
@@ -110,6 +107,9 @@ pub(crate) struct ExtensionRuntimeState {
     /// Pre-`Ready` session-discovery declarations admitted but not yet
     /// committed or dropped by interception.
     pub(super) pending_session_discovery_declarations: HashMap<tau_proto::ConnectionId, usize>,
+    /// Pre-`Ready` per-agent context declarations admitted but not yet
+    /// committed or dropped by interception.
+    pub(super) pending_agent_context_declarations: HashMap<tau_proto::ConnectionId, usize>,
     /// Connections that sent `Ready` but are still waiting for the global
     /// initial collision preflight or their atomic stage activation.
     pub(super) ready_received: HashSet<tau_proto::ConnectionId>,

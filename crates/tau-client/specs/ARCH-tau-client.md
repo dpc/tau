@@ -194,6 +194,10 @@ The session-provider registration helper and session-readiness helper emit trans
 wire publications. Session skill and AGENTS.md producers must do the same; the harness
 commits them before downstream effects under
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
+The per-agent registration and readiness helpers also emit transient wire
+publications. Per-agent value producers use transient publication; the harness
+commits all three events before projection or wait release under
+[SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Prompt-fragment startup events are transient declarations: the harness commits
 them through ordinary interception before activating their prompt projection.
 See

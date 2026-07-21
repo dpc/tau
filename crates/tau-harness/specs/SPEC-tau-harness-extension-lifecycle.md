@@ -135,6 +135,10 @@ Session-provider registration, skill, and AGENTS.md declarations use the same
 pre-interception activation reservation boundary; readiness remains ordered operational
 traffic. See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
+Per-agent provider registration and value declarations use the same bounded
+pre-interception reservation and Ready-blocking rules. Per-agent readiness is
+operational traffic and therefore remains ordered behind activation. See
+[SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Harness-internal tool handlers are installed before this preflight, so their names
 participate as reserved owners. Per-connection retained activation traffic is
 bounded by message-count and encoded-byte quotas; overflow follows the same

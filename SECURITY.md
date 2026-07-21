@@ -141,6 +141,15 @@ initialization until acknowledgement or disconnect; a deadline or degraded mode 
 a separate decision. Re-check reservation cleanup/reaccounting, wait-set admission, and
 disconnect/respawn generation checks whenever this flow changes. See
 [SPEC-session-discovery-declarations-and-readiness](specs/SPEC-session-discovery-declarations-and-readiness.md).
+Configured extension kinds have the same authority to publish transient per-agent
+context registration, values, and readiness. The harness commits them before
+projection or wait release, revalidates the exact connection generation, bounds
+pre-Ready declarations, and excludes raw events from semantic replay. Values and
+readiness intentionally remain ungated by registration or loaded membership; a
+current-session `extension.context_ready` also preserves the legacy ability to
+release the source from session initialization. Treat these as trusted-local
+compatibility surfaces when reviewing changes. See
+[SPEC-per-agent-context-declarations-and-readiness](specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

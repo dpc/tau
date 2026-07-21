@@ -270,11 +270,13 @@ impl ShellRuntime {
         if is_replay {
             return;
         }
-        let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
-            agent_id.clone(),
-            &cwd,
-            &self.cwd_state,
-        )));
+        let _ = self
+            .tx
+            .send(HarnessInputMessage::emit_transient(cwd_context_event(
+                agent_id.clone(),
+                &cwd,
+                &self.cwd_state,
+            )));
         let pending_workdir =
             self.cwd_state
                 .take_committed_pending_workdir_result(&agent_id, &cwd, mutation_id);
@@ -343,12 +345,9 @@ impl ShellRuntime {
         if is_replay {
             return;
         }
-        let _ = self
-            .tx
-            .send(HarnessInputMessage::emit(invalid_cwd_context_event(
-                agent_id.clone(),
-                &self.cwd_state,
-            )));
+        let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            invalid_cwd_context_event(agent_id.clone(), &self.cwd_state),
+        ));
         if let Some(pending) = self
             .cwd_state
             .take_correlated_pending_workdir_result(&agent_id, mutation_id)
@@ -418,14 +417,12 @@ impl ShellRuntime {
 
     fn publish_ready_if_pending(&self, agent_id: tau_proto::AgentId) {
         if let Some(session_id) = self.cwd_state.take_pending_ready(&agent_id) {
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit(Event::ExtensionContextReady(
-                    ExtensionContextReady {
-                        session_id,
-                        agent_id,
-                    },
-                )));
+            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+                Event::ExtensionContextReady(ExtensionContextReady {
+                    session_id,
+                    agent_id,
+                }),
+            ));
         }
     }
 
@@ -439,21 +436,20 @@ impl ShellRuntime {
             return;
         }
         if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
-            let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
-                done.agent_id.clone(),
-                &cwd,
-                &self.cwd_state,
-            )));
+            let _ = self
+                .tx
+                .send(HarnessInputMessage::emit_transient(cwd_context_event(
+                    done.agent_id.clone(),
+                    &cwd,
+                    &self.cwd_state,
+                )));
             self.publish_ready_if_pending(done.agent_id);
             return;
         }
         if self.cwd_state.is_invalid(&done.agent_id) {
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit(invalid_cwd_context_event(
-                    done.agent_id.clone(),
-                    &self.cwd_state,
-                )));
+            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+                invalid_cwd_context_event(done.agent_id.clone(), &self.cwd_state),
+            ));
             self.publish_ready_if_pending(done.agent_id);
             return;
         }
@@ -674,6 +670,7 @@ mod tests {
         let HarnessInputMessage::Emit(context) = rx.recv().expect("context publish") else {
             panic!("expected context publish");
         };
+        assert!(context.transient);
         assert!(matches!(
             context.event.as_ref(),
             Event::ExtAgentContextPublish(publish)
@@ -682,6 +679,7 @@ mod tests {
         let HarnessInputMessage::Emit(ready) = rx.recv().expect("context ready") else {
             panic!("expected context ready");
         };
+        assert!(ready.transient);
         assert!(matches!(
             ready.event.as_ref(),
             Event::ExtensionContextReady(ready)
@@ -736,12 +734,14 @@ mod tests {
                 if matches!(emit.event.as_ref(), Event::ExtAgentContextPublish(publish)
                     if publish.key.as_ref() == "workdir"
                         && publish.value.0["status"] == "invalid")
+                    && emit.transient
         ));
         let second = rx.recv().expect("ready");
         assert!(matches!(
             second,
             HarnessInputMessage::Emit(emit)
                 if matches!(emit.event.as_ref(), Event::ExtensionContextReady(_))
+                    && emit.transient
         ));
         assert!(
             rx.try_recv().is_err(),

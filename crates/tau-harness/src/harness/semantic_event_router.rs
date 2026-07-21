@@ -36,6 +36,9 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ExtAgentsMdAvailable(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
                 | Event::ExtensionSessionContextReady(_)
+                | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtAgentContextPublish(_)
+                | Event::ExtensionContextReady(_)
         )
         || is_raw_tool_terminal_event(event)
     {

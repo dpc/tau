@@ -1476,6 +1476,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
         frames[1],
         HarnessInputMessage::Emit(ref emit)
             if matches!(emit.event.as_ref(), Event::ExtensionContextProviderRegister(_))
+                && emit.transient
     ));
     assert!(matches!(
         frames[2],
@@ -1591,11 +1592,11 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(ready_events.iter().any(|(event, _)| matches!(
+    assert!(ready_events.iter().any(|(event, transient)| matches!(
         event,
         Event::ExtensionContextReady(ready)
             if ready.session_id == "session-1" && ready.agent_id.as_str() == "agent-1"
-    )));
+    ) && *transient));
     assert!(ready_events.iter().any(|(event, transient)| matches!(
         event,
         Event::ExtensionSessionContextReady(ready) if ready.session_id == "session-1"

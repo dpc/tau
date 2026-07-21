@@ -232,3 +232,5 @@ The extension prompt-fragment declaration-to-projection flow is specified by
 [SPEC-prompt-fragment-declarations-and-projection](SPEC-prompt-fragment-declarations-and-projection.md).
 The session-discovery declaration/readiness flow is specified by
 [SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).
+The per-agent context declaration/value/readiness flow is specified by
+[SPEC-per-agent-context-declarations-and-readiness](SPEC-per-agent-context-declarations-and-readiness.md).

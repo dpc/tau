@@ -21,6 +21,9 @@ process-connection generation. See
 `extension.prompt_fragment_publish` remains the extension-authored declaration
 name but now defaults to transient and never enters semantic history. See
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
+Per-agent context registration, values, and readiness retain their existing wire
+names, default to transient, and remain runtime-only observations. See
+[SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Tool progress likewise separates transient Tool/Core
 `tool.progress_reported` observations from protected harness-authored canonical
 `tool.progress` facts. Both share the `ToolProgress` payload, but the event names
@@ -153,3 +156,7 @@ The four session-discovery DTOs retain their existing wire names and default to 
 session-provider registration, skill availability, AGENTS.md availability, and session
 readiness. Their commit-before-effects contract is
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
+The three per-agent context DTOs likewise retain their wire names and default to
+transient: provider registration, keyed agent context publication, and agent
+readiness. Their commit-before-effects contract is
+[SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).

@@ -165,9 +165,10 @@ impl<State> ExtensionBuilder<State> {
     ///
     /// This is a startup publication helper only. The extension remains
     /// responsible for subscribing to lifecycle events, publishing context, and
-    /// emitting runtime readiness events.
+    /// emitting runtime readiness events. The registration uses transient wire
+    /// metadata.
     pub fn register_context_provider(&mut self) -> &mut Self {
-        self.startup_event(tau_proto::Event::ExtensionContextProviderRegister(
+        self.startup_transient_event(tau_proto::Event::ExtensionContextProviderRegister(
             tau_proto::ExtensionContextProviderRegister {},
         ))
     }

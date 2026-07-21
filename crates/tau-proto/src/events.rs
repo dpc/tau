@@ -1928,9 +1928,12 @@ pub struct ExtAgentsMdAvailable {
     pub content: String,
 }
 
-/// An extension declares that it will publish per-agent prompt context after
-/// each matching `session.agent_loaded` event and acknowledge completion with
-/// `extension.context_ready`.
+/// Declares that this extension provides prompt context after matching
+/// `session.agent_loaded` events.
+///
+/// The transient declaration commits before provider membership changes.
+/// Registration controls wait participation but does not gate value or
+/// readiness publication.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextProviderRegister {}
 
@@ -1943,7 +1946,12 @@ pub struct ExtensionContextProviderRegister {}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionSessionContextProviderRegister {}
 
-/// An extension finished broadcasting refreshed prompt context for one agent.
+/// Acknowledges that this extension finished publishing context for one agent.
+///
+/// The transient acknowledgement commits before effects. For the current
+/// session, it releases the source from the named agent's captured wait and,
+/// for compatibility, from session initialization; a mismatched session has no
+/// effect. Registration does not gate publication.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
     /// Session containing the loaded agent.
@@ -1965,7 +1973,10 @@ pub struct ExtensionSessionContextReady {
 #[serde(transparent)]
 pub struct AgentContextValue(pub serde_json::Value);
 
-/// An extension publishes its complete agent-scoped contribution for one key.
+/// Publishes this extension's complete agent-scoped contribution for one key.
+///
+/// The transient value commits before slot replacement. Registration and
+/// current loaded-agent membership do not gate publication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtAgentContextPublish {
     /// Agent this context belongs to.
@@ -3833,9 +3844,10 @@ pub enum SessionStartReason {
     Resume,
 }
 
-/// The harness created or switched to a session. Extensions that
-/// subscribe react by performing per-session setup (e.g. discovering
-/// AGENTS.md) and signal completion with `ExtensionContextReady`.
+/// The harness created or switched to a session. Extensions that subscribe
+/// react by performing per-session setup (e.g. discovering AGENTS.md) and
+/// signal completion with `ExtensionSessionContextReady`. Per-agent providers
+/// instead react to `SessionAgentLoaded` and use `ExtensionContextReady`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionStarted {
     pub session_id: SessionId,
@@ -5314,6 +5326,9 @@ impl Event {
                 | Self::ExtAgentsMdAvailable(_)
                 | Self::ExtensionSessionContextProviderRegister(_)
                 | Self::ExtensionSessionContextReady(_)
+                | Self::ExtensionContextProviderRegister(_)
+                | Self::ExtensionContextReady(_)
+                | Self::ExtAgentContextPublish(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)

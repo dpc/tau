@@ -4040,6 +4040,83 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     h.shutdown().expect("shutdown");
 }
 
+/// Disconnecting the last per-agent context waiter must resume a prompt that
+/// already committed but was deferred before its model snapshot was frozen.
+#[test]
+fn context_provider_disconnect_resumes_publish_idle_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let conn_id = "disconnecting-agent-context";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe");
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        )),
+    )
+    .expect("register context provider");
+    h.handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
+        .expect("ready");
+
+    h.dispatch_user_prompt("s1".into(), "resume after disconnect".to_owned())
+        .expect("dispatch user prompt");
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    assert!(!h.pending_publish_idle_dispatches.is_empty());
+    let agent_id = h
+        .agents
+        .values()
+        .find_map(|agent| agent.agent_id.clone())
+        .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
+        .expect("loaded agent");
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ExtAgentContextPublish(
+            tau_proto::ExtAgentContextPublish {
+                agent_id: agent_id.clone(),
+                key: "disconnect-test".into(),
+                value: tau_proto::AgentContextValue(serde_json::json!("stale")),
+            },
+        )),
+    )
+    .expect("publish context before disconnect");
+    assert!(
+        h.agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("stale")
+    );
+
+    h.handle_disconnect(conn_id);
+
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(
+        !h.agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("stale")
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt_context_contains(prompt, "resume after disconnect")
+    )));
+}
+
 #[test]
 fn disconnect_before_ready_drops_all_staged_state() {
     // If a handshaking extension goes away, its staged batch is discarded rather
@@ -7103,7 +7180,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
             ),
         },
     );
-    h.publish_agent_context_publish(
+    h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
             agent_id: agent_id.clone(),
@@ -7144,7 +7221,7 @@ fn switch_session_clears_session_scoped_extension_context() {
             ),
         },
     );
-    h.publish_agent_context_publish(
+    h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
             agent_id: agent_id.clone(),

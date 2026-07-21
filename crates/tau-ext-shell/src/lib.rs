@@ -2105,7 +2105,7 @@ fn apply_started_cwd_metadata(
                 let cwd = PathBuf::from(path);
                 if cwd_state.set_metadata_text(started.agent_id.clone(), cwd.clone()) && !is_replay
                 {
-                    let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                    let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
                         started.agent_id.clone(),
                         &cwd,
                         cwd_state,
@@ -2129,17 +2129,17 @@ fn dispatch_session_agent_loaded(
         return;
     }
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
-        let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+        let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
             loaded.agent_id.clone(),
             &cwd,
             cwd_state,
         )));
-        let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
-            ExtensionContextReady {
+        let _ = tx.send(HarnessInputMessage::emit_transient(
+            Event::ExtensionContextReady(ExtensionContextReady {
                 session_id: loaded.session_id,
                 agent_id: loaded.agent_id,
-            },
-        )));
+            }),
+        ));
         return;
     }
 

@@ -475,6 +475,16 @@ facts, or readiness release.
 See
 [`SPEC-session-discovery-declarations-and-readiness`](../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
+Every authenticated configured extension kind may also author the three
+per-agent context events without a capability; unconfigured/socket peers may
+not. Registration controls captured wait participation but does not gate value
+or readiness publication, and values may target arbitrary or unloaded agents.
+For the current session, committed `extension.context_ready` releases both the
+source's named-agent wait and, for compatibility, any session-initialization
+wait containing it; a mismatched session is effect-free. Raw events are
+transient runtime observations and never enter semantic replay. See
+[`SPEC-per-agent-context-declarations-and-readiness`](../specs/SPEC-per-agent-context-declarations-and-readiness.md).
+
 - **`extension.skill_available`** — The extension discovered a skill on
   disk: name, description, file path, whether to inject it into the
   system prompt, whether users may invoke it with `/skill`, whether model-side
@@ -484,21 +494,24 @@ See
   AGENTS.md file and is shipping its contents eagerly so the harness
   can inject them without a tool round-trip. The transient declaration commits before
   slot replacement and durable per-agent instruction injection.
-- **`extension.context_provider_register`** — The extension registers as a
+- **`extension.context_provider_register`** — A transient declaration that commits
+  before the extension registers as a
   per-agent context provider that can publish context after
   `session.agent_loaded` and acknowledge with `extension.context_ready`.
 - **`extension.session_context_provider_register`** — The extension registers as
   a session-wide context provider that can publish context after
   `session.started` and acknowledge with `extension.session_context_ready`. Registration
   is a transient declaration and commits before provider membership changes.
-- **`extension.context_ready`** — The extension finished publishing
-  refreshed prompt context for one loaded agent.
+- **`extension.context_ready`** — A transient acknowledgement that commits before
+  releasing the extension's wait for refreshed prompt context for one agent.
 - **`extension.session_context_ready`** — An extension acknowledges that it finished
   publishing refreshed session-wide context such as skills and AGENTS.md files after
   `session.started`. The transient acknowledgement commits before it can release session
   initialization; only an effective registered waiter can release the barrier.
-- **`extension.agent_context_publish`** — The extension publishes context for a
-  particular agent/session context provider slot.
+- **`extension.agent_context_publish`** — A transient value publication that
+  commits before replacing the extension's contribution for a particular
+  agent/context key. Registration and loaded-agent membership do not gate raw
+  publication.
 - **`extension.prompt_fragment_publish`** — The extension publishes a
   prompt-fragment declaration that defaults to transient. Every authenticated
   configured extension kind may publish one. It commits through ordinary

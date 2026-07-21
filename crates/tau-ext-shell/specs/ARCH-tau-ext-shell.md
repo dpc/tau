@@ -35,7 +35,8 @@ between namespaces. Committed `agent.metadata_set` / `agent.metadata_unset`
 events are the source of truth. The extension updates its in-memory cache only
 after seeing those events, publishes fresh `agent_context.workdir` after each committed change, and
 emits `extension.context_ready` only after publishing the initial cwd context for
-a loaded agent. Metadata values are inheritable so child agents start in the
+a loaded agent. Both publications use transient wire metadata and commit before
+the harness updates prompt projection or releases readiness. Metadata values are inheritable so child agents start in the
 parent's remembered workdir. Stored stale or malformed values remain
 authoritative and fail closed until an explicit absolute setter repairs them.
 

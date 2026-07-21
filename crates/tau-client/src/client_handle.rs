@@ -501,7 +501,8 @@ impl ClientHandle {
     ///
     /// This is only a protocol convenience paired with
     /// [`crate::ExtensionBuilder::register_context_provider`]. Callers still
-    /// own any state folding, context publication, and readiness policy.
+    /// own any state folding, context publication, and readiness policy. The
+    /// acknowledgement uses transient wire metadata.
     ///
     /// # Errors
     ///
@@ -511,7 +512,7 @@ impl ClientHandle {
         session_id: tau_proto::SessionId,
         agent_id: tau_proto::AgentId,
     ) -> ClientResult<()> {
-        self.emit(tau_proto::Event::ExtensionContextReady(
+        self.emit_transient(tau_proto::Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id,
                 agent_id,

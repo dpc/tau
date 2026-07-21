@@ -1,0 +1,619 @@
+//! Contract tests for `SPEC-per-agent-context-declarations-and-readiness`.
+
+use super::*;
+
+/// Build one per-agent context value with an easily inspected payload.
+fn context(agent_id: &str, value: &str) -> Event {
+    Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        key: "test".into(),
+        value: tau_proto::AgentContextValue(serde_json::json!(value)),
+    })
+}
+
+/// Register one interceptor for the complete per-agent context event family.
+fn connect_agent_context_interceptor(h: &mut Harness) {
+    connect_test_tool(h, "agent-context-interceptor");
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER),
+                EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_CONTEXT_PUBLISH),
+                EventSelector::Exact(tau_proto::EventName::EXTENSION_CONTEXT_READY),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+}
+
+/// Return whether one source committed an event matching the predicate.
+fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Dropping a value declaration must prevent both stream observation and prompt
+/// projection mutation.
+#[test]
+fn dropped_context_value_has_no_projection() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Action,
+    );
+    connect_agent_context_interceptor(&mut h);
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+
+    h.handle_extension_event_inner("context-owner", context("agent-1", "dropped"))
+        .expect("park context");
+    assert_eq!(
+        h.agent_context.template_value(Some(&agent_id)),
+        serde_json::json!({})
+    );
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop context");
+
+    assert_eq!(
+        h.agent_context.template_value(Some(&agent_id)),
+        serde_json::json!({})
+    );
+    assert!(!source_committed(&h, "context-owner", |event| {
+        matches!(event, Event::ExtAgentContextPublish(_))
+    }));
+}
+
+/// A same-name interceptor replacement must become the committed observation
+/// and the only value applied to the per-agent prompt projection.
+#[test]
+fn context_replacement_projects_only_committed_payload() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_agent_context_interceptor(&mut h);
+    let agent_id = tau_proto::AgentId::parse("agent-unloaded").expect("agent id");
+
+    h.handle_extension_event_inner("context-owner", context("agent-unloaded", "original"))
+        .expect("park context");
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(context("agent-unloaded", "replacement")))),
+        })),
+    )
+    .expect("replace context");
+
+    let projected = h.agent_context.template_value(Some(&agent_id)).to_string();
+    assert!(projected.contains("replacement"));
+    assert!(!projected.contains("original"));
+    assert!(source_committed(&h, "context-owner", |event| {
+        matches!(
+            event,
+            Event::ExtAgentContextPublish(publish)
+                if publish.value.0 == serde_json::json!("replacement")
+        )
+    }));
+}
+
+/// FIFO generic publication must settle a context value before the later
+/// readiness acknowledgement can release its per-agent dispatch barrier.
+#[test]
+fn parked_context_value_prevents_readiness_overtake() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_agent_context_interceptor(&mut h);
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        [tau_proto::ConnectionId::from("context-owner")]
+            .into_iter()
+            .collect(),
+    );
+
+    h.handle_extension_event_inner("context-owner", context("agent-1", "ordered"))
+        .expect("park context");
+    h.handle_extension_event_inner(
+        "context-owner",
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+        }),
+    )
+    .expect("queue readiness");
+    assert!(h.pending_agent_context_ready.contains_key(&agent_id));
+
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit context value");
+    assert!(
+        h.agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("ordered")
+    );
+    assert!(
+        h.pending_agent_context_ready.contains_key(&agent_id),
+        "readiness must remain effect-free while its own interception is pending"
+    );
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit readiness");
+
+    assert!(
+        h.agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("ordered")
+    );
+    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+}
+
+/// Every authenticated configured client kind retains the existing authority
+/// to publish per-agent context, without registration or loaded-agent gating;
+/// an unconfigured peer retains none.
+#[test]
+fn configured_kinds_publish_ungated_context_for_arbitrary_agents() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let kinds = [
+        tau_proto::ClientKind::Provider,
+        tau_proto::ClientKind::Tool,
+        tau_proto::ClientKind::Action,
+        tau_proto::ClientKind::Ui,
+        tau_proto::ClientKind::Core,
+        tau_proto::ClientKind::External,
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let source = format!("configured-{index}");
+        let agent = format!("agent-{}", index + 10);
+        connect_ready_configured_extension(&mut h, &source, &source, kind);
+        h.handle_extension_event_inner(&source, context(&agent, &source))
+            .expect("publish configured context");
+        assert!(
+            h.agent_context
+                .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id")))
+                .to_string()
+                .contains(&source)
+        );
+        assert!(source_committed(&h, &source, |event| {
+            matches!(
+                event,
+                Event::ExtAgentContextPublish(publish)
+                    if publish.value.0 == serde_json::json!(source)
+            )
+        }));
+    }
+
+    connect_test_tool(&mut h, "unconfigured");
+    h.handle_extension_event_inner("unconfigured", context("agent-99", "spoofed"))
+        .expect("reject unconfigured context");
+    assert_eq!(
+        h.agent_context.template_value(Some(
+            &tau_proto::AgentId::parse("agent-99").expect("agent id")
+        )),
+        serde_json::json!({})
+    );
+    assert!(!source_committed(&h, "unconfigured", |event| {
+        matches!(event, Event::ExtAgentContextPublish(_))
+    }));
+
+    connect_ready_configured_extension(
+        &mut h,
+        "socket-origin",
+        "socket-origin",
+        tau_proto::ClientKind::Tool,
+    );
+    h.bus.disconnect("socket-origin");
+    h.bus.connect(Connection::new(
+        ConnectionMetadata {
+            id: "socket-origin".into(),
+            name: "socket-origin".to_owned(),
+            kind: tau_proto::ClientKind::Tool,
+            origin: ConnectionOrigin::Socket,
+        },
+        Box::new(TestSink {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }),
+    ));
+    h.handle_extension_event_inner("socket-origin", context("agent-100", "socket"))
+        .expect("reject socket-origin context");
+    assert_eq!(
+        h.agent_context.template_value(Some(
+            &tau_proto::AgentId::parse("agent-100").expect("agent id")
+        )),
+        serde_json::json!({})
+    );
+    assert!(!source_committed(&h, "socket-origin", |event| {
+        matches!(event, Event::ExtAgentContextPublish(_))
+    }));
+}
+
+/// A pre-Ready registration reservation must hold activation until interception
+/// commits and stages provider membership.
+#[test]
+fn parked_registration_blocks_ready_activation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.extensions
+        .entries
+        .get_mut("context-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    connect_agent_context_interceptor(&mut h);
+
+    h.handle_extension_event(
+        "context-owner",
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        )),
+    )
+    .expect("park registration");
+    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
+        .expect("record Ready");
+    assert_eq!(
+        h.extensions.entries["context-owner"].state,
+        crate::extension::ExtensionState::Handshaking
+    );
+    assert!(
+        !h.agent_context_providers
+            .contains(&tau_proto::ConnectionId::from("context-owner")),
+        "registration must remain effect-free while interception is pending"
+    );
+    assert_eq!(
+        h.extensions
+            .pending_agent_context_declarations
+            .get("context-owner"),
+        Some(&1)
+    );
+
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit registration");
+    assert_eq!(
+        h.extensions.entries["context-owner"].state,
+        crate::extension::ExtensionState::Ready
+    );
+    assert!(
+        h.agent_context_providers
+            .contains(&tau_proto::ConnectionId::from("context-owner"))
+    );
+}
+
+/// Dropping a pre-Ready value declaration must release its activation charge
+/// and allow an already-recorded Ready to activate without projecting the
+/// value.
+#[test]
+fn dropped_startup_context_releases_reservation_and_ready() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut("context-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    connect_agent_context_interceptor(&mut h);
+
+    h.handle_extension_event_inner("context-owner", context("agent-1", "dropped"))
+        .expect("park context");
+    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
+        .expect("record Ready");
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop context");
+
+    assert_eq!(
+        h.extensions.entries["context-owner"].state,
+        crate::extension::ExtensionState::Ready
+    );
+    assert!(
+        !h.extensions
+            .pending_agent_context_declarations
+            .contains_key("context-owner")
+    );
+    assert_eq!(
+        h.agent_context.template_value(Some(
+            &tau_proto::AgentId::parse("agent-1").expect("agent id")
+        )),
+        serde_json::json!({})
+    );
+}
+
+/// Current-session per-agent readiness deliberately preserves its legacy
+/// cross-scope behavior by releasing both agent and session initialization
+/// waits.
+#[test]
+fn context_ready_preserves_session_and_agent_wait_release() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    let source = tau_proto::ConnectionId::from("context-owner");
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    h.initialized_sessions.remove("s1");
+    h.turn_state = TurnState::InitializingSession {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+        waiting_on: [source.clone()].into_iter().collect(),
+    };
+    h.pending_agent_context_ready
+        .insert(agent_id.clone(), [source].into_iter().collect());
+
+    h.handle_extension_event_inner(
+        "context-owner",
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+        }),
+    )
+    .expect("publish readiness");
+
+    assert!(h.initialized_sessions.contains("s1"));
+    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+}
+
+/// A dropped or wrong-session readiness observation must not release either
+/// compatibility wait.
+#[test]
+fn dropped_and_mismatched_context_ready_are_effect_free() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_agent_context_interceptor(&mut h);
+    let source = tau_proto::ConnectionId::from("context-owner");
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    h.turn_state = TurnState::InitializingSession {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+        waiting_on: [source.clone()].into_iter().collect(),
+    };
+    h.pending_agent_context_ready
+        .insert(agent_id.clone(), [source.clone()].into_iter().collect());
+    let ready = |session_id: &str| {
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: session_id.into(),
+            agent_id: agent_id.clone(),
+        })
+    };
+
+    h.handle_extension_event_inner("context-owner", ready("s1"))
+        .expect("park readiness");
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop readiness");
+    assert!(h.pending_agent_context_ready[&agent_id].contains(&source));
+    assert!(matches!(
+        &h.turn_state,
+        TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(&source)
+    ));
+
+    h.handle_extension_event_inner("context-owner", ready("other-session"))
+        .expect("park mismatched readiness");
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit mismatched readiness");
+    assert!(h.pending_agent_context_ready[&agent_id].contains(&source));
+    assert!(matches!(
+        &h.turn_state,
+        TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(&source)
+    ));
+}
+
+/// A parked old-generation declaration may commit for observation after
+/// disconnect but cannot mutate the successor or recreate removed context.
+#[test]
+fn disconnected_generation_cannot_project_parked_context() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "old-owner",
+        "stable-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_agent_context_interceptor(&mut h);
+    h.handle_extension_event_inner("old-owner", context("agent-1", "stale"))
+        .expect("park stale context");
+    h.handle_disconnect("old-owner");
+    connect_ready_configured_extension(
+        &mut h,
+        "new-owner",
+        "stable-owner",
+        tau_proto::ClientKind::Tool,
+    );
+
+    h.handle_extension_event(
+        "agent-context-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit stale context");
+
+    assert!(source_committed(&h, "old-owner", |event| {
+        matches!(event, Event::ExtAgentContextPublish(_))
+    }));
+    assert_eq!(
+        h.agent_context.template_value(Some(
+            &tau_proto::AgentId::parse("agent-1").expect("agent id")
+        )),
+        serde_json::json!({})
+    );
+    assert!(
+        !h.extensions
+            .pending_agent_context_declarations
+            .contains_key("new-owner")
+    );
+}
+
+/// Disconnecting an active interceptor must remove its context before passing a
+/// parked readiness event that can synchronously freeze a prompt snapshot.
+#[test]
+fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    h.selected_model = Some("test/model".into());
+    connect_ready_configured_extension(&mut h, "waiter", "waiter", tau_proto::ClientKind::Tool);
+    h.handle_extension_message(
+        "waiter",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe waiter");
+    h.handle_extension_event_inner(
+        "waiter",
+        Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+    )
+    .expect("register waiter");
+    connect_ready_configured_extension(
+        &mut h,
+        "stale-owner",
+        "stale-owner",
+        tau_proto::ClientKind::Action,
+    );
+    h.handle_extension_event(
+        "stale-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::EXTENSION_CONTEXT_READY,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept readiness");
+    connect_ready_configured_extension(
+        &mut h,
+        "fragment-owner",
+        "fragment-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.handle_extension_event_inner(
+        "fragment-owner",
+        Event::ExtPromptFragmentPublish(tau_proto::ExtPromptFragmentPublish {
+            fragment: tau_proto::PromptFragment::new(
+                "stale-context-check",
+                tau_proto::PromptPriority::new(50),
+                "{{#each agent_context.test}}{{value}}{{/each}}",
+            ),
+        }),
+    )
+    .expect("publish stable fragment");
+
+    h.dispatch_user_prompt("s1".into(), "dispatch after readiness".to_owned())
+        .expect("dispatch prompt");
+    let agent_id = h
+        .agents
+        .values()
+        .find_map(|agent| agent.agent_id.clone())
+        .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
+        .expect("loaded agent");
+    h.handle_extension_event_inner("fragment-owner", context(agent_id.as_str(), "SAFE CONTEXT"))
+        .expect("publish stable context");
+    h.handle_extension_event_inner(
+        "stale-owner",
+        context(agent_id.as_str(), "STALE DISCONNECTING CONTEXT"),
+    )
+    .expect("publish stale context");
+    h.handle_extension_event_inner(
+        "waiter",
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+        }),
+    )
+    .expect("park waiter readiness");
+    assert!(h.pending_intercept.is_some());
+    assert!(h.pending_agent_context_ready.contains_key(&agent_id));
+
+    h.handle_disconnect("stale-owner");
+
+    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(h.pending_intercept.is_none());
+    assert!(
+        h.pending_publish_idle_dispatches.is_empty(),
+        "readiness resolution must drain deferred prompt dispatch"
+    );
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert!(prompt.system_prompt.contains("SAFE CONTEXT"));
+    assert!(!prompt.system_prompt.contains("STALE DISCONNECTING CONTEXT"));
+    assert!(
+        !h.agent_context
+            .template_value(Some(&agent_id))
+            .to_string()
+            .contains("STALE DISCONNECTING CONTEXT")
+    );
+}

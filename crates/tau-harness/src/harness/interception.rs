@@ -112,6 +112,8 @@ pub(crate) enum ActivationDeclarationFamily {
     PromptFragment,
     /// Session-provider registration, skill, or AGENTS.md declaration.
     SessionDiscovery,
+    /// Per-agent context registration or value declaration.
+    AgentContext,
 }
 
 /// Immutable authenticated metadata carried beside one generic peer publish.
@@ -824,6 +826,8 @@ impl Harness {
                     | Event::ExtAgentsMdAvailable(_) => {
                         ActivationDeclarationFamily::SessionDiscovery
                     }
+                    Event::ExtensionContextProviderRegister(_)
+                    | Event::ExtAgentContextPublish(_) => ActivationDeclarationFamily::AgentContext,
                     _ => return None,
                 };
                 Some(ActivationReservation {
