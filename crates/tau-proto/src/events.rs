@@ -2869,11 +2869,12 @@ pub struct UiPromptSubmitted {
 /// while the user is typing; carries the full current contents of
 /// the prompt buffer.
 ///
-/// Always transient — never persisted to a semantic event log and never folded
-/// into an agent transcript. Subscribers use it to detect
-/// "user is alive" without polling: e.g. std-notifications resets
-/// its idle deadline on every draft event so the desktop notification
-/// doesn't fire while the user is mid-sentence.
+/// Defaults to transient, but caller-selected Emit metadata remains
+/// independent: the interactive CLI currently sends `transient=false`. The
+/// harness preserves either bit while excluding drafts from semantic stores and
+/// replay. Subscribers use it to detect "user is alive" without polling: e.g.
+/// std-notifications resets its idle deadline on every draft event so the
+/// desktop notification doesn't fire while the user is mid-sentence.
 ///
 /// The target agent scopes the currently viewed transcript at the moment the
 /// snapshot was captured. This keeps future draft restore, autocomplete, or
@@ -2933,6 +2934,10 @@ pub struct SessionReplayComplete {
 /// The UI terminal focus state changed. Emitted when the terminal supports
 /// focus-in/focus-out reporting and the user moves focus into or away from the
 /// Tau terminal window.
+///
+/// Like [`UiPromptDraft`], this event defaults to transient while the
+/// interactive CLI currently sends `transient=false`; the harness preserves
+/// either bit and excludes the observation from semantic stores and replay.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiFocusChanged {
     /// Session whose attached UI observed the focus change.

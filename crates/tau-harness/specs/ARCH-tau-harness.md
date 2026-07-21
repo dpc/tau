@@ -6,8 +6,9 @@ The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
 terminal-output, and custom-event slices now use generic `Emit` publication, immutable authenticated
-internal publisher snapshots, source-aware admission, and downstream processing as required by
+publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
+The attached-UI liveness slice now uses the same generic publication boundary.
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 
@@ -31,6 +32,10 @@ Custom extension-owned events likewise cross ordinary interception and commit
 before direct live subscriber delivery. They have no harness semantic consumer
 and never enter semantic replay. See
 [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
+Prompt-draft and focus observations accept only attached socket UIs and cross
+ordinary interception and commit before live subscribers react. They never enter
+semantic replay. See
+[SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 Architectural or externally meaningful functional changes to harness event
 logs/journals or interfaces with extensions require the separately reviewed,

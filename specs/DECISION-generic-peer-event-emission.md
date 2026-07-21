@@ -242,3 +242,5 @@ The live terminal-output row is implemented by
 [SPEC-terminal-output-side-effect-events](SPEC-terminal-output-side-effect-events.md).
 The custom extension-owned event row is implemented by
 [SPEC-custom-extension-events](SPEC-custom-extension-events.md).
+The attached-UI prompt-draft and focus row is implemented by
+[SPEC-ui-prompt-draft-and-focus-events](SPEC-ui-prompt-draft-and-focus-events.md).

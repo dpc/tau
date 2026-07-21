@@ -93,12 +93,19 @@ and carries the harness-runtime-scoped watched-agent turn generation.
 
 ## Prompt-draft scope
 
-`ui.prompt_draft` is transient and not transcript truth, but it is still
+`ui.prompt_draft` defaults to transient and is runtime-only rather than
+transcript truth, but it is still
 contentful user input. Consumers that store, restore, synchronize, autocomplete,
 or otherwise maintain state from prompt drafts must key that state by both
 `session_id` and `target_agent_id`. A missing `target_agent_id` means an
 unscoped/session-level draft, normally the start-new-agent prompt; consumers
 must not infer the current agent from absence.
+Only an attached socket UI may author draft observations. The event default is
+transient, although the interactive CLI's established Emit wrapper currently
+sends a false transient bit. The harness preserves that metadata but excludes
+the event from semantic stores and replay for either value. `ui.focus_changed`
+uses the same authority and persistence contract. See
+[SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 ## Shared agent navigation mode
 

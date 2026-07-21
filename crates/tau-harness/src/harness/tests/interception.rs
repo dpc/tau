@@ -9,6 +9,7 @@ mod tool_lifecycle;
 mod tool_progress;
 mod tool_request;
 mod tool_terminal;
+mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;

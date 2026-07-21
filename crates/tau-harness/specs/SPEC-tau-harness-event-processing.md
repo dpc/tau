@@ -39,6 +39,10 @@ Custom extension-owned events also use ordinary interception and commit before
 direct subscriber delivery. Opaque custom events remain outside semantic history
 for either caller transience value. See
 [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
+Attached-UI prompt-draft and focus observations likewise use ordinary
+interception and commit before live subscriber reaction. Both remain outside
+semantic history for either caller transience value. See
+[SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as
@@ -91,7 +95,7 @@ allowlist. UI command handlers keep their existing keep-going result at the
 dispatch-helper boundary; the outer client-message layer remains responsible for
 connection lifetime. Metadata writes are validated and enqueued through the normal
 publish path; fallback publication is limited to explicitly allowed UI/live
-events. Extension-owned custom events use exact attached-UI authority rather
+events. Prompt-draft, focus, and extension-owned custom events use exact attached-UI authority rather
 than fallback and preserve the explicit transient override or event default.
 Tool lifecycle/terminal facts and harness-owned lifecycle,
 membership, transcript, and status facts must not be accepted through client

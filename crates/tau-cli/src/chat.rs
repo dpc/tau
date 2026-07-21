@@ -4,6 +4,8 @@
 #[cfg(test)]
 mod agent_picker_tests;
 #[cfg(test)]
+mod event_message_tests;
+#[cfg(test)]
 mod recorded_line_routing_tests;
 
 use std::collections::HashMap;
@@ -200,7 +202,12 @@ fn startup_disconnect_or_io_error(
 
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
-    send_frame(writer, &HarnessInputMessage::emit(event.clone()))
+    send_frame(writer, &durable_emit_message(event))
+}
+
+/// Wrap an event in the interactive UI's durable-by-default Emit message.
+fn durable_emit_message(event: &Event) -> HarnessInputMessage {
+    HarnessInputMessage::emit(event.clone())
 }
 
 fn format_ui_io_cumulative_stats(stats: &UiIoCumulativeStats) -> String {

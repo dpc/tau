@@ -176,6 +176,14 @@ validation prevents custom payloads from spoofing typed first-party event names;
 opaque payloads remain live/debug-only and never enter semantic stores. Existing
 trusted-local frame, activation, and diagnostics-cardinality bounds apply. See
 [SPEC-custom-extension-events](specs/SPEC-custom-extension-events.md).
+Only harness-assigned attached socket UIs may publish prompt-draft and focus
+liveness observations. Dedicated external-message, non-UI, disconnected, and
+extension-path peers cannot. Drafts contain the full current prompt buffer and
+remain visible to privileged interceptors, subscribed live peers, and debug
+logging, but neither liveness event enters semantic stores or replay for either
+transient value. The shared decoded-message bound applies; no smaller trusted-UI
+payload bound is promised. See
+[SPEC-ui-prompt-draft-and-focus-events](specs/SPEC-ui-prompt-draft-and-focus-events.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

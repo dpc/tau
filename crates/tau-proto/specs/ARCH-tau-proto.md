@@ -177,3 +177,9 @@ metadata, and opaque CBOR. Reserved first-party categories remain structurally
 unrepresentable. Custom events are live subscriber traffic rather than semantic
 history; authenticated publisher identity is not yet present on wire delivery.
 See [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
+
+`ui.prompt_draft` and `ui.focus_changed` retain their typed payloads and transient
+event defaults. Caller-selected Emit metadata remains separate: the interactive
+CLI currently sends both with `transient=false`, while the harness excludes both
+from semantic stores for either value. See
+[SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).

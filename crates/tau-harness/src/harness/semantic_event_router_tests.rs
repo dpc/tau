@@ -143,6 +143,27 @@ fn custom_extension_events_never_enter_semantic_history() {
     assert!(!should_persist_event(&event, true));
 }
 
+/// UI draft and focus observations are live liveness signals, never semantic
+/// history, for either caller-selected transient value.
+#[test]
+fn ui_liveness_events_never_enter_semantic_history() {
+    for event in [
+        Event::UiPromptDraft(tau_proto::UiPromptDraft {
+            session_id: "s1".into(),
+            target_agent_id: None,
+            text: "typing".to_owned(),
+        }),
+        Event::UiFocusChanged(tau_proto::UiFocusChanged {
+            session_id: "s1".into(),
+            focused: true,
+        }),
+    ] {
+        assert!(event.defaults_to_transient());
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

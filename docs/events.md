@@ -588,16 +588,23 @@ intent.
   `user`), and user/internal message class. The harness translates accepted requests into durable
   `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
-  current draft buffer. Transient — used for "user is alive" signals
+  current draft buffer. Defaults to transient and is used for "user is alive" signals
   (e.g. notification idle reset), not persisted. Carries the viewed
   `target_agent_id` when the draft belongs to an existing agent transcript;
   modern producers must set it in that case. Absence means the draft is
   session-level/unscoped, normally the start-new-agent prompt. Legacy peers whose
   payloads predate this field also decode as absent, so future restore/sync
-  consumers must not infer the current agent from absence.
+  consumers must not infer the current agent from absence. Only an attached
+  socket UI may publish one. The CLI currently sends a false transient wire bit,
+  but the harness preserves that metadata while excluding drafts from semantic
+  stores and historical replay for either value.
 - **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
-  session when terminal focus events are available. Transient; used for idle and
-  notification behavior, not transcript truth.
+  session when terminal focus events are available. It is a live subscriber
+  observation, not transcript truth; Tau currently has no first-party focus
+  subscriber. It defaults to transient, while the CLI currently sends a false
+  transient wire bit. It has the same authority and no-store contract as prompt drafts.
+  See
+  [`SPEC-ui-prompt-draft-and-focus-events`](../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 - **`ui.role_select`** — User requests a role switch. The harness resolves
   the role to a provider-published model at runtime.
 - **`ui.agent_model_select`** — User requests a model override for a loaded

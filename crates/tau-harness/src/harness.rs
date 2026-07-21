@@ -10428,6 +10428,18 @@ impl Harness {
         }) && !self.external_message_peers.contains(client_id)
     }
 
+    fn enqueue_attached_socket_ui_publish(
+        &mut self,
+        client_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+    ) {
+        if self.is_attached_socket_ui(client_id) {
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(client_id), event, transient, false, None);
+        }
+    }
+
     fn handle_client_message(
         &mut self,
         client_id: &str,
@@ -10615,18 +10627,16 @@ impl Harness {
         let Some(event) = self.handle_client_agent_metadata_event(client_id, event) else {
             return Ok(true);
         };
+        if matches!(event, Event::UiPromptDraft(_) | Event::UiFocusChanged(_)) {
+            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
+            return Ok(true);
+        }
         if matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
-            if self.is_attached_socket_ui(client_id) {
-                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-                self.enqueue_publish(Some(client_id), event, transient, false, None);
-            }
+            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
             return Ok(true);
         }
         if matches!(event, Event::ExtensionEvent(_)) {
-            if self.is_attached_socket_ui(client_id) {
-                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-                self.enqueue_publish(Some(client_id), event, transient, false, None);
-            }
+            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
             return Ok(true);
         }
         self.handle_client_fallback_event(client_id, event, transient_override);
@@ -13282,13 +13292,7 @@ impl Harness {
     }
 
     fn is_client_fallback_emit_allowed(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::UiPromptDraft(_)
-                | Event::UiFocusChanged(_)
-                | Event::UiDetachRequest(_)
-                | Event::UiShellCommand(_)
-        )
+        matches!(event, Event::UiDetachRequest(_) | Event::UiShellCommand(_))
     }
 
     fn requires_tool_event_intake(event: &Event) -> bool {

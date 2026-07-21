@@ -212,12 +212,12 @@ intercept {
 }
 ```
 
-Another peer requests emission:
+An attached UI requests emission using the CLI's current false transient bit:
 
 ```text
 emit {
   event: ui.prompt_draft { ... },
-  transient: true
+  transient: false
 }
 ```
 
@@ -226,7 +226,7 @@ The harness finds the interceptor and sends it:
 ```text
 intercept_request {
   event: ui.prompt_draft { ... },
-  transient: true
+  transient: false
 }
 ```
 

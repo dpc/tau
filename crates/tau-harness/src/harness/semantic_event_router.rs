@@ -44,6 +44,8 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::Osc1337SetUserVar(_)
                 | Event::TermBell(_)
                 | Event::ExtensionEvent(_)
+                | Event::UiPromptDraft(_)
+                | Event::UiFocusChanged(_)
         )
         || is_raw_tool_terminal_event(event)
     {
