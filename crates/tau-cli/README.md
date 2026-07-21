@@ -73,3 +73,5 @@ The current implementation has a socket reader thread, renderer path, redraw/tim
 ## Command paths
 
 Interactive chat, `tau dev send`, and `--prompt-stdin` should share socket/session setup and prompt construction wherever possible. Mode-specific command capabilities are fine, but avoid duplicating protocol handshakes or slash-command parsing in separate paths.
+Bare `/tree` is a one-shot exception to fire-and-forget `tau dev send`: it
+waits for and prints the harness's single requester-directed multiline notice.

@@ -1,12 +1,19 @@
-use tau_proto::{Event, NodeId, PromptOriginator, UiRoleUpdateAction, UiTreeNavigationTarget};
+use tau_proto::{
+    Event, HarnessInputMessage, HarnessOutputMessage, NodeId, PromptOriginator, UiRoleUpdateAction,
+    UiTreeNavigationTarget,
+};
 
-use super::event_for_line;
+use super::{event_for_line, message_for_line, read_tree_result};
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
 
 const SESSION_ID: &str = "test-session";
 
 fn event(text: &str) -> Option<Event> {
     event_for_line(SESSION_ID, text)
+}
+
+fn message(text: &str) -> Option<HarnessInputMessage> {
+    message_for_line(SESSION_ID, text)
 }
 
 fn prompt_text(text: &str) -> String {
@@ -73,9 +80,9 @@ fn retry_requests_exact_delayed_prompt_release() {
 /// stays a prompt.
 #[test]
 fn tree_commands_request_or_navigate_tree() {
-    match event("/tree").expect("tree event") {
-        Event::UiTreeRequest(req) => assert_eq!(req.session_id, SESSION_ID),
-        other => panic!("expected UiTreeRequest, got {other:?}"),
+    match message("/tree").expect("tree message") {
+        HarnessInputMessage::UiTreeRequest(req) => assert_eq!(req.session_id, SESSION_ID),
+        other => panic!("expected UiTreeRequest message, got {other:?}"),
     }
 
     match event("/tree 42").expect("navigate event") {
@@ -103,6 +110,40 @@ fn tree_commands_request_or_navigate_tree() {
     }
 
     assert_eq!(prompt_text("/tree nope"), "/tree nope");
+}
+
+/// The one-shot headless tree client consumes the same single multiline notice
+/// sent to interactive UIs.
+#[test]
+fn headless_tree_result_reads_one_multiline_notice() {
+    let (reader_stream, mut harness_stream) =
+        std::os::unix::net::UnixStream::pair().expect("reader stream pair");
+    reader_stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("read timeout");
+    let (writer_stream, _discard_stream) =
+        std::os::unix::net::UnixStream::pair().expect("writer stream pair");
+    let (mut reader, _writer) =
+        crate::ui_client::connect_ui_streams(reader_stream, writer_stream, "tree-test")
+            .expect("connect UI streams");
+    let mut harness_writer = tau_proto::HarnessOutputWriter::new(&mut harness_stream);
+    harness_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::now(),
+            Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
+                message: "root\nfirst prompt\nsecond prompt".to_owned(),
+                level: tau_proto::NoticeLevel::Info,
+                always_show: false,
+            }),
+        ))
+        .expect("write tree result");
+    harness_writer.flush().expect("flush tree result");
+
+    assert_eq!(
+        read_tree_result(&mut reader).expect("read tree result"),
+        "root\nfirst prompt\nsecond prompt"
+    );
 }
 
 /// `/compact` must reach the harness instead of being sent as prompt text.

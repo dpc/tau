@@ -637,8 +637,6 @@ intent.
   `model_override` is installed on the new agent before its first prompt is
   queued or routed, and `ephemeral: true` keeps the agent transcript and session
   membership memory-only for the daemon lifetime.
-- **`ui.tree_request`** — User typed `/tree`: render the selected or targeted
-  agent's prompt rewind anchors to chat.
 - **`ui.navigate_tree`** — User typed `/tree <anchor>`, `/tree root`, or the
   expert `/tree node <node-id>` form: move the selected or targeted agent head
   to the resolved root-or-node target so the next prompt branches there.

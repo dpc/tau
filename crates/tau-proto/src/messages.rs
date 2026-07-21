@@ -998,6 +998,21 @@ pub struct UiDebugEventStatsRequest {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
+/// Dedicated UI input requesting an agent's user-facing prompt rewind anchors.
+///
+/// The harness consumes this request directly and replies only to the
+/// requesting UI connection. It is not a session fact and must not be
+/// broadcast.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiTreeRequest {
+    /// Session whose agent tree should be rendered.
+    pub session_id: SessionId,
+    /// Target agent tree to render. `None` leaves selection to the harness's
+    /// current/default conversation state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
+}
+
 /// Messages the harness accepts from connected peers (UI clients and
 /// extensions).
 ///
@@ -1023,6 +1038,7 @@ pub enum HarnessInputMessage {
     GetSessionAgentList(GetSessionAgentList),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     UiDetachRequest(UiDetachRequest),
+    UiTreeRequest(UiTreeRequest),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),

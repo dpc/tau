@@ -109,6 +109,17 @@ is done.
   connection-control input; it is not published, intercepted, subscribed, or
   replayed. Other client origins and configured extensions are silently denied.
   The input frame remains visible in local debug JSONL and protocol metering.
+- **`ui_tree_request`** — An attached local UI asks the harness to render one
+  agent's prompt rewind anchors. The harness returns exactly one multiline
+  `harness.notice` only to the requester, preserving anchor order, selection
+  markers, previews, and diagnostics. The request and result are not published,
+  intercepted, subscribed, or replayed. Other client origins are silently
+  denied. Configured-extension requests are first metered, then phase-validated.
+  Legal-phase requests are silently denied before activation staging;
+  illegal-phase requests retain normal protocol-failure behavior. The input
+  remains visible in local debug JSONL and is metered as
+  `message.ui_tree_request`. `tau dev send <session> /tree` waits for and prints
+  the directed notice.
 
 ## Emission and interception (peer ↔ harness)
 

@@ -8129,6 +8129,7 @@ impl Harness {
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
                         | HarnessInputMessage::UiDetachRequest(_)
+                        | HarnessInputMessage::UiTreeRequest(_)
                 )
             } else {
                 matches!(
@@ -8145,7 +8146,8 @@ impl Harness {
                                 | HarnessInputMessage::GetAgentPromptCreated(_)
                                 | HarnessInputMessage::ExtensionDataRequest(_)
                                 | HarnessInputMessage::UiDebugEventStatsRequest(_)
-                                | HarnessInputMessage::UiDetachRequest(_),
+                                | HarnessInputMessage::UiDetachRequest(_)
+                                | HarnessInputMessage::UiTreeRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
                         )
                 )
@@ -8164,6 +8166,7 @@ impl Harness {
             &message,
             HarnessInputMessage::UiDebugEventStatsRequest(_)
                 | HarnessInputMessage::UiDetachRequest(_)
+                | HarnessInputMessage::UiTreeRequest(_)
         ) && self.extensions.entries.contains_key(source_id)
         {
             // These requests belong exclusively to attached socket UIs.
@@ -8360,6 +8363,7 @@ impl Harness {
             | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::UiDebugEventStatsRequest(_)
             | HarnessInputMessage::UiDetachRequest(_)
+            | HarnessInputMessage::UiTreeRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
             | HarnessInputMessage::PeerSessionProbe(_) => {}
@@ -10614,6 +10618,10 @@ impl Harness {
             // Connection-control behavior is applied only by startup/runtime
             // routing after exact attached-socket-UI authorization.
             HarnessInputMessage::UiDetachRequest(_) => Ok(true),
+            HarnessInputMessage::UiTreeRequest(request) => {
+                self.handle_ui_tree_request(client_id, request);
+                Ok(true)
+            }
             HarnessInputMessage::ExternalAgentMessage(request) => {
                 if !self
                     .external_message_peers
@@ -10774,9 +10782,6 @@ impl Harness {
                 .map(|keep_going| (keep_going, None)),
             Event::UiSetAgentDisplayName(req) => self
                 .handle_ui_set_agent_display_name(req)
-                .map(|keep_going| (keep_going, None)),
-            Event::UiTreeRequest(req) => self
-                .handle_ui_tree_request(client_id, req)
                 .map(|keep_going| (keep_going, None)),
             Event::UiNavigateTree(req) => self
                 .handle_ui_navigate_tree(client_id, req)
@@ -11557,11 +11562,22 @@ impl Harness {
     fn handle_ui_tree_request(
         &mut self,
         client_id: &str,
-        req: tau_proto::UiTreeRequest,
-    ) -> Result<bool, HarnessError> {
-        self.publish_event(Some(client_id), Event::UiTreeRequest(req.clone()));
-        self.handle_tree_request(&req.session_id, req.target_agent_id.as_deref());
-        Ok(true)
+        tau_proto::UiTreeRequest {
+            session_id,
+            target_agent_id,
+        }: tau_proto::UiTreeRequest,
+    ) {
+        if !self.is_attached_socket_ui(client_id) {
+            return;
+        }
+        let message = self.tree_request_result(&session_id, target_agent_id.as_deref());
+        self.send_direct_harness_notice(
+            client_id,
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            tau_proto::NoticeLevel::Info,
+            false,
+            message,
+        );
     }
 
     fn handle_ui_navigate_tree(
@@ -16274,20 +16290,20 @@ impl Harness {
         }
     }
 
-    /// Renders the selected agent tree as user-facing rewind anchors.
-    /// Bound-session-only: refuses if `session_id` doesn't match.
-    fn handle_tree_request(&mut self, session_id: &SessionId, target_agent_id: Option<&str>) {
+    /// Render the selected agent tree as one user-facing multiline result.
+    ///
+    /// Bound-session-only: returns the existing refusal text when `session_id`
+    /// does not match.
+    fn tree_request_result(&self, session_id: &SessionId, target_agent_id: Option<&str>) -> String {
         if session_id != &self.current_session_id {
-            self.emit_info(&format!(
+            return format!(
                 "tree request for `{}` ignored; harness is bound to `{}`",
                 session_id.as_str(),
                 self.current_session_id.as_str()
-            ));
-            return;
+            );
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(target_agent_id) else {
-            self.emit_info("tree request ignored: unknown agent");
-            return;
+            return "tree request ignored: unknown agent".to_owned();
         };
         let agent_id = self
             .target_agent_id_for_agent(&cid)
@@ -16296,10 +16312,7 @@ impl Harness {
         let events = match self.agent_store.agent_events(&agent_id) {
             Ok(events) => events,
             Err(error) => {
-                self.emit_info(&format!(
-                    "tree request ignored: failed to load agent log: {error}"
-                ));
-                return;
+                return format!("tree request ignored: failed to load agent log: {error}");
             }
         };
         let lines: Vec<String> = match self.agent_store.agent(&agent_id) {
@@ -16335,13 +16348,10 @@ impl Harness {
                 lines
             }
             _ => {
-                self.emit_info(&format!("agent `{}` has no entries yet", agent_id));
-                return;
+                return format!("agent `{agent_id}` has no entries yet");
             }
         };
-        for line in lines {
-            self.emit_info(&line);
-        }
+        lines.join("\n")
     }
 
     /// Validates a `UiNavigateTree` request against the bound session and

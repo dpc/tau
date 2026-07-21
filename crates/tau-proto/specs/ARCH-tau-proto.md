@@ -195,4 +195,6 @@ bus event. Its payload selects one configured extension by name; authorization
 and the directed notice response remain harness concerns.
 `ui_detach_request` is likewise a flat payload-free peer-to-harness message; its
 authorized effect is local connection control rather than event publication.
-The tree request candidate remains event-based pending migration.
+`ui_tree_request` is a flat message carrying the session and optional target
+agent; the harness returns its rendered tree only to the requesting UI as one
+multiline notice. `ui.navigate_tree` remains a distinct state-changing event.

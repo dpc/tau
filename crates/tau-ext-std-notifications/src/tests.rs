@@ -146,31 +146,6 @@ fn startup_uses_exact_notification_subscriptions() {
     );
 }
 
-fn message_variant(msg: &HarnessInputMessage) -> &'static str {
-    match msg {
-        HarnessInputMessage::Hello(_) => "Hello",
-        HarnessInputMessage::Subscribe(_) => "Subscribe",
-        HarnessInputMessage::Intercept(_) => "Intercept",
-        HarnessInputMessage::Ready(_) => "Ready",
-        HarnessInputMessage::Disconnect(_) => "Disconnect",
-        HarnessInputMessage::ConfigError(_) => "ConfigError",
-        HarnessInputMessage::Emit(_) => "Emit",
-        HarnessInputMessage::InterceptReply(_) => "InterceptReply",
-        HarnessInputMessage::GetAgentPromptCreated(_) => "GetAgentPromptCreated",
-        HarnessInputMessage::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
-        HarnessInputMessage::GetRenderedPrompt(_) => "GetRenderedPrompt",
-        HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
-        HarnessInputMessage::GetCurrentSession(_) => "GetCurrentSession",
-        HarnessInputMessage::GetSessionAgentList(_) => "GetSessionAgentList",
-        HarnessInputMessage::UiDebugEventStatsRequest(_) => "UiDebugEventStatsRequest",
-        HarnessInputMessage::UiDetachRequest(_) => "UiDetachRequest",
-        HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
-        HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
-        HarnessInputMessage::ExternalAgentMessageAuth(_) => "ExternalAgentMessageAuth",
-        HarnessInputMessage::PeerSessionProbe(_) => "PeerSessionProbe",
-    }
-}
-
 /// Distinct process generations must not reuse a live idle-summary correlation,
 /// even when both start at sequence zero and their requests overlap.
 #[test]
@@ -233,7 +208,11 @@ impl<R: std::io::Read> EventReader<R> {
                     return Ok(Some(event));
                 }
                 Some(msg) => {
-                    tracing::trace!(target: "tau::test", kind = message_variant(&msg), "EventReader: skipping message");
+                    tracing::trace!(
+                        target: "tau::test",
+                        kind = %tau_client::harness_input_message_name(&msg),
+                        "EventReader: skipping message"
+                    );
                     continue;
                 }
             }

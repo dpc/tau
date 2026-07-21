@@ -1,10 +1,10 @@
-//! Shared constructors for UI protocol events.
+//! Shared constructors for UI protocol events and dedicated input messages.
 
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tau_proto::{Event, UiRoleUpdateAction};
+use tau_proto::{Event, HarnessInputMessage, UiRoleUpdateAction};
 
 pub(crate) fn cancel_prompt(
     session_id: &str,
@@ -40,8 +40,11 @@ pub(crate) fn retry_prompt(session_id: &str, target_agent_id: Option<tau_proto::
     })
 }
 
-pub(crate) fn tree_request(session_id: &str, target_agent_id: Option<tau_proto::AgentId>) -> Event {
-    Event::UiTreeRequest(tau_proto::UiTreeRequest {
+pub(crate) fn tree_request_message(
+    session_id: &str,
+    target_agent_id: Option<tau_proto::AgentId>,
+) -> HarnessInputMessage {
+    HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
         session_id: session_id.into(),
         target_agent_id,
     })

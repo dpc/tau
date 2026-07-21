@@ -100,6 +100,11 @@ embedded/non-socket UIs, dedicated external-message peers, and configured
 extensions are silently denied; they cannot mutate the daemon's
 exit-on-disconnect control. Configured extension attempts retain normal protocol
 phase validation and metering but are denied before activation staging.
+Only an attached socket UI may send `ui_tree_request` and inspect agent prompt
+anchors/previews. The harness returns exactly one requester-directed multiline
+notice and does not publish the request or result. Other client origins and
+configured extensions are silently denied; extension attempts retain normal
+phase validation and metering but are denied before activation staging.
 Only authenticated configured Tool/Core peers may publish transient tool
 registration/unregistration declarations; canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the

@@ -7047,10 +7047,10 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
     }
 }
 
+/// Tree formatting preserves exact root/anchor order, selection markers, and
+/// prompt previews without exposing assistant/tool raw nodes.
 #[test]
-fn ui_tree_request_lists_prompt_anchors_without_raw_nodes() {
-    // The default tree view is the user-facing rewind surface: it lists root
-    // plus prompt anchors and does not expose assistant/tool raw node ids.
+fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -7067,45 +7067,24 @@ fn ui_tree_request_lists_prompt_anchors_without_raw_nodes() {
         )),
     );
     append_user_message_via_event(&mut h, "s1", "second prompt");
+    h.handle_ui_navigate_tree(
+        "ui",
+        tau_proto::UiNavigateTree {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
+        },
+    )
+    .expect("select second prompt anchor");
 
-    h.handle_tree_request(&"s1".into(), Some(agent_id.as_str()));
-    let notice_messages: Vec<String> = event_log_events(&h)
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::HarnessNotice(notice) => Some(notice.message),
-            _ => None,
-        })
-        .collect();
-
-    assert!(
-        notice_messages
-            .iter()
-            .any(|message| message.contains("0") && message.contains("before first prompt")),
-        "root anchor should be listed: {notice_messages:?}"
-    );
-    assert!(
-        notice_messages
-            .iter()
-            .any(|message| message.contains("1") && message.contains("first prompt")),
-        "first prompt anchor should be listed: {notice_messages:?}"
-    );
-    assert!(
-        notice_messages
-            .iter()
-            .any(|message| message.contains("2") && message.contains("second prompt")),
-        "second prompt anchor should be listed without synthetic inputs shifting numbering: {notice_messages:?}"
-    );
-    assert!(
-        !notice_messages
-            .iter()
-            .any(|message| message.contains("assistant answer should not be listed")),
-        "assistant raw node should not be part of default /tree output: {notice_messages:?}"
-    );
-    assert!(
-        !notice_messages.iter().any(|message| message
-            .contains("synthetic injected input should not be listed")
-            || message.contains("internal prompt should not be listed")),
-        "synthetic/internal inputs should not be part of default /tree output: {notice_messages:?}"
+    let result = h.tree_request_result(&"s1".into(), Some(agent_id.as_str()));
+    assert_eq!(
+        result,
+        concat!(
+            "    0   before first prompt (root)\n",
+            "    1   before prompt  user: first prompt\n",
+            "    2 * before prompt  user: second prompt",
+        )
     );
 }
 

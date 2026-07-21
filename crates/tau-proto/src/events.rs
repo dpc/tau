@@ -3134,17 +3134,6 @@ pub struct UiSetAgentDisplayName {
     pub display_name: String,
 }
 
-/// The user typed `/tree`: render an agent's user-facing rewind anchors to
-/// the chat output.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiTreeRequest {
-    pub session_id: SessionId,
-    /// Target agent tree to render. `None` leaves selection to the harness's
-    /// current/default conversation state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<AgentId>,
-}
-
 /// The user typed `/tree <target>`: move an agent's head pointer to a
 /// user-facing prompt anchor, root, or explicit raw node.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -4785,8 +4774,6 @@ pub enum Event {
     UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.create_agent")]
     UiCreateAgent(UiCreateAgent),
-    #[serde(rename = "ui.tree_request")]
-    UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
     UiNavigateTree(UiNavigateTree),
     #[serde(rename = "ui.compact_request")]
@@ -5180,7 +5167,6 @@ impl Event {
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
-            Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,

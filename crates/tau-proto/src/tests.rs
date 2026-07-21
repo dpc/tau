@@ -1315,10 +1315,6 @@ fn representative_events() -> Vec<Event> {
             parent_agent: Some(agent_id("parent_1")),
             ephemeral: false,
         }),
-        Event::UiTreeRequest(UiTreeRequest {
-            session_id: "s1".into(),
-            target_agent_id: Some(agent_id("agent-1")),
-        }),
         Event::UiNavigateTree(UiNavigateTree {
             session_id: "s1".into(),
             target_agent_id: Some(agent_id("agent-1")),
@@ -1486,6 +1482,10 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             scope: SessionAgentListScope::History,
         }),
         HarnessInputMessage::UiDetachRequest(UiDetachRequest {}),
+        HarnessInputMessage::UiTreeRequest(UiTreeRequest {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
@@ -1959,7 +1959,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "ui.set_agent_display_name",
         "ui.shell_command",
         "ui.switch_session",
-        "ui.tree_request",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -2462,6 +2461,61 @@ fn removed_ui_detach_request_event_has_no_decoder() {
     let removed = serde_json::json!({
         "event": "ui.detach_request",
         "payload": {}
+    });
+    assert!(serde_json::from_value::<Event>(removed).is_err());
+}
+
+/// UI tree inspection uses a flat dedicated input message and cannot decode as
+/// an event or harness output.
+#[test]
+fn ui_tree_request_uses_dedicated_input_message() {
+    let input = HarnessInputMessage::UiTreeRequest(UiTreeRequest {
+        session_id: "s1".into(),
+        target_agent_id: Some(agent_id("agent-1")),
+    });
+    let json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "message": "ui_tree_request",
+            "payload": {
+                "session_id": "s1",
+                "target_agent_id": "agent-1"
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(HarnessInputMessage::UiTreeRequest(UiTreeRequest {
+            session_id: "s1".into(),
+            target_agent_id: None,
+        }))
+        .expect("serialize request without target"),
+        serde_json::json!({
+            "message": "ui_tree_request",
+            "payload": {
+                "session_id": "s1"
+            }
+        })
+    );
+
+    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert_eq!(
+        decode_harness_input_from_slice(&bytes).expect("decode input"),
+        input
+    );
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
+    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+}
+
+/// The superseded dotted tree-request event has no compatibility decoder.
+#[test]
+fn removed_ui_tree_request_event_has_no_decoder() {
+    let removed = serde_json::json!({
+        "event": "ui.tree_request",
+        "payload": {
+            "session_id": "s1",
+            "target_agent_id": "agent-1"
+        }
     });
     assert!(serde_json::from_value::<Event>(removed).is_err());
 }

@@ -637,6 +637,46 @@ mod ui_io_tests {
         }
     }
 
+    /// Bare `/tree`'s production command boundary writes exactly one dedicated
+    /// request frame rather than an emitted event.
+    #[test]
+    fn tree_command_sends_dedicated_request_frame() {
+        let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+        harness_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+        let mut errors = Vec::new();
+
+        assert!(handle_tree_command_text(
+            "s1",
+            Some(tau_proto::AgentId::parse("agent-1").expect("agent id")),
+            "/tree",
+            &writer,
+            |message| errors.push(message.to_owned()),
+        ));
+
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+        assert_eq!(
+            reader.read_message().expect("read request"),
+            Some(HarnessInputMessage::UiTreeRequest(
+                tau_proto::UiTreeRequest {
+                    session_id: "s1".into(),
+                    target_agent_id: Some(tau_proto::AgentId::parse("agent-1").expect("agent id")),
+                },
+            ))
+        );
+        match reader.read_message() {
+            Err(tau_proto::DecodeError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("unexpected second tree frame: {other:?}"),
+        }
+        assert!(errors.is_empty());
+    }
+
     #[test]
     fn handshake_write_error_reads_pending_startup_disconnect() {
         let (mut harness_stdout, ui_stdout) = UnixStream::pair().expect("stdout pair");
@@ -1948,13 +1988,13 @@ fn take_new_agent_role(pending: &mut PendingNewAgentOptions, current_role: Strin
     pending.take_role().unwrap_or(current_role)
 }
 
-fn tree_command_event(
+fn tree_command_message(
     session_id: &str,
     target_agent_id: Option<tau_proto::AgentId>,
     text: &str,
-) -> Result<Option<Event>, &'static str> {
+) -> Result<Option<HarnessInputMessage>, &'static str> {
     if text == "/tree" {
-        return Ok(Some(crate::ui_events::tree_request(
+        return Ok(Some(crate::ui_events::tree_request_message(
             session_id,
             target_agent_id,
         )));
@@ -1962,13 +2002,31 @@ fn tree_command_event(
     if let Some(arg) = text.strip_prefix("/tree ") {
         let target = crate::ui_commands::parse_tree_navigation_target(arg)
             .map_err(|()| TREE_NAVIGATION_USAGE)?;
-        return Ok(Some(crate::ui_events::navigate_tree(
-            session_id,
-            target_agent_id,
-            target,
+        return Ok(Some(HarnessInputMessage::emit(
+            crate::ui_events::navigate_tree(session_id, target_agent_id, target),
         )));
     }
     Ok(None)
+}
+
+fn handle_tree_command_text(
+    session_id: &str,
+    target_agent_id: Option<tau_proto::AgentId>,
+    text: &str,
+    writer: &WriterHandle,
+    mut show_error: impl FnMut(&str),
+) -> bool {
+    match tree_command_message(session_id, target_agent_id, text) {
+        Ok(Some(message)) => {
+            let _ = send_frame(writer, &message);
+            true
+        }
+        Ok(None) => false,
+        Err(message) => {
+            show_error(message);
+            true
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2386,17 +2444,13 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_tree_command(&self, text: &str) -> bool {
-        match tree_command_event(self.session_id, self.selected_side_agent_id(), text) {
-            Ok(Some(event)) => {
-                let _ = send_event(self.writer, &event);
-                true
-            }
-            Ok(None) => false,
-            Err(message) => {
-                self.output.system_info(message);
-                true
-            }
-        }
+        handle_tree_command_text(
+            self.session_id,
+            self.selected_side_agent_id(),
+            text,
+            self.writer,
+            |message| self.output.system_info(message),
+        )
     }
 
     fn handle_compact_command(&self, text: &str) -> bool {

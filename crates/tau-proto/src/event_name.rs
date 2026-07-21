@@ -384,7 +384,6 @@ impl EventName {
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_CREATE_AGENT: Self = Self::from_static(EventCategory::Ui, "create_agent");
-    pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
     pub const UI_COMPACT_REQUEST: Self = Self::from_static(EventCategory::Ui, "compact_request");
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");

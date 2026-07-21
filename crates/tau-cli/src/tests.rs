@@ -5291,6 +5291,45 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
     assert!(vt.screen_contains(80, "important config error"));
 }
 
+/// The interactive renderer preserves one directed tree notice as ordered,
+/// distinct lines, including anchor spacing and the selected-head marker.
+#[test]
+fn tree_notice_renders_multiline_result_without_reformatting() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let expected = [
+        "    0   before first prompt (root)",
+        "    1   before prompt  user: first prompt",
+        "    2 * before prompt  user: second prompt",
+    ];
+
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: tau_proto::notice_kind::HARNESS_NOTICE.into(),
+        message: expected.join("\n"),
+        level: tau_proto::NoticeLevel::Info,
+        always_show: false,
+    }));
+    sync(&handle);
+
+    let rows = vt.screen_text(80);
+    let mut previous_row = None;
+    for line in expected {
+        let row = rows
+            .iter()
+            .position(|row| row.contains(line))
+            .unwrap_or_else(|| panic!("missing exact tree row {line:?} in {rows:?}"));
+        assert!(
+            previous_row.is_none_or(|previous| previous < row),
+            "tree rows are out of order: {rows:?}"
+        );
+        previous_row = Some(row);
+    }
+}
+
 #[test]
 fn critical_notice_level_keeps_always_show_harness_failure() {
     let (_term, handle, vt) = setup(80, 24);

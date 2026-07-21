@@ -478,6 +478,229 @@ fn detach_request() -> HarnessInputMessage {
     HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {})
 }
 
+fn tree_request(session_id: &str, target_agent_id: Option<&str>) -> HarnessInputMessage {
+    HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
+        session_id: session_id.into(),
+        target_agent_id: target_agent_id.map(crate::parse_agent_id),
+    })
+}
+
+/// An attached socket UI receives exactly one multiline tree result while
+/// other peers, publication history, and semantic stores see no request or
+/// result event. The point-to-point request remains visible in debug JSONL.
+#[test]
+fn tree_request_returns_one_directed_multiline_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    append_user_message_via_event(&mut h, "s1", "first tree prompt");
+    append_user_message_via_event(&mut h, "s1", "second tree prompt");
+    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (_observer_id, mut observer) = connect_socket_ui(&mut h);
+    let debug_log_path = h
+        .enable_debug_log(&td.path().join("debug"))
+        .expect("enable debug log");
+    let baseline_seq = h.event_log.next_seq();
+    let event = HarnessEvent::FromConnection {
+        connection_id: requesting_ui_id,
+        message: Box::new(tree_request("s1", Some(agent_id.as_str()))),
+    };
+    h.log_event(&event);
+
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("handle tree request");
+
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_NOTICE);
+    assert_eq!(notice.level, tau_proto::NoticeLevel::Info);
+    assert!(!notice.always_show);
+    assert_eq!(
+        notice.message,
+        concat!(
+            "    0   before first prompt (root)\n",
+            "    1   before prompt  user: first tree prompt\n",
+            "    2   before prompt  user: second tree prompt",
+        )
+    );
+    assert_no_message(&mut requesting_ui);
+    assert_no_message(&mut observer);
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+
+    let debug_lines = std::fs::read_to_string(debug_log_path).expect("read debug log");
+    let entries = debug_lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("debug JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["event_name"], "<message>");
+    assert_eq!(entries[0]["event"]["message"], "ui_tree_request");
+    assert_eq!(entries[0]["event"]["payload"]["session_id"], "s1");
+}
+
+/// Startup intake preserves tree request handling without treating the request
+/// as a subscription or publishing its one directed error result.
+#[test]
+fn tree_request_returns_directed_result_during_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let baseline_seq = h.event_log.next_seq();
+
+    assert!(
+        !h.handle_startup_from_connection(ui_id.as_str(), tree_request("s1", None))
+            .expect("handle startup tree request")
+    );
+
+    let notice = read_notice(&mut ui);
+    assert_eq!(notice.message, "tree request ignored: unknown agent");
+    assert_no_message(&mut ui);
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+}
+
+/// Non-UI sockets, dedicated external-message peers, and embedded UIs cannot
+/// inspect agent tree previews or trigger a directed result.
+#[test]
+fn tree_request_is_silently_denied_for_other_client_origins() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let socket_tool = connect_test_client_with_origin(
+        &mut h,
+        "tree-socket-tool",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+    let embedded_ui = connect_test_client(&mut h, "tree-embedded-ui", tau_proto::ClientKind::Ui);
+    let (external_id, mut external) = connect_socket_ui(&mut h);
+    h.handle_client_message(
+        external_id.as_str(),
+        HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_kind: tau_proto::ClientKind::External,
+            capabilities: Default::default(),
+        }),
+    )
+    .expect("external-agent message hello");
+    let baseline_seq = h.event_log.next_seq();
+
+    for connection_id in [
+        tau_proto::ConnectionId::from("tree-socket-tool"),
+        tau_proto::ConnectionId::from("tree-embedded-ui"),
+        external_id,
+    ] {
+        let mut served_clients = 0;
+        let mut exit_on_disconnect = false;
+        let mut ever_attached = false;
+        h.handle_runtime_event(
+            HarnessEvent::FromConnection {
+                connection_id,
+                message: Box::new(tree_request("s1", None)),
+            },
+            &mut served_clients,
+            &mut exit_on_disconnect,
+            &mut ever_attached,
+        )
+        .expect("silently deny tree request");
+        assert_eq!(served_clients, 0);
+    }
+
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+    assert!(socket_tool.lock().expect("socket tool frames").is_empty());
+    assert!(embedded_ui.lock().expect("embedded UI frames").is_empty());
+    assert_no_message(&mut external);
+}
+
+/// Configured extensions are metered and silently denied after legal phase
+/// validation but before activation staging.
+#[test]
+fn tree_request_is_silently_denied_for_configured_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let ready = connect_ready_configured_extension(
+        &mut h,
+        "tree-ready-requester",
+        "tree-ready-requester",
+        tau_proto::ClientKind::Tool,
+    );
+    ready.lock().expect("ready requester frames").clear();
+    let handshaking = connect_handshaking_tool(&mut h, "tree-handshaking-requester");
+    let notice_count = h.replayable_harness_notices.len();
+
+    for connection_id in ["tree-ready-requester", "tree-handshaking-requester"] {
+        h.handle_extension_message(connection_id, tree_request("s1", None))
+            .expect("silently deny configured extension tree request");
+        let stats = h.extensions.entries[connection_id]
+            .protocol_io
+            .cumulative_stats();
+        assert_eq!(stats.uplink["message.ui_tree_request"].count, 1);
+    }
+
+    assert_eq!(
+        h.extensions.entries["tree-ready-requester"].state,
+        ExtensionState::Ready
+    );
+    assert_eq!(
+        h.extensions.entries["tree-handshaking-requester"].state,
+        ExtensionState::Handshaking
+    );
+    assert!(
+        !h.extensions
+            .activation_staging
+            .contains_key("tree-handshaking-requester")
+    );
+    assert!(ready.lock().expect("ready requester frames").is_empty());
+    assert!(
+        handshaking
+            .lock()
+            .expect("handshaking requester frames")
+            .is_empty()
+    );
+    assert_eq!(h.replayable_harness_notices.len(), notice_count);
+}
+
+/// Tree requests preserve ordinary configured-extension phase validation:
+/// pre-Hello requests are metered and then follow runtime protocol-failure
+/// isolation instead of the legal-phase silent denial.
+#[test]
+fn tree_request_preserves_configured_extension_phase_validation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    h.initial_extension_tool_preflight_complete = true;
+    connect_handshaking_tool(&mut h, "tree-spawning-requester");
+    h.extensions
+        .entries
+        .get_mut("tree-spawning-requester")
+        .expect("spawning requester")
+        .state = ExtensionState::Spawning;
+    let notice_count = h.replayable_harness_notices.len();
+
+    h.handle_extension_message("tree-spawning-requester", tree_request("s1", None))
+        .expect("isolate out-of-phase requester");
+
+    let entry = &h.extensions.entries["tree-spawning-requester"];
+    assert_eq!(
+        entry.protocol_io.cumulative_stats().uplink["message.ui_tree_request"].count,
+        1
+    );
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(h.bus.connection("tree-spawning-requester").is_none());
+    assert_eq!(h.replayable_harness_notices.len(), notice_count + 1);
+}
+
 /// An attached socket UI may disable exit-on-disconnect without publishing,
 /// delivering, or persisting a bus event. The point-to-point frame remains
 /// visible in the local debug JSONL trace.

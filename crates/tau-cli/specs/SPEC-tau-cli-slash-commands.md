@@ -54,6 +54,10 @@ to leading slash roots; ordinary prompt text that contains slashes later in the
 line remains normal prompt text.
 
 `/tree` argument parsing is CLI-owned, while anchor resolution is harness-owned.
+Bare `/tree` sends the dedicated `ui_tree_request` message and renders the
+harness's exactly one requester-directed multiline notice. `tau dev send`
+waits for and prints that same notice before exiting. Tree navigation forms
+remain `ui.navigate_tree` events because they mutate the selected agent head.
 The CLI maps `/tree <positive-integer>` to a one-based prompt anchor target,
 `/tree 0` and `/tree root` to the explicit root/before-first target, and
 `/tree node <non-negative-integer>` to the raw-node expert target. It must not

@@ -141,6 +141,21 @@ also silently denied after normal phase validation and metering but before
 activation staging, so repeated requests cannot consume activation quota,
 disconnect the extension, or fail required startup.
 
+UI tree inspection is a flat `ui_tree_request` input message from an attached
+socket UI. The harness preserves the existing session/agent validation, prompt
+anchor ordering, selected-head markers, previews, and diagnostic text, then
+returns exactly one requester-directed multiline `harness.notice` with the
+existing lines in their existing order. Neither the request nor result enters
+publication, interception, subscriptions, semantic persistence, or replay. The
+request remains visible in local debug JSONL and is metered as
+`message.ui_tree_request`.
+
+Tree authority uses the same exact `is_attached_socket_ui` classification.
+Other client origins are silently denied so agent prompt previews cannot leak.
+Configured extensions are silently denied after normal phase validation and
+metering but before activation staging; illegal-phase requests retain normal
+protocol-failure behavior.
+
 ## Harness-owned tool-call id scoping
 
 The harness-owned `wait` and `cancel` tools treat explicit `tool_call_id`

@@ -35,7 +35,7 @@ pub(crate) fn connect_ui_client_until(
     if timeout.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "agent roster deadline elapsed while connecting",
+            "UI request deadline elapsed while connecting",
         ));
     }
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
@@ -70,7 +70,7 @@ impl Read for DeadlineUnixReader {
                 .deadline
                 .checked_duration_since(std::time::Instant::now())
                 .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::TimedOut, "agent roster deadline elapsed")
+                    io::Error::new(io::ErrorKind::TimedOut, "UI request deadline elapsed")
                 })?;
             self.stream
                 .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))?;
@@ -103,7 +103,7 @@ impl Write for DeadlineUnixWriter {
             .deadline
             .checked_duration_since(std::time::Instant::now())
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::TimedOut, "agent roster deadline elapsed")
+                io::Error::new(io::ErrorKind::TimedOut, "UI request deadline elapsed")
             })?;
         self.stream.set_write_timeout(Some(remaining))?;
         self.stream.write(buffer)

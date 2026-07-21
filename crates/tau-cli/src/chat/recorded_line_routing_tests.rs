@@ -243,9 +243,9 @@ impl TestTreeCommandHandlers {
 
 impl RecordedLineHandlers for TestTreeCommandHandlers {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        match tree_command_event("s1", None, text) {
-            Ok(Some(event)) => {
-                self.outputs.push(format_tree_event(&event));
+        match tree_command_message("s1", None, text) {
+            Ok(Some(message)) => {
+                self.outputs.push(format_tree_message(&message));
                 Ok(CommandOutcome::Continue)
             }
             Ok(None) => Ok(CommandOutcome::NotHandled),
@@ -270,11 +270,14 @@ impl RecordedLineHandlers for TestTreeCommandHandlers {
     }
 }
 
-fn format_tree_event(event: &Event) -> String {
-    match event {
-        Event::UiTreeRequest(_) => "tree:request".to_owned(),
-        Event::UiNavigateTree(req) => format!("tree:navigate:{:?}", req.target),
-        other => panic!("expected tree event, got {other:?}"),
+fn format_tree_message(message: &HarnessInputMessage) -> String {
+    match message {
+        HarnessInputMessage::UiTreeRequest(_) => "tree:request".to_owned(),
+        HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+            Event::UiNavigateTree(req) => format!("tree:navigate:{:?}", req.target),
+            other => panic!("expected tree navigation event, got {other:?}"),
+        },
+        other => panic!("expected tree message, got {other:?}"),
     }
 }
 

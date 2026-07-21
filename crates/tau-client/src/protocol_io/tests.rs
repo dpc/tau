@@ -48,6 +48,17 @@ fn protocol_io_input_message_key_uses_ui_detach_request_message_name() {
     assert_eq!(input_message_key(&message), "message.ui_detach_request");
 }
 
+/// Dedicated UI tree requests use their flat message name for metering.
+#[test]
+fn protocol_io_input_message_key_uses_ui_tree_request_message_name() {
+    let message = HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
+        session_id: "s1".into(),
+        target_agent_id: None,
+    });
+
+    assert_eq!(input_message_key(&message), "message.ui_tree_request");
+}
+
 /// Cumulative protocol I/O counters must survive sample draining because debug
 /// dumps are lifetime counters while rolling samples drive transient status.
 #[test]

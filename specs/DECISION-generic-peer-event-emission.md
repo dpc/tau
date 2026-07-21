@@ -15,10 +15,9 @@ The agent-metadata row has completed its request-to-canonical-fact split under
 [SPEC-agent-metadata-requests-and-canonical-facts](SPEC-agent-metadata-requests-and-canonical-facts.md).
 Its rejection-outcome interface remains unspecified; current validation
 failures produce no canonical successor, so this row is not yet fully complete.
-The dedicated UI-request row is partially migrated:
-`ui_debug_event_stats_request` and `ui_detach_request` are now flat
-point-to-point input messages. `ui.tree_request` remains event-based pending a
-separate slice.
+The dedicated UI-request row is migrated:
+`ui_debug_event_stats_request`, `ui_detach_request`, and `ui_tree_request` are
+flat point-to-point input messages rather than events.
 
 This decision applies to `Emit` from every peer kind, including extensions,
 providers, UI clients, external peers, and harness-connected core components.
@@ -253,3 +252,5 @@ The custom extension-owned event row is implemented by
 [SPEC-custom-extension-events](SPEC-custom-extension-events.md).
 The attached-UI prompt-draft and focus row is implemented by
 [SPEC-ui-prompt-draft-and-focus-events](SPEC-ui-prompt-draft-and-focus-events.md).
+The dedicated attached-UI request row is implemented by
+[SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
