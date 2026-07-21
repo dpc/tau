@@ -84,7 +84,7 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(crate) source: tau_proto::ConnectionId,
     /// Authenticated configured extension kind captured at admission.
     pub(crate) kind: tau_proto::ClientKind,
-    /// Configured extension generation captured at admission.
+    /// Stable configured instance identity captured at admission.
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
     /// Activation-stage reservation made before interception.
     pub(crate) activation_reservation: Option<ActivationReservation>,
@@ -110,6 +110,8 @@ pub(crate) enum ActivationDeclarationFamily {
     ToolLifecycle,
     /// Extension-level prompt-fragment declaration.
     PromptFragment,
+    /// Session-provider registration, skill, or AGENTS.md declaration.
+    SessionDiscovery,
 }
 
 /// Immutable authenticated metadata carried beside one generic peer publish.
@@ -816,6 +818,11 @@ impl Harness {
                     }
                     Event::ExtPromptFragmentPublish(_) => {
                         ActivationDeclarationFamily::PromptFragment
+                    }
+                    Event::ExtensionSessionContextProviderRegister(_)
+                    | Event::ExtSkillAvailable(_)
+                    | Event::ExtAgentsMdAvailable(_) => {
+                        ActivationDeclarationFamily::SessionDiscovery
                     }
                     _ => return None,
                 };

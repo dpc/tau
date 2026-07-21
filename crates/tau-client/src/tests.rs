@@ -1483,7 +1483,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
             if matches!(
                 emit.event.as_ref(),
                 Event::ExtensionSessionContextProviderRegister(_)
-            )
+            ) && emit.transient
     ));
     let HarnessInputMessage::Emit(prompt_fragment_emit) = &frames[3] else {
         panic!("expected prompt fragment publish before Ready: {frames:?}");
@@ -1587,19 +1587,19 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
     let ready_events = frames
         .iter()
         .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+            HarnessInputMessage::Emit(emit) => Some((emit.event.as_ref(), emit.transient)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(ready_events.iter().any(|event| matches!(
+    assert!(ready_events.iter().any(|(event, _)| matches!(
         event,
         Event::ExtensionContextReady(ready)
             if ready.session_id == "session-1" && ready.agent_id.as_str() == "agent-1"
     )));
-    assert!(ready_events.iter().any(|event| matches!(
+    assert!(ready_events.iter().any(|(event, transient)| matches!(
         event,
         Event::ExtensionSessionContextReady(ready) if ready.session_id == "session-1"
-    )));
+    ) && *transient));
 }
 
 /// Ensures detached sends still flow through the writer before runner

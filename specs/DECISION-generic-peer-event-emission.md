@@ -230,3 +230,5 @@ The provider-quota report-to-canonical-current-state flow is specified by
 [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
 The extension prompt-fragment declaration-to-projection flow is specified by
 [SPEC-prompt-fragment-declarations-and-projection](SPEC-prompt-fragment-declarations-and-projection.md).
+The session-discovery declaration/readiness flow is specified by
+[SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).

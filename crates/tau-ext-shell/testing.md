@@ -53,3 +53,5 @@ AGENTS.md tests cover ancestor and local ordering, size caps, user roots before
 project roots, and trusted symlink following. Skill tests cover project/user and
 XDG/legacy precedence, collisions through `tau-skills`, supported symlink forms,
 and canonical-directory cycle detection.
+Protocol coverage feeds a deterministic skill/AGENTS.md batch and asserts transient wire
+metadata for both declarations and the following session-readiness acknowledgement.

@@ -44,6 +44,37 @@ fn prompt_fragment_declarations_never_enter_semantic_history() {
     assert!(!should_persist_event(&event, true));
 }
 
+/// Session-discovery declarations and readiness are runtime observations, never
+/// semantic history, regardless of peer-selected transient metadata.
+#[test]
+fn session_discovery_events_never_enter_semantic_history() {
+    for event in [
+        Event::ExtensionSessionContextProviderRegister(
+            tau_proto::ExtensionSessionContextProviderRegister {},
+        ),
+        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: "runtime-skill".into(),
+            description: "runtime skill".to_owned(),
+            file_path: "/tmp/runtime-skill.md".into(),
+            add_to_prompt: true,
+            user_invocable: true,
+            disable_model_invocation: false,
+            argument_hint: None,
+        }),
+        Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
+            file_path: "/tmp/AGENTS.md".into(),
+            content: "runtime instructions".to_owned(),
+        }),
+        Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
+            session_id: "session-1".into(),
+        }),
+    ] {
+        assert!(event.defaults_to_transient());
+        assert!(!should_persist_event(&event, false));
+        assert!(!should_persist_event(&event, true));
+    }
+}
+
 /// Provider quota observations and canonical current snapshots remain outside
 /// semantic history even when a peer incorrectly requests durable publication.
 #[test]

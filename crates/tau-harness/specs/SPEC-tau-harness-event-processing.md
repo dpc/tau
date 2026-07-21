@@ -15,6 +15,10 @@ Extension prompt-fragment projection runs only after this ordinary commit.
 Declarations are excluded from semantic persistence and replay for either
 caller-supplied transience value; see
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
+Session registration/discovery projection and readiness release likewise run only after
+ordinary commit; their raw events are excluded from semantic persistence for either
+caller transience value. See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as

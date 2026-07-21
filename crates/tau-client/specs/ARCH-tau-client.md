@@ -190,6 +190,10 @@ state they need, publish context values, and choose when to emit
 `extension.context_ready` or `extension.session_context_ready`. `ClientHandle`
 provides small readiness emit helpers for those two DTOs, but readiness policy
 and correlation remain extension-owned.
+The session-provider registration helper and session-readiness helper emit transient
+wire publications. Session skill and AGENTS.md producers must do the same; the harness
+commits them before downstream effects under
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Prompt-fragment startup events are transient declarations: the harness commits
 them through ordinary interception before activating their prompt projection.
 See

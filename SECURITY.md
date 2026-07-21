@@ -130,6 +130,17 @@ generations cannot mutate that projection. Pre-Ready declarations reserve bounde
 activation capacity until commit, drop, or disconnect, and no declaration enters semantic
 history or replay. See
 [SPEC-prompt-fragment-declarations-and-projection](specs/SPEC-prompt-fragment-declarations-and-projection.md).
+Every authenticated configured extension kind may also publish transient session-provider
+registration, skill, AGENTS.md, and session-readiness events without a capability.
+They commit before projection or barrier release and revalidate the exact run-local
+generation; only registered live non-socket Tool subscribers participate in the wait
+barrier. Pre-Ready declarations reserve bounded activation count/bytes until commit,
+drop, or disconnect. Raw events never enter semantic journals or replay. A connected
+effective waiter intentionally has no readiness deadline and can hold session
+initialization until acknowledgement or disconnect; a deadline or degraded mode requires
+a separate decision. Re-check reservation cleanup/reaccounting, wait-set admission, and
+disconnect/respawn generation checks whenever this flow changes. See
+[SPEC-session-discovery-declarations-and-readiness](specs/SPEC-session-discovery-declarations-and-readiness.md).
 Configured Provider peers likewise submit transient
 `provider.quota_*_reported` observations before any account-state acceptance.
 Only the post-commit consumer may validate the captured live generation,

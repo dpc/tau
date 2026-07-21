@@ -148,3 +148,8 @@ harness's exact current session. Its bounded result contains membership
 lifecycle, persistence, runtime/navigation classification for live rows, and
 content-minimized creation labels. It is not an event and has no
 extension/external request path.
+
+The four session-discovery DTOs retain their existing wire names and default to transient:
+session-provider registration, skill availability, AGENTS.md availability, and session
+readiness. Their commit-before-effects contract is
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).

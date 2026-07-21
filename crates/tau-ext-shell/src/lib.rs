@@ -2067,10 +2067,28 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
 
 fn dispatch_session_started(started: SessionStarted, tx: &Output) {
     let session_id = started.session_id.clone();
-    for event in build_session_started_events(started) {
-        let _ = tx.send(HarnessInputMessage::emit(event));
+    dispatch_session_discovery_events(session_id, build_session_started_events(started), tx);
+}
+
+/// Publish one ordered session-discovery batch followed by its readiness
+/// acknowledgement.
+fn dispatch_session_discovery_events(
+    session_id: tau_proto::SessionId,
+    events: Vec<Event>,
+    tx: &Output,
+) {
+    for event in events {
+        let message = if matches!(
+            &event,
+            Event::ExtSkillAvailable(_) | Event::ExtAgentsMdAvailable(_)
+        ) {
+            HarnessInputMessage::emit_transient(event)
+        } else {
+            HarnessInputMessage::emit(event)
+        };
+        let _ = tx.send(message);
     }
-    let _ = tx.send(HarnessInputMessage::emit(
+    let _ = tx.send(HarnessInputMessage::emit_transient(
         Event::ExtensionSessionContextReady(ExtensionSessionContextReady { session_id }),
     ));
 }

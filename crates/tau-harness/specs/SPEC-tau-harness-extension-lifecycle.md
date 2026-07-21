@@ -131,6 +131,10 @@ Pre-Ready prompt-fragment declarations reserve count and encoded bytes before
 interception, block Ready until pass/drop/disconnect settles, and stage only the
 committed survivor. See
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
+Session-provider registration, skill, and AGENTS.md declarations use the same
+pre-interception activation reservation boundary; readiness remains ordered operational
+traffic. See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Harness-internal tool handlers are installed before this preflight, so their names
 participate as reserved owners. Per-connection retained activation traffic is
 bounded by message-count and encoded-byte quotas; overflow follows the same

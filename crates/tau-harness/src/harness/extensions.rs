@@ -44,9 +44,9 @@ pub(super) struct ExtensionActivationStage {
     /// Action schema received before `Ready`. Schema publishing is a
     /// replacement, so only the latest staged schema matters.
     pub(super) action_schema: Option<tau_actions::ActionSchema>,
-    /// Skill announcements received before `Ready`, in wire order.
+    /// Committed skill declarations awaiting activation, in commit order.
     pub(super) skill_announcements: Vec<tau_proto::ExtSkillAvailable>,
-    /// AGENTS.md announcements received before `Ready`, in wire order.
+    /// Committed AGENTS.md declarations awaiting activation, in commit order.
     pub(super) agents_files: Vec<tau_proto::ExtAgentsMdAvailable>,
     /// Whether the extension registered as an agent context provider before
     /// `Ready`.
@@ -65,9 +65,6 @@ pub(super) struct ExtensionActivationStage {
     /// Per-agent context acknowledgements received before `Ready`, in wire
     /// order.
     pub(super) context_ready_events: Vec<tau_proto::ExtensionContextReady>,
-    /// Session-wide context acknowledgements received before `Ready`, in wire
-    /// order.
-    pub(super) session_context_ready_events: Vec<tau_proto::ExtensionSessionContextReady>,
     /// Extension-started agent queries received before `Ready`, in wire order.
     pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.
@@ -110,6 +107,9 @@ pub(crate) struct ExtensionRuntimeState {
     /// Pre-`Ready` prompt-fragment declarations admitted but not yet committed
     /// or dropped by interception.
     pub(super) pending_prompt_fragment_declarations: HashMap<tau_proto::ConnectionId, usize>,
+    /// Pre-`Ready` session-discovery declarations admitted but not yet
+    /// committed or dropped by interception.
+    pub(super) pending_session_discovery_declarations: HashMap<tau_proto::ConnectionId, usize>,
     /// Connections that sent `Ready` but are still waiting for the global
     /// initial collision preflight or their atomic stage activation.
     pub(super) ready_received: HashSet<tau_proto::ConnectionId>,

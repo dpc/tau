@@ -537,10 +537,10 @@ fn disable_model_invocation_implies_user_invocable() {
     );
 }
 
-/// Ensures the harness normalizes manual-only skill policy before publishing
-/// availability events that UI clients use for `/skill` completion.
+/// Ensures commit-first publication preserves the raw declaration while the
+/// harness-owned skill projection normalizes manual-only invocation policy.
 #[test]
-fn published_skill_event_normalizes_disable_model_invocation() {
+fn published_skill_event_preserves_raw_flags_while_projection_normalizes() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let path = tmp.path().join("manual-event.md");
@@ -549,10 +549,16 @@ fn published_skill_event_normalizes_disable_model_invocation() {
         "---\nname: manual-event\ndescription: Manual event\n---\nManual event body.\n",
     )
     .expect("write skill");
-
-    h.publish_extension_skill_available(
+    connect_ready_configured_extension(
+        &mut h,
         "ext",
-        tau_proto::ExtSkillAvailable {
+        "configured-ext",
+        tau_proto::ClientKind::Tool,
+    );
+
+    h.handle_extension_event_inner(
+        "ext",
+        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
             name: "manual-event".into(),
             description: "Manual event".to_owned(),
             file_path: path,
@@ -560,8 +566,9 @@ fn published_skill_event_normalizes_disable_model_invocation() {
             user_invocable: false,
             disable_model_invocation: true,
             argument_hint: Some("<task>".to_owned()),
-        },
-    );
+        }),
+    )
+    .expect("publish skill");
 
     let published = event_log_events(&h)
         .into_iter()
@@ -570,9 +577,10 @@ fn published_skill_event_normalizes_disable_model_invocation() {
             _ => None,
         })
         .expect("published skill event");
-    assert!(published.user_invocable);
+    assert!(!published.user_invocable);
     assert!(published.disable_model_invocation);
     assert_eq!(published.argument_hint.as_deref(), Some("<task>"));
+    assert!(h.discovered_skills["manual-event"].user_invocable);
 }
 
 /// Ensures non-user-invocable skill commands are rejected before any prompt is

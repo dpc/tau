@@ -525,13 +525,13 @@ impl ClientHandle {
     /// This is only a protocol convenience paired with
     /// [`crate::ExtensionBuilder::register_session_context_provider`]. Callers
     /// still own session lifecycle handling, context publication, and readiness
-    /// policy.
+    /// policy. The acknowledgement uses transient wire metadata.
     ///
     /// # Errors
     ///
     /// Returns an error when sending the underlying protocol frame fails.
     pub fn emit_session_context_ready(&self, session_id: tau_proto::SessionId) -> ClientResult<()> {
-        self.emit(tau_proto::Event::ExtensionSessionContextReady(
+        self.emit_transient(tau_proto::Event::ExtensionSessionContextReady(
             tau_proto::ExtensionSessionContextReady { session_id },
         ))
     }

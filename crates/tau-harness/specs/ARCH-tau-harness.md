@@ -3,8 +3,8 @@
 ## Status
 
 The external-message, provider-model, provider-quota, provider-execution,
-tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, and
-prompt-fragment slices now use generic `Emit` publication, immutable authenticated
+tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, prompt-fragment, and
+session-discovery slices now use generic `Emit` publication, immutable authenticated
 internal publisher snapshots, source-aware admission, and downstream processing as required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The general protocol-level authenticated publisher envelope and remaining peer
@@ -177,6 +177,10 @@ read/frontmatter rules as the `skill` tool. Roles with missing, hidden, or
 unreadable required skills are removed from role selection/delegation and get a
 mandatory replayable `harness.config_error` notice; if the selected/default
 startup role is removed, startup fails rather than falling back silently.
+Session registration, skills, AGENTS.md contents, and readiness cross ordinary
+interception and commit before they update these projections or release the barrier.
+See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
 ## Daemon and provider reliability boundaries
 

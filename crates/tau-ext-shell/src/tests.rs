@@ -3347,6 +3347,62 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
     writer.flush().expect("flush");
 }
 
+/// Ensures the deterministic skill, AGENTS.md, and readiness batch uses
+/// transient wire metadata for every session-discovery event.
+#[test]
+fn session_discovery_events_use_transient_wire_metadata() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let output = Output::channel(tx);
+    dispatch_session_discovery_events(
+        "session-transient".into(),
+        vec![
+            Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+                name: "transient-skill".into(),
+                description: "transient skill".to_owned(),
+                file_path: "/tmp/transient-skill.md".into(),
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+            }),
+            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
+                file_path: "/tmp/AGENTS.md".into(),
+                content: "transient instructions".to_owned(),
+            }),
+        ],
+        &output,
+    );
+
+    let frames = rx.try_iter().collect::<Vec<_>>();
+    let mut saw_skill = false;
+    let mut saw_agents = false;
+    let mut saw_ready = false;
+    for frame in frames {
+        let HarnessInputMessage::Emit(emit) = frame else {
+            continue;
+        };
+        match emit.event.as_ref() {
+            Event::ExtSkillAvailable(_) => {
+                assert!(emit.transient);
+                saw_skill = true;
+            }
+            Event::ExtAgentsMdAvailable(_) => {
+                assert!(emit.transient);
+                saw_agents = true;
+            }
+            Event::ExtensionSessionContextReady(ready) => {
+                assert_eq!(ready.session_id, "session-transient");
+                assert!(emit.transient);
+                saw_ready = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_skill);
+    assert!(saw_agents);
+    assert!(saw_ready);
+}
+
 #[test]
 fn extension_reads_file() {
     let tempdir = TempDir::new().expect("tempdir");

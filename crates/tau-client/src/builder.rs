@@ -176,9 +176,10 @@ impl<State> ExtensionBuilder<State> {
     /// emit `extension.session_context_ready` at runtime.
     ///
     /// This is a startup publication helper only. Runtime session folding,
-    /// context publication, and readiness events remain extension-owned.
+    /// context publication, and readiness events remain extension-owned. The
+    /// registration uses transient wire metadata.
     pub fn register_session_context_provider(&mut self) -> &mut Self {
-        self.startup_event(tau_proto::Event::ExtensionSessionContextProviderRegister(
+        self.startup_transient_event(tau_proto::Event::ExtensionSessionContextProviderRegister(
             tau_proto::ExtensionSessionContextProviderRegister {},
         ))
     }

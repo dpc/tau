@@ -26,12 +26,12 @@ impl SkillCommandState {
         Self::default()
     }
 
-    /// Apply one harness-stamped skill availability event.
+    /// Apply one committed raw skill-availability declaration.
     pub(crate) fn apply_skill_available(&self, skill: &ExtSkillAvailable) {
         let mut inner = locked(&self.inner);
-        // The harness normalizes this before publishing, but keep completion
-        // robust to stale replay data or older daemons: manual-only
-        // `disable_model_invocation` skills are effectively user-invocable.
+        // Raw declarations retain their authored flags. Manual-only
+        // `disable_model_invocation` skills are nevertheless effectively
+        // user-invocable in both this live projection and the harness projection.
         if !skill.user_invocable && !skill.disable_model_invocation {
             inner.remove(skill.name.as_str());
             return;

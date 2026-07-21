@@ -3595,6 +3595,9 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures a committed AGENTS.md declaration remains projection-staged until
+/// extension Ready, while operational per-agent readiness and queued prompts
+/// stay behind activation and observe the activated instructions.
 #[test]
 fn agents_context_ready_staged_until_ready_and_queue_waits() {
     // AGENTS.md discovery and the matching context-ready acknowledgement are
@@ -3649,11 +3652,11 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
             .iter()
             .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::ExtAgentsMdAvailable(_))
+    }));
     assert!(!event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(
-            event,
-            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
-        )
+        matches!(event, Event::ExtensionContextReady(_))
     }));
 
     h.handle_extension_message(

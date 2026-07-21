@@ -32,6 +32,10 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
                 | Event::ProviderRetryPromptResultReported(_)
                 | Event::ProviderCacheMissDiagnosticReported(_)
                 | Event::ExtPromptFragmentPublish(_)
+                | Event::ExtSkillAvailable(_)
+                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionContextProviderRegister(_)
+                | Event::ExtensionSessionContextReady(_)
         )
         || is_raw_tool_terminal_event(event)
     {

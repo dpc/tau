@@ -1895,7 +1895,8 @@ pub struct ExtensionRestarting {
     pub reason: Option<String>,
 }
 
-/// An extension discovered a skill and is advertising it to the harness.
+/// A transient raw skill declaration committed before harness validation,
+/// collision selection, diagnostics, or winner projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtSkillAvailable {
     pub name: SkillName,
@@ -1916,8 +1917,8 @@ pub struct ExtSkillAvailable {
     pub argument_hint: Option<String>,
 }
 
-/// An extension discovered one AGENTS.md file and is advertising it to the
-/// harness.
+/// A transient raw AGENTS.md declaration committed before slot replacement and
+/// durable per-agent instruction injection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtAgentsMdAvailable {
     /// Absolute path to the AGENTS.md file.
@@ -1933,8 +1934,11 @@ pub struct ExtAgentsMdAvailable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextProviderRegister {}
 
-/// An extension declares that it will publish session-wide prompt context after
-/// each matching `session.started` event and acknowledge completion with
+/// A transient session-provider declaration committed before provider
+/// membership changes.
+///
+/// Effective registered Tool subscribers publish session-wide prompt context
+/// after matching `session.started` events and acknowledge with
 /// `extension.session_context_ready`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionSessionContextProviderRegister {}
@@ -1948,8 +1952,8 @@ pub struct ExtensionContextReady {
     pub agent_id: AgentId,
 }
 
-/// An extension finished broadcasting refreshed session-wide context such as
-/// skills and AGENTS.md files after a `session.started` notification.
+/// A transient session-discovery acknowledgement committed before it may
+/// release session initialization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionSessionContextReady {
     /// Session whose session-wide context is complete for now.
@@ -5306,6 +5310,9 @@ impl Event {
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
                 | Self::ExtPromptFragmentPublish(_)
+                | Self::ExtSkillAvailable(_)
+                | Self::ExtAgentsMdAvailable(_)
+                | Self::ExtensionSessionContextProviderRegister(_)
                 | Self::ExtensionSessionContextReady(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)

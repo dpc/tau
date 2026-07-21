@@ -770,8 +770,6 @@ struct NormalizedFinishedToolCalls {
 struct ActivatedExtensionEvents {
     /// Per-agent context acknowledgements.
     context_ready: Vec<tau_proto::ExtensionContextReady>,
-    /// Session-wide context acknowledgements.
-    session_context_ready: Vec<tau_proto::ExtensionSessionContextReady>,
     /// Extension-originated agent queries.
     agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Operational messages withheld behind the initial activation barrier.
@@ -4446,11 +4444,10 @@ impl Harness {
 
     /// Final commit: persist (when applicable), append to the event
     /// log, and broadcast on the bus. Does not consult interception
-    /// state — the caller is responsible for getting here only when
-    /// the chain has resolved. Triggers any post-commit reactions
-    /// (currently: deferred agent dispatches that were waiting on
-    /// this user-message-bearing event to land in the tree, plus
-    /// per-publish conversation `head` syncs).
+    /// state — the caller is responsible for getting here only when the chain
+    /// has resolved. After broadcast, it runs captured peer-event consumers
+    /// and other post-commit reactions, including deferred agent dispatch
+    /// and per-publish conversation `head` synchronization.
     pub(crate) fn commit_event(
         &mut self,
         source: Option<&str>,
@@ -7142,16 +7139,6 @@ impl Harness {
             .push(ready);
     }
 
-    fn stage_extension_session_context_ready(
-        &mut self,
-        source_id: &str,
-        ready: tau_proto::ExtensionSessionContextReady,
-    ) {
-        self.extension_activation_stage_mut(source_id)
-            .session_context_ready_events
-            .push(ready);
-    }
-
     fn stage_start_agent_request(&mut self, source_id: &str, query: tau_proto::StartAgentRequest) {
         self.extension_activation_stage_mut(source_id)
             .agent_queries
@@ -7272,17 +7259,16 @@ impl Harness {
             .insert(publish.fragment.name.clone(), publish.fragment);
     }
 
-    fn publish_extension_skill_available(
+    fn apply_extension_skill_available(
         &mut self,
         source_id: &str,
         mut skill: tau_proto::ExtSkillAvailable,
     ) {
         normalize_skill_invocation_policy(&mut skill);
         self.record_discovered_skill(source_id, &skill);
-        self.publish_event(Some(source_id), Event::ExtSkillAvailable(skill));
     }
 
-    fn publish_agents_md_available(
+    fn apply_agents_md_available(
         &mut self,
         source_id: &str,
         agents: tau_proto::ExtAgentsMdAvailable,
@@ -7301,7 +7287,6 @@ impl Harness {
                 content: agents.content.clone(),
             });
         }
-        self.publish_event(Some(source_id), Event::ExtAgentsMdAvailable(agents));
         let live_agents: Vec<_> = self
             .agents
             .iter()
@@ -7546,15 +7531,9 @@ impl Harness {
         );
     }
 
-    fn register_session_context_provider(&mut self, source_id: &str) {
+    fn apply_session_context_provider_registration(&mut self, source_id: &str) {
         self.session_context_providers
             .insert(tau_proto::ConnectionId::from(source_id));
-        self.publish_event(
-            Some(source_id),
-            Event::ExtensionSessionContextProviderRegister(
-                tau_proto::ExtensionSessionContextProviderRegister {},
-            ),
-        );
     }
 
     fn publish_agent_context_publish(
@@ -7588,15 +7567,11 @@ impl Harness {
         self.handle_extension_context_ready(source_id, ready)
     }
 
-    fn publish_extension_session_context_ready(
+    fn apply_extension_session_context_ready(
         &mut self,
         source_id: &str,
         ready: tau_proto::ExtensionSessionContextReady,
     ) -> Result<(), HarnessError> {
-        self.publish_event(
-            Some(source_id),
-            Event::ExtensionSessionContextReady(ready.clone()),
-        );
         self.handle_extension_session_context_ready(source_id, ready)
     }
 
@@ -7607,7 +7582,6 @@ impl Harness {
         let Some(stage) = self.extensions.activation_staging.remove(source_id) else {
             return ActivatedExtensionEvents {
                 context_ready: Vec::new(),
-                session_context_ready: Vec::new(),
                 agent_queries: Vec::new(),
                 deferred_messages: Vec::new(),
             };
@@ -7658,16 +7632,16 @@ impl Harness {
             self.publish_action_schema(source_id, schema);
         }
         for skill in stage.skill_announcements {
-            self.publish_extension_skill_available(source_id, skill);
+            self.apply_extension_skill_available(source_id, skill);
         }
         for agents in stage.agents_files {
-            self.publish_agents_md_available(source_id, agents);
+            self.apply_agents_md_available(source_id, agents);
         }
         if stage.agent_context_provider_registered {
             self.register_agent_context_provider(source_id);
         }
         if stage.session_context_provider_registered {
-            self.register_session_context_provider(source_id);
+            self.apply_session_context_provider_registration(source_id);
         }
         for publish in stage.agent_context_publishes {
             self.publish_agent_context_publish(source_id, publish);
@@ -7683,7 +7657,6 @@ impl Harness {
         }
         ActivatedExtensionEvents {
             context_ready: stage.context_ready_events,
-            session_context_ready: stage.session_context_ready_events,
             agent_queries: stage.agent_queries,
             deferred_messages: stage.deferred_messages,
         }
@@ -7697,9 +7670,6 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         for ready in activated.context_ready {
             self.publish_extension_context_ready(source_id, ready)?;
-        }
-        for ready in activated.session_context_ready {
-            self.publish_extension_session_context_ready(source_id, ready)?;
         }
         for query in activated.agent_queries {
             self.handle_start_agent_request(source_id, query)?;
@@ -7726,6 +7696,10 @@ impl Harness {
             && self
                 .extensions
                 .pending_prompt_fragment_declarations
+                .is_empty()
+            && self
+                .extensions
+                .pending_session_discovery_declarations
                 .is_empty()
             && self
                 .extensions
@@ -7939,6 +7913,10 @@ impl Harness {
             || self
                 .extensions
                 .pending_prompt_fragment_declarations
+                .contains_key(source_id)
+            || self
+                .extensions
+                .pending_session_discovery_declarations
                 .contains_key(source_id)
         {
             return Ok(());
@@ -8640,6 +8618,52 @@ impl Harness {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
             return Ok(());
         }
+        if matches!(
+            event,
+            Event::ExtensionSessionContextProviderRegister(_)
+                | Event::ExtSkillAvailable(_)
+                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionContextReady(_)
+        ) {
+            // This is configured event-authority admission only. Registration,
+            // discovery projection, diagnostics, instruction injection, and
+            // readiness release happen after ordinary commit under
+            // `SPEC-session-discovery-declarations-and-readiness`.
+            let authorized = self
+                .extensions
+                .entries
+                .get(source_id)
+                .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
+                && self
+                    .bus
+                    .connection(source_id)
+                    .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = source_id,
+                    event = %event_name,
+                    "peer lacks session-discovery event authority"
+                );
+                return Ok(());
+            }
+            let declaration = matches!(
+                event,
+                Event::ExtensionSessionContextProviderRegister(_)
+                    | Event::ExtSkillAvailable(_)
+                    | Event::ExtAgentsMdAvailable(_)
+            );
+            if declaration && self.should_stage_extension_capabilities(source_id) {
+                *self
+                    .extensions
+                    .pending_session_discovery_declarations
+                    .entry(source_id.into())
+                    .or_default() += 1;
+            }
+            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            return Ok(());
+        }
         if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
@@ -8733,6 +8757,16 @@ impl Harness {
         }
         if matches!(event, Event::ExtPromptFragmentPublish(_)) {
             self.process_committed_prompt_fragment(peer_context, event);
+            return;
+        }
+        if matches!(
+            event,
+            Event::ExtensionSessionContextProviderRegister(_)
+                | Event::ExtSkillAvailable(_)
+                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionContextReady(_)
+        ) {
+            self.process_committed_session_discovery_event(peer_context, event);
             return;
         }
         let Event::ProviderModelsDeclared(declaration) = event else {
@@ -9268,6 +9302,72 @@ impl Harness {
         }
     }
 
+    /// Apply registration, discovery projection, derived facts, or readiness
+    /// only after one session-discovery event commits for its exact
+    /// configured connection generation.
+    fn process_committed_session_discovery_event(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref() else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
+                && entry.kind == extension.kind
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            return;
+        }
+        if let Some(reservation) = extension.activation_reservation
+            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+        {
+            self.finish_pending_session_discovery_declaration(source_id.as_str());
+            return;
+        }
+
+        match event {
+            Event::ExtensionSessionContextProviderRegister(_) => {
+                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                    self.stage_session_context_provider_register(source_id.as_str());
+                } else {
+                    self.apply_session_context_provider_registration(source_id.as_str());
+                }
+            }
+            Event::ExtSkillAvailable(skill) => {
+                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                    self.stage_extension_skill_available(source_id.as_str(), skill.clone());
+                } else {
+                    self.apply_extension_skill_available(source_id.as_str(), skill.clone());
+                }
+            }
+            Event::ExtAgentsMdAvailable(agents) => {
+                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                    self.stage_agents_md_available(source_id.as_str(), agents.clone());
+                } else {
+                    self.apply_agents_md_available(source_id.as_str(), agents.clone());
+                }
+            }
+            Event::ExtensionSessionContextReady(ready) => {
+                if let Err(error) =
+                    self.apply_extension_session_context_ready(source_id.as_str(), ready.clone())
+                {
+                    self.pending_publish_error.get_or_insert(error);
+                }
+            }
+            _ => unreachable!("caller filters session-discovery events"),
+        }
+
+        if extension.activation_reservation.is_some() {
+            self.finish_pending_session_discovery_declaration(source_id.as_str());
+        }
+    }
+
     /// Apply one committed prompt-fragment declaration to the exact configured
     /// connection generation that authored it.
     fn process_committed_prompt_fragment(
@@ -9450,6 +9550,9 @@ impl Harness {
             interception::ActivationDeclarationFamily::PromptFragment => {
                 self.finish_pending_prompt_fragment_declaration(extension.source.as_str());
             }
+            interception::ActivationDeclarationFamily::SessionDiscovery => {
+                self.finish_pending_session_discovery_declaration(extension.source.as_str());
+            }
         }
     }
 
@@ -9478,6 +9581,15 @@ impl Harness {
         );
     }
 
+    /// Release one admitted pre-`Ready` session-discovery declaration and retry
+    /// activation.
+    fn finish_pending_session_discovery_declaration(&mut self, source_id: &str) {
+        self.finish_pending_activation_declaration(
+            source_id,
+            interception::ActivationDeclarationFamily::SessionDiscovery,
+        );
+    }
+
     /// Release one family-specific pending count and retry extension
     /// activation.
     fn finish_pending_activation_declaration(
@@ -9495,6 +9607,9 @@ impl Harness {
             }
             interception::ActivationDeclarationFamily::PromptFragment => {
                 &mut self.extensions.pending_prompt_fragment_declarations
+            }
+            interception::ActivationDeclarationFamily::SessionDiscovery => {
+                &mut self.extensions.pending_session_discovery_declarations
             }
         };
         let remove = if let Some(count) = pending.get_mut(&source_id) {
@@ -9948,22 +10063,6 @@ impl Harness {
         event: Event,
     ) -> Result<Option<Event>, HarnessError> {
         match event {
-            Event::ExtSkillAvailable(skill) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_skill_available(source_id, skill);
-                } else {
-                    self.publish_extension_skill_available(source_id, skill);
-                }
-                Ok(None)
-            }
-            Event::ExtAgentsMdAvailable(agents) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_agents_md_available(source_id, agents);
-                } else {
-                    self.publish_agents_md_available(source_id, agents);
-                }
-                Ok(None)
-            }
             Event::ExtensionContextProviderRegister(_) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_agent_context_provider_register(source_id);
@@ -9972,27 +10071,11 @@ impl Harness {
                 }
                 Ok(None)
             }
-            Event::ExtensionSessionContextProviderRegister(_) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_session_context_provider_register(source_id);
-                } else {
-                    self.register_session_context_provider(source_id);
-                }
-                Ok(None)
-            }
             Event::ExtensionContextReady(ready) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_context_ready(source_id, ready);
                 } else {
                     self.publish_extension_context_ready(source_id, ready)?;
-                }
-                Ok(None)
-            }
-            Event::ExtensionSessionContextReady(ready) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_session_context_ready(source_id, ready);
-                } else {
-                    self.publish_extension_session_context_ready(source_id, ready)?;
                 }
                 Ok(None)
             }
@@ -12088,6 +12171,9 @@ impl Harness {
             .remove(connection_id);
         self.extensions
             .pending_prompt_fragment_declarations
+            .remove(connection_id);
+        self.extensions
+            .pending_session_discovery_declarations
             .remove(connection_id);
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
