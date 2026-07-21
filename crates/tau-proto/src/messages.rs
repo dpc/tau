@@ -704,7 +704,7 @@ pub struct SessionAgentListError {
     pub message: String,
 }
 
-/// Request for the harness's authoritative current session id.
+/// Request for the harness's authoritative current session identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GetCurrentSession {
     /// Caller-generated correlation id.
@@ -718,6 +718,8 @@ pub struct CurrentSessionResult {
     pub request_id: String,
     /// Harness-owned current session id at request handling time.
     pub session_id: SessionId,
+    /// Absolute canonical project root captured when the harness started.
+    pub project_root: PathBuf,
 }
 
 /// Request for a content-minimized roster of the currently bound session.

@@ -270,8 +270,9 @@ may traverse a larger bounded raw catalog than general peer discovery so stale
 unrelated pairs do not consume the much smaller matching-candidate budget.
 Local running-session listing isolates bounded runtime-path traversal, then uses
 a per-candidate, correlation-matched local socket RPC to obtain each responsive harness's
-in-memory current session id. Runtime metadata and persisted session directories
-are not lifecycle authority. The overall scan has a fixed deadline and fails
+in-memory current session id and immutable canonical startup project root.
+Runtime metadata and persisted session directories provide neither live records
+nor returned field authority. The overall scan has a fixed deadline and fails
 instead of returning a partial snapshot when candidate traversal or the total
 probe budget is incomplete.
 This authority is governed by

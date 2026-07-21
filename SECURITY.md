@@ -277,10 +277,11 @@ including unreadable conventional metadata owned by a live or
 liveness-unknown PID.
 Local running-session listing isolates bounded raw traversal from its caller and
 uses runtime paths only as socket candidates. Each responsive daemon returns its
-in-memory current session id through a correlation-matched, per-probe-deadline
-local socket RPC; adjacent metadata and persisted session directories are not
-lifecycle authority. The CLI escapes record separators and terminal controls
-before writing line-oriented output.
+in-memory current session id and immutable canonical startup project root
+through a correlation-matched, per-probe-deadline local socket RPC; adjacent
+metadata and persisted session directories supply neither records nor fields.
+The CLI escapes record separators and terminal controls before writing
+line-oriented output, and uses JSON string escaping for structured output.
 
 Inter-harness/session communication is likewise cooperative same-UID IPC, with
 correlation and bounded model-spend admission rather than hostile-sender ACLs.

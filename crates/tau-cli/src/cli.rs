@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use tau_session_inspect::{default_session_id, default_sessions_dir, default_state_dir};
@@ -196,7 +196,7 @@ pub enum Command {
 #[derive(Subcommand)]
 pub enum SessionCommand {
     /// List currently running sessions.
-    List,
+    List(SessionListArgs),
 
     /// Show a single session's history.
     Show {
@@ -208,6 +208,29 @@ pub enum SessionCommand {
         #[arg(long, default_value_os_t = default_sessions_dir())]
         sessions_dir: PathBuf,
     },
+}
+
+/// Output and exact-directory filters for `tau session list`.
+#[derive(Args, Clone, Debug, Default)]
+pub struct SessionListArgs {
+    /// List only harnesses whose canonical startup root is this directory.
+    #[arg(long, value_name = "DIR", value_parser = parse_canonical_directory)]
+    pub dir: Option<PathBuf>,
+
+    /// Emit one JSON array with session id and canonical project root fields.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Canonicalizes one existing directory during CLI parsing.
+fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
+    let canonical = Path::new(value)
+        .canonicalize()
+        .map_err(|error| format!("cannot access directory `{value}`: {error}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("path is not a directory: `{value}`"));
+    }
+    Ok(canonical)
 }
 
 #[derive(Subcommand)]

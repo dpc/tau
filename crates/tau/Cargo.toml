@@ -33,4 +33,5 @@ tau-ext-xmpp.workspace = true
 serde_json.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true
+tau-socket.workspace = true
 tempfile.workspace = true

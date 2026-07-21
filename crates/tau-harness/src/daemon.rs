@@ -24,7 +24,7 @@ use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
-    Harness, HarnessSessionLaunch, HarnessStartupPeers, InitialClient,
+    Harness, HarnessSessionLaunch, HarnessStartupInputs, InitialClient,
     InitialClientStartupErrorOutput, assistant_text_from_output_items,
     tool_calls_from_output_items,
 };
@@ -1223,11 +1223,12 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     initial_client: Option<InitialClient>,
     mut initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
 ) -> Result<(), HarnessError> {
+    let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let mut harness_paths = notify_startup_error(
-        runtime_dir::prepare_harness_paths(project_root, eager_session_id),
+        runtime_dir::prepare_harness_paths(&project_root, eager_session_id),
         &mut initial_client_error_stream,
     )?;
     tracing::debug!(target: "tau_harness::startup", harness_path = %harness_paths.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared harness paths");
@@ -1250,10 +1251,11 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 reason: session_start_reason(options.session_status),
                 session_persistence: options.session_persistence,
             },
-            HarnessStartupPeers {
+            HarnessStartupInputs {
                 initial_client,
                 internal_tool_handlers,
                 ignore_startup_environment: false,
+                project_root,
             },
             &mut initial_client_error_stream,
         ),
@@ -1286,6 +1288,19 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     drop(listener_handle);
     harness_paths.cleanup();
     result
+}
+
+/// Resolves and validates the immutable directory identity advertised by a
+/// runtime harness.
+fn canonical_project_root(project_root: &Path) -> Result<PathBuf, HarnessError> {
+    let canonical = project_root.canonicalize()?;
+    if !canonical.is_dir() {
+        return Err(HarnessError::Participant(format!(
+            "harness project root is not a directory: {}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 /// Entrypoint for `tau component harness`.

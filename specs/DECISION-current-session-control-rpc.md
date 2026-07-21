@@ -2,14 +2,6 @@
 
 Authority: confirmed, 2026-07-21, dpc
 
-## Status
-
-The current `current_session_result` returns only the typed current session id.
-Adding the canonical immutable startup `project_root` remains pending; the
-existing requester direction, authorization, and non-publication/non-persistence
-semantics already apply. Remove this status when implementation and the linked
-records are synchronized with the confirmed two-field response.
-
 `tau session list` must use a narrow requester-directed
 `get_current_session`/`current_session_result` control RPC to obtain each
 responsive local harness's current session identity: its current session id and

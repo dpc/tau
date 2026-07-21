@@ -154,8 +154,9 @@ harness is currently bound to a claimed session and accepts bare inter-session
 messages. It does not enumerate agents or expose receiving policy.
 
 `get_current_session` is a local-control, requester-directed RPC that returns the
-harness's in-memory current session id. Runtime discovery uses it to establish
-lifecycle authority without trusting adjacent metadata.
+harness's in-memory current session id and immutable canonical startup project
+root. Runtime discovery uses both fields to establish live identity without
+trusting adjacent metadata.
 See
 [DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
 

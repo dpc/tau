@@ -197,7 +197,13 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
             .any(|routed| matches!(
                 &routed.frame,
                 HarnessOutputMessage::CurrentSessionResult(result)
-                    if result.request_id == "current-1" && result.session_id.as_str() == "s1"
+                    if result.request_id == "current-1"
+                        && result.session_id.as_str() == "s1"
+                        && result.project_root
+                            == std::env::current_dir()
+                                .expect("current directory")
+                                .canonicalize()
+                                .expect("canonical current directory")
             ))
     );
     assert!(other_ui.lock().expect("other UI frames").is_empty());

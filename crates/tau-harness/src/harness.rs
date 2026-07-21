@@ -1590,9 +1590,8 @@ pub(crate) enum InitialClient {
     Stdio,
 }
 
-/// Initial UI and harness-owned tool handlers installed before extension
-/// startup preflight.
-pub(crate) struct HarnessStartupPeers {
+/// Process-local inputs captured before configured harness startup.
+pub(crate) struct HarnessStartupInputs {
     /// Optional UI transport accepted during startup.
     pub(crate) initial_client: Option<InitialClient>,
     /// Harness-owned tool handlers whose names must be reserved before
@@ -1600,6 +1599,8 @@ pub(crate) struct HarnessStartupPeers {
     pub(crate) internal_tool_handlers: InternalToolHandlers,
     /// Whether startup and runtime settings ignore environment transports.
     pub(crate) ignore_startup_environment: bool,
+    /// Absolute canonical project root captured for this harness startup.
+    pub(crate) project_root: PathBuf,
 }
 
 /// Output path used before an initial UI has been accepted by the normal bus.
@@ -1631,6 +1632,17 @@ impl HarnessSessionLaunch {
         }
         Ok(self)
     }
+}
+
+/// Immutable construction inputs shared across configured harness startup
+/// stages.
+struct HarnessConstructionInputs {
+    /// Initial session reason and persistence policy.
+    launch: HarnessSessionLaunch,
+    /// Whether startup and runtime settings ignore environment transports.
+    ignore_startup_environment: bool,
+    /// Absolute canonical project root captured for this harness startup.
+    project_root: PathBuf,
 }
 
 /// Dedupe projection for one provider status notification.
@@ -1778,6 +1790,8 @@ pub struct Harness {
     /// Daemon-mode harnesses set this so `/session new` can keep discovery
     /// metadata's active session id synchronized with `current_session_id`.
     pub(crate) runtime_harness_path: Option<PathBuf>,
+    /// Absolute canonical startup root returned by live-session control reads.
+    project_root: PathBuf,
     /// The single active session this harness currently owns. User messages and
     /// harness-owned RPCs with a different `session_id` are rejected. `/session
     /// new` reuses the daemon process but switches this binding, clears
@@ -2453,6 +2467,8 @@ struct HarnessBaseParts {
     /// Persistence policy for session metadata, membership logs, debug event
     /// traces, per-session stderr logs, and session-scoped extension data.
     session_persistence: tau_core::SessionPersistenceMode,
+    /// Absolute canonical startup root for this harness.
+    project_root: PathBuf,
     /// Session id the harness is initially bound to.
     current_session_id: SessionId,
     /// Reason associated with the initial session binding.
@@ -2535,6 +2551,8 @@ struct StartupHarnessParts {
     roles: StartupRoles,
     /// Whether harness settings ignore startup environment transports.
     ignore_startup_environment: bool,
+    /// Absolute canonical project root captured for this harness startup.
+    project_root: PathBuf,
 }
 
 /// One user-facing `/tree` prompt rewind anchor derived from durable prompt
@@ -2670,6 +2688,7 @@ impl Harness {
             agent_store: parts.agent_store,
             session_persistence: parts.session_persistence,
             runtime_harness_path: None,
+            project_root: parts.project_root,
             current_session_id: parts.current_session_id,
             current_session_generation: 0,
             current_session_start_reason: parts.current_session_start_reason,
@@ -2807,6 +2826,7 @@ impl Harness {
         eager_session_start_reason: tau_proto::SessionStartReason,
         session_persistence: tau_core::SessionPersistenceMode,
     ) -> Result<Self, HarnessError> {
+        let project_root = std::env::current_dir()?.canonicalize()?;
         let launch = HarnessSessionLaunch {
             reason: eager_session_start_reason,
             session_persistence,
@@ -2938,6 +2958,7 @@ impl Harness {
             store,
             agent_store,
             session_persistence,
+            project_root,
             current_session_id: eager_session_id.into(),
             current_session_start_reason: launch.reason,
             available_roles,
@@ -3029,10 +3050,11 @@ impl Harness {
                 reason: eager_session_start_reason,
                 session_persistence,
             },
-            HarnessStartupPeers {
+            HarnessStartupInputs {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: false,
+                project_root: std::env::current_dir()?.canonicalize()?,
             },
             &mut initial_client_error_stream,
         )
@@ -3059,10 +3081,11 @@ impl Harness {
                 reason: eager_session_start_reason,
                 session_persistence,
             },
-            HarnessStartupPeers {
+            HarnessStartupInputs {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: true,
+                project_root: std::env::current_dir()?.canonicalize()?,
             },
             &mut initial_client_error_stream,
         )
@@ -3075,7 +3098,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         launch: HarnessSessionLaunch,
-        startup_peers: HarnessStartupPeers,
+        startup_inputs: HarnessStartupInputs,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         Self::from_config_with_initial_client_policy(
@@ -3084,7 +3107,7 @@ impl Harness {
             dirs,
             eager_session_id,
             launch,
-            startup_peers,
+            startup_inputs,
             initial_client_error_stream,
         )
     }
@@ -3095,28 +3118,36 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         launch: HarnessSessionLaunch,
-        startup_peers: HarnessStartupPeers,
+        startup_inputs: HarnessStartupInputs,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         let launch = launch.validate()?;
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
-        let ignore_startup_environment = startup_peers.ignore_startup_environment;
+        let HarnessStartupInputs {
+            initial_client,
+            internal_tool_handlers,
+            ignore_startup_environment,
+            project_root,
+        } = startup_inputs;
         let (mut harness, startup) = Self::build_configured_harness(
             config,
             state_dir,
             dirs,
             eager_session_id,
-            launch,
-            ignore_startup_environment,
+            HarnessConstructionInputs {
+                launch,
+                ignore_startup_environment,
+                project_root,
+            },
         )?;
-        harness.install_internal_tool_handlers(startup_peers.internal_tool_handlers);
+        harness.install_internal_tool_handlers(internal_tool_handlers);
 
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
-        let initial_client_id = harness
-            .accept_initial_client(startup_peers.initial_client, initial_client_error_stream)?;
+        let initial_client_id =
+            harness.accept_initial_client(initial_client, initial_client_error_stream)?;
         harness.publish_current_session_dir();
         harness.emit_extension_startup_diagnostics(&config.extension_startup_diagnostics);
         harness.emit_extension_startup_diagnostics(&startup.extension_secrets.diagnostics);
@@ -3166,8 +3197,7 @@ impl Harness {
         state_dir: PathBuf,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
-        launch: HarnessSessionLaunch,
-        ignore_startup_environment: bool,
+        construction: HarnessConstructionInputs,
     ) -> Result<(Self, ConfiguredHarnessStartup), HarnessError> {
         let startup_started_at = Instant::now();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
@@ -3178,8 +3208,7 @@ impl Harness {
                 sessions_dir.clone(),
                 dirs,
                 eager_session_id,
-                launch,
-                ignore_startup_environment,
+                construction,
             )?;
         Ok((
             harness,
@@ -3213,8 +3242,7 @@ impl Harness {
         sessions_dir: PathBuf,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
-        launch: HarnessSessionLaunch,
-        ignore_startup_environment: bool,
+        construction: HarnessConstructionInputs,
     ) -> Result<
         (
             Self,
@@ -3224,6 +3252,11 @@ impl Harness {
         ),
         HarnessError,
     > {
+        let HarnessConstructionInputs {
+            launch,
+            ignore_startup_environment,
+            project_root,
+        } = construction;
         let startup_started_at = Instant::now();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening policy store");
         let policy_store = PolicyStore::open(policy_store_path_from(&state_dir))?;
@@ -3258,6 +3291,7 @@ impl Harness {
             harness_settings,
             roles,
             ignore_startup_environment,
+            project_root,
         })?;
         harness.enabled_extension_names = config
             .extensions
@@ -3357,6 +3391,7 @@ impl Harness {
             store: parts.store,
             agent_store: parts.agent_store,
             session_persistence: parts.launch.session_persistence,
+            project_root: parts.project_root,
             current_session_id: parts.eager_session_id.into(),
             current_session_start_reason: parts.launch.reason,
             available_roles: parts.roles.available_roles,
@@ -10879,6 +10914,7 @@ impl Harness {
                             tau_proto::CurrentSessionResult {
                                 request_id: request.request_id,
                                 session_id: self.current_session_id.clone(),
+                                project_root: self.project_root.clone(),
                             },
                         ),
                     );

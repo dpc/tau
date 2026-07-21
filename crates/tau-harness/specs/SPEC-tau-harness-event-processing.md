@@ -242,10 +242,11 @@ must-pass and immutable because they carry the complete shared classification.
 ## Directed agent-roster reads
 
 `get_current_session` is accepted from an attached local socket/control
-connection and returns the event loop's in-memory current session id directly to
-that requester. Socket connections currently retain their accepted UI metadata;
-the `Hello.client_kind` claim does not authorize this same-UID control RPC.
-Runtime files locate the socket but do not supply the returned lifecycle fact.
+connection and returns the event loop's in-memory current session id plus its
+immutable canonical startup project root directly to that requester. Socket
+connections currently retain their accepted UI metadata; the `Hello.client_kind`
+claim does not authorize this same-UID control RPC. Runtime files locate the
+socket but supply neither returned field.
 See
 [DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
 

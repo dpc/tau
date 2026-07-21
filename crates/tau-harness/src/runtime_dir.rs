@@ -8,7 +8,8 @@
 //!
 //! Metadata-based discovery enumerates `*.sock`, reads matching `*.json`, then
 //! verifies liveness. Running-session listing instead treats sockets as
-//! candidates and asks each responsive harness for its in-memory session id.
+//! candidates and asks each responsive harness for its in-memory session
+//! identity.
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,15 @@ const DAEMON_METADATA_VERSION: u32 = 0;
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
 
 static ACTIVE_DISCOVERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Authoritative current identity reported by one responsive harness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunningSession {
+    /// Harness-owned current session id at probe handling time.
+    pub session_id: tau_proto::SessionId,
+    /// Absolute canonical project root captured when the harness started.
+    pub project_root: PathBuf,
+}
 
 /// Non-queued admission for one top-level session discovery call.
 #[derive(Clone)]
@@ -798,13 +808,17 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Lists authoritative session ids reported by responsive harness daemons.
+/// Lists authoritative current identities reported by responsive harness
+/// daemons.
 ///
 /// Persisted session directories and runtime metadata are not lifecycle
 /// authority. This non-destructive scan uses bounded runtime-directory
-/// traversal only to locate socket candidates, then obtains each id through a
-/// bounded local control RPC answered from harness memory. Results are sorted
-/// and deduplicated; having no responsive daemons produces an empty vector.
+/// traversal only to locate socket candidates, then obtains each identity
+/// through a bounded local control RPC answered from harness memory. Results
+/// are sorted by session id and project root. One record is retained per
+/// responsive harness, including indistinguishable duplicate identities, so
+/// callers can detect multiple harnesses for one directory. Having no
+/// responsive daemons produces an empty vector.
 ///
 /// # Errors
 ///
@@ -812,7 +826,7 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
 /// fails, process-wide discovery admission is busy, the scan worker cannot be
 /// spawned, or the total probe deadline expires before every candidate is
 /// resolved.
-pub fn list_running_session_ids() -> Result<Vec<tau_proto::SessionId>, std::io::Error> {
+pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
     let permit = DiscoveryCallPermit::try_acquire()
         .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy"))?;
     let deadline = Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT;
@@ -842,7 +856,7 @@ pub fn list_running_session_ids() -> Result<Vec<tau_proto::SessionId>, std::io::
         }
     };
     candidates.sort();
-    let mut session_ids = Vec::new();
+    let mut sessions = Vec::new();
     for harness_path in candidates {
         if Instant::now() >= deadline {
             return Err(running_session_list_incomplete(
@@ -850,7 +864,7 @@ pub fn list_running_session_ids() -> Result<Vec<tau_proto::SessionId>, std::io::
             ));
         }
         match probe_current_session(&harness_path, deadline, &cancelled) {
-            CurrentSessionProbe::Reported(session_id) => session_ids.push(session_id),
+            CurrentSessionProbe::Reported(session) => sessions.push(session),
             CurrentSessionProbe::Unresponsive => {}
             CurrentSessionProbe::DeadlineExpired => {
                 return Err(running_session_list_incomplete(
@@ -864,9 +878,10 @@ pub fn list_running_session_ids() -> Result<Vec<tau_proto::SessionId>, std::io::
             }
         }
     }
-    session_ids.sort();
-    session_ids.dedup();
-    Ok(session_ids)
+    sessions.sort_by(|left, right| {
+        (&left.session_id, &left.project_root).cmp(&(&right.session_id, &right.project_root))
+    });
+    Ok(sessions)
 }
 
 fn scan_running_session_candidates(
@@ -911,7 +926,7 @@ fn scan_running_session_candidates(
 }
 
 enum CurrentSessionProbe {
-    Reported(tau_proto::SessionId),
+    Reported(RunningSession),
     Unresponsive,
     DeadlineExpired,
     Infrastructure(std::io::Error),
@@ -950,7 +965,12 @@ fn probe_current_session(
             {
                 tau_socket::SocketReceive::Message {
                     message: tau_proto::HarnessOutputMessage::CurrentSessionResult(result),
-                } if result.request_id == request_id => return Some(Ok(result.session_id)),
+                } if result.request_id == request_id => {
+                    return Some(Ok(RunningSession {
+                        session_id: result.session_id,
+                        project_root: result.project_root,
+                    }));
+                }
                 tau_socket::SocketReceive::Message {
                     message: tau_proto::HarnessOutputMessage::Disconnect(_),
                 }
@@ -961,7 +981,7 @@ fn probe_current_session(
         }
     })();
     match reported {
-        Some(Ok(session_id)) => CurrentSessionProbe::Reported(session_id),
+        Some(Ok(session)) => CurrentSessionProbe::Reported(session),
         Some(Err(error)) => CurrentSessionProbe::Infrastructure(error),
         None if Instant::now() >= deadline => CurrentSessionProbe::DeadlineExpired,
         None => CurrentSessionProbe::Unresponsive,
@@ -1323,6 +1343,11 @@ mod tests {
         let listener =
             tau_socket::SocketListener::bind(socket_path(path)).expect("current-session listener");
         let session_id = tau_proto::SessionId::from(session_id);
+        let project_root = path
+            .parent()
+            .expect("runtime path parent")
+            .canonicalize()
+            .expect("canonical project root");
         std::thread::spawn(move || {
             let mut client = listener.accept().expect("accept current-session probe");
             assert!(matches!(
@@ -1342,6 +1367,7 @@ mod tests {
                     tau_proto::CurrentSessionResult {
                         request_id: "unrelated-request".to_owned(),
                         session_id: "wrong-session".into(),
+                        project_root: PathBuf::from("/wrong/project"),
                     },
                 ))
                 .expect("unrelated current-session result");
@@ -1350,6 +1376,7 @@ mod tests {
                     tau_proto::CurrentSessionResult {
                         request_id: request.request_id,
                         session_id,
+                        project_root,
                     },
                 ))
                 .expect("current-session result");
@@ -1693,8 +1720,11 @@ mod tests {
         std::fs::write(socket_path(&stale), b"not a socket").expect("stale socket");
 
         assert_eq!(
-            list_running_session_ids().expect("running sessions"),
-            vec![tau_proto::SessionId::from("running-session")]
+            list_running_sessions().expect("running sessions"),
+            vec![RunningSession {
+                session_id: "running-session".into(),
+                project_root: harnesses_dir().canonicalize().expect("canonical root"),
+            }]
         );
         daemon.join().expect("current-session daemon");
     }
@@ -1707,7 +1737,7 @@ mod tests {
         let _guard = runtime_override(&temp);
 
         assert!(
-            list_running_session_ids()
+            list_running_sessions()
                 .expect("running sessions")
                 .is_empty()
         );
@@ -1726,16 +1756,20 @@ mod tests {
         std::fs::write(metadata_path(&live), b"{").expect("invalid metadata");
 
         assert_eq!(
-            list_running_session_ids().expect("running sessions"),
-            vec![tau_proto::SessionId::from("authoritative-session")]
+            list_running_sessions().expect("running sessions"),
+            vec![RunningSession {
+                session_id: "authoritative-session".into(),
+                project_root: harnesses_dir().canonicalize().expect("canonical root"),
+            }]
         );
         daemon.join().expect("current-session daemon");
     }
 
-    /// Ensures listing sorts and deduplicates session ids reported by distinct
-    /// responsive harnesses.
+    /// Ensures listing sorts responsive records while retaining
+    /// indistinguishable identities so callers can detect multiple
+    /// harnesses for one directory.
     #[test]
-    fn running_session_list_returns_sorted_distinct_ids() {
+    fn running_session_list_sorts_and_retains_duplicate_identities() {
         let temp = TempDir::new().expect("temp runtime");
         let _guard = runtime_override(&temp);
         std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
@@ -1744,10 +1778,20 @@ mod tests {
         let a = spawn_current_session_daemon(&harnesses_dir().join("c"), "a-session");
 
         assert_eq!(
-            list_running_session_ids().expect("running sessions"),
+            list_running_sessions().expect("running sessions"),
             vec![
-                tau_proto::SessionId::from("a-session"),
-                tau_proto::SessionId::from("z-session")
+                RunningSession {
+                    session_id: "a-session".into(),
+                    project_root: harnesses_dir().canonicalize().expect("canonical root"),
+                },
+                RunningSession {
+                    session_id: "a-session".into(),
+                    project_root: harnesses_dir().canonicalize().expect("canonical root"),
+                },
+                RunningSession {
+                    session_id: "z-session".into(),
+                    project_root: harnesses_dir().canonicalize().expect("canonical root"),
+                },
             ]
         );
         z.join().expect("z daemon");
@@ -1767,7 +1811,7 @@ mod tests {
                 .expect("junk runtime entry");
         }
 
-        let error = list_running_session_ids().expect_err("bounded listing");
+        let error = list_running_sessions().expect_err("bounded listing");
         assert!(
             error
                 .to_string()
@@ -1794,8 +1838,11 @@ mod tests {
         let started = Instant::now();
 
         assert_eq!(
-            list_running_session_ids().expect("running sessions"),
-            vec![tau_proto::SessionId::from("responsive-session")]
+            list_running_sessions().expect("running sessions"),
+            vec![RunningSession {
+                session_id: "responsive-session".into(),
+                project_root: harnesses_dir().canonicalize().expect("canonical root"),
+            }]
         );
         assert!(started.elapsed() < Duration::from_secs(1));
         blocked_daemon.join().expect("blocked daemon");
@@ -1817,7 +1864,7 @@ mod tests {
             .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 2_100));
         let started = Instant::now();
 
-        let error = list_running_session_ids().expect_err("scan deadline");
+        let error = list_running_sessions().expect_err("scan deadline");
 
         *TEST_DISCOVERY_SCAN_DELAY
             .lock()
@@ -1848,7 +1895,7 @@ mod tests {
             .lock()
             .expect("test scan delay lock poisoned") = Some((harnesses_dir(), 1_750));
 
-        let error = list_running_session_ids().expect_err("global probe deadline");
+        let error = list_running_sessions().expect_err("global probe deadline");
 
         *TEST_DISCOVERY_SCAN_DELAY
             .lock()

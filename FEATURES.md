@@ -95,7 +95,9 @@ session switch, and daemon exit forget them.
 Running sessions also expose a bounded, pipe-friendly `tau agent list` roster.
 `tau session list` similarly prints one line- and ANSI-control-safe row per
 distinct session id authoritatively reported by responsive local harnesses,
-without treating historical session directories as live.
+without treating historical session directories as live. Exact canonical
+project-root filtering is available with `--dir`; `--json` returns each
+responsive harness's session id and startup project root as one array.
 The terminal's C-b binding picks an effectively active agent, while C-B includes
 all current live agents, through optional `fzf` without changing durable
 navigation state. The shifted chord requires enhanced keyboard reporting and

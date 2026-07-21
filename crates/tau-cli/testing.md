@@ -48,3 +48,12 @@ additive filters, deterministic topology, and exact ten-column escaped TSV; and
 tau-cli-term owns fixed fzf arguments, statuses, and output. Input-loop coverage
 should simulate changes between initial and revalidation snapshots and prove both
 successful switching and no-retarget failure paths.
+
+Running-session-list verification is also layered: tau-proto locks the directed
+two-field control response; tau-harness tests canonical startup-root ownership,
+requester direction, bounded complete discovery, stale/unresponsive exclusion,
+sorting, and duplicate retention; tau-cli tests argument canonicalization,
+exact filtering, human escaping/deduplication, and JSON rendering. Bundled
+`tau` binary tests use isolated runtime directories to lock command dispatch,
+stdout and exit status, relative-directory filtered JSON, runtime-I/O failure
+without partial output, and inspection-only empty-runtime behavior.

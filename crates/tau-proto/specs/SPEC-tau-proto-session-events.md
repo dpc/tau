@@ -125,7 +125,8 @@ results acknowledge processing but do not replace the authoritative snapshot.
 ## Directed current-session agent roster
 
 `get_current_session` carries a correlation id and `current_session_result`
-echoes it with the harness-owned current session id.
+echoes it with the harness-owned current session id and absolute canonical
+startup project root.
 See
 [DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
 

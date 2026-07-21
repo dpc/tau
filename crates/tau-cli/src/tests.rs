@@ -303,8 +303,9 @@ fn session_commands_parse_nested_operations() {
     assert!(matches!(
         list.command,
         Some(super::cli::Command::Session {
-            command: super::cli::SessionCommand::List,
+            command: super::cli::SessionCommand::List(args),
         })
+            if args.dir.is_none() && !args.json
     ));
 
     let show = super::cli::Cli::parse_from(["tau", "session", "show", "--session-id", "s1"]);
@@ -314,6 +315,88 @@ fn session_commands_parse_nested_operations() {
             command: super::cli::SessionCommand::Show { session_id, .. },
         }) if session_id == "s1"
     ));
+}
+
+/// Session-list filtering canonicalizes symlink aliases during parsing and
+/// composes independently with structured output.
+#[test]
+fn session_list_parses_canonical_directory_and_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir(&project).expect("project directory");
+    std::os::unix::fs::symlink(&project, &alias).expect("project symlink");
+
+    let cli = super::cli::Cli::try_parse_from([
+        std::ffi::OsStr::new("tau"),
+        std::ffi::OsStr::new("session"),
+        std::ffi::OsStr::new("list"),
+        std::ffi::OsStr::new("--dir"),
+        alias.as_os_str(),
+        std::ffi::OsStr::new("--json"),
+    ])
+    .expect("session list arguments");
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Session {
+            command: super::cli::SessionCommand::List(args),
+        }) if args.dir.as_deref() == Some(project.as_path()) && args.json
+    ));
+}
+
+/// Missing paths and non-directory paths fail in clap's exit-2 value-validation
+/// path instead of becoming successful empty list filters.
+#[test]
+fn session_list_rejects_invalid_directories_during_parsing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"not a directory").expect("test file");
+    for invalid in [temp.path().join("missing"), file] {
+        let error = match super::cli::Cli::try_parse_from([
+            std::ffi::OsStr::new("tau"),
+            std::ffi::OsStr::new("session"),
+            std::ffi::OsStr::new("list"),
+            std::ffi::OsStr::new("--dir"),
+            invalid.as_os_str(),
+        ]) {
+            Ok(_) => panic!("invalid directory should be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+/// An inaccessible directory is an invalid filter rather than an apparent
+/// successful absence result.
+#[test]
+fn session_list_rejects_inaccessible_directory_during_parsing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let private = temp.path().join("private");
+    let directory = private.join("project");
+    std::fs::create_dir_all(&directory).expect("private project");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000))
+        .expect("remove directory access");
+
+    let result = super::cli::Cli::try_parse_from([
+        std::ffi::OsStr::new("tau"),
+        std::ffi::OsStr::new("session"),
+        std::ffi::OsStr::new("list"),
+        std::ffi::OsStr::new("--dir"),
+        directory.as_os_str(),
+    ]);
+
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+        .expect("restore directory access");
+    let error = match result {
+        Ok(_) => panic!("inaccessible directory should be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    assert_eq!(error.exit_code(), 2);
 }
 
 /// The superseded flat commands stay rejected instead of creating a second

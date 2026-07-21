@@ -1597,6 +1597,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         HarnessOutputMessage::CurrentSessionResult(CurrentSessionResult {
             request_id: "current-session-1".to_owned(),
             session_id: "s1".into(),
+            project_root: std::path::PathBuf::from("/work/project"),
         }),
         HarnessOutputMessage::SessionAgentListResult(Box::new(SessionAgentListResult {
             request_id: "agent-list-1".to_owned(),

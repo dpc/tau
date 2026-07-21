@@ -11,6 +11,30 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Runtime harness startup captures one canonical directory identity so symlink
+/// aliases and parent components cannot leak into live-session responses.
+#[test]
+fn project_root_identity_is_canonical_and_requires_a_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let project = temp.path().join("project");
+    let alias = temp.path().join("alias");
+    let file = temp.path().join("file");
+    fs::create_dir(&project).expect("project directory");
+    std::os::unix::fs::symlink(&project, &alias).expect("project symlink");
+    fs::write(&file, b"not a directory").expect("test file");
+
+    assert_eq!(
+        canonical_project_root(&alias).expect("canonical project root"),
+        project.canonicalize().expect("canonical project directory")
+    );
+    assert!(
+        canonical_project_root(&file)
+            .expect_err("file project root")
+            .to_string()
+            .contains("not a directory")
+    );
+}
+
 /// Protects the component startup source boundary: direct entrypoints ignore
 /// inherited private transport while only spawned initial-UI children consume
 /// it.

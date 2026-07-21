@@ -185,12 +185,25 @@ catch-up is limited to projections replayed for currently loaded agents, not a
 new durable session-wide message index.
 
 `tau session list` uses runtime paths only to locate socket candidates. Each
-responsive harness returns its in-memory current session id through a directed
-local control RPC; persisted directories and runtime metadata never supply rows.
-The CLI sorts, deduplicates, and escapes ids into line- and ANSI-control-safe
-records. The runtime scan and protocol authority are governed by
+responsive harness returns its in-memory current session id and immutable
+canonical startup project root through a directed local control RPC; persisted
+directories and runtime metadata never supply records or fields. Bare output
+sorts, deduplicates, and escapes ids into line- and ANSI-control-safe records.
+`--dir` canonicalizes an existing caller directory and filters by exact root
+identity. `--json` emits one complete array with one two-field record per
+responsive harness, including duplicates, so automation can distinguish zero,
+one, or multiple matching harnesses. The runtime scan and protocol authority are
+governed by
 [ARCH-tau-harness](../../tau-harness/specs/ARCH-tau-harness.md) and
 [DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+Relative filters resolve from caller CWD; missing, inaccessible, and
+non-directory values fail as CLI misuse with exit 2. Zero, one, and multiple
+matches plus broken output pipes succeed. Bounded discovery, probe,
+serialization, and non-broken-pipe output failures return another nonzero
+status. Discovery, probe, and serialization failures occur before stdout is
+touched; non-broken-pipe stdout failures may leave a prefix because the stream
+cannot be rolled back. Listing is inspection-only and never creates or removes
+runtime or persisted state.
 
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable

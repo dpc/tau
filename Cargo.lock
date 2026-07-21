@@ -3560,6 +3560,7 @@ dependencies = [
  "tau-ext-xmpp",
  "tau-harness",
  "tau-proto",
+ "tau-socket",
  "tempfile",
 ]
 

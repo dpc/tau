@@ -15,6 +15,7 @@ mod dev_tmux;
 mod event_renderer;
 mod line_output;
 mod list_agents;
+mod list_sessions;
 mod markdown_render;
 mod message_fact_render;
 mod print_prompt;
@@ -588,7 +589,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             } => {}
             cli::Command::Session { command } => {
                 let command_name = match command {
-                    cli::SessionCommand::List => "session list",
+                    cli::SessionCommand::List(_) => "session list",
                     cli::SessionCommand::Show { .. } => "session show",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
@@ -728,16 +729,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
 
             cli::Command::Session {
-                command: cli::SessionCommand::List,
+                command: cli::SessionCommand::List(args),
             } => {
                 reject_harness_config_overrides(&harness_config_overrides, "session list")?;
-                let session_ids = tau_harness::runtime_dir::list_running_session_ids()?;
-                let mut output = String::new();
-                for session_id in session_ids {
-                    output.push_str(&line_output::escape_field(session_id.as_str()));
-                    output.push('\n');
-                }
-                line_output::write_stdout(&output)
+                list_sessions::run(&args)
             }
 
             cli::Command::Session {

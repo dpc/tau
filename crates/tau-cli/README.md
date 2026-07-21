@@ -52,12 +52,28 @@ bind `agent-pick-all` to another distinguishable key.
 
 `tau session list` prints one escaped row per distinct current session id
 reported by responsive local harnesses. Runtime paths only locate socket
-candidates; each daemon reports its in-memory current session through a directed
-local control RPC, and persisted session directories never add rows.
+candidates; each daemon reports its in-memory current session and immutable
+canonical startup project root through a directed local control RPC, and
+persisted session directories never add rows.
 Backslash, tab, newline, carriage return, and other control characters use the
 same `\\`, `\t`, `\n`, `\r`, and `\u{hex}` escaping as agent-list fields.
 This makes records line- and ANSI-control-safe; it does not normalize general
 Unicode format characters.
+
+`tau session list --dir DIR` canonicalizes an existing directory and returns
+only exact project-root matches. `--json` emits one array whose records contain
+required `session_id` and `project_root` strings; empty results are `[]`, and
+duplicate records are retained when multiple responsive harnesses report the
+same identity.
+
+Relative `--dir` values resolve from the caller's current directory. Missing,
+inaccessible, and non-directory values are CLI errors with exit status 2.
+Zero, one, and multiple matches are successful complete snapshots, and a closed
+output pipe is also success. Other discovery, probe, serialization, or output
+failures return nonzero. Discovery, probe, and serialization failures occur
+before stdout is touched; a stdout write failure can leave a written prefix
+because arbitrary output streams cannot be rolled back. The command only
+inspects runtime candidates and does not create or clean up state.
 
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because

@@ -81,7 +81,10 @@ submissions.
 
 ## Quick inspection workflow
 
-1. Identify a running session with `tau session list`. For historical sessions,
+1. Identify a running session with `tau session list`; use `--dir DIR` for an
+   exact canonical project-root filter or `--json` for structured session/root
+   records. Relative filters resolve from caller CWD, and invalid filters exit 2
+   rather than looking like an empty live result. For historical sessions,
    inspect `~/.local/state/tau/sessions/` and sort by `meta.json` or directory
    mtime.
 2. Read `events.jsonl` around the failing prompt first.
