@@ -979,6 +979,18 @@ pub struct ExtensionDataEntry {
 // Directional protocol envelopes
 // ---------------------------------------------------------------------------
 
+/// Dedicated UI input requesting current protocol frame I/O stats for one
+/// configured extension.
+///
+/// The harness consumes this debug request directly and replies only to the
+/// requesting UI connection. It is not a durable session fact and must not be
+/// broadcast to extensions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiDebugEventStatsRequest {
+    /// Configured extension name to inspect.
+    pub extension_name: ExtensionName,
+}
+
 /// Messages the harness accepts from connected peers (UI clients and
 /// extensions).
 ///
@@ -1002,6 +1014,7 @@ pub enum HarnessInputMessage {
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     GetCurrentSession(GetCurrentSession),
     GetSessionAgentList(GetSessionAgentList),
+    UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),

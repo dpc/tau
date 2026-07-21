@@ -1352,9 +1352,6 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("agent-1"),
             display_name: "Main".to_owned(),
         }),
-        Event::UiDebugEventStatsRequest(UiDebugEventStatsRequest {
-            extension_name: "std-shell".to_owned(),
-        }),
         Event::Osc1337SetUserVar(Osc1337SetUserVar {
             name: "tau_status".to_owned(),
             value: "ready".to_owned(),
@@ -1828,7 +1825,6 @@ fn expected_default_transient(event: &Event) -> bool {
                 | Event::UiPromptDraft(_)
                 | Event::UiFocusChanged(_)
                 | Event::UiSetAgentDisplayName(_)
-                | Event::UiDebugEventStatsRequest(_)
         )
 }
 
@@ -1953,7 +1949,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "ui.cancel_prompt",
         "ui.compact_request",
         "ui.create_agent",
-        "ui.debug_event_stats_request",
         "ui.detach_request",
         "ui.focus_changed",
         "ui.navigate_tree",
@@ -2422,6 +2417,26 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
 
     let output_bytes = encode_harness_output_to_vec(&output).expect("encode output");
     assert!(decode_harness_input_from_slice(&output_bytes).is_err());
+}
+
+/// UI debug stats use a flat dedicated input message and cannot decode as an
+/// event or harness output.
+#[test]
+fn ui_debug_event_stats_request_uses_dedicated_input_message() {
+    let input = HarnessInputMessage::UiDebugEventStatsRequest(UiDebugEventStatsRequest {
+        extension_name: "std-shell".into(),
+    });
+    let json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(json["message"], "ui_debug_event_stats_request");
+    assert_eq!(json["payload"]["extension_name"], "std-shell");
+
+    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert_eq!(
+        decode_harness_input_from_slice(&bytes).expect("decode input"),
+        input
+    );
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
+    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
 /// Ensures raw events are not accepted where directional protocol messages are

@@ -51,6 +51,7 @@ impl DebugEventLog {
                         }
                         emit.event.name().to_string()
                     }
+                    tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return,
                     _ => "<message>".to_owned(),
                 };
                 let mut redacted_message = message.as_ref().clone();

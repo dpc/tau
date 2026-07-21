@@ -25,6 +25,21 @@ fn protocol_io_input_message_key_uses_emitted_event_name() {
     assert_eq!(input_message_key(&message), "term.bell");
 }
 
+/// Dedicated UI debug requests use a flat message key rather than the removed
+/// dotted event name.
+#[test]
+fn protocol_io_input_message_key_uses_ui_debug_request_message_name() {
+    let message =
+        HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "std-shell".into(),
+        });
+
+    assert_eq!(
+        input_message_key(&message),
+        "message.ui_debug_event_stats_request"
+    );
+}
+
 /// Cumulative protocol I/O counters must survive sample draining because debug
 /// dumps are lifetime counters while rolling samples drive transient status.
 #[test]

@@ -2954,18 +2954,6 @@ pub struct UiFocusChanged {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
-/// The UI requests current protocol frame I/O stats for one configured
-/// extension.
-///
-/// The harness consumes this debug request directly and replies only to the
-/// requesting UI connection. It is not a durable session fact and must not be
-/// broadcast to extensions.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiDebugEventStatsRequest {
-    /// Configured extension name to inspect.
-    pub extension_name: String,
-}
-
 /// The user requests switching to an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleSelect {
@@ -4800,8 +4788,6 @@ pub enum Event {
     UiRoleUpdate(UiRoleUpdate),
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest(UiDetachRequest),
-    #[serde(rename = "ui.debug_event_stats_request")]
-    UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     #[serde(rename = "ui.shell_command")]
     UiShellCommand(UiShellCommand),
     #[serde(rename = "ui.switch_session")]
@@ -5201,7 +5187,6 @@ impl Event {
             Self::UiAgentModelSelect(_) => EventName::UI_AGENT_MODEL_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
-            Self::UiDebugEventStatsRequest(_) => EventName::UI_DEBUG_EVENT_STATS_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
@@ -5377,7 +5362,6 @@ impl Event {
                 | Self::SessionReplayComplete(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiCreateAgent(_)
-                | Self::UiDebugEventStatsRequest(_)
                 | Self::UiPromptDraft(_)
                 | Self::UiFocusChanged(_)
                 | Self::UiSetAgentNavigationMode(_)

@@ -12,6 +12,10 @@ required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
 The metadata slice covers request-to-canonical publication; rejection outcomes
 remain unspecified and preserve silent rejection.
+UI extension-counter inspection now uses the dedicated
+`ui_debug_event_stats_request` message with attached-socket-UI authority and a
+directed, non-published notice result. The tree and detach members of that
+dedicated-request row remain event-based.
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 

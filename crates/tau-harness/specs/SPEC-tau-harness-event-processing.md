@@ -117,9 +117,15 @@ existing persistence and replay behavior. See
 
 UI debug/status commands that inspect local transport counters are direct live
 responses to the requesting UI, not ordinary publish/replay traffic. Extension
-protocol-I/O stats are exposed only through the `ui.debug_event_stats_request`
-control path, answered with a directed non-persisted notice, and must not add
-subscriptions or synthetic replay events.
+protocol-I/O stats are exposed only through the flat
+`ui_debug_event_stats_request` input message from an attached socket UI, answered
+with a directed non-persisted notice, and must not add debug JSONL, subscriptions,
+interception, or synthetic replay events. Authority uses the exact
+`is_attached_socket_ui` classification: the harness assigned UI kind, socket
+origin, and no dedicated external-message-peer role. Every unauthorized
+non-extension client receives exactly one requester-directed, content-free
+`ui.command_error`; configured extensions are silently denied without a response,
+warning, or disconnection.
 
 ## Harness-owned tool-call id scoping
 

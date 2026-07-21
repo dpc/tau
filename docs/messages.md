@@ -94,6 +94,16 @@ is done.
   surfaces the message just like a `harness.yaml` parse error so the user can
   see why their per-extension config was rejected.
 
+## UI diagnostics (UI → harness)
+
+- **`ui_debug_event_stats_request`** — An attached local UI requests cumulative
+  protocol frame I/O counters for one configured extension. The harness replies
+  only to that UI with a directed `harness.notice` delivery. The request and
+  result are not published, intercepted, subscribed, or replayed, and the request
+  is omitted from debug JSONL. Other socket peers and embedded/non-socket UIs
+  receive a content-free authorization error. Configured extensions are silently
+  denied without a response, warning, or disconnection.
+
 ## Emission and interception (peer ↔ harness)
 
 These messages wrap a real bus `Event` while it is entering the harness. They

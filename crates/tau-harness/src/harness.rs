@@ -3556,6 +3556,13 @@ impl Harness {
         connection_id: &str,
         message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
+        if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
+            && !self.extensions.entries.contains_key(connection_id)
+        {
+            let _keep = self.handle_client_message(connection_id, message)?;
+            self.take_pending_publish_error()?;
+            return Ok(false);
+        }
         let origin = self.bus.connection(connection_id).map(|m| m.origin.clone());
         let subscribed = match origin {
             Some(ConnectionOrigin::Socket) => {
@@ -6437,6 +6444,14 @@ impl Harness {
         served_clients: &mut usize,
         exit_on_disconnect: &mut bool,
     ) -> Result<(), HarnessError> {
+        if matches!(
+            message.as_ref(),
+            HarnessInputMessage::UiDebugEventStatsRequest(_)
+        ) && !self.extensions.entries.contains_key(&connection_id)
+        {
+            let _keep = self.handle_client_message(&connection_id, *message)?;
+            return Ok(());
+        }
         let origin = self
             .bus
             .connection(&connection_id)
@@ -8114,6 +8129,7 @@ impl Harness {
                         | HarnessInputMessage::InterceptReply(_)
                         | HarnessInputMessage::GetAgentPromptCreated(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
+                        | HarnessInputMessage::UiDebugEventStatsRequest(_)
                 )
             } else {
                 matches!(
@@ -8128,7 +8144,8 @@ impl Harness {
                                 | HarnessInputMessage::ConfigError(_)
                                 | HarnessInputMessage::InterceptReply(_)
                                 | HarnessInputMessage::GetAgentPromptCreated(_)
-                                | HarnessInputMessage::ExtensionDataRequest(_),
+                                | HarnessInputMessage::ExtensionDataRequest(_)
+                                | HarnessInputMessage::UiDebugEventStatsRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
                         )
                 )
@@ -8142,6 +8159,15 @@ impl Harness {
                     ),
                 );
             }
+        }
+        if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
+            && self.extensions.entries.contains_key(source_id)
+        {
+            // This request belongs exclusively to attached socket UIs. Configured
+            // extensions are silently denied after normal phase validation and
+            // metering, before activation staging can turn repeated requests into
+            // a quota warning, disconnect, or startup failure.
+            return Ok(());
         }
         let activation_pending = self
             .extensions
@@ -8328,6 +8354,7 @@ impl Harness {
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
             | HarnessInputMessage::GetCurrentSession(_)
             | HarnessInputMessage::GetSessionAgentList(_)
+            | HarnessInputMessage::UiDebugEventStatsRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)
             | HarnessInputMessage::PeerSessionProbe(_) => {}
@@ -10575,6 +10602,10 @@ impl Harness {
                 }
                 Ok(true)
             }
+            HarnessInputMessage::UiDebugEventStatsRequest(request) => {
+                self.handle_ui_debug_event_stats_request(client_id, request);
+                Ok(true)
+            }
             HarnessInputMessage::ExternalAgentMessage(request) => {
                 if !self
                     .external_message_peers
@@ -10736,10 +10767,6 @@ impl Harness {
             Event::UiSetAgentDisplayName(req) => self
                 .handle_ui_set_agent_display_name(req)
                 .map(|keep_going| (keep_going, None)),
-            Event::UiDebugEventStatsRequest(req) => {
-                self.handle_ui_debug_event_stats_request(client_id, req);
-                Ok((true, None))
-            }
             Event::UiTreeRequest(req) => self
                 .handle_ui_tree_request(client_id, req)
                 .map(|keep_going| (keep_going, None)),
@@ -10917,13 +10944,13 @@ impl Harness {
         client_id: &str,
         request: tau_proto::UiDebugEventStatsRequest,
     ) {
-        if !self.is_authorized_debug_event_stats_client(client_id) {
+        if !self.is_attached_socket_ui(client_id) {
             self.send_direct_harness_notice(
                 client_id,
                 tau_proto::notice_kind::UI_COMMAND_ERROR,
                 tau_proto::NoticeLevel::Info,
                 true,
-                "extension event stats are only available to local socket clients".to_owned(),
+                "extension event stats are only available to attached local UIs".to_owned(),
             );
             return;
         }
@@ -10932,7 +10959,8 @@ impl Harness {
             .entries
             .values()
             .filter(|entry| {
-                entry.name == request.extension_name && entry.state != ExtensionState::Disconnected
+                entry.name == request.extension_name.as_str()
+                    && entry.state != ExtensionState::Disconnected
             })
             .collect::<Vec<_>>();
         let (kind, message) = match live_matches.as_slice() {
@@ -10972,12 +11000,6 @@ impl Harness {
             true,
             message,
         );
-    }
-
-    fn is_authorized_debug_event_stats_client(&self, client_id: &str) -> bool {
-        self.bus
-            .connection(client_id)
-            .is_some_and(|metadata| metadata.origin == ConnectionOrigin::Socket)
     }
 
     fn send_direct_harness_notice(

@@ -432,16 +432,6 @@ fn insert_extension_entry_with_meter(
     h.extensions.order.push(connection_id);
 }
 
-fn first_notice(sink: &Arc<Mutex<Vec<RoutedFrame>>>) -> tau_proto::HarnessNotice {
-    let frames = sink.lock().expect("sink");
-    for routed in frames.iter() {
-        if let Some(Event::HarnessNotice(notice)) = peel_inner_event(&routed.frame) {
-            return notice.clone();
-        }
-    }
-    panic!("missing harness notice in frames: {frames:?}");
-}
-
 fn connect_socket_ui(
     h: &mut Harness,
 ) -> (
@@ -478,6 +468,12 @@ fn assert_no_message<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) {
     }
 }
 
+fn debug_event_stats_request(extension_name: &str) -> HarnessInputMessage {
+    HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+        extension_name: extension_name.into(),
+    })
+}
+
 /// A UI debug event-stats request should receive a directed, non-persisted
 /// notice for the requested live extension only; other UIs must not see the
 /// response merely because they are connected.
@@ -502,13 +498,19 @@ fn debug_event_stats_request_is_directed_to_requesting_ui() {
         meter,
     );
 
-    h.handle_client_event_inner(
-        requesting_ui_id.as_str(),
-        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "std-shell".to_owned(),
-        }),
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        HarnessEvent::FromConnection {
+            connection_id: requesting_ui_id,
+            message: Box::new(debug_event_stats_request("std-shell")),
+        },
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
     )
-    .expect("request stats");
+    .expect("request stats through runtime router");
 
     let notice = read_notice(&mut requesting_ui);
     assert!(notice.always_show);
@@ -551,13 +553,8 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
         })),
     )
     .expect("extension hello");
-    h.handle_client_event_inner(
-        ui_id.as_str(),
-        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "std-shell".to_owned(),
-        }),
-    )
-    .expect("request stats");
+    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+        .expect("request stats");
 
     let notice = read_notice(&mut ui);
     assert!(notice.always_show);
@@ -574,6 +571,7 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+    let other_ui = connect_test_client(&mut h, "other-ui", tau_proto::ClientKind::Ui);
     let meter = tau_client::ProtocolIoMeter::default();
     meter.record_bytes(
         tau_client::ProtocolIoDirection::Uplink,
@@ -588,22 +586,226 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
         meter,
     );
 
-    h.handle_client_event_inner(
-        "ui",
-        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "secret-ext".to_owned(),
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        HarnessEvent::FromConnection {
+            connection_id: "ui".into(),
+            message: Box::new(debug_event_stats_request("secret-ext")),
+        },
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("request stats through runtime router");
+
+    let frames = ui.lock().expect("UI frames");
+    assert_eq!(frames.len(), 1, "denial must produce exactly one frame");
+    let Some(Event::HarnessNotice(notice)) = peel_inner_event(&frames[0].frame) else {
+        panic!("expected one directed harness notice: {frames:?}");
+    };
+    assert_eq!(notice.kind, tau_proto::notice_kind::UI_COMMAND_ERROR);
+    assert!(notice.always_show);
+    assert_eq!(
+        notice.message,
+        "extension event stats are only available to attached local UIs"
+    );
+    assert!(
+        other_ui.lock().expect("other UI frames").is_empty(),
+        "denial must not leak to another peer"
+    );
+}
+
+/// A socket peer dedicated to external-agent messaging cannot use its initial
+/// UI classification to read extension protocol counters.
+#[test]
+fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_counters() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (client_id, mut client) = connect_socket_ui(&mut h);
+    let (_other_ui_id, mut other_ui) = connect_socket_ui(&mut h);
+    h.handle_client_message(
+        client_id.as_str(),
+        HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_kind: tau_proto::ClientKind::External,
+            capabilities: Default::default(),
         }),
     )
-    .expect("request stats");
+    .expect("external-agent message hello");
+    let meter = tau_client::ProtocolIoMeter::default();
+    meter.record_bytes(
+        tau_client::ProtocolIoDirection::Uplink,
+        "secret.extension_event".to_owned(),
+        Some(128),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "ext-secret",
+        "secret-ext",
+        ExtensionState::Ready,
+        meter,
+    );
 
-    let notice = first_notice(&ui);
-    assert!(notice.always_show);
+    h.handle_client_message(client_id.as_str(), debug_event_stats_request("secret-ext"))
+        .expect("request stats");
+
+    let notice = read_notice(&mut client);
+    assert_eq!(notice.kind, tau_proto::notice_kind::UI_COMMAND_ERROR);
+    assert_eq!(
+        notice.message,
+        "extension event stats are only available to attached local UIs"
+    );
+    assert_no_message(&mut client);
+    assert_no_message(&mut other_ui);
+}
+
+/// Configured extensions cannot round-trip the client-only debug request to
+/// obtain another extension's counters.
+#[test]
+fn debug_event_stats_request_is_ignored_from_configured_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let debug_log_path = h
+        .enable_debug_log(&td.path().join("debug"))
+        .expect("enable debug log");
+    let requester = connect_ready_configured_extension(
+        &mut h,
+        "requester",
+        "requester",
+        tau_proto::ClientKind::Tool,
+    );
+    requester.lock().expect("requester frames").clear();
+    let meter = tau_client::ProtocolIoMeter::default();
+    meter.record_bytes(
+        tau_client::ProtocolIoDirection::Uplink,
+        "secret.extension_event".to_owned(),
+        Some(128),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "ext-secret",
+        "secret-ext",
+        ExtensionState::Ready,
+        meter,
+    );
+
+    let notice_count = h.replayable_harness_notices.len();
+    let event = HarnessEvent::FromConnection {
+        connection_id: "requester".into(),
+        message: Box::new(debug_event_stats_request("secret-ext")),
+    };
+    h.log_event(&event);
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("ignore client-only request through runtime router");
+
+    assert!(
+        requester.lock().expect("requester frames").is_empty(),
+        "extension must not receive counter data or a UI diagnostic"
+    );
+    assert_eq!(
+        h.extensions.entries["requester"].state,
+        ExtensionState::Ready,
+        "silently denied requests must not disconnect the extension"
+    );
+    assert_eq!(
+        h.replayable_harness_notices.len(),
+        notice_count,
+        "silently denied requests must not publish a replayable warning"
+    );
+    assert!(
+        std::fs::read_to_string(debug_log_path)
+            .expect("read debug log")
+            .is_empty(),
+        "the request and denial must remain absent from debug JSONL"
+    );
+}
+
+/// A configured extension's request is silently denied after phase validation
+/// and metering, before activation staging can turn repetitions into a quota
+/// warning, disconnect, or required-startup failure.
+#[test]
+fn debug_event_stats_request_is_not_staged_for_handshaking_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let debug_log_path = h
+        .enable_debug_log(&td.path().join("debug"))
+        .expect("enable debug log");
+    let requester = connect_handshaking_tool(&mut h, "requester");
+    let notice_count = h.replayable_harness_notices.len();
+    let event = HarnessEvent::FromConnection {
+        connection_id: "requester".into(),
+        message: Box::new(debug_event_stats_request("secret-ext")),
+    };
+    h.log_event(&event);
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("silently deny request through runtime router");
+
+    assert!(requester.lock().expect("requester frames").is_empty());
+    assert_eq!(
+        h.extensions.entries["requester"].state,
+        ExtensionState::Handshaking
+    );
+    assert!(h.bus.connection("requester").is_some());
+    assert!(
+        !h.extensions.activation_staging.contains_key("requester"),
+        "denied request must not consume activation quota"
+    );
+    assert_eq!(h.replayable_harness_notices.len(), notice_count);
+    assert!(
+        std::fs::read_to_string(debug_log_path)
+            .expect("read debug log")
+            .is_empty()
+    );
+}
+
+/// Startup intake preserves the existing directed no-live result without
+/// publishing, staging, or treating the request as a subscription.
+#[test]
+fn debug_event_stats_request_reports_no_live_extension_during_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+
+    assert!(
+        !h.handle_startup_from_connection(
+            ui_id.as_str(),
+            debug_event_stats_request("missing-extension"),
+        )
+        .expect("request stats through startup router")
+    );
+
+    let notice = read_notice(&mut ui);
+    assert_eq!(notice.kind, tau_proto::notice_kind::UI_COMMAND_ERROR);
     assert!(
         notice
             .message
-            .contains("only available to local socket clients")
+            .contains("no live extension named `missing-extension`")
     );
-    assert!(!notice.message.contains("secret.extension_event"));
+    assert_no_message(&mut ui);
 }
 
 /// A disconnected extension entry should not satisfy a debug stats request when
@@ -642,13 +844,8 @@ fn debug_event_stats_request_ignores_disconnected_extension_entry() {
         live_meter,
     );
 
-    h.handle_client_event_inner(
-        ui_id.as_str(),
-        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "std-shell".to_owned(),
-        }),
-    )
-    .expect("request stats");
+    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+        .expect("request stats");
 
     let notice = read_notice(&mut ui);
     assert!(notice.always_show);
@@ -679,13 +876,8 @@ fn debug_event_stats_request_rejects_ambiguous_live_extension_name() {
         tau_client::ProtocolIoMeter::default(),
     );
 
-    h.handle_client_event_inner(
-        ui_id.as_str(),
-        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "std-shell".to_owned(),
-        }),
-    )
-    .expect("request stats");
+    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+        .expect("request stats");
 
     let notice = read_notice(&mut ui);
     assert!(notice.always_show);

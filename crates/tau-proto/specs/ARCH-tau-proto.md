@@ -189,3 +189,8 @@ canonical metadata payload shapes but are distinct transient-by-default peer
 requests. Only harness-authored `agent.metadata_set` and
 `agent.metadata_unset` are durable facts. See
 [SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
+
+`ui_debug_event_stats_request` is a flat peer-to-harness message rather than a
+bus event. Its payload selects one configured extension by name; authorization
+and the directed notice response remain harness concerns. The other dedicated UI
+request candidates remain event-based pending migration.

@@ -15,6 +15,10 @@ The agent-metadata row has completed its request-to-canonical-fact split under
 [SPEC-agent-metadata-requests-and-canonical-facts](SPEC-agent-metadata-requests-and-canonical-facts.md).
 Its rejection-outcome interface remains unspecified; current validation
 failures produce no canonical successor, so this row is not yet fully complete.
+The dedicated UI-request row is partially migrated:
+`ui_debug_event_stats_request` is now a flat point-to-point input message.
+`ui.tree_request` and `ui.detach_request` remain event-based pending separate
+slices.
 
 This decision applies to `Emit` from every peer kind, including extensions,
 providers, UI clients, external peers, and harness-connected core components.

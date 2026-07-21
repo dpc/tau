@@ -88,6 +88,12 @@ fact. Other socket peers and peer-authored canonical facts are rejected. Metadat
 is extension-visible coordination state, not a secret store; invalid requests
 currently have no outcome event. See
 [`SPEC-agent-metadata-requests-and-canonical-facts`](specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
+Only an attached socket UI may send `ui_debug_event_stats_request` to inspect
+configured-extension protocol counters. Dedicated external-message peers,
+non-UI sockets, and embedded/non-socket UIs receive only a content-free
+authorization error. The request is omitted from debug JSONL and its result is a
+requester-directed, non-published notice. Configured extensions are silently denied
+without a response, warning, or disconnection.
 Only authenticated configured Tool/Core peers may publish transient tool
 registration/unregistration declarations; canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the

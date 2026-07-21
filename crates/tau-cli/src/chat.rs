@@ -248,7 +248,9 @@ fn handle_debug_show_ui_event_stats_command_text(
 
 const DEBUG_SHOW_EVENT_STATS_USAGE: &str = "/debug-show-event-stats <extension>";
 
-fn debug_show_event_stats_request_event(text: &str) -> Result<Option<Event>, &'static str> {
+fn parse_debug_show_event_stats_command(
+    text: &str,
+) -> Result<Option<HarnessInputMessage>, &'static str> {
     let mut parts = text.split_whitespace();
     let Some(command) = parts.next() else {
         return Ok(None);
@@ -262,11 +264,29 @@ fn debug_show_event_stats_request_event(text: &str) -> Result<Option<Event>, &'s
     if parts.next().is_some() {
         return Err(DEBUG_SHOW_EVENT_STATS_USAGE);
     }
-    Ok(Some(Event::UiDebugEventStatsRequest(
+    Ok(Some(HarnessInputMessage::UiDebugEventStatsRequest(
         tau_proto::UiDebugEventStatsRequest {
-            extension_name: extension_name.to_owned(),
+            extension_name: extension_name.into(),
         },
     )))
+}
+
+fn handle_debug_show_event_stats_command_text(
+    text: &str,
+    writer: &WriterHandle,
+    mut show_usage: impl FnMut(&str),
+) -> bool {
+    match parse_debug_show_event_stats_command(text) {
+        Ok(Some(message)) => {
+            let _ = send_frame(writer, &message);
+            true
+        }
+        Ok(None) => false,
+        Err(usage) => {
+            show_usage(usage);
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -513,27 +533,56 @@ mod ui_io_tests {
     /// request instead of falling through to prompt submission, while keeping
     /// usage errors local to the UI.
     #[test]
-    fn debug_show_event_stats_command_builds_request_event() {
-        let event = debug_show_event_stats_request_event("/debug-show-event-stats std-shell")
+    fn debug_show_event_stats_command_builds_request() {
+        let message = parse_debug_show_event_stats_command("/debug-show-event-stats std-shell")
             .expect("parse command")
-            .expect("request event");
+            .expect("request message");
 
         assert_eq!(
-            event,
-            Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-                extension_name: "std-shell".to_owned()
+            message,
+            HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+                extension_name: "std-shell".into()
             })
         );
         assert_eq!(
-            debug_show_event_stats_request_event("/debug-show-event-stats")
+            parse_debug_show_event_stats_command("/debug-show-event-stats")
                 .expect_err("missing extension"),
             DEBUG_SHOW_EVENT_STATS_USAGE
         );
         assert_eq!(
-            debug_show_event_stats_request_event("/debug-show-event-stats std-shell extra")
+            parse_debug_show_event_stats_command("/debug-show-event-stats std-shell extra")
                 .expect_err("extra argument"),
             DEBUG_SHOW_EVENT_STATS_USAGE
         );
+    }
+
+    /// The command's production send path must write exactly one dedicated flat
+    /// request frame and report it handled so prompt submission cannot see it.
+    #[test]
+    fn debug_show_event_stats_command_sends_dedicated_request_frame() {
+        let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+        harness_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+        let mut usage = Vec::new();
+
+        assert!(handle_debug_show_event_stats_command_text(
+            "/debug-show-event-stats std-shell",
+            &writer,
+            |message| usage.push(message.to_owned()),
+        ));
+
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+        assert_eq!(
+            reader.read_message().expect("read request"),
+            Some(HarnessInputMessage::UiDebugEventStatsRequest(
+                tau_proto::UiDebugEventStatsRequest {
+                    extension_name: "std-shell".into(),
+                },
+            ))
+        );
+        assert!(usage.is_empty());
     }
 
     #[test]
@@ -2409,17 +2458,9 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_debug_show_event_stats_command(&self, text: &str) -> bool {
-        match debug_show_event_stats_request_event(text) {
-            Ok(Some(event)) => {
-                let _ = send_event(self.writer, &event);
-                true
-            }
-            Ok(None) => false,
-            Err(usage) => {
-                self.output.system_info(usage);
-                true
-            }
-        }
+        handle_debug_show_event_stats_command_text(text, self.writer, |usage| {
+            self.output.system_info(usage);
+        })
     }
 
     fn handle_theme_command(&mut self, text: &str) {

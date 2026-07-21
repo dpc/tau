@@ -329,6 +329,25 @@ fn transient_from_connection_events_are_not_logged_twice() {
     );
 }
 
+/// Dedicated UI debug-stat requests stay out of debug JSONL just as the
+/// superseded transient request event did.
+#[test]
+fn ui_debug_event_stats_requests_are_not_logged() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+
+    log.log_harness_event(&HarnessEvent::FromConnection {
+        connection_id: ConnectionId::from("ui"),
+        message: Box::new(HarnessInputMessage::UiDebugEventStatsRequest(
+            tau_proto::UiDebugEventStatsRequest {
+                extension_name: "secret-extension".into(),
+            },
+        )),
+    });
+
+    assert!(read_lines(log.path()).is_empty());
+}
+
 /// Ensures raw terminal provider reports cannot leak embedded provider-image
 /// bytes into debug JSONL.
 #[test]
