@@ -107,6 +107,29 @@ impl SideObserver {
         }
     }
 
+    /// Waits until the named extension reports readiness.
+    pub(super) fn wait_for_extension(
+        &mut self,
+        name: &str,
+        deadline: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.events.iter().any(|observed| {
+            matches!(
+                &observed.event,
+                Event::ExtensionReady(ready) if ready.extension_name.as_str() == name
+            )
+        }) {
+            return Ok(());
+        }
+        self.recv_until(deadline, |observed| {
+            matches!(
+                &observed.event,
+                Event::ExtensionReady(ready) if ready.extension_name.as_str() == name
+            )
+        })?;
+        Ok(())
+    }
+
     /// Receives until `predicate` accepts one delivery, retaining every prior
     /// event in order.
     pub(super) fn recv_until(
@@ -166,6 +189,23 @@ impl SideObserver {
                     ctx_id: Some(ctx_id.to_owned()),
                     parent_agent: None,
                     ephemeral: false,
+                },
+            )))?;
+        Ok(())
+    }
+
+    /// Cancels one exact prompt through this observer's UI connection.
+    pub(super) fn cancel_prompt(
+        &mut self,
+        session_id: &SessionId,
+        prompt: &tau_proto::AgentPromptCreated,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.peer
+            .send(&HarnessInputMessage::emit(Event::UiCancelPrompt(
+                tau_proto::UiCancelPrompt {
+                    session_id: session_id.clone(),
+                    target_agent_id: Some(prompt.agent_id.clone()),
+                    agent_prompt_id: Some(prompt.agent_prompt_id.clone()),
                 },
             )))?;
         Ok(())

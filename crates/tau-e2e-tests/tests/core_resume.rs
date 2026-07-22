@@ -17,6 +17,8 @@ mod headless_process;
 mod multi_agent;
 #[path = "core_resume/observer.rs"]
 mod observer;
+#[path = "core_resume/peer_navigation.rs"]
+mod peer_navigation;
 #[path = "core_resume/process_group.rs"]
 mod process_group;
 #[path = "core_resume/pty_process.rs"]

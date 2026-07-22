@@ -52,6 +52,14 @@ impl GateFixture {
         Self::new_with_mode(scenario, fake_provider_bin, FixtureMode::MultiAgent)
     }
 
+    /// Creates the closed peer-entrypoint configuration with no initial agent.
+    pub(super) fn new_peer_entrypoint(
+        scenario: &ScenarioV2,
+        fake_provider_bin: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_mode(scenario, fake_provider_bin, FixtureMode::PeerEntrypoint)
+    }
+
     fn new_with_mode(
         scenario: &ScenarioV2,
         fake_provider_bin: &Path,
@@ -149,6 +157,17 @@ impl GateFixture {
                     }
                 }),
             ),
+            FixtureMode::PeerEntrypoint => (
+                "deterministic-peer",
+                serde_json::json!({
+                    "deterministic-peer": {
+                        "model": "fake/test",
+                        "tools": [],
+                        "inter_session_receiver": true,
+                        "inter_session_auto_start": true,
+                    }
+                }),
+            ),
         };
         let harness = serde_json::json!({
             "agents": {
@@ -198,7 +217,7 @@ impl GateFixture {
             completed: Cell::new(false),
             enabled_extensions: match mode {
                 FixtureMode::DummyTool => &["e2e-fake-provider", "test-dummy"],
-                FixtureMode::MultiAgent => &["e2e-fake-provider"],
+                FixtureMode::MultiAgent | FixtureMode::PeerEntrypoint => &["e2e-fake-provider"],
             },
         })
     }
@@ -330,6 +349,8 @@ enum FixtureMode {
     DummyTool,
     /// S8 main/worker gate with only harness-owned `agent_start`.
     MultiAgent,
+    /// Auto-starting peer receiver without any initial local agent.
+    PeerEntrypoint,
 }
 
 impl Drop for GateFixture {

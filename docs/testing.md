@@ -181,11 +181,18 @@ follow-up. Replay boundaries, directed rosters, typed multi-agent store
 prefixes/suffixes, exact provider consumption, and process-group/socket cleanup
 remain independent oracles; the VT model proves only selection, terminal
 historical rows, and transcript ordering.
-A side UI observer preserves replay metadata and typed CBOR
-store reads prove identity and prefix/suffix durability. This is one narrow
-known-bug terminal projection gate, not broad rendering fidelity. The lane does
-not validate provider-builtin, upstream ChatGPT lowering/parsing, WebSocket
-behavior, production retries, or crash-exact replay.
+For those two resume topologies, a side UI observer preserves replay metadata
+and typed CBOR store reads prove identity and prefix/suffix durability.
+A third topology starts the universal PTY agentless and tool-free, then uses a
+private exact same-process sender callback to authorize one bare external
+message. That message auto-starts the first receiver. Typed socket stats prove
+`active_auto/running`; the correlated hold-ready notice is broadcast later, so
+its target-PTY projection proves that UI consumed the update before one real
+Ctrl-J selects the exact recipient. The test then cancels and reaps its correlated
+provider hold. These are narrow terminal projection gates, not broad rendering
+fidelity. They do not claim broader peer trust, delivery, provider, crash,
+provider-builtin, upstream ChatGPT lowering/parsing, WebSocket, production
+retry, or crash-exact replay coverage.
 
 The separate `core_shell_resume` target starts that same universal binary as
 bundled `component ext-shell`. Its closed scenario exposes only `workdir` and

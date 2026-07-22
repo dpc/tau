@@ -22026,9 +22026,9 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     sender.shutdown().expect("shutdown sender");
 }
 
-/// Two real harness event loops complete callback correlation and auto-start
-/// over separate Unix sockets, and acknowledge only after the receive
-/// projection commits.
+/// Two real harness event loops complete callback correlation and delegated
+/// auto-start over separate Unix sockets, retain `active_auto/running`
+/// navigation state, and acknowledge only after the receive projection commits.
 #[test]
 fn external_agent_message_two_harness_live_success_commits_before_ack() {
     let td = TempDir::new().expect("tempdir");
@@ -22150,6 +22150,21 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     assert!(result.started);
     assert!(target.agent_routes.contains_key(recipient_id.as_str()));
     assert_eq!(target.agents.len(), 1);
+    assert_eq!(
+        target.agent_navigation_modes.get(&recipient_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+    );
+    let recipient_cid = target
+        .agent_routes
+        .get(recipient_id.as_str())
+        .expect("auto-started recipient route");
+    assert_eq!(
+        target
+            .agent_stats_snapshot(recipient_cid)
+            .expect("auto-started recipient stats")
+            .runtime_state,
+        tau_proto::AgentRuntimeState::Running
+    );
     assert_eq!(durable_agent_message_received_events(&target).len(), 1);
     accept_sender.join().expect("sender accept thread");
     target.shutdown().expect("shutdown target");

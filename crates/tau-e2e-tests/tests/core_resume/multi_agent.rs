@@ -67,7 +67,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
         fixture.artifact_path("s8-boot-a-observer.json"),
         deadline,
     )?;
-    wait_fake_extension(&mut observer_a, deadline)?;
+    observer_a.wait_for_extension("e2e-fake-provider", deadline)?;
     observer_a.create_main(&session_id, "s8-main", MAIN_PROMPT)?;
     wait_marker(&mut observer_a, "worker completion observed", deadline)?;
     wait_two_idle(&mut observer_a, deadline)?;
@@ -118,7 +118,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
         deadline,
     )?;
     wait_resume_boundaries(&mut observer_b, &session_id, &identities, deadline)?;
-    wait_fake_extension(&mut observer_b, deadline)?;
+    observer_b.wait_for_extension("e2e-fake-provider", deadline)?;
     assert_replay_only_before_input(&observer_b.events, &session_id, &identities)?;
     if matched_actions(&fixture)? != matched_after_a {
         return Err("S8 cold replay consumed a provider action".into());

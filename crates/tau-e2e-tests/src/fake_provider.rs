@@ -1418,7 +1418,7 @@ impl FakeState {
             .trace
             .clone()
             .ok_or_else(|| ClientError::handler("trace not configured"))?;
-        let handle = handle.clone();
+        let worker_handle = handle.clone();
         let held_prompt = prompt.clone();
         let prompt_id = prompt.agent_prompt_id.clone();
         let worker_prompt_id = prompt_id.clone();
@@ -1437,8 +1437,8 @@ impl FakeState {
                         &format!("prompt_id={worker_prompt_id} hold_timeout"),
                     );
                     let _ = completion.send(());
-                    let _ =
-                        handle.emit_transient(Event::ProviderResponseFinishedReported(terminal));
+                    let _ = worker_handle
+                        .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                     HoldOutcome::TimedOut
                 }
                 Ok(canceled_by) => {
@@ -1454,8 +1454,8 @@ impl FakeState {
                     terminal.error = Some("(cancelled by harness)".to_owned());
                     terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
                     let _ = completion.send(());
-                    let _ =
-                        handle.emit_transient(Event::ProviderResponseFinishedReported(terminal));
+                    let _ = worker_handle
+                        .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                     HoldOutcome::Canceled(canceled_by)
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => HoldOutcome::Shutdown,
@@ -1476,7 +1476,17 @@ impl FakeState {
                 completed,
             },
         );
-        self.trace(&format!("prompt_id={prompt_id} hold_ready"))
+        self.trace(&format!("prompt_id={prompt_id} hold_ready"))?;
+        handle.request_notice(
+            format!(
+                "e2e_fake_provider.hold_ready {}",
+                serde_json::to_string(&serde_json::json!({
+                    "prompt_id": prompt_id.to_string(),
+                }))
+                .map_err(|error| ClientError::handler(error.to_string()))?
+            ),
+            tau_proto::NoticeLevel::Info,
+        )
     }
 
     fn emit_agent_tool_call(

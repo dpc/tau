@@ -45,6 +45,10 @@ its universal PTY Boot B preserves that exact extension/tool surface. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
+The separate peer-navigation PTY case starts with no agent, exposes no tools,
+and authorizes one exact external message through a fixture-owned same-process
+callback endpoint. Its sole provider action is a bounded hold used to inspect
+the live navigation interval.
 
 Hermetic embedded and daemon launches bypass ambient Tau startup-role,
 role/config, extension, and secret environment transports, retain that policy
@@ -135,7 +139,8 @@ acknowledgement protocol design.
 S5 deliberately uses one existing `HoldUntilCancel` action without issuing a
 cancellation. After the fake commits the worker lane cursor and starts the
 bounded hold worker, it appends one exact prompt-correlated `hold_ready` semantic
-trace record. The test separately observes the same prompt in the durable
+trace record and emits the same correlation as an info-level notice. The test
+separately observes the same prompt in the durable
 harness `agent.inference_dispatch_started` journal and decodes the fake
 checkpoint's exact scenario, worker lane binding, and next-action cursor before
 sending `SIGKILL` to the private daemon process group. The readiness record is
@@ -250,6 +255,14 @@ replayed `agent_start` lifecycle, post-boundary directed current/history rosters
 typed two-agent store record counts/prefixes/suffixes, the fake checkpoint, and
 bounded process-group/socket cleanup reject replay work, lane rebinding,
 cross-agent routing, and partial cleanup.
+The peer-navigation case requires the authenticated bare delivery to report one
+auto-started recipient, observes its complete stats snapshot as
+`active_auto/running`, and waits for the correlated hold-ready notice broadcast
+later to render on the target PTY. It sends the real Ctrl-J binding exactly once while the
+correlated hold remains live. The selected prompt must name that recipient;
+exact cancellation then reaps the hold without a timeout. This covers
+first-agent navigation only; it does not expand peer trust, delivery, or crash
+guarantees.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

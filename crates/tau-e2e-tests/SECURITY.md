@@ -144,6 +144,17 @@ only bounded stderr/observer/PTY diagnostics, and verifies the socket, lock, and
 process group disappear before reuse. This adds no network, credential, shell,
 arbitrary prompt, production-provider, or manual cold-resume authority.
 
+The peer-navigation PTY case exposes no tools and starts with no agent. Its
+fixture-owned sender record and callback socket live only under the private
+runtime root, authorize one exact typed request, and add no general network or
+credential authority. A bounded fake-provider hold preserves the receiver's
+live interval long enough to exercise the real Ctrl-J binding, then an exact
+prompt cancellation reaps it. The case proves navigation eligibility, not
+stronger peer authentication or delivery semantics.
+Callback accept/read/write run synchronously under one absolute deadline with no
+detached worker; negative fixtures cover both an absent callback and a complete
+Hello that stalls before authentication.
+
 The headless core-shell resume gate is a controlled production-extension
 exception. It enables only the fake provider and exact universal
 `component ext-shell`, exposes only `workdir` and `edit`, keeps directory locking

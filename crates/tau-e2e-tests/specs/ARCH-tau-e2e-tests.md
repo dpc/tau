@@ -86,7 +86,8 @@ behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
 bundled core-shell component.
 
-The Unix-only core-resume gate is the deterministic fixture's public-UI boundary.
+The original Unix-only core-resume topology is the deterministic fixture's
+dummy-tool public-UI boundary.
 It runs the exact built universal `tau` under a fixed real PTY, while the fake
 provider and built-in test dummy remain supervised subprocesses. Boot A reaches a
 durable terminal dummy result and is fully reaped; Boot B uses explicit
@@ -107,6 +108,16 @@ Replay-aware socket delivery, directed rosters, typed multi-agent stores, and
 exact fake-provider consumption remain independent authorities. This does not
 extend terminal rendering, production-provider, crash-exact, watch-restoration,
 or recovery claims.
+
+A third core-resume topology starts the exact universal Tau under a PTY with no
+agent and no tools. One private same-process sender record and callback socket
+authorize an exact bare external message, which auto-starts the first agent.
+Socket stats are authoritative for its `active_auto/running` state; the
+correlated hold-ready notice is broadcast afterward, so its target-PTY
+projection proves that UI consumed the update before one real Ctrl-J selects
+the exact recipient. The provider hold is explicitly canceled and reaped after
+selection. This topology does not broaden peer trust, delivery, provider,
+crash, or terminal-rendering claims.
 
 The complementary core-shell resume gate is headless so failures localize to the
 production extension boundary already packaged by the same universal binary.

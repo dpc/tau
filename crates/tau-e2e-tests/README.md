@@ -41,6 +41,11 @@ under the PTY. It selects both restored transcripts only by stable ID, submits
 one targeted worker follow-up, and combines the narrow VT evidence with directed
 rosters, replay metadata, exact fake-provider consumption, typed multi-agent
 store prefixes/suffixes, and bounded process/socket cleanup.
+An independent PTY case keeps a fresh target session agentless until one
+authenticated bare inter-session message auto-starts its first receiver. It
+requires the live `active_auto/running` snapshot and the correlated hold-ready
+notice rendered later by the target PTY, uses the ordinary Ctrl-J binding once
+to select the exact recipient, then explicitly cancels the provider hold.
 The separate headless `core_shell_resume` gate runs that universal binary as the
 bundled `component ext-shell`, exposes only `workdir` and `edit`, and proves a
 canonical per-agent workdir plus a relative context-checked edit survive full

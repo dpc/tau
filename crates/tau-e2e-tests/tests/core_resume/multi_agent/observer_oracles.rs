@@ -35,24 +35,6 @@ impl Identities {
     }
 }
 
-/// Waits for the sole allowed fake-provider extension to become ready.
-pub(super) fn wait_fake_extension(
-    observer: &mut SideObserver,
-    deadline: Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if observer.events.iter().any(fake_ready) {
-        return Ok(());
-    }
-    observer.recv_until(deadline, fake_ready).map(|_| ())
-}
-
-fn fake_ready(observed: &ObservedEvent) -> bool {
-    matches!(
-        &observed.event,
-        Event::ExtensionReady(ready) if ready.extension_name.as_str() == "e2e-fake-provider"
-    )
-}
-
 /// Waits for one terminal provider response containing an exact marker.
 pub(super) fn wait_marker(
     observer: &mut SideObserver,

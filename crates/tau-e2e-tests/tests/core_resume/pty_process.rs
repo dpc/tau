@@ -169,6 +169,16 @@ impl PtyProcess {
         writer.flush()
     }
 
+    /// Sends the ordinary Ctrl-J next-agent navigation key.
+    pub(super) fn send_next_agent_key(&mut self) -> Result<(), std::io::Error> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("PTY writer closed"))?;
+        writer.write_all(b"\n")?;
+        writer.flush()
+    }
+
     /// Waits until the normalized current screen contains `needle`.
     pub(super) fn wait_for(
         &self,

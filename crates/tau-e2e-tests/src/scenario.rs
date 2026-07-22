@@ -200,8 +200,8 @@ pub enum ScenarioActionV2 {
     /// Remain pending until an exact prompt cancellation, with a hard timeout.
     ///
     /// After its wait worker starts, the fake emits exactly one
-    /// prompt-correlated `hold_ready` semantic trace record. This is live
-    /// fixture readiness, not provider acknowledgement.
+    /// prompt-correlated `hold_ready` semantic trace record and info-level
+    /// notice. These are live fixture readiness, not provider acknowledgement.
     HoldUntilCancel {
         /// Exact latest user text.
         user_text: String,
