@@ -27,15 +27,20 @@ worker uses fixed synthetic identity and metadata and is appended only after
 Boot A releases both typed stores; reopening `AgentStore` and `SessionStore`
 validates the sequence-zero creation and adjacent durable load/unload before
 Boot B starts. This seeding is fixture-owned persistence setup, not a fake-provider
-file-write or a public unload operation.
+file-write or a public unload operation. S4 enables the same sole `agent_start`
+tool for its main and configures two distinct tool-free worker roles.
 
 Each S1/S2/S3 production-worker start sequence uses one adjacent
 `AgentStartCall`/`AgentStartResult` pair. It requires the exact production schema
 and fixture-authored arguments, then records only the distinct self/child
-identities minted by the harness. Because a production-started worker has no
+identities minted by the harness. S4 permits exactly two such sequential pairs
+and checkpoints both child identities with contiguous start ordinals; later
+automatic-watch matching targets only the latest successful start. Explicit
+`agent_watch` remains restricted to the one-child S2 fixture. Because a
+production-started worker has no
 initial `ctx_id`, its first prompt may bind only the unique unconsumed lane with
 identical configured text; zero or multiple candidates fail closed. That
-immutable binding and the parent/child association are checkpointed with the
+immutable binding and the parent/child associations are checkpointed with the
 scenario cursors.
 The closed S2 watch action derives its target only from that association, always
 enables, and requires an exact successful sanitized result without exposing
@@ -47,8 +52,10 @@ configured content or typed runtime state, and stable subscription/generation
 correlation. Unrelated and excess records fail before queue admission. Each
 accepted live record releases one provider prompt; there is no general scheduler
 or arbitrary message-routing control. Replay cannot release an action. This fixture proves a
-clean, quiescent resume of one completed worker and non-persistence of its
-daemon-lifetime watch. S2 proves explicit recreation creates one new subscription
+clean, quiescent S1 resume of one completed worker and non-persistence of its
+daemon-lifetime watch. S4 proves the bounded counterpart for two sequentially
+started workers, including retained lane and journal ownership under
+reverse-creation activation. S2 proves explicit recreation creates one new subscription
 and admits only its exact bounded live notifications; the initial snapshot
 cannot activate the provider. It does not prove interrupted-request recovery,
 watch persistence, or crash-exact provider/harness checkpoint coordination.

@@ -11,6 +11,10 @@ production harness-owned internal handlers. S1 exposes only `agent_start` to its
 exact main role; S2 adds only `agent_watch`; both expose no tools to the worker.
 S3 reuses the S1 surface: `UiCreateAgent`, directed roster queries, and typed
 store seeding remain test-driver boundaries rather than fake-provider actions.
+S4 configures one main exposing only `agent_start` and two distinct tool-free
+worker roles. Its closed grammar permits at most two adjacent production starts,
+retains their ordered child identities, and matches each sequential automatic
+watch batch against the latest successful start.
 Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
@@ -40,7 +44,11 @@ proves one fresh subscription's exact initial, prompt, running, response, and
 idle facts without treating the initial snapshot as model work. S3 composes the
 same current durable pair with one valid unloaded durable history member while
 proving a same-daemon ephemeral agent leaves no cold-restored transcript,
-membership, route, or replay boundary. It does not cover the
+membership, route, or replay boundary. S4 restores a three-member durable
+session, validates roster and replay facts by identity, activates the two
+workers in reverse creation order, and rejects lane rebinding or cross-agent
+transcript suffixes. Its bounded two-start checkpoint semantics remain
+fixture-local and make no crash-exact coordination claim. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's

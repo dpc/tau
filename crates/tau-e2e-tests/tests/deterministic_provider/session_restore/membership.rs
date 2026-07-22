@@ -78,7 +78,7 @@ fn cold_resume_composes_loaded_unloaded_and_ephemeral_membership()
     );
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
-    assert_resume_boundaries(&observer_b.events, &identities, &session_id)?;
+    assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
     assert_replay_is_observational(&observer_b.events, &identities)?;
     assert_s3_absent_runtime_state(&observer_b.events, &absent)?;
     if matched_action_count(&fixture)? != boot_a_action_matches {

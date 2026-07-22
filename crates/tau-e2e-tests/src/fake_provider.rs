@@ -31,6 +31,7 @@ const MAX_TURNS: usize = 8;
 const MAX_SCENARIO_BYTES: usize = 16 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
 const MAX_DELTAS: usize = 8;
+const MAX_AGENT_START_PAIRS: usize = 2;
 
 /// Runs the deterministic provider over standard input/output.
 pub fn run_stdio() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,8 +84,9 @@ struct FakeState {
     barriers: HashMap<String, Vec<BarrierParticipant>>,
     /// Non-initial model-visible watch deliveries awaiting one provider prompt.
     watch_notifications: HashMap<tau_proto::AgentId, VecDeque<AgentMessageReceived>>,
-    /// Child identities learned from exact successful `agent_start` results.
-    child_agents: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
+    /// Ordered child identities learned from exact successful `agent_start`
+    /// results for each parent.
+    child_agents: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
     /// Count of exact watch notifications consumed by a staged action.
     watch_progress: HashMap<tau_proto::AgentId, usize>,
     /// Subscription/generation correlation retained across staged watch
@@ -265,6 +267,8 @@ struct AgentLaneCheckpoint {
 struct ChildAgentCheckpoint {
     /// Parent agent that issued the exact start call.
     parent_agent_id: tau_proto::AgentId,
+    /// Zero-based start-result ordinal within this parent's bound lane.
+    start_ordinal: usize,
     /// Harness-minted child agent returned by the tool.
     child_agent_id: tau_proto::AgentId,
 }
@@ -275,8 +279,8 @@ struct RestoredScenarioState {
     cursors: Vec<usize>,
     /// Validated immutable live-agent lane associations.
     agent_lanes: HashMap<tau_proto::AgentId, usize>,
-    /// Validated immutable parent-to-child associations.
-    child_agents: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
+    /// Validated ordered parent-to-child associations.
+    child_agents: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
 }
 
 impl TauExtension for FakeProvider {
@@ -379,6 +383,16 @@ fn model_snapshot() -> ProviderModelsDeclared {
 }
 
 impl FakeState {
+    /// Returns the child owned by the parent's most recently consumed start.
+    fn current_child_agent(
+        &self,
+        parent_agent_id: &tau_proto::AgentId,
+    ) -> Option<&tau_proto::AgentId> {
+        self.child_agents
+            .get(parent_agent_id)
+            .and_then(|children| children.last())
+    }
+
     fn record_watch_notification(&mut self, message: &AgentMessageReceived) -> ClientResult<()> {
         let model_visible = match message.kind {
             tau_proto::AgentMessageKind::WatchResponse
@@ -392,7 +406,7 @@ impl FakeState {
         if !model_visible {
             return Ok(());
         }
-        let Some(expected_child) = self.child_agents.get(&message.recipient_id) else {
+        let Some(expected_child) = self.current_child_agent(&message.recipient_id) else {
             return Err(ClientError::handler(
                 "unexpected model-visible watch recipient",
             ));
@@ -717,7 +731,7 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         expected: &[WatchNotificationV2],
     ) -> ClientResult<()> {
-        let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id).cloned() else {
+        let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id).cloned() else {
             return Err(self.mismatch(cursor, "watch prompt has no validated child identity"));
         };
         let actual = self
@@ -1081,6 +1095,7 @@ impl FakeState {
             if !self
                 .child_agents
                 .values()
+                .flatten()
                 .any(|child_agent_id| child_agent_id == &prompt.agent_id)
             {
                 return Err(ClientError::handler(
@@ -1347,7 +1362,7 @@ impl FakeState {
                 emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
             }
             ScenarioActionV2::AgentWatchCall { call_id, .. } => {
-                let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id) else {
+                let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id) else {
                     return Err(self.mismatch(
                         0,
                         "agent_watch call has no validated agent_start child identity",
@@ -1533,12 +1548,16 @@ impl FakeState {
             ScenarioActionV2::AgentStartResult { call_id, .. } => {
                 let results = prompt
                     .context
-                    .flatten_iter()
-                    .filter_map(|item| match item {
-                        ContextItem::ToolResult(result) => Some(result),
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find_map(|block| match block {
+                        tau_proto::ContextBlock::ToolResults(results) => Some(&results.items),
                         _ => None,
                     })
-                    .collect::<Vec<_>>();
+                    .ok_or_else(|| {
+                        self.mismatch(cursor, "agent_start result lacks a tool-results block")
+                    })?;
                 if results.len() != 1
                     || results[0].call_id != *call_id
                     || results[0].tool_type != ToolType::Function
@@ -1569,14 +1588,21 @@ impl FakeState {
                 {
                     return Err(self.mismatch(cursor, "agent_start result identity mismatch"));
                 }
-                if self
+                let children = self
                     .child_agents
                     .get(&self_agent_id)
-                    .is_some_and(|existing| existing != &child_agent_id)
-                {
-                    return Err(self.mismatch(cursor, "agent_start child identity changed"));
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if children.contains(&child_agent_id) {
+                    return Err(self.mismatch(cursor, "agent_start child identity reused"));
                 }
-                self.child_agents.insert(self_agent_id, child_agent_id);
+                if children.len() >= MAX_AGENT_START_PAIRS {
+                    return Err(self.mismatch(cursor, "agent_start child count exceeded"));
+                }
+                self.child_agents
+                    .entry(self_agent_id)
+                    .or_default()
+                    .push(child_agent_id);
             }
             ScenarioActionV2::AgentWatchCall { .. } => {
                 let watch = prompt
@@ -1587,7 +1613,10 @@ impl FakeState {
                     .tools
                     .iter()
                     .find(|tool| tool.name.as_str() == "agent_start");
-                if !self.child_agents.contains_key(&prompt.agent_id)
+                if self
+                    .child_agents
+                    .get(&prompt.agent_id)
+                    .is_none_or(|children| children.len() != 1)
                     || prompt.tools.len() != 2
                     || watch.is_none_or(|tool| {
                         tool.tool_type != ToolType::Function
@@ -1602,7 +1631,7 @@ impl FakeState {
                 }
             }
             ScenarioActionV2::AgentWatchResult { call_id, .. } => {
-                let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id) else {
+                let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id) else {
                     return Err(self.mismatch(
                         cursor,
                         "agent_watch result has no validated agent_start child identity",
@@ -1738,9 +1767,15 @@ impl FakeState {
             child_agents: self
                 .child_agents
                 .iter()
-                .map(|(parent_agent_id, child_agent_id)| ChildAgentCheckpoint {
-                    parent_agent_id: parent_agent_id.clone(),
-                    child_agent_id: child_agent_id.clone(),
+                .flat_map(|(parent_agent_id, child_agent_ids)| {
+                    child_agent_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(start_ordinal, child_agent_id)| ChildAgentCheckpoint {
+                            parent_agent_id: parent_agent_id.clone(),
+                            start_ordinal,
+                            child_agent_id: child_agent_id.clone(),
+                        })
                 })
                 .collect(),
         };
@@ -2044,46 +2079,49 @@ impl ScenarioConfig {
                         ));
                     }
                 }
-                let consumed_start_parents = agent_lanes
+                let consumed_start_counts = agent_lanes
                     .iter()
                     .filter_map(|(agent_id, lane_index)| {
-                        scenario.lanes[*lane_index]
+                        let count = scenario.lanes[*lane_index]
                             .actions
                             .iter()
                             .enumerate()
-                            .any(|(action_index, action)| {
+                            .filter(|(action_index, action)| {
                                 matches!(action, ScenarioActionV2::AgentStartResult { .. })
-                                    && checkpoint.cursors[*lane_index] > action_index
+                                    && checkpoint.cursors[*lane_index] > *action_index
                             })
-                            .then_some(agent_id.clone())
+                            .count();
+                        (count != 0).then_some((agent_id.clone(), count))
                     })
-                    .collect::<std::collections::HashSet<_>>();
-                if checkpoint.child_agents.len() > 1
-                    || checkpoint.child_agents.len() != consumed_start_parents.len()
+                    .collect::<HashMap<_, _>>();
+                let consumed_start_count = consumed_start_counts.values().sum::<usize>();
+                if checkpoint.child_agents.len() > MAX_AGENT_START_PAIRS
+                    || checkpoint.child_agents.len() != consumed_start_count
                 {
                     return Err(ClientError::handler(
                         "cursor checkpoint child bindings do not match consumed starts",
                     ));
                 }
-                let mut child_agents = HashMap::new();
+                let mut ordered_children = HashMap::<
+                    tau_proto::AgentId,
+                    std::collections::BTreeMap<usize, tau_proto::AgentId>,
+                >::new();
                 let mut children = std::collections::HashSet::new();
                 for binding in checkpoint.child_agents {
                     let parent_lane = agent_lanes.get(&binding.parent_agent_id).copied();
-                    let consumed_start_result = parent_lane.is_some_and(|lane_index| {
-                        scenario.lanes[lane_index].actions.iter().enumerate().any(
-                            |(action_index, action)| {
-                                matches!(action, ScenarioActionV2::AgentStartResult { .. })
-                                    && checkpoint.cursors[lane_index] > action_index
-                            },
-                        )
-                    });
+                    let consumed_start_count = consumed_start_counts
+                        .get(&binding.parent_agent_id)
+                        .copied()
+                        .unwrap_or_default();
                     let child_lane = agent_lanes.get(&binding.child_agent_id).copied();
                     if binding.parent_agent_id == binding.child_agent_id
-                        || !consumed_start_result
+                        || binding.start_ordinal >= consumed_start_count
                         || child_lane == parent_lane
                         || !children.insert(binding.child_agent_id.clone())
-                        || child_agents
-                            .insert(binding.parent_agent_id, binding.child_agent_id)
+                        || ordered_children
+                            .entry(binding.parent_agent_id)
+                            .or_default()
+                            .insert(binding.start_ordinal, binding.child_agent_id)
                             .is_some()
                     {
                         return Err(ClientError::handler(
@@ -2091,10 +2129,21 @@ impl ScenarioConfig {
                         ));
                     }
                 }
-                if child_agents
-                    .keys()
-                    .any(|parent| !consumed_start_parents.contains(parent))
-                {
+                let mut child_agents = HashMap::new();
+                for (parent, count) in consumed_start_counts {
+                    let Some(ordered) = ordered_children.remove(&parent) else {
+                        return Err(ClientError::handler(
+                            "cursor checkpoint omits a consumed child binding",
+                        ));
+                    };
+                    if ordered.len() != count || ordered.keys().copied().ne(0..count) {
+                        return Err(ClientError::handler(
+                            "cursor checkpoint child ordinals are not contiguous",
+                        ));
+                    }
+                    child_agents.insert(parent, ordered.into_values().collect());
+                }
+                if !ordered_children.is_empty() {
                     return Err(ClientError::handler(
                         "cursor checkpoint child parent does not own a consumed start",
                     ));

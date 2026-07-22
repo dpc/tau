@@ -23,7 +23,8 @@ provider disconnect without restart,
 clean resume, concurrent lane isolation, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
 watch, explicit post-resume watch recreation with exact new-subscription
-notifications, loaded/unloaded/ephemeral membership composition, and startup
+notifications, loaded/unloaded/ephemeral membership composition, two-worker
+restore with reverse-creation activation and ID-keyed ordering/isolation, and startup
 rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
@@ -41,8 +42,9 @@ The independent headless `cancellation_liveness` gate holds two exact provider
 lanes, cancels each harness-minted prompt id once, and then completes a fresh
 prompt on the second selected agent's existing lane. It does not exercise PTY
 restore or core-shell.
-The `session_restore` case uses the production harness-owned `agent_start`
-built-in under exact two-role policy. It cleanly replaces the daemon, restores
+The first three `session_restore` fixtures use the production harness-owned
+`agent_start` built-in under exact two-role policy. The first cleanly replaces
+the daemon, restores
 the completed durable worker as an idle independently addressable
 conversation, and proves the old automatic watch does not re-fan out fresh
 worker activity. A separate fresh fixture recreates the watch through production
@@ -53,6 +55,10 @@ seeds a valid durable worker load/unload history while the stores are unowned.
 Cold resume restores only the two current durable routes, reports the seeded
 worker only in history, rejects both absent routes, and leaves no ephemeral
 journal or durable membership record.
+A fourth fixture configures one main with only `agent_start` plus two distinct
+tool-free worker roles. It cold-restores all three durable routes, compares
+roster rows as an ID-keyed set, activates workers in reverse creation order, and
+proves retained lane ownership and per-worker transcript isolation.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

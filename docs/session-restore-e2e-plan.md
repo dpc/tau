@@ -51,7 +51,7 @@ dispatch-uncertain and is not resent automatically. An unresolved foreground
 tool call is closed conservatively with a durable synthetic error and is not
 rerun. These are distinct recovery cases.
 
-## Existing coverage and the gap
+## Existing coverage and remaining gaps
 
 The deterministic fake-provider suite already proves a clean, quiescent
 same-agent resume and preservation of its provider lane cursor. The Unix
@@ -70,7 +70,10 @@ S1 creates a production worker, cold-restores main and worker together, and
 exercises both restored routes. S2 repeats that setup and explicitly recreates a
 non-persistent watch with a fresh subscription. S3 composes current durable,
 historically unloaded, and process-local ephemeral membership across a clean
-restart. Multiple-worker ordering independence remains the S4 acceptance gap.
+restart. S4 restores two distinct durable workers, activates them in reverse
+creation order, and proves that lane ownership, transcript suffixes, and ID-keyed
+rosters do not depend on completion or RPC row order. S5 and later interruption
+and repair scenarios remain planned.
 
 ## Test boundaries and oracles
 
@@ -185,6 +188,14 @@ and two worker actions, below the 16 KiB ceiling. Boot A spends five main and on
 worker provider turn; Boot B spends one main and one worker turn, totaling six
 main and two worker turns. Promptless ephemeral creation, typed store seeding,
 roster queries, and absent-route probes consume no fake-provider action.
+
+S4 uses three lanes and compact 1,911-byte scenario JSON: exactly six main
+actions (two adjacent start call/result pairs and two ordered three-record watch
+actions) and two actions in each distinct worker lane, below the 16 KiB ceiling.
+Boot A spends ten main and one provider turn per worker. Boot B activates only
+the workers, in reverse creation order, and spends one provider turn per worker,
+totaling ten main and two turns per worker. Roster queries and replay consume no
+fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -330,6 +341,12 @@ runtime completion order. Treat RPC rows as a set; their order is not a
 protocol contract. Do not use
 `BarrierText`: its lane must contain no other actions and it cannot also support
 the resumed activation in this scenario.
+
+Implemented by
+`session_restore::multiple_workers::cold_resume_multiple_workers_is_order_independent`
+using two sequential production starts, exact distinct roles/instructions/lanes,
+observed-but-nonauthoritative completion order, reverse-creation activation after
+cold resume, and ID-keyed durable and RPC assertions.
 
 ### S5 — Worker inference is dispatch-uncertain
 

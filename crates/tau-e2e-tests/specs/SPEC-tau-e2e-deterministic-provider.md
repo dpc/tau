@@ -30,7 +30,9 @@ and `edit` to a closed scratch-only scenario. S1 is the other: its main role
 exposes only the production harness-owned `agent_start` built-in while its
 worker role exposes no tools. S2 adds only production `agent_watch` to that
 main role. S3 reuses S1's exact roles and grammar; its promptless ephemeral agent
-and typed unloaded-worker store records consume no fake-provider action. The fake
+and typed unloaded-worker store records consume no fake-provider action. S4
+instead configures two distinct tool-free worker roles and keeps only
+`agent_start` on the main. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
@@ -51,12 +53,16 @@ disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
 tool names, arguments, and results remain outside the grammar. S1 adds one
-distinct adjacent `AgentStartCall`/`AgentStartResult` pair. The fake requires
+distinct adjacent `AgentStartCall`/`AgentStartResult` pair; S4 raises that
+closed bound to two unique adjacent pairs. The fake requires
 exact bounded instruction, optional role, task name, call id, production tool
-name/type/schema, one sole successful result with an exact two-field payload,
+name/type/schema, one sole successful result in the latest continuation block
+with an exact two-field payload,
 and harness-minted distinct
-self/child identities. It retains that parent/child association for later
-watch matching. S2 adds one adjacent `AgentWatchCall`/`AgentWatchResult` pair.
+self/child identities. It retains the ordered parent/child associations and
+matches automatic watch traffic against the latest successful start. S2 adds
+one adjacent `AgentWatchCall`/`AgentWatchResult` pair and therefore still
+requires exactly one retained child.
 It derives the exact watched ID only from that retained association, permits
 only `enable: true`, requires the production name/type/schema, and accepts one
 correlated successful result whose exact sanitized text names the child and
@@ -88,10 +94,11 @@ participant lane, and has one consistent bounded participant count, preventing
 same-lane and cyclic barrier plans. Initial `ctx_id` binds an agent to one lane.
 The public terminal UI supplies no initial `ctx_id`, so an unbound first prompt
 may select the sole configured lane. S1's production-started worker also has no
-initial `ctx_id`; its exact first user text must select exactly one unconsumed,
-unbound lane. Zero or multiple candidates fail closed. Every selected binding
-is immutable and checkpointed. Other multi-lane scenarios still require an
-exact `ctx_id`. Continuations cannot change that binding. The fake subscribes
+initial `ctx_id`; neither do S4's two production-started workers. Their exact
+first user text must select exactly one unconsumed, unbound lane. Zero or
+multiple candidates fail closed. Every selected binding is immutable and
+checkpointed. Other multi-lane agents still require an exact `ctx_id`.
+Continuations cannot change that binding. The fake subscribes
 only to live prompt/cancel/watch traffic, so restored event replay cannot
 consume actions.
 
@@ -101,11 +108,12 @@ line-range shapes, and vary only bounded call IDs, nonce text, prompts, and fina
 markers. Its result continuations require success; the resumed provider prompt
 must contain both the old nonce-bearing transcript and restored workdir context.
 
-V2 cursors, immutable agent-to-lane bindings, and S1 harness-minted
+V2 cursors, immutable agent-to-lane bindings, and bounded harness-minted
 parent-to-child associations are atomically checkpointed in the harness-assigned
 extension state directory and restored only after validating the complete
 scenario identity, a 64 KiB checkpoint ceiling, binding uniqueness,
-parent/start-result correlation, and cardinality bounds. This supports
+parent/start-result correlation, contiguous per-parent start ordinals, and
+cardinality bounds. This supports
 clean, quiescent daemon stop/resume with no in-flight action. The checkpoint and
 harness journal are not transactionally committed together, so this fixture
 makes no crash-exact action-replay claim; such a claim requires a provider
@@ -150,6 +158,12 @@ ephemeral worker. Boot B spends exactly one fresh main and one fresh durable-wor
 turn, for six main and two worker turns across both boots and six lane actions
 total. Probes for the unloaded and vanished ephemeral identities must produce no
 provider prompt or action.
+S4 consumes two sequential start pairs and two three-record automatic-watch
+actions in Boot A: ten main turns and one turn in each distinct worker lane.
+Boot B consumes one fresh turn per worker in reverse creation order, with no
+main turn. Exact lane-local continuations and per-agent durable suffixes reject
+lane rebinding and cross-agent transcript leakage; roster rows are compared as
+an ID-keyed set rather than by RPC order.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

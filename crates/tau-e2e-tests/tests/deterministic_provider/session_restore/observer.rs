@@ -270,6 +270,15 @@ impl SessionRestoreObserver {
     /// Waits until two distinct agents' latest complete stats are idle and
     /// empty.
     pub(super) fn wait_for_two_idle_agents(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.wait_for_idle_agent_count(2)
+    }
+
+    /// Waits until exactly `expected` distinct agents' latest complete stats
+    /// are idle and empty.
+    pub(super) fn wait_for_idle_agent_count(
+        &mut self,
+        expected: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut latest = BTreeMap::new();
         for observed in &self.events {
             if let Event::AgentStatsUpdated(stats) = &observed.event {
@@ -280,7 +289,7 @@ impl SessionRestoreObserver {
             }
         }
         loop {
-            if latest.len() == 2
+            if latest.len() == expected
                 && latest
                     .values()
                     .all(|(state, in_flight)| *state == AgentRuntimeState::Idle && *in_flight == 0)

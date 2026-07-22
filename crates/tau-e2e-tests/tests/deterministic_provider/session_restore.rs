@@ -19,6 +19,8 @@ use super::daemon_support::{disconnect_ui, spawn_daemon};
 
 #[path = "session_restore/membership.rs"]
 mod membership;
+#[path = "session_restore/multiple_workers.rs"]
+mod multiple_workers;
 #[path = "session_restore/observer.rs"]
 mod observer;
 use observer::{Observed, SessionRestoreObserver};
@@ -133,7 +135,7 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
     );
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
-    assert_resume_boundaries(&observer_b.events, &identities, &session_id)?;
+    assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
     assert_replay_is_observational(&observer_b.events, &identities)?;
     assert_eq!(
         fixture
@@ -284,7 +286,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     );
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
-    assert_resume_boundaries(&observer_b.events, &identities, &session_id)?;
+    assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
     assert_replay_is_observational(&observer_b.events, &identities)?;
     if matched_action_count(&fixture)? != boot_a_action_matches {
         return Err("S2 cold replay consumed a fake-provider action".into());
@@ -387,6 +389,11 @@ impl BootIdentities {
             main: main.ok_or("main creation fact missing")?,
             worker: worker.ok_or("worker creation fact missing")?,
         })
+    }
+
+    /// Returns every current durable identity for set-oriented shared oracles.
+    fn all(&self) -> [&AgentId; 2] {
+        [&self.main, &self.worker]
     }
 }
 
@@ -785,7 +792,7 @@ fn assert_durable_boot_a(
 
 fn assert_resume_boundaries(
     events: &[Observed],
-    identities: &BootIdentities,
+    agent_ids: &[&AgentId],
     session_id: &SessionId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session_boundaries = events
@@ -808,7 +815,7 @@ fn assert_resume_boundaries(
         )
         .into());
     };
-    for agent_id in [&identities.main, &identities.worker] {
+    for agent_id in agent_ids {
         let boundaries = events
             .iter()
             .enumerate()
@@ -818,7 +825,7 @@ fn assert_resume_boundaries(
                     && matches!(
                         &observed.event,
                         Event::AgentReplayComplete(done)
-                            if &done.agent_id == agent_id
+                            if &done.agent_id == *agent_id
                                 && done.session_id.as_ref() == Some(session_id)
                                 && done.error.is_none()
                     )
@@ -975,6 +982,19 @@ fn assert_provider_turn_counts(
     identities: &BootIdentities,
     expected: ProviderTurnCounts,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_provider_turn_counts_by_agent(
+        events,
+        &BTreeMap::from([
+            (identities.main.clone(), expected.main),
+            (identities.worker.clone(), expected.worker),
+        ]),
+    )
+}
+
+fn assert_provider_turn_counts_by_agent(
+    events: &[Observed],
+    expected: &BTreeMap<AgentId, usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let created = events
         .iter()
         .filter(|observed| !observed.replay)
@@ -1005,17 +1025,11 @@ fn assert_provider_turn_counts(
             .clone();
         *counts.entry(agent_id).or_insert(0) += 1;
     }
-    let main = counts.get(&identities.main).copied().unwrap_or_default();
-    let worker = counts.get(&identities.worker).copied().unwrap_or_default();
-    let unexpected = counts
-        .keys()
-        .any(|agent_id| agent_id != &identities.main && agent_id != &identities.worker);
-    if main != expected.main || worker != expected.worker || unexpected {
-        return Err(format!(
-            "provider-turn budget changed: main={main}/{}, worker={}/{}, all={counts:?}",
-            expected.main, worker, expected.worker
-        )
-        .into());
+    for agent_id in expected.keys() {
+        counts.entry(agent_id.clone()).or_insert(0);
+    }
+    if &counts != expected {
+        return Err(format!("provider-turn budget changed: {counts:?} != {expected:?}").into());
     }
     Ok(())
 }

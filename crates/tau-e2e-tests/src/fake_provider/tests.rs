@@ -181,10 +181,10 @@ fn v2_dummy_tool_actions_require_an_adjacent_matching_pair() {
     );
 }
 
-/// Ensures production `agent_start` remains one exact, bounded, adjacent
-/// call/result pair rather than a generic harness-tool grammar.
+/// Ensures production `agent_start` remains at most two exact, bounded,
+/// adjacent call/result pairs rather than a generic harness-tool grammar.
 #[test]
-fn v2_agent_start_actions_require_one_bounded_adjacent_pair() {
+fn v2_agent_start_actions_require_at_most_two_bounded_adjacent_pairs() {
     let pair = agent_start_scenario();
     assert!(
         FakeConfig {
@@ -218,13 +218,45 @@ fn v2_agent_start_actions_require_one_bounded_adjacent_pair() {
         .is_err()
     );
 
-    let mut repeated = pair.clone();
-    repeated.lanes[0]
-        .actions
-        .extend(pair.lanes[0].actions.clone());
+    let mut two_pairs = pair.clone();
+    let mut second_pair = pair.lanes[0].actions.clone();
+    for action in &mut second_pair {
+        match action {
+            ScenarioActionV2::AgentStartCall {
+                call_id, user_text, ..
+            }
+            | ScenarioActionV2::AgentStartResult {
+                call_id, user_text, ..
+            } => {
+                *call_id = "second-call".into();
+                *user_text = "start second".to_owned();
+            }
+            _ => unreachable!(),
+        }
+    }
+    two_pairs.lanes[0].actions.extend(second_pair.clone());
     assert!(
         FakeConfig {
-            scenario: ScenarioConfig::V2(repeated)
+            scenario: ScenarioConfig::V2(two_pairs.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let mut three_pairs = two_pairs;
+    for action in &mut second_pair {
+        match action {
+            ScenarioActionV2::AgentStartCall { call_id, .. }
+            | ScenarioActionV2::AgentStartResult { call_id, .. } => {
+                *call_id = "third-call".into();
+            }
+            _ => unreachable!(),
+        }
+    }
+    three_pairs.lanes[0].actions.extend(second_pair);
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(three_pairs)
         }
         .validate()
         .is_err()
@@ -335,7 +367,7 @@ fn v2_agent_watch_runtime_mismatches_leave_state_unconsumed() {
     let mut state = FakeState::default();
     state.scenario = Some(ScenarioConfig::V2(scenario));
     state.lane_cursors = vec![0];
-    state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+    state.child_agents = HashMap::from([(parent.clone(), vec![child.clone()])]);
 
     let mut call_prompt = prompt_for(&parent, "watch", Some("lane"));
     call_prompt.tools = vec![
@@ -535,7 +567,7 @@ fn v2_watch_notification_chains_enforce_only_their_two_predecessors() {
         state.scenario = Some(ScenarioConfig::V2(scenario()));
         state.lane_cursors = vec![0];
         state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
-        state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+        state.child_agents = HashMap::from([(parent.clone(), vec![child.clone()])]);
         state
     };
 
@@ -599,7 +631,7 @@ fn v2_watch_runtime_mismatches_leave_the_action_unconsumed() {
     state.scenario = Some(ScenarioConfig::V2(scenario));
     state.lane_cursors = vec![0];
     state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
-    state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+    state.child_agents = HashMap::from([(parent.clone(), vec![child.clone()])]);
 
     let mut wrong_sender = watch_turn(
         &parent,
@@ -666,7 +698,7 @@ fn v2_no_context_lane_binding_requires_the_unique_retained_child() {
     state.scenario = Some(ScenarioConfig::V2(scenario));
     state.lane_cursors = vec![0, 0];
     state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
-    state.child_agents = HashMap::from([(parent, child.clone())]);
+    state.child_agents = HashMap::from([(parent, vec![child.clone()])]);
     assert_eq!(
         state
             .select_v2_lane(&prompt_for(&child, "worker", None))
@@ -796,7 +828,7 @@ fn v2_agent_start_runtime_mismatches_leave_state_unconsumed() {
         .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
         .expect("exact sole result commits");
     assert_eq!(result_state.lane_cursors, [2]);
-    assert_eq!(result_state.child_agents.get(&parent), Some(&child));
+    assert_eq!(result_state.child_agents[&parent], [child]);
     assert!(checkpoint.exists());
 }
 
@@ -985,6 +1017,27 @@ fn agent_start_scenario() -> ScenarioV2 {
             ],
         }],
     )
+}
+
+fn two_agent_start_scenario() -> ScenarioV2 {
+    let mut scenario = agent_start_scenario();
+    let mut second = scenario.lanes[0].actions.clone();
+    for action in &mut second {
+        match action {
+            ScenarioActionV2::AgentStartCall {
+                call_id, user_text, ..
+            }
+            | ScenarioActionV2::AgentStartResult {
+                call_id, user_text, ..
+            } => {
+                *call_id = "second-call".into();
+                *user_text = "start second".to_owned();
+            }
+            _ => unreachable!(),
+        }
+    }
+    scenario.lanes[0].actions.extend(second);
+    scenario
 }
 
 fn agent_watch_scenario() -> ScenarioV2 {
@@ -1414,6 +1467,7 @@ fn v2_checkpoint_bounds_and_correlates_child_bindings() {
         }],
         child_agents: vec![ChildAgentCheckpoint {
             parent_agent_id: parent.clone(),
+            start_ordinal: 0,
             child_agent_id: child.clone(),
         }],
     };
@@ -1429,7 +1483,10 @@ fn v2_checkpoint_bounds_and_correlates_child_bindings() {
     let restored = ScenarioConfig::V2(scenario.clone())
         .restore_state(Some(&checkpoint_path))
         .expect("valid child checkpoint restores");
-    assert_eq!(restored.child_agents.get(&parent), Some(&child));
+    assert_eq!(
+        restored.child_agents[&parent].as_slice(),
+        std::slice::from_ref(&child)
+    );
 
     let mut missing_child = base();
     missing_child.child_agents.clear();
@@ -1470,6 +1527,7 @@ fn v2_checkpoint_bounds_and_correlates_child_bindings() {
     let mut repeated = base();
     repeated.child_agents.push(ChildAgentCheckpoint {
         parent_agent_id: tau_proto::AgentId::parse("other-parent").expect("other parent id"),
+        start_ordinal: 0,
         child_agent_id: child,
     });
     write(&repeated);
@@ -1484,6 +1542,60 @@ fn v2_checkpoint_bounds_and_correlates_child_bindings() {
         vec![b'x'; MAX_CHECKPOINT_BYTES as usize + 1],
     )
     .expect("write oversized checkpoint");
+    assert!(
+        ScenarioConfig::V2(scenario)
+            .restore_state(Some(&checkpoint_path))
+            .is_err()
+    );
+}
+
+/// Restores both ordered child identities for the bounded two-start grammar and
+/// rejects missing or duplicate ordinals.
+#[test]
+fn v2_checkpoint_restores_two_ordered_children_for_one_parent() {
+    let scenario = two_agent_start_scenario();
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let checkpoint_path = tempdir.path().join("cursor.json");
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let first = tau_proto::AgentId::parse("first-child").expect("first child id");
+    let second = tau_proto::AgentId::parse("second-child").expect("second child id");
+    let checkpoint = CursorCheckpoint {
+        scenario: scenario.clone(),
+        cursors: vec![4],
+        agent_lanes: vec![AgentLaneCheckpoint {
+            agent_id: parent.clone(),
+            lane_index: 0,
+        }],
+        child_agents: vec![
+            ChildAgentCheckpoint {
+                parent_agent_id: parent.clone(),
+                start_ordinal: 0,
+                child_agent_id: first.clone(),
+            },
+            ChildAgentCheckpoint {
+                parent_agent_id: parent.clone(),
+                start_ordinal: 1,
+                child_agent_id: second.clone(),
+            },
+        ],
+    };
+    let write = |checkpoint: &CursorCheckpoint| {
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_vec(checkpoint).expect("checkpoint serializes"),
+        )
+        .expect("write checkpoint");
+    };
+
+    write(&checkpoint);
+    let restored = ScenarioConfig::V2(scenario.clone())
+        .restore_state(Some(&checkpoint_path))
+        .expect("two children restore");
+    assert_eq!(restored.child_agents[&parent], [first, second]);
+
+    let mut duplicate_ordinal = checkpoint;
+    duplicate_ordinal.child_agents[1].start_ordinal = 0;
+    write(&duplicate_ordinal);
     assert!(
         ScenarioConfig::V2(scenario)
             .restore_state(Some(&checkpoint_path))

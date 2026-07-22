@@ -137,7 +137,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         .as_ref()
                         .is_some_and(|role| role.is_empty() || role.len() > 256)
                     || !agent_start_call_ids.insert(call_id.as_str())
-                    || agent_start_call_ids.len() > 1
+                    || agent_start_call_ids.len() > MAX_AGENT_START_PAIRS
                     || !matches!(
                         lane.actions.get(action_index + 1),
                         Some(ScenarioActionV2::AgentStartResult {
@@ -147,7 +147,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     ) =>
                 {
                     return Err(ClientError::handler(
-                        "scenario requires exactly one unique bounded adjacent agent_start call/result pair",
+                        "scenario allows at most two unique bounded adjacent agent_start call/result pairs",
                     ));
                 }
                 ScenarioActionV2::AgentStartResult { call_id, .. }

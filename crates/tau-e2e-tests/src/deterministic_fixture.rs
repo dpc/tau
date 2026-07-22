@@ -45,6 +45,7 @@ enum FixtureMode {
     CoreShell,
     SessionRestore,
     SessionRestoreWatch,
+    SessionRestoreMultipleWorkers,
 }
 
 impl DeterministicFixture {
@@ -141,6 +142,30 @@ impl DeterministicFixture {
             fake_provider_bin,
             None,
             FixtureMode::SessionRestoreWatch,
+        )
+    }
+
+    /// Creates the three-role S4 cold-resume fixture with production
+    /// `agent_start` enabled only for the main role.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_session_restore_multiple_workers(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            None,
+            FixtureMode::SessionRestoreMultipleWorkers,
         )
     }
 
@@ -272,28 +297,46 @@ impl DeterministicFixture {
         };
         let role_config = if matches!(
             mode,
-            FixtureMode::SessionRestore | FixtureMode::SessionRestoreWatch
+            FixtureMode::SessionRestore
+                | FixtureMode::SessionRestoreWatch
+                | FixtureMode::SessionRestoreMultipleWorkers
         ) {
             let main_tools = if mode == FixtureMode::SessionRestoreWatch {
                 serde_json::json!(["agent_start", "agent_watch"])
             } else {
                 serde_json::json!(["agent_start"])
             };
+            let mut roles = serde_json::json!({
+                "deterministic-main": {
+                    "model": "fake/test",
+                    "tools": main_tools,
+                },
+                "deterministic-worker": {
+                    "model": "fake/test",
+                    "tools": [],
+                }
+            });
+            if mode == FixtureMode::SessionRestoreMultipleWorkers {
+                let roles = roles
+                    .as_object_mut()
+                    .expect("literal role configuration is an object");
+                roles.remove("deterministic-worker");
+                for role in ["deterministic-worker-alpha", "deterministic-worker-beta"] {
+                    roles.insert(
+                        role.to_owned(),
+                        serde_json::json!({
+                            "model": "fake/test",
+                            "tools": [],
+                        }),
+                    );
+                }
+            }
             serde_json::json!({
                 "default_role": "deterministic-main",
                 "id_template": "main",
                 "role_groups": {
                     "e2e": {
-                        "roles": {
-                            "deterministic-main": {
-                                "model": "fake/test",
-                                "tools": main_tools,
-                            },
-                            "deterministic-worker": {
-                                "model": "fake/test",
-                                "tools": [],
-                            }
-                        }
+                        "roles": roles
                     }
                 }
             })
@@ -460,6 +503,37 @@ impl DeterministicFixture {
     /// explicit-watch fixture.
     pub fn assert_session_restore_watch_roles(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.assert_session_restore_role_tools(&["agent_start", "agent_watch"])
+    }
+
+    /// Verifies the generated S4 role projection has one closed main and two
+    /// distinct tool-free worker roles.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated role surface differs from S4.
+    pub fn assert_session_restore_multiple_worker_roles(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            self.root().join("artifacts/harness-config.json"),
+        )?)?;
+        let agents = &config["agents"];
+        let roles = &agents["role_groups"]["e2e"]["roles"];
+        if agents["default_role"] != "deterministic-main"
+            || agents["id_template"] != "main"
+            || roles.as_object().is_none_or(|roles| roles.len() != 3)
+            || roles["deterministic-main"]["model"] != "fake/test"
+            || roles["deterministic-main"]["tools"] != serde_json::json!(["agent_start"])
+            || ["deterministic-worker-alpha", "deterministic-worker-beta"]
+                .into_iter()
+                .any(|role| {
+                    roles[role]["model"] != "fake/test"
+                        || roles[role]["tools"] != serde_json::json!([])
+                })
+        {
+            return Err("generated S4 role configuration changed".into());
+        }
+        Ok(())
     }
 
     fn assert_session_restore_role_tools(
