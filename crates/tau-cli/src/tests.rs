@@ -5896,7 +5896,9 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
     assert!(!status_row.contains("@engineer-junior_b ("));
 }
 
-/// Covers the single-watcher label in `SPEC-tau-cli-agent-message-labels`.
+/// Prevents reintroducing the `watched by:` prefix while preserving the watcher
+/// id beside the selected-agent label required by
+/// `SPEC-tau-cli-agent-message-labels`.
 #[test]
 fn status_agent_chip_shows_current_agent_watchers() {
     let (_term, handle, vt) = setup(120, 24);
@@ -5943,11 +5945,13 @@ fn status_agent_chip_shows_current_agent_watchers() {
         .find(|row| row.contains("@engineer_child"))
         .expect("status row after watch update");
     assert!(status_row.contains("@engineer_child (fix streaming ellipsis)"));
-    assert!(status_row.contains("watched by: manager-AjhD"));
+    assert!(status_row.contains("manager-AjhD"));
+    assert!(!status_row.contains("watched by:"));
     assert!(!status_row.contains("child of"));
 }
 
-/// Covers the watcher-derived display contract in
+/// Prevents reintroducing the `watched by:` prefix while preserving the sorted
+/// first watcher id and `+N more agents` truncation required by
 /// `SPEC-tau-cli-agent-message-labels`.
 #[test]
 fn status_agent_chip_truncates_multiple_current_agent_watchers() {
@@ -5988,7 +5992,8 @@ fn status_agent_chip_truncates_multiple_current_agent_watchers() {
         .into_iter()
         .find(|row| row.contains("@engineer_child"))
         .expect("status row after watch updates");
-    assert!(status_row.contains("watched by: manager-AjhD, +1 more agents"));
+    assert!(status_row.contains("manager-AjhD, +1 more agents"));
+    assert!(!status_row.contains("watched by:"));
     assert!(!status_row.contains("reviewer-Zz99"));
 }
 

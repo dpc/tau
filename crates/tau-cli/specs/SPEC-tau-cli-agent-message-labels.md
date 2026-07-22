@@ -42,9 +42,9 @@ The CLI derives session-scoped forward and reverse watcher caches from complete
 them from live or replayed snapshots; they do not mutate display names or durable
 transcripts.
 
-For the currently viewed agent, one watcher renders `watched by: <watcher-id>`.
+For the currently viewed agent, one watcher renders `<watcher-id>`.
 Multiple watchers are sorted by stable agent id and render the first watcher as
-`watched by: <first-id>, +N more agents`; remaining ids are not expanded into the
+`<first-id>, +N more agents`; remaining ids are not expanded into the
 status row. Watcher context never changes the agent's own display label.
 
 Navigation state (`active`, `active-auto`, or `suspended`) is harness-owned

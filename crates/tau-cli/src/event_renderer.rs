@@ -2205,11 +2205,8 @@ impl EventRenderer {
         let first = watchers.first()?;
         match watchers.len() {
             0 => None,
-            1 => Some(format!("watched by: {first}")),
-            count => Some(format!(
-                "watched by: {first}, +{} more agents",
-                count.saturating_sub(1)
-            )),
+            1 => Some(first.to_owned()),
+            count => Some(format!("{first}, +{} more agents", count.saturating_sub(1))),
         }
     }
 
