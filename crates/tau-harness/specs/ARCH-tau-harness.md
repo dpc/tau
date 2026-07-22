@@ -27,6 +27,19 @@ interception and broadcast. Extension-authored generic
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 
+Destructive cancellation after an interceptor request was delivered retains the
+registration but suspends that connection from matching new publications until
+exactly one stale reply is consumed without action. Registration replacement is
+accepted during indefinite suspension; disconnect clears it and a new connection
+starts unsuspended. See
+[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
+
+Peer frames retain their admission session/generation through activation
+staging. Rollover raw-commits documented session-bound observations but blocks
+their downstream semantics at one shared generation boundary. Process-global
+tool/prompt-fragment/model declarations and provider-quota current-state reports
+survive rollover and run only under exact live connection/instance checks.
+
 Per-agent context registration, values, and readiness commit before the harness
 updates runtime prompt projections or releases waits. Exact connection-generation
 checks prevent stale publishers from mutating successor state. Existing ungated
@@ -151,16 +164,20 @@ a committed canonical fact. The harness owns no transport registration,
 admission, ordering, deduplication, native routing, reply state, or
 send-completion protocol.
 
-The post-commit prompt consumer validates universal fields, projects valid
-incoming facts as ordinary user context, and requests one live activation after
-transcript placement. `message.sent` becomes assistant context without activation.
-Open tool rounds defer transcript placement and wake until terminal tool results
-close, while the fact itself broadcasts immediately. Replay reconstructs context
-but never wakes the agent, resends transport traffic, or rebuilds
-extension-private authority. Invalid or unavailable targets remain committed and
-visible to subscribers even when no prompt projection is possible.
+The post-commit prompt consumer validates universal fields and immediately
+creates one payload-free live wake for valid incoming facts. `message.sent`
+becomes assistant context without activation. The sole tree-global foreground
+tool round defers only branch-applicable transcript placement and provider
+dispatch; it does not defer wake creation. Root, ancestor-above-assistant, and
+sibling facts materialize immediately. The fact itself always broadcasts
+immediately. Replay reconstructs the same branch-applicable context but never
+creates a runtime wake, resends transport traffic, or rebuilds
+extension-private authority. Invalid or unavailable targets remain
+committed and visible to subscribers even when no prompt projection is possible.
 The complete schema, persistence, and projection contract is
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+Agent-message and shared tool-round placement is specified by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 ## Provider model declarations and canonical state
 
@@ -177,7 +194,9 @@ also carries the stable configured provider publisher so replacement and empty
 snapshots remain attributable even though their delivery source is the harness.
 Subscribe-time current-state replay synthesizes canonical updates with that stable
 publisher and harness source metadata only; it never replays declarations or reruns
-their side-effects. The payload and event-name contract is documented in
+their side-effects. Session rollover retains a deferred declaration and applies it
+when the captured connection/configured instance remains exact because model state
+is process-global. The payload and event-name contract is documented in
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-model-declarations-and-canonical-state).
 
 Configured Provider peers publish explicitly transient
@@ -202,6 +221,10 @@ creation, treats pending and busy eligible agents as reusable endpoints, and
 releases sender success only from the receive projection's post-commit
 continuation. This state is generation-bound and in-memory; crash ambiguity
 follows best-effort at-least-once semantics.
+The committed directional facts, sequence-aware semantic placement, runtime-only
+recipient wake, branch acknowledgement, canonical provider rendering, and
+replay boundary are specified across harness and core by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 The peer-created endpoint purpose itself is ordinary durable lifecycle state: the
 harness embeds a reserved, non-inheritable metadata marker in the immutable
 ordered `AgentStarted` creation fact and restores it before extension-query

@@ -82,6 +82,50 @@ fn configured_extension_request_precedes_canonical_fact() {
     ));
 }
 
+/// A metadata request active in interception at rollover keeps its raw
+/// observation but cannot mutate replacement-session metadata from stale
+/// admission.
+#[test]
+fn rollover_metadata_request_is_observation_only() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
+    h.session_loaded_agents.insert(agent_id.clone());
+    connect_ready_configured_extension(
+        &mut h,
+        "requester",
+        "stable-requester",
+        tau_proto::ClientKind::Action,
+    );
+    connect_test_tool(&mut h, "metadata-interceptor");
+    h.handle_extension_event(
+        "metadata-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_METADATA_SET_REQUEST,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_persist(
+        "requester",
+        set_request(&agent_id, "stale rollover", None),
+        Some(true),
+    )
+    .expect("park metadata request");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(matches!(
+        metadata_commits(&h).as_slice(),
+        [(Some(source), Event::AgentMetadataSetRequest(request))]
+            if source == "requester"
+                && request.value == CborValue::Text("stale rollover".to_owned())
+    ));
+}
+
 /// Configured extensions and attached socket UI peers have request authority,
 /// while unconfigured/non-UI peers and peer-authored canonical facts do not.
 #[test]

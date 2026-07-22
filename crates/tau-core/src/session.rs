@@ -138,6 +138,8 @@ pub enum AgentEntry {
     },
     /// Cross-agent message projection stored in this agent's transcript.
     AgentMessage {
+        /// Sequence of the canonical directional fact in the owning journal.
+        durable_event_seq: PersistedAgentEventSeq,
         /// Stable logical message id shared by sender and recipient
         /// projections.
         message_id: AgentMessageId,
@@ -186,9 +188,15 @@ pub enum AgentEntry {
     },
 }
 
-/// One committed context input waiting behind an open provider tool round.
+/// One committed context input accepted on the open provider tool round's
+/// branch and waiting for its aggregate result.
 #[derive(Clone, Debug, PartialEq)]
 enum PendingContextInput {
+    /// Harness-owned canonical agent-message projection.
+    AgentMessage {
+        /// Exact typed entry to materialize after the tool result aggregate.
+        entry: Box<AgentEntry>,
+    },
     /// Generic canonical external-message fact projection.
     MessageFact {
         /// Projected ordinary context message.
@@ -198,10 +206,15 @@ enum PendingContextInput {
     },
 }
 
+/// The sole unfinished foreground provider tool round in one agent tree.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct PendingToolRound {
+    /// Tool-calling assistant node that owns the round and its result
+    /// aggregate.
     assistant_node_id: NodeId,
+    /// Provider call IDs in model-authored order.
     call_order: Vec<ToolCallId>,
+    /// Terminal results received so far, keyed by their owning call ID.
     terminal_results: HashMap<ToolCallId, ToolResultItem>,
 }
 
@@ -311,11 +324,15 @@ pub struct AgentTree {
     /// Canonical provider image bytes retained across all durable transcript
     /// events, including branches and compaction replacement windows.
     retained_provider_image_bytes: u64,
+    /// Sole tree-global foreground round, keyed by its assistant node.
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
+    /// Reverse ownership from every open call ID to the sole round's assistant.
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
-    /// Context inputs committed while provider tool adjacency is open.
+    /// Branch-applicable context committed while provider tool adjacency is
+    /// open.
     ///
-    /// They materialize in arrival order after the terminal tool-result node.
+    /// Agent messages and extension facts share exact durable acceptance order
+    /// and materialize after the round's complete aggregate result.
     pending_context_inputs: Vec<PendingContextInput>,
     /// Globally unique tool calls that already have one real background
     /// completion event.
@@ -767,6 +784,44 @@ impl AgentTree {
         calls
     }
 
+    /// Returns whether this agent tree has an unfinished foreground provider
+    /// tool round on any branch.
+    ///
+    /// The tree admits at most one such round globally. Runtime dispatch must
+    /// remain blocked on every branch until that round terminalizes.
+    #[must_use]
+    pub fn has_open_foreground_tool_round(&self) -> bool {
+        !self.pending_tool_rounds.is_empty()
+    }
+
+    /// Returns unfinished calls from the sole open foreground provider round.
+    ///
+    /// Unlike [`Self::unresolved_foreground_tool_calls_from`], this query is
+    /// branch-independent and is intended for cold recovery of the tree-global
+    /// round invariant.
+    #[must_use]
+    pub fn unresolved_foreground_tool_calls(&self) -> Vec<&ToolCallItem> {
+        let Some((&assistant_node_id, round)) = self.pending_tool_rounds.iter().next() else {
+            return Vec::new();
+        };
+        let Some(AgentEntry::AssistantResponse { output_items, .. }) =
+            self.node(assistant_node_id).map(|node| &node.entry)
+        else {
+            return Vec::new();
+        };
+        round
+            .call_order
+            .iter()
+            .filter(|call_id| !round.terminal_results.contains_key(*call_id))
+            .filter_map(|call_id| {
+                output_items.iter().find_map(|item| match item {
+                    ContextItem::ToolCall(call) if &call.call_id == call_id => Some(call),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     /// Returns backgrounded tool calls on `head`'s branch and any durable
     /// background completion recorded for them.
     ///
@@ -980,7 +1035,12 @@ impl AgentTree {
         Self::try_from_events(agent_id, events).expect("validated agent events")
     }
 
-    pub(crate) fn try_from_events(
+    /// Fallibly folds durable agent events into a fresh deterministic tree.
+    ///
+    /// Returns the first semantic or parent validation error instead of
+    /// panicking, allowing recovery classifiers to fail closed on invalid
+    /// input.
+    pub fn try_from_events(
         agent_id: AgentId,
         events: &[PersistedAgentEvent],
     ) -> Result<Self, AgentEventValidationError> {
@@ -1005,33 +1065,8 @@ impl AgentTree {
             inference_dispatches: HashMap::new(),
             inference_dispatch_order: Vec::new(),
         };
-        for entry in events {
-            if entry.event.name().category() == &tau_proto::EventCategory::Message {
-                if entry.parent != AgentEventParent::InheritHead {
-                    return Err(AgentEventValidationError::new(
-                        "raw message fact record has a noncanonical fold parent",
-                    ));
-                }
-                let target = entry.event.message_agent_target().ok_or_else(|| {
-                    AgentEventValidationError::new("message category record has no agent target")
-                })?;
-                if target.as_str() != tree.agent_id.as_str() {
-                    return Err(AgentEventValidationError::new(
-                        "raw message fact target does not match agent journal owner",
-                    ));
-                }
-                // Message facts are canonical raw journal records. Their
-                // transcript projection is a post-commit consumer and therefore
-                // cannot participate in append-time semantic validation.
-                if let Some(Ok(projection)) = tau_proto::project_message_fact(&entry.event) {
-                    tree.record_message_fact(tree.head, Box::new(projection.item), entry.seq);
-                }
-                tree.next_event_seq = entry.seq.next();
-                continue;
-            }
-            tree.validate_event_at(entry.parent, &entry.event)?;
-            tree.apply_event_at(entry.parent, &entry.event);
-            tree.next_event_seq = entry.seq.next();
+        for record in events {
+            tree.apply_persisted_record(record)?;
         }
         Ok(tree)
     }
@@ -1057,24 +1092,29 @@ impl AgentTree {
         self.ordinary_inference_generation
     }
 
-    /// Bumps the cached next-event-seq after a successful append.
-    /// Crate-internal — only the agent store mutates this.
-    pub(crate) fn advance_next_event_seq(&mut self) {
+    /// Bumps the cached next-event sequence after one synthetic or persisted
+    /// fold.
+    fn advance_next_event_seq(&mut self) {
         self.next_event_seq = self.next_event_seq.next();
     }
 
-    /// Incrementally apply one durable event to the tree. Mirrors the
-    /// fold rules of [`AgentTree::from_events`]. Tree-folding events
-    /// are parented at the current `head`; for callers that need to
-    /// fold an event onto a *specific* branch (without first emitting
-    /// an [`AgentHeadMoved`] to bounce `head` there), use
+    /// Incrementally applies one synthetic event and allocates its next
+    /// sequence.
+    ///
+    /// This convenience path mirrors transcript folding but bypasses
+    /// durable-record validation and cannot project raw `message.*` facts.
+    /// Tree-folding events are parented at the current `head`; for callers
+    /// that need to fold an event onto a *specific* branch (without first
+    /// emitting an [`AgentHeadMoved`] to bounce `head` there), use
     /// [`AgentTree::apply_event_at`].
     pub fn apply_event(&mut self, event: &Event) {
         self.apply_event_at(AgentEventParent::InheritHead, event);
     }
 
-    /// Like [`AgentTree::apply_event`] but parents the produced node using an
-    /// explicit fold-parent policy.
+    /// Like [`AgentTree::apply_event`] but uses an explicit fold-parent policy.
+    ///
+    /// This synthetic path allocates and advances one sequence while bypassing
+    /// durable-record validation and raw-fact projection.
     ///
     /// [`AgentEventParent::InheritHead`] keeps the current single-cursor
     /// behavior. [`AgentEventParent::Root`] starts a fresh branch at the
@@ -1089,6 +1129,70 @@ impl AgentTree {
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
+        let node_id = self.apply_persisted_event_at(parent, event, self.next_event_seq);
+        self.advance_next_event_seq();
+        node_id
+    }
+
+    /// Applies one exact durable record through the canonical incremental fold.
+    ///
+    /// This is the sequence-aware counterpart to [`Self::apply_event_at`].
+    /// It validates contiguous journal sequence, handles canonical raw
+    /// `message.*` facts, applies ordinary agent events, and advances
+    /// [`Self::next_event_seq`] exactly once. Replay and incremental consumers
+    /// should use this method instead of discarding
+    /// [`PersistedAgentEvent::seq`].
+    pub fn apply_persisted_record(
+        &mut self,
+        record: &PersistedAgentEvent,
+    ) -> Result<Option<NodeId>, AgentEventValidationError> {
+        if record.seq != self.next_event_seq {
+            return Err(AgentEventValidationError::new(format!(
+                "agent event sequence mismatch: expected {}, got {}",
+                self.next_event_seq.get(),
+                record.seq.get()
+            )));
+        }
+        let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
+            if record.parent != AgentEventParent::InheritHead {
+                return Err(AgentEventValidationError::new(
+                    "raw message fact record has a noncanonical fold parent",
+                ));
+            }
+            let target = record.event.message_agent_target().ok_or_else(|| {
+                AgentEventValidationError::new("message category record has no agent target")
+            })?;
+            if target.as_str() != self.agent_id.as_str() {
+                return Err(AgentEventValidationError::new(
+                    "raw message fact target does not match agent journal owner",
+                ));
+            }
+            // Message facts are canonical raw journal records. Their transcript
+            // projection is a post-commit consumer and cannot veto the fact.
+            tau_proto::project_message_fact(&record.event)
+                .and_then(Result::ok)
+                .and_then(|projection| {
+                    self.record_message_fact(self.head, Box::new(projection.item), record.seq)
+                })
+        } else {
+            self.validate_event_at(record.parent, &record.event)?;
+            self.apply_persisted_event_at(record.parent, &record.event, record.seq)
+        };
+        self.advance_next_event_seq();
+        Ok(node_id)
+    }
+
+    /// Applies one already-validated event with its owning journal sequence.
+    ///
+    /// This low-level helper does not validate the event or sequence and does
+    /// not advance `next_event_seq`; canonical record consumers use
+    /// [`Self::apply_persisted_record`].
+    fn apply_persisted_event_at(
+        &mut self,
+        parent: AgentEventParent,
+        event: &Event,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
         self.retained_provider_image_bytes = self
             .retained_provider_image_bytes
             .saturating_add(durable_event_provider_image_bytes(event));
@@ -1097,7 +1201,7 @@ impl AgentTree {
         if self.apply_side_state_event(event) {
             return None;
         }
-        self.apply_transcript_event(parent.resolve(self.head), event)
+        self.apply_transcript_event(parent.resolve(self.head), event, durable_event_seq)
     }
 
     fn apply_compaction_control_event(&mut self, event: &Event) {
@@ -1263,7 +1367,12 @@ impl AgentTree {
         }
     }
 
-    fn apply_transcript_event(&mut self, parent: Option<NodeId>, event: &Event) -> Option<NodeId> {
+    fn apply_transcript_event(
+        &mut self,
+        parent: Option<NodeId>,
+        event: &Event,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
         match event {
             Event::AgentPromptSubmitted(prompt) => Some(self.append_user_text_input(
                 parent,
@@ -1296,11 +1405,11 @@ impl AgentTree {
                 },
             )),
             Event::AgentMessageSent(message) => self
-                .agent_message_entry_from_sent(message)
-                .map(|entry| self.append_node_at(parent, entry)),
+                .agent_message_entry_from_sent(message, durable_event_seq)
+                .and_then(|entry| self.record_agent_message(parent, entry)),
             Event::AgentMessageReceived(message) => self
-                .agent_message_entry_from_received(message)
-                .map(|entry| self.append_node_at(parent, entry)),
+                .agent_message_entry_from_received(message, durable_event_seq)
+                .and_then(|entry| self.record_agent_message(parent, entry)),
             Event::ProviderResponseFinished(response) => {
                 Some(self.apply_provider_response_finished(parent, response))
             }
@@ -1331,6 +1440,23 @@ impl AgentTree {
         )
     }
 
+    /// Fold one canonical directional agent-message occurrence without
+    /// splitting an open provider tool round.
+    fn record_agent_message(
+        &mut self,
+        parent: Option<NodeId>,
+        entry: AgentEntry,
+    ) -> Option<NodeId> {
+        if self.open_tool_round_applies_to(parent) {
+            self.pending_context_inputs
+                .push(PendingContextInput::AgentMessage {
+                    entry: Box::new(entry),
+                });
+            return None;
+        }
+        Some(self.append_node_at(parent, entry))
+    }
+
     /// Fold one valid committed message fact behind tool adjacency when needed.
     fn record_message_fact(
         &mut self,
@@ -1338,7 +1464,7 @@ impl AgentTree {
         item: Box<tau_proto::MessageItem>,
         durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
-        if !self.pending_tool_rounds.is_empty() {
+        if self.open_tool_round_applies_to(parent) {
             self.pending_context_inputs
                 .push(PendingContextInput::MessageFact {
                     item,
@@ -1355,13 +1481,20 @@ impl AgentTree {
         ))
     }
 
-    /// Project one already-persisted message fact into the cached transcript.
-    pub(crate) fn record_committed_message_fact(
-        &mut self,
-        item: Box<tau_proto::MessageItem>,
-        durable_event_seq: PersistedAgentEventSeq,
-    ) -> Option<NodeId> {
-        self.record_message_fact(self.head, item, durable_event_seq)
+    /// Returns whether the sole open foreground round owns context accepted
+    /// under `parent`.
+    ///
+    /// Root inputs, inputs above the tool-calling assistant, and sibling-branch
+    /// inputs materialize immediately. Only the assistant itself and its
+    /// descendants defer until the aggregate tool result closes the round.
+    fn open_tool_round_applies_to(&self, parent: Option<NodeId>) -> bool {
+        let Some(parent) = parent else {
+            return false;
+        };
+        let Some(assistant_node_id) = self.pending_tool_rounds.keys().next().copied() else {
+            return false;
+        };
+        self.is_ancestor_head(AgentHead::Node(assistant_node_id), AgentHead::Node(parent))
     }
 
     fn apply_provider_response_finished(
@@ -1409,6 +1542,10 @@ impl AgentTree {
         if call_order.is_empty() {
             return;
         }
+        assert!(
+            self.pending_tool_rounds.is_empty(),
+            "cannot open a second foreground provider tool round"
+        );
         for call_id in &call_order {
             self.tool_call_rounds.insert(call_id.clone(), node_id);
         }
@@ -1464,8 +1601,13 @@ impl AgentTree {
         })
     }
 
-    fn agent_message_entry_from_sent(&self, message: &AgentMessageSent) -> Option<AgentEntry> {
+    fn agent_message_entry_from_sent(
+        &self,
+        message: &AgentMessageSent,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<AgentEntry> {
         (message.sender_id == self.agent_id).then(|| AgentEntry::AgentMessage {
+            durable_event_seq,
             message_id: message.message_id.clone(),
             direction: AgentMessageDirection::Outbound,
             sender_id: message.sender_id.clone(),
@@ -1481,8 +1623,10 @@ impl AgentTree {
     fn agent_message_entry_from_received(
         &self,
         message: &AgentMessageReceived,
+        durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<AgentEntry> {
         (message.recipient_id == self.agent_id).then(|| AgentEntry::AgentMessage {
+            durable_event_seq,
             message_id: message.message_id.clone(),
             direction: AgentMessageDirection::Inbound,
             sender_id: message.sender_id.clone(),
@@ -1600,12 +1744,16 @@ impl AgentTree {
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
             Event::AgentMessageSent(message)
-                if self.agent_message_entry_from_sent(message).is_some() =>
+                if self
+                    .agent_message_entry_from_sent(message, self.next_event_seq)
+                    .is_some() =>
             {
                 Some(Ok(()))
             }
             Event::AgentMessageReceived(message)
-                if self.agent_message_entry_from_received(message).is_some() =>
+                if self
+                    .agent_message_entry_from_received(message, self.next_event_seq)
+                    .is_some() =>
             {
                 let payload_matches_kind = ((message.kind == AgentMessageKind::WatchTurnState)
                     == message.watch_turn_state.is_some())
@@ -2154,6 +2302,7 @@ impl AgentTree {
             }
         }
         let mut seen = HashSet::new();
+        let mut requests_tool_calls = false;
         for item in &response.output_items {
             if matches!(item, ContextItem::ToolResult(_)) {
                 return Err(AgentEventValidationError::new(
@@ -2163,6 +2312,7 @@ impl AgentTree {
             let ContextItem::ToolCall(call) = item else {
                 continue;
             };
+            requests_tool_calls = true;
             if call.call_id.as_str().is_empty() {
                 return Err(AgentEventValidationError::new(
                     "agent response contained an empty tool call id",
@@ -2180,6 +2330,11 @@ impl AgentTree {
                     call.call_id
                 )));
             }
+        }
+        if requests_tool_calls && !self.pending_tool_rounds.is_empty() {
+            return Err(AgentEventValidationError::new(
+                "agent tree already has an open foreground provider tool round",
+            ));
         }
         Ok(())
     }
@@ -2237,6 +2392,7 @@ impl AgentTree {
         );
         for input in std::mem::take(&mut self.pending_context_inputs) {
             let entry = match input {
+                PendingContextInput::AgentMessage { entry } => *entry,
                 PendingContextInput::MessageFact {
                     item,
                     durable_event_seq,

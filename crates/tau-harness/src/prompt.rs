@@ -1024,7 +1024,12 @@ pub(crate) fn assemble_prompt_context_from(
                                 xml_escape(message)
                             )
                         }
-                        _ => message.clone(),
+                        (tau_core::AgentMessageDirection::Inbound, None) => format!(
+                            "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
+                            sender_id,
+                            xml_escape(message)
+                        ),
+                        (tau_core::AgentMessageDirection::Outbound, _) => message.clone(),
                     };
                     blocks.push(tau_proto::ContextBlock::UserInput(
                         tau_proto::UserInputBlock {

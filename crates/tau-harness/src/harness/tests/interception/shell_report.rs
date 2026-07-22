@@ -938,7 +938,8 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
             .pending_ephemeral_ui_shell_canonical_events
             .get(&command.command_id)
             .map(|count| count.get()),
-        Some(2)
+        None,
+        "rollover must cancel the parked progress and commit its queued terminal"
     );
     harness
         .handle_extension_event(
@@ -947,7 +948,7 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
                 action: InterceptAction::Pass(None),
             })),
         )
-        .expect("commit queued shell facts");
+        .expect("consume stale pre-rollover reply");
 
     assert!(
         !harness

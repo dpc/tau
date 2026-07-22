@@ -122,7 +122,7 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 5, worker: 1 },
+        ProviderTurnCounts { main: 4, worker: 1 },
     )?;
     let boot_a_action_matches = fixture
         .trace()?
@@ -278,7 +278,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 5, worker: 1 },
+        ProviderTurnCounts { main: 4, worker: 1 },
     )?;
     let boot_a_action_matches = matched_action_count(&fixture)?;
     disconnect_ui(&mut observer_a.peer)?;
@@ -347,7 +347,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     assert_provider_turn_counts(
         &observer_b.events,
         &identities,
-        ProviderTurnCounts { main: 6, worker: 1 },
+        ProviderTurnCounts { main: 5, worker: 1 },
     )?;
     disconnect_ui(&mut observer_b.peer)?;
     daemon_b.finish()?;

@@ -16,6 +16,7 @@ mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
+use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{PendingTool, background_completion_prompt};
 
 /// Construct one forged-provenance report for ordinary extension publication.
@@ -134,6 +135,58 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     let model: tau_proto::ModelId = "declared/dropped".into();
     assert!(!h.provider_model_routes.contains_key(&model));
     assert!(committed_provider_model_events(&h).is_empty());
+}
+
+/// A model declaration deferred behind another intercepted publication updates
+/// process-global provider state across rollover for the same live generation.
+#[test]
+fn rollover_applies_deferred_provider_models_for_current_generation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "rollover-blocker");
+    h.handle_extension_event(
+        "rollover-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block provider models"));
+    h.handle_extension_event_inner_with_persist(
+        "model-provider",
+        provider_models_declaration("declared/rollover", 1234),
+        Some(false),
+    )
+    .expect("defer model declaration");
+    let model: tau_proto::ModelId = "declared/rollover".into();
+    assert!(!h.provider_model_routes.contains_key(&model));
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert_eq!(
+        h.provider_model_routes
+            .get(&model)
+            .map(tau_proto::ConnectionId::as_str),
+        Some("model-provider")
+    );
+    assert_eq!(h.provider_model_info[&model].context_window, 1234);
+    assert!(matches!(
+        committed_provider_model_events(&h).as_slice(),
+        [
+            (Some(declaration_source), Event::ProviderModelsDeclared(_)),
+            (Some(canonical_source), Event::ProviderModelsUpdated(_)),
+        ] if declaration_source == "model-provider"
+            && canonical_source == HARNESS_CONNECTION_ID
+    ));
 }
 
 /// Same-name declaration replacement drives canonicalization from the committed
@@ -645,6 +698,62 @@ fn dropping_message_report_produces_no_canonical_fact() {
             Event::MessageDelivered(_) | Event::MessageDeliveredReported(_)
         )
     }));
+}
+
+/// A message report active in interception at rollover keeps its raw
+/// observation but cannot canonicalize, wake a branch, or create an activation
+/// from the stale session admission.
+#[test]
+fn rollover_message_report_is_observation_only() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::MESSAGE_DELIVERED_REPORTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let report = Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("rollover-message"),
+        tau_proto::MessageParty {
+            stable_id: "sender-1".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "wake replacement",
+    ));
+    h.handle_extension_event_inner_with_persist("bridge", report, Some(false))
+        .expect("park report");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::MessageDeliveredReported(report)
+                if report.message_id.as_str() == "rollover-message"
+        )
+    }));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::MessageDelivered(fact)
+                if fact.message_id.as_str() == "rollover-message"
+        )
+    }));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
 }
 
 /// Downstream canonicalization consumes the committed same-name replacement,
@@ -1287,8 +1396,9 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     assert!(h.pending_external_receive_acks.is_empty());
 }
 
-/// A canceled local continuation released after rollover retires silently and
-/// cannot publish old receive/sent/tool terminal facts into the new session.
+/// Rollover cancels a local continuation and suspends its responder until the
+/// stale reply is consumed; no old receive/sent/tool terminal fact reaches the
+/// replacement session.
 #[test]
 fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1325,7 +1435,7 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("release old receive");
+    .expect("consume stale old-receive reply");
 
     assert!(h.pending_external_receive_acks.is_empty());
     assert!(!event_log_events(&h).iter().any(|event| {
@@ -1481,8 +1591,9 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     );
 }
 
-/// A parked old-generation receive retains a canceled tombstone across rollover
-/// and is rejected when the interceptor later releases it.
+/// A parked old-generation receive retains a canceled tombstone across
+/// rollover; its responder is skipped for replacement work and its later stale
+/// reply is consumed without applying it.
 #[test]
 fn peer_receive_parked_across_rollover_cannot_commit() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1501,14 +1612,44 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
     )
     .expect("register interceptor");
     let connection_id = tau_proto::ConnectionId::from("peer-client");
-    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "rollover");
+    let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
+    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id.clone(), "rollover");
+    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert_eq!(h.peer_input_rate[&recipient_id].len(), 1);
 
     h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_input_rate.is_empty());
+    let peer_results_after_rollover = peer_results.lock().expect("peer results");
     assert!(
-        h.pending_external_receive_acks
-            .values()
-            .all(|pending| pending.canceled)
+        peer_results_after_rollover.iter().any(|frame| {
+            matches!(
+                &frame.frame,
+                HarnessOutputMessage::ExternalAgentMessageResult(result)
+                    if result.request_id == "peer-request-rollover"
+                        && result.error.as_deref()
+                            == Some("target session changed before receive commit")
+                        && result.recipient_id.is_none()
+                        && !result.started
+            )
+        }),
+        "peer results: {peer_results_after_rollover:?}"
+    );
+    drop(peer_results_after_rollover);
+    let replacement_cid = ensure_test_user_agent(&mut h);
+    let replacement_id = durable_agent_id_for_conversation(&h, &replacement_cid).clone();
+    queue_intercepted_peer_receive(
+        &mut h,
+        &connection_id,
+        replacement_id.clone(),
+        "replacement-generation",
+    );
+    let committed_before_stale_reply = committed_peer_receives(&h);
+    assert_eq!(committed_before_stale_reply.len(), 1);
+    assert_eq!(
+        committed_before_stale_reply[0].message_id.as_str(),
+        "peer-message-replacement-generation"
     );
     h.handle_extension_event(
         "peer-rollover-interceptor",
@@ -1516,10 +1657,34 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("release old receive");
+    .expect("consume stale old-receive reply");
 
     assert!(h.pending_external_receive_acks.is_empty());
-    assert!(committed_peer_receives(&h).is_empty());
+    assert_eq!(committed_peer_receives(&h), committed_before_stale_reply);
+    queue_intercepted_peer_receive(
+        &mut h,
+        &connection_id,
+        replacement_id,
+        "post-stale-resumption",
+    );
+    assert!(
+        h.pending_intercept.is_some(),
+        "interception must resume after consuming exactly one stale reply"
+    );
+    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    h.handle_extension_event(
+        "peer-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit post-stale receive");
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(
+        committed_peer_receives(&h).iter().any(|received| {
+            received.message_id.as_str() == "peer-message-post-stale-resumption"
+        })
+    );
 }
 
 /// A final response parked before commit must not fan out watch content after
@@ -1745,6 +1910,883 @@ fn intercepted_compaction_start_pins_materialized_model() {
         tau_proto::PromptOperation::StandaloneCompaction
     );
     h.shutdown().expect("shutdown");
+}
+
+/// A successful standalone compaction binds its continuation to the final
+/// steer publication, so interception cannot let the checkpoint overtake and
+/// omit that activating input.
+#[test]
+fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    {
+        let info = h
+            .provider_model_info
+            .get_mut(&tau_proto::ModelId::from("test/model"))
+            .expect("model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(1);
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(1);
+        agent.context_usage_head = agent.head;
+        agent.context_usage_model = Some("test/model".into());
+    }
+    assert!(h.schedule_standalone_auto_compaction_for_activation(
+        &cid,
+        true,
+        Some(tau_proto::AgentHead::Root),
+    ));
+    let compact_prompt = read_nth_prompt_created(&h, 0);
+    let transaction_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started.transaction_id),
+            _ => None,
+        })
+        .expect("standalone transaction");
+
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .extend([
+            PendingPrompt::user("first steer after compaction".to_owned()),
+            PendingPrompt::user("final steer after compaction".to_owned()),
+        ]);
+    let interceptor = connect_test_tool(&mut h, "completion-steer-owner");
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register steer interceptor");
+
+    h.handle_provider_response_finished(provider_text_response(
+        &compact_prompt.agent_prompt_id,
+        compact_prompt.agent_id.clone(),
+        "summary",
+    ))
+    .expect("accept compact response");
+    let (parked, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        parked,
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered { ref text, .. })
+            if text == "first steer after compaction"
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.transaction_id.as_ref() == Some(&transaction_id)
+            ))
+            .count(),
+        0,
+        "the continuation checkpoint must wait for the exact steer commit"
+    );
+    assert_eq!(prompt_created_count(&h), 1);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: compact_prompt.agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release first steer");
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered { text, .. }))
+            if text == "final steer after compaction"
+    ));
+    assert_eq!(prompt_created_count(&h), 1);
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.transaction_id.as_ref() == Some(&transaction_id)
+    )));
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release final steer");
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("continuation checkpoint");
+    let tau_proto::AgentHead::Node(final_steer_node) = checkpoint.through else {
+        panic!("continuation must end at the final steer node");
+    };
+    assert!(matches!(
+        &default_agent_node(&h, final_steer_node).entry,
+        AgentEntry::UserInput { items, .. }
+            if items.iter().any(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "final steer after compaction"
+                    ))
+            ))
+    ));
+    let continuation = read_nth_prompt_created(&h, 1);
+    for expected in [
+        "first steer after compaction",
+        "final steer after compaction",
+    ] {
+        assert_eq!(
+            continuation
+                .context
+                .flatten_iter()
+                .filter(|item| matches!(
+                    item,
+                    ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content,
+                        ..
+                    }) if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == expected
+                    ))
+                ))
+                .count(),
+            1
+        );
+    }
+    let events = event_log_events(&h);
+    let checkpoint_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.transaction_id.as_ref() == Some(&transaction_id)
+            )
+        })
+        .expect("checkpoint index");
+    let navigation_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentHeadMoved(moved) if moved.head == tau_proto::AgentHead::Root
+            )
+        })
+        .expect("navigation index");
+    assert!(checkpoint_index < navigation_index);
+    h.shutdown().expect("shutdown");
+}
+
+/// First-suffix persistence failure retains the exact interceptor-approved
+/// replacement, recommits it without repeated interception, publishes only the
+/// untouched remaining suffix, and fans out the sanctioned watcher text only
+/// after its successful durable commit.
+#[test]
+fn rejected_compaction_completion_steer_retries_on_reselection() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let (agent_id, transaction_id, _, batch_parent) =
+        super::lifecycle::seed_restored_compaction_checkpoint(
+            &mut h,
+            &cid,
+            &"test/model".into(),
+            "ct-steer-retry",
+        );
+    h.enqueued_standalone_inference_checkpoints.clear();
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let watcher_messages_before = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id == watcher_id
+                && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+        })
+        .count();
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::Running {
+            id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: Some(batch_parent),
+            model: "test/model".into(),
+            branch_generation: 0,
+            compact_prompt_id: "ap-compact-steer-retry".into(),
+        };
+    let retry_prompt =
+        PendingPrompt::human_ui_watch_notified("retry exact completion steer".to_owned());
+    let final_retry_prompt = PendingPrompt::user("retry final completion steer".to_owned());
+    let completion = AgentPublishCompletion::StandaloneContinuation {
+        transaction_id: transaction_id.clone(),
+        model: "test/model".into(),
+        activation_cut: tau_proto::AgentHead::Root,
+        batch_parent,
+        source: None,
+        retry_prompts: vec![retry_prompt.clone(), final_retry_prompt],
+        complete_on_commit: false,
+        approved_retry_event: None,
+    };
+    let interceptor = connect_test_tool(&mut h, "retry-replacement-owner");
+    h.handle_extension_event(
+        "retry-replacement-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register replacement interceptor");
+    h.publish_event_for_agent_with_completion(
+        &cid,
+        None,
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: retry_prompt.text.clone(),
+            message_class: retry_prompt.message_class,
+            internal_kind: retry_prompt.internal_kind(),
+            ctx_id: retry_prompt.ctx_id.clone(),
+        }),
+        Some(completion),
+        false,
+    );
+    let (mut replacement, _) = intercepted_payload(&interceptor);
+    let Event::AgentPromptSteered(replaced) = &mut replacement else {
+        panic!("steer intercepted");
+    };
+    replaced.text = "approved replacement steer".to_owned();
+    replaced.ctx_id = Some("approved-ctx".to_owned());
+    let event_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = event_path.with_extension("cbor.steer-retry-backup");
+    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&event_path).expect("reject final steer append");
+    h.handle_extension_event(
+        "retry-replacement-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement))),
+        })),
+    )
+    .expect("release approved replacement into append failure");
+    assert!(
+        h.pending_agent_publish_completions.contains_key(&cid),
+        "failed append must retain the exact completion envelope"
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Running { .. }
+    ));
+    assert_eq!(prompt_created_count(&h), 0);
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.recipient_id == watcher_id
+                    && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+            })
+            .count(),
+        watcher_messages_before,
+        "rejected steer must not fan out a phantom watcher input"
+    );
+    std::fs::remove_dir(&event_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: batch_parent,
+        }),
+    );
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(steered))
+            if steered.text == "retry final completion steer"
+    ));
+    h.handle_extension_event(
+        "retry-replacement-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release remaining suffix steer");
+    assert!(!h.pending_agent_publish_completions.contains_key(&cid));
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("retried continuation checkpoint");
+    assert_ne!(checkpoint.through, batch_parent);
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("retried owner prompt");
+    assert_eq!(
+        prompt
+            .context
+            .flatten_iter()
+            .filter(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "approved replacement steer"
+                    ))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        prompt
+            .context
+            .flatten_iter()
+            .filter(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "retry exact completion steer"
+                    ))
+            ))
+            .count(),
+        0
+    );
+    assert_eq!(
+        prompt
+            .context
+            .flatten_iter()
+            .filter(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "retry final completion steer"
+                    ))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        interceptor
+            .lock()
+            .expect("interceptor frames")
+            .iter()
+            .filter(|frame| matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_)))
+            .count(),
+        2,
+        "approved first steer must not restart interception; only the remaining suffix is new"
+    );
+    let watcher_messages: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id == watcher_id
+                && message.kind == tau_proto::AgentMessageKind::WatchPrompt
+        })
+        .collect();
+    assert_eq!(watcher_messages.len(), watcher_messages_before + 1);
+    assert!(watcher_messages.iter().any(|message| {
+        message.message.contains("approved replacement steer")
+            && !message.message.contains("retry exact completion steer")
+    }));
+}
+
+fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
+    event_log_events(h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentMessageReceived(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A completion-owned intercepted steer and an independent activation queued
+/// behind it retain disjoint envelope ownership; the steer cannot consume the
+/// later activation's watermark.
+#[test]
+fn completion_steer_cannot_steal_queued_activation_ownership() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let (agent_id, transaction_id, _, batch_parent) =
+        super::lifecycle::seed_restored_compaction_checkpoint(
+            &mut h,
+            &cid,
+            &"test/model".into(),
+            "ct-envelope-ownership",
+        );
+    h.enqueued_standalone_inference_checkpoints.clear();
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::Running {
+            id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: Some(batch_parent),
+            model: "test/model".into(),
+            branch_generation: 0,
+            compact_prompt_id: "ap-envelope-compact".into(),
+        };
+    let _interceptor = connect_test_tool(&mut h, "completion-envelope-owner");
+    h.handle_extension_event(
+        "completion-envelope-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let completion_prompt = PendingPrompt::user("completion-owned steer".to_owned());
+    h.publish_event_for_agent_with_completion(
+        &cid,
+        None,
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: completion_prompt.text.clone(),
+            message_class: completion_prompt.message_class,
+            internal_kind: None,
+            ctx_id: None,
+        }),
+        Some(AgentPublishCompletion::StandaloneContinuation {
+            transaction_id,
+            model: "test/model".into(),
+            activation_cut: tau_proto::AgentHead::Root,
+            batch_parent,
+            source: None,
+            retry_prompts: vec![completion_prompt],
+            complete_on_commit: true,
+            approved_retry_event: None,
+        }),
+        false,
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id,
+            text: "independent queued activation".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    assert!(h.pending_intercept.as_ref().is_some_and(|pending| {
+        pending
+            .sync_head_for
+            .as_ref()
+            .is_some_and(|sync| sync.suppress_activation_dispatch && sync.completion.is_some())
+    }));
+
+    h.handle_extension_event(
+        "completion-envelope-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release completion steer");
+    let independent_node = default_agent_tree(&h)
+        .nodes()
+        .iter()
+        .find_map(|node| {
+            matches!(
+                &node.entry,
+                AgentEntry::UserInput { items, .. }
+                    if items.iter().any(|item| matches!(
+                        item,
+                        ContextItem::Message(MessageItem { content, .. })
+                            if content.iter().any(|part| matches!(
+                                part,
+                                ContentPart::Text { text }
+                                    if text == "independent queued activation"
+                            ))
+                    ))
+            )
+            .then_some(node.id)
+        })
+        .expect("independent activation node");
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(
+        h.pending_publish_idle_dispatches[0].activation_through,
+        Some(tau_proto::AgentHead::Node(independent_node))
+    );
+}
+
+/// Agent-local transaction-id collisions cannot purge another agent's deferred
+/// completion batch.
+#[test]
+fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid_a = ensure_test_user_agent(&mut h);
+    let cid_b = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_a = durable_agent_id_for_conversation(&h, &cid_a);
+    let agent_b = durable_agent_id_for_conversation(&h, &cid_b);
+    let _interceptor = connect_test_tool(&mut h, "batch-collision-owner");
+    h.handle_extension_event(
+        "batch-collision-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register queue blocker");
+    h.publish_event(None, draft_event("hold completion batches"));
+    let transaction_id = tau_proto::CompactionTransactionId::parse("ct-0").expect("transaction");
+    let completion = |text: &str| AgentPublishCompletion::StandaloneContinuation {
+        transaction_id: transaction_id.clone(),
+        model: "test/model".into(),
+        activation_cut: tau_proto::AgentHead::Root,
+        batch_parent: tau_proto::AgentHead::Root,
+        source: None,
+        retry_prompts: vec![PendingPrompt::user(text.to_owned())],
+        complete_on_commit: true,
+        approved_retry_event: None,
+    };
+    let completion_a = completion("agent A completion");
+    for (cid, agent_id, text, owned_completion) in [
+        (
+            &cid_a,
+            agent_a.clone(),
+            "agent A completion",
+            completion_a.clone(),
+        ),
+        (
+            &cid_b,
+            agent_b.clone(),
+            "agent B completion",
+            completion("agent B completion"),
+        ),
+    ] {
+        h.publish_event_for_agent_with_completion(
+            cid,
+            None,
+            Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                inference_activation: true,
+                agent_id,
+                text: text.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                ctx_id: None,
+            }),
+            Some(owned_completion),
+            false,
+        );
+    }
+    h.discard_deferred_agent_publish_batch(&cid_a, &completion_a);
+    assert!(h.deferred_publishes.iter().all(|publish| {
+        !matches!(
+            publish.event(),
+            Event::AgentPromptSteered(steered) if steered.agent_id == agent_a
+        )
+    }));
+    assert!(h.deferred_publishes.iter().any(|publish| {
+        matches!(
+            publish.event(),
+            Event::AgentPromptSteered(steered) if steered.agent_id == agent_b
+        )
+    }));
+}
+
+/// Canceling an unloading agent's intercepted ordinary inference checkpoint
+/// preserves and resumes another agent's durable publication from the global
+/// deferred FIFO.
+#[test]
+fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid_a = ensure_test_user_agent(&mut h);
+    let cid_b = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_a = durable_agent_id_for_conversation(&h, &cid_a);
+    let agent_b = durable_agent_id_for_conversation(&h, &cid_b);
+    let _interceptor = connect_test_tool(&mut h, "unload-completion-owner");
+    h.handle_extension_event(
+        "unload-completion-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register completion interceptor");
+    let agent_prompt_id = tau_proto::AgentPromptId::from("ap-unload-a");
+    h.agents
+        .get_mut(&cid_a)
+        .expect("agent A")
+        .activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: agent_prompt_id.clone(),
+        through: tau_proto::AgentHead::Root,
+        dispatch: crate::agent::InferenceDispatchOwnership {
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
+        },
+    };
+    let old_checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_a,
+            transaction_id: None,
+            agent_prompt_id,
+            through: tau_proto::AgentHead::Root,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        });
+    h.publish_for_agent(&cid_a, old_checkpoint.clone());
+    assert!(h.pending_intercept.is_some());
+    h.publish_for_agent(
+        &cid_b,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_b.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    assert_eq!(h.deferred_publishes.len(), 1);
+
+    h.remove_agent(&cid_a);
+
+    assert!(h.pending_intercept.is_none());
+    assert!(h.deferred_publishes.is_empty());
+    assert!(h.agents.contains_key(&cid_b));
+    assert!(!event_log_events(&h).contains(&old_checkpoint));
+    assert_eq!(
+        h.agent_store
+            .agent(agent_b.as_str())
+            .expect("other agent tree")
+            .head(),
+        None,
+        "other agent's deferred head move must commit instead of being dropped"
+    );
+    assert!(event_log_events(&h).into_iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentHeadMoved(moved)
+                if moved.agent_id == agent_b && moved.head == tau_proto::AgentHead::Root
+        )
+    }));
+    h.handle_extension_event(
+        "unload-completion-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("replace suspended interceptor registration");
+    let surviving_event = draft_event("surviving post-unload event");
+    h.publish_event(None, surviving_event.clone());
+    assert!(h.pending_intercept.is_none());
+    h.handle_extension_event(
+        "unload-completion-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("stale pre-unload reply is ignored");
+    assert!(event_log_events(&h).contains(&surviving_event));
+    assert!(!event_log_events(&h).contains(&old_checkpoint));
+}
+
+/// Disconnect clears destructive-cancellation suspension with the old
+/// registration, so a reconnected interceptor can register and immediately
+/// intercept without first supplying the old connection's stale reply.
+#[test]
+fn suspended_interceptor_disconnect_reconnects_unsuspended() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let connection_id = "suspended-reconnect";
+    let _interceptor = connect_test_tool(&mut h, connection_id);
+    h.handle_extension_event(
+        connection_id,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register checkpoint interceptor");
+    let agent_prompt_id = tau_proto::AgentPromptId::from("ap-suspended-reconnect");
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: crate::agent::InferenceCheckpointOwner::Inference,
+            agent_prompt_id: agent_prompt_id.clone(),
+            through: tau_proto::AgentHead::Root,
+            dispatch: crate::agent::InferenceDispatchOwnership {
+                model: "test/model".into(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
+            },
+        };
+    h.publish_for_agent(
+        &cid,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id,
+            transaction_id: None,
+            agent_prompt_id,
+            through: tau_proto::AgentHead::Root,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    assert!(h.pending_intercept.is_some());
+
+    h.remove_agent(&cid);
+    let typed_connection_id = tau_proto::ConnectionId::from(connection_id);
+    assert!(
+        h.suspended_interceptor_connections
+            .contains(&typed_connection_id)
+    );
+    h.handle_disconnect(connection_id);
+    assert!(
+        !h.suspended_interceptor_connections
+            .contains(&typed_connection_id)
+    );
+
+    let reconnected = connect_test_tool(&mut h, connection_id);
+    h.handle_extension_event(
+        connection_id,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register reconnected interceptor");
+    let after_reconnect = draft_event("intercept after reconnect");
+    h.publish_event(None, after_reconnect.clone());
+
+    let (intercepted, _) = intercepted_payload(&reconnected);
+    assert_eq!(intercepted, after_reconnect);
+    assert_eq!(
+        h.pending_intercept
+            .as_ref()
+            .map(|pending| pending.conn_id.as_str()),
+        Some(connection_id)
+    );
+    h.handle_extension_event(
+        connection_id,
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release reconnected interception");
+    assert!(event_log_events(&h).contains(&after_reconnect));
+}
+
+/// Rollover retains a deferred default-mandatory standalone cancellation even
+/// when its caller did not set the explicit `must_pass` envelope bit.
+#[test]
+fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-rollover-terminal").expect("transaction");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            compact_prompt_id: "ap-rollover-terminal".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: None,
+            model: "test/model".into(),
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    let _interceptor = connect_test_tool(&mut h, "rollover-terminal-blocker");
+    h.handle_extension_event(
+        "rollover-terminal-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block rollover terminal"));
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id,
+            transaction_id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+            resume_through: None,
+        }),
+    );
+    assert!(h.pending_intercept.is_some());
+    assert!(!event_log_events(&h).into_iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.transaction_id == transaction_id
+        )
+    }));
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(event_log_events(&h).into_iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.transaction_id == transaction_id
+                    && failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::Cancelled
+        )
+    }));
 }
 
 /// A replay-drift claim parked by interception must remain uniquely pending;
@@ -3406,6 +4448,8 @@ fn failed_intercept_request_delivery_skips_interceptor_and_drains_publishes() {
     assert_eq!(second_entry.event, second);
 }
 
+/// Disconnecting the responder is equivalent to `Pass(None)`: the original
+/// publication commits and the interception FIFO drains instead of wedging.
 #[test]
 fn interception_disconnect_mid_reply_publishes_original() {
     let tmp = TempDir::new().expect("tempdir");
@@ -3433,14 +4477,11 @@ fn interception_disconnect_mid_reply_publishes_original() {
     assert_eq!(entry.event, draft_event("inflight"));
 }
 
+/// A prompt parked in interception cannot dispatch against the pre-commit
+/// branch; release first folds the user input, then creates a prompt containing
+/// that exact committed message.
 #[test]
 fn interception_user_prompt_dispatch_waits_for_commit() {
-    // Regression for the "Ready" loop. When `AgentPromptSubmitted` is
-    // held in interception, the harness must not dispatch the agent
-    // prompt against the pre-prompt conversation tail — the
-    // assembled message list must include the just-committed user
-    // message. We assert this by inspecting the conversation
-    // head/tree before vs. after the intercept reply lands.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
@@ -3479,7 +4520,12 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         head_before_dispatch,
         "c.head must not advance while the prompt is parked"
     );
-    assert_eq!(h.pending_user_prompt_dispatches.len(), 1);
+    assert!(h.pending_intercept.as_ref().is_some_and(|pending| {
+        pending
+            .sync_head_for
+            .as_ref()
+            .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
+    }));
 
     // Reply pass-through. Commit + react fires the deferred
     // dispatch, and the AgentPromptCreated is built from the
@@ -3492,7 +4538,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     )
     .expect("intercept reply");
 
-    assert_eq!(h.pending_user_prompt_dispatches.len(), 0);
+    assert!(h.pending_intercept.is_none());
     assert_eq!(
         prompt_created_count(&h),
         prompts_before + 1,
@@ -3574,11 +4620,9 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         .expect("dispatch user prompt with passive notice");
 
     assert_eq!(prompt_created_count(&h), prompts_before);
-    assert_eq!(
-        h.pending_publish_idle_dispatches.len(),
-        1,
-        "dispatch should be deferred for the whole passive+user batch"
-    );
+    assert!(h.pending_intercept.is_some());
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(!h.pending_publish_idle_dispatches[0].committed_activation);
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -3593,7 +4637,15 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         prompts_before,
         "provider dispatch must still wait for the real user prompt"
     );
+    assert!(h.pending_intercept.as_ref().is_some_and(|pending| matches!(
+        pending.event,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            ..
+        })
+    )));
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(!h.pending_publish_idle_dispatches[0].committed_activation);
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -3603,7 +4655,8 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     )
     .expect("pass user prompt");
 
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 0);
+    assert!(h.pending_intercept.is_none());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
     assert_eq!(prompt_created_count(&h), prompts_before + 1);
     let compact = read_nth_prompt_created(&h, prompts_before as usize);
     assert_eq!(
@@ -3640,6 +4693,294 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         vec![(passive_text, false), ("real follow-up".to_owned(), true)],
         "passive notice should commit false immediately before the active user prompt"
     );
+}
+
+/// Navigation queued behind an intercepted activation commits after that
+/// activation, leaving its exact branch-owned obligation dormant until the
+/// original activation node is reselected.
+#[test]
+fn intercepted_activation_navigation_keeps_original_branch_dormant() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.current_session_id.clone();
+    h.initialized_sessions.insert(session_id);
+    h.selected_model = Some("echo/model".into());
+    let _interceptor = connect_test_tool(&mut h, "interceptor-branch-activation");
+    h.handle_extension_event(
+        "interceptor-branch-activation",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.dispatch_prompt_for_agent(&cid, "branch A activation".to_owned())
+        .expect("intercept activation");
+    assert!(h.pending_intercept.as_ref().is_some_and(|pending| {
+        pending
+            .sync_head_for
+            .as_ref()
+            .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
+    }));
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.handle_extension_event(
+        "interceptor-branch-activation",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit activation then navigation");
+
+    let activation_node = default_agent_tree(&h)
+        .nodes()
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.entry,
+                AgentEntry::UserInput { items, .. }
+                    if items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContextItem::Message(MessageItem { content, .. })
+                                if content.iter().any(|part| {
+                                    matches!(
+                                        part,
+                                        ContentPart::Text { text }
+                                            if text == "branch A activation"
+                                    )
+                                })
+                        )
+                    })
+            )
+        })
+        .map(|node| node.id)
+        .expect("activation node");
+    assert_eq!(h.agents[&cid].head, None);
+    assert_eq!(prompt_created_count(&h), 0);
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(activation_node),
+        }),
+    );
+    assert_eq!(prompt_created_count(&h), 1);
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// Two intercepted same-agent activations separated onto sibling branches
+/// retain two precommit tokens and become independent branch-owned obligations.
+#[test]
+fn intercepted_sibling_activations_retain_distinct_obligations() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.current_session_id.clone();
+    h.initialized_sessions.insert(session_id);
+    h.selected_model = Some("echo/model".into());
+    let _interceptor = connect_test_tool(&mut h, "interceptor-sibling-activations");
+    h.handle_extension_event(
+        "interceptor-sibling-activations",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.dispatch_prompt_for_agent(&cid, "branch A activation".to_owned())
+        .expect("intercept branch A");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.dispatch_prompt_for_agent(&cid, "branch B activation".to_owned())
+        .expect("queue branch B");
+    assert!(h.pending_intercept.is_some());
+    assert!(h.deferred_publishes.iter().any(|publish| matches!(
+        publish.event(),
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            text,
+            ..
+        }) if text == "branch B activation"
+    )));
+
+    h.handle_extension_event(
+        "interceptor-sibling-activations",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit branch A and park branch B");
+    assert!(h.pending_intercept.is_some());
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    h.handle_extension_event(
+        "interceptor-sibling-activations",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit branch B");
+
+    let nodes = default_agent_tree(&h)
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.entry {
+            AgentEntry::UserInput { items, .. } => items.iter().find_map(|item| match item {
+                ContextItem::Message(MessageItem { content, .. }) => {
+                    content.iter().find_map(|part| match part {
+                        ContentPart::Text { text }
+                            if text == "branch A activation" || text == "branch B activation" =>
+                        {
+                            Some((text.clone(), node.id))
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let branch_a = nodes["branch A activation"];
+    let branch_b = nodes["branch B activation"];
+    assert_ne!(branch_a, branch_b);
+    let branch_b_prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(h.agents[&cid].head, Some(branch_b));
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_prompt_id == branch_b_prompt.agent_prompt_id
+                && started.through == tau_proto::AgentHead::Node(branch_b)
+    )));
+
+    h.handle_provider_response_finished(provider_text_response(
+        &branch_b_prompt.agent_prompt_id,
+        agent_id.clone(),
+        "branch B complete",
+    ))
+    .expect("finish branch B");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(branch_a),
+        }),
+    );
+    assert_eq!(prompt_created_count(&h), 2);
+    let branch_a_prompt = read_nth_prompt_created(&h, 1);
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_prompt_id == branch_a_prompt.agent_prompt_id
+                && started.through == tau_proto::AgentHead::Node(branch_a)
+    )));
+    assert!(h.pending_intercept.is_none());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// An activating fact rejected by the agent journal leaves no detached
+/// activation ownership that a later committed occurrence could consume.
+#[test]
+fn rejected_activating_append_leaves_no_stale_dispatch() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let event_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = event_path.with_extension("cbor.activation-backup");
+    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&event_path).expect("reject activation append");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: "rejected activation".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(
+        conv.pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != "rejected activation" && !prompt.is_loop_guard())
+    );
+    assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
+    assert!(!conv.loop_guard.stop_automatic_continuation());
+    assert!(h.pending_tools.is_empty());
+    assert!(h.tool_agents.is_empty());
+    assert!(h.peer_internal_tool_agents.is_empty());
+    std::fs::remove_dir(&event_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("committed activation".to_owned()))
+        .expect("dispatch later activation");
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert_eq!(prompt_created_count(&h), 1);
+    let prompt = read_nth_prompt_created(&h, 0);
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == prompt.agent_prompt_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("later checkpoint");
+    let tau_proto::AgentHead::Node(through) = checkpoint.through else {
+        panic!("later activation watermark");
+    };
+    assert!(matches!(
+        &default_agent_node(&h, through).entry,
+        AgentEntry::UserInput { items, .. }
+            if items.iter().any(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text } if text == "committed activation"
+                    ))
+            ))
+    ));
 }
 
 #[test]
@@ -3877,6 +5218,106 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     assert!(persist, "metadata unset must be durable by default");
 
     h.shutdown().expect("shutdown");
+}
+
+/// Rollover preserves a deferred mutation-correlated metadata set under the
+/// same effective must-pass policy used by an interceptor Drop.
+#[test]
+fn rollover_commits_deferred_mutation_correlated_metadata_set() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let agent_id = tau_proto::AgentId::parse("metadata-rollover-agent").expect("agent id");
+    h.session_loaded_agents.insert(agent_id.clone());
+    let _interceptor = connect_test_tool(&mut h, "metadata-rollover-blocker");
+    h.handle_extension_event(
+        "metadata-rollover-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block metadata mutation"));
+    let metadata = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id,
+        key: tau_proto::AgentMetadataKey::new("rollover-key"),
+        value: CborValue::Text("retained".to_owned()),
+        mutation_id: Some(
+            tau_proto::AgentMetadataMutationId::parse("rollover-mutation").expect("mutation id"),
+        ),
+        inheritable: true,
+    });
+    h.publish_event(None, metadata.clone());
+    assert!(!event_log_events(&h).contains(&metadata));
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(event_log_events(&h).contains(&metadata));
+}
+
+/// Deferred peer observation families commit across rollover while the advanced
+/// admission generation suppresses internal-prompt and context-registration
+/// effects uniformly.
+#[test]
+fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    connect_ready_configured_extension(
+        &mut h,
+        "observation-owner",
+        "configured-observation-owner",
+        tau_proto::ClientKind::Core,
+    );
+    let _interceptor = connect_test_tool(&mut h, "observation-rollover-blocker");
+    h.handle_extension_event(
+        "observation-rollover-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block peer observations"));
+    let observations = [
+        Event::ExtInternalPromptSubmitRequest(tau_proto::ExtInternalPromptSubmitRequest {
+            agent_id,
+            text: "stale internal prompt".to_owned(),
+            ctx_id: Some("stale-context".to_owned()),
+        }),
+        Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+        Event::ExtensionSessionContextProviderRegister(
+            tau_proto::ExtensionSessionContextProviderRegister {},
+        ),
+    ];
+    for event in observations.clone() {
+        h.handle_extension_event_inner("observation-owner", event)
+            .expect("defer observation");
+    }
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    let events = event_log_events(&h);
+    for observation in observations {
+        assert!(events.contains(&observation));
+    }
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.text == "stale internal prompt"
+        ) || matches!(
+            event,
+            Event::AgentPromptSteered(prompt)
+                if prompt.text == "stale internal prompt"
+        )
+    }));
+    let source = tau_proto::ConnectionId::from("observation-owner");
+    assert!(!h.agent_context_providers.contains(&source));
+    assert!(!h.session_context_providers.contains(&source));
 }
 
 /// Interceptors may rewrite progress payloads, but shell correlation/target

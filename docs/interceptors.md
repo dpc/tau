@@ -172,7 +172,8 @@ receives the next `intercept_request`.
 
 A peer cannot spoof the cursor in its reply. The harness records the pending
 interceptor and advances the chain from that connection when the reply arrives.
-Unexpected or duplicate replies are ignored.
+Unexpected or duplicate replies are ignored unless the harness is waiting to
+consume the one stale reply described below.
 
 ## Failure and backpressure
 
@@ -185,6 +186,17 @@ as `pass` unchanged so an extension cannot wedge the event pipeline by going
 away mid-reply. If the harness cannot deliver an `intercept_request` to the
 selected interceptor, it logs the failure, removes/skips that interceptor
 registration, and continues the chain instead of parking the publish.
+
+Agent unload, session rollover, or canceled peer receive can destructively
+cancel a publication after its `intercept_request` was delivered. The harness
+keeps the interceptor registration but suspends the entire connection from
+matching new publications until it consumes that request's uncorrelated stale
+reply. A registration replacement is stored but remains suspended. The next
+`intercept_reply` from the connection is consumed without applying its action
+and clears suspension; exactly one reply is consumed, then normal interception
+resumes. Suspension has no timeout, so a connection that never replies remains
+bypassed indefinitely. Disconnect removes the suspended registration and state;
+a later connection and registration start unsuspended.
 
 ## Final emission
 

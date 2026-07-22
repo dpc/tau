@@ -1,5 +1,24 @@
 use super::*;
 
+/// Applies one contiguous durable record through the sole canonical fold path.
+fn apply_persisted_test_record(
+    tree: &mut AgentTree,
+    parent: AgentEventParent,
+    event: Event,
+) -> (PersistedAgentEventSeq, Option<NodeId>) {
+    let seq = tree.next_event_seq;
+    let node = tree
+        .apply_persisted_record(&PersistedAgentEvent {
+            seq,
+            source: None,
+            event,
+            parent,
+            recorded_at: tau_proto::UnixMicros::default(),
+        })
+        .expect("test record is contiguous and valid");
+    (seq, node)
+}
+
 /// Ensures extension-supplied typed image metadata cannot bypass the durable
 /// provider-content byte/type validation boundary.
 #[test]
@@ -1162,8 +1181,8 @@ fn inheritable_metadata_filters_non_inheritable_entries() {
 }
 
 /// Ensures provider tool-call rounds fold only after every terminal result,
-/// preserving model call order and then flushing message facts in the pending
-/// input FIFO.
+/// preserving model call order and then flushing typed agent messages and
+/// message facts together in durable acceptance order.
 #[test]
 fn provider_tool_round_waits_for_all_terminal_results() {
     let agent_id = agent_id();
@@ -1175,7 +1194,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             AgentEventParent::InheritHead,
             &Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
                 agent_prompt_id: "sp-tool-round".into(),
-                agent_id,
+                agent_id: agent_id.clone(),
                 output_items: vec![
                     ContextItem::ToolCall(ToolCallItem {
                         call_id: first_call_id.clone(),
@@ -1211,20 +1230,60 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .expect("assistant response should fold");
 
     assert_eq!(tree.head(), Some(assistant_node_id));
+    let (outbound_seq, outbound_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: "agent-sent-during-tool".into(),
+            sender_id: agent_id.clone(),
+            recipient: tau_proto::AgentMessageRecipient::Agent {
+                agent_id: other_agent_id(),
+            },
+            kind: AgentMessageKind::Message,
+            message: "outbound after result".to_owned(),
+        }),
+    );
     assert!(
-        tree.record_committed_message_fact(
-            Box::new(tau_proto::MessageItem {
-                role: tau_proto::ContextRole::User,
-                content: vec![tau_proto::ContentPart::Text {
-                    text: "<tau_message event=\"delivered\">later</tau_message>".to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            }),
-            PersistedAgentEventSeq::new(7),
-        )
-        .is_none(),
+        outbound_node.is_none(),
+        "outbound projection must remain pending behind the tool result"
+    );
+    let (message_fact_seq, message_fact_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("test-publisher"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("during-tool-fact"),
+            tau_proto::MessageParty {
+                stable_id: "external-sender".to_owned(),
+                display_name: None,
+                sender_auth: None,
+            },
+            None,
+            "later",
+        )),
+    );
+    assert!(
+        message_fact_node.is_none(),
         "generic message fact must share the tool-adjacent pending input queue"
+    );
+    let (inbound_seq, inbound_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "agent-received-during-tool".into(),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "inbound after fact".to_owned(),
+        }),
+    );
+    assert!(
+        inbound_node.is_none(),
+        "inbound projection must remain pending behind the tool result"
     );
     assert!(
         tree.apply_event_at(
@@ -1260,16 +1319,42 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .expect("final terminal result should close the round");
     let final_node = tree
         .node(final_node_id)
-        .expect("message-fact node should exist");
+        .expect("inbound agent-message node should exist");
     assert!(matches!(
         final_node.entry,
+        AgentEntry::AgentMessage {
+            durable_event_seq,
+            direction: AgentMessageDirection::Inbound,
+            ..
+        } if durable_event_seq == inbound_seq
+    ));
+    let message_fact_node = tree
+        .node(final_node.parent_id.expect("inbound follows message fact"))
+        .expect("message-fact node should exist");
+    assert!(matches!(
+        message_fact_node.entry,
         AgentEntry::MessageFact {
             durable_event_seq,
             ..
-        } if durable_event_seq == PersistedAgentEventSeq::new(7)
+        } if durable_event_seq == message_fact_seq
+    ));
+    let outbound_node = tree
+        .node(message_fact_node.parent_id.expect("fact follows outbound"))
+        .expect("outbound agent-message node should exist");
+    assert!(matches!(
+        outbound_node.entry,
+        AgentEntry::AgentMessage {
+            durable_event_seq,
+            direction: AgentMessageDirection::Outbound,
+            ..
+        } if durable_event_seq == outbound_seq
     ));
     let tool_results_node = tree
-        .node(final_node.parent_id.expect("fact follows tool results"))
+        .node(
+            outbound_node
+                .parent_id
+                .expect("outbound follows tool results"),
+        )
         .expect("tool results node should exist");
     assert_eq!(tool_results_node.parent_id, Some(assistant_node_id));
 
@@ -1288,6 +1373,177 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         tree.unresolved_foreground_tool_calls_from(Some(final_node_id))
             .is_empty()
     );
+}
+
+/// Ensures one foreground provider round owns the whole tree while only
+/// context accepted on the tool-calling assistant's branch defers behind it.
+#[test]
+fn provider_tool_round_is_tree_global_and_branch_applicable() {
+    let agent_id = agent_id();
+    let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+    let root_node = tree
+        .apply_event_at(
+            AgentEventParent::Root,
+            &Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: "root prompt".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        )
+        .expect("root prompt folds");
+    let call_id = ToolCallId::from("call-global");
+    let assistant_node = tree
+        .apply_event_at(
+            AgentEventParent::Under(root_node),
+            &Event::ProviderResponseFinished(tool_calling_response(
+                &agent_id,
+                "ap-global",
+                vec![call_id.clone()],
+            )),
+        )
+        .expect("first tool-bearing response folds");
+    assert!(tree.has_open_foreground_tool_round());
+
+    let second_round = Event::ProviderResponseFinished(tool_calling_response(
+        &agent_id,
+        "ap-second",
+        vec![ToolCallId::from("call-second-round")],
+    ));
+    let error = tree
+        .validate_event_at(AgentEventParent::Under(root_node), &second_round)
+        .expect_err("a sibling response cannot open another foreground round");
+    assert!(error.to_string().contains("already has an open"));
+
+    let sibling_message = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: "sibling-message".into(),
+        sender_id: other_agent_id(),
+        sender_session_id: None,
+        recipient_id: agent_id.clone(),
+        kind: AgentMessageKind::Message,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        message: "sibling materializes now".to_owned(),
+    });
+    let (_, sibling_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::Under(root_node),
+        sibling_message,
+    );
+    let sibling_node = sibling_node.expect("sibling input materializes immediately");
+    assert_eq!(tree.node(sibling_node).unwrap().parent_id, Some(root_node));
+
+    let descendant_message = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: "descendant-message".into(),
+        sender_id: other_agent_id(),
+        sender_session_id: None,
+        recipient_id: agent_id,
+        kind: AgentMessageKind::Message,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        message: "descendant waits".to_owned(),
+    });
+    let (_, descendant_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::Under(assistant_node),
+        descendant_message,
+    );
+    assert!(descendant_node.is_none());
+
+    let drained = tree.apply_event_at(
+        AgentEventParent::InheritHead,
+        &Event::ProviderToolResult(tau_proto::ToolResult {
+            call_id,
+            tool_name: ToolName::new("tool"),
+            tool_type: ToolType::Function,
+            result: tau_proto::CborValue::Text("done".to_owned()),
+            provider_content: Vec::new(),
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+    );
+    let drained = drained.expect("tool result and deferred input fold");
+    let drained_node = tree.node(drained).expect("drained message node");
+    assert!(matches!(
+        drained_node.entry,
+        AgentEntry::AgentMessage { .. }
+    ));
+    let results_node = tree.node(drained_node.parent_id.unwrap()).unwrap();
+    assert_eq!(results_node.parent_id, Some(assistant_node));
+    assert!(!tree.has_open_foreground_tool_round());
+}
+
+/// Ensures convenience incremental folds allocate deterministic, monotonic
+/// synthetic sequences for repeated agent-message occurrences.
+#[test]
+fn synthetic_agent_message_folds_advance_occurrence_sequence() {
+    let agent_id = agent_id();
+    let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+    for (message_id, message) in [("sent-one", "one"), ("sent-two", "two")] {
+        tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: message_id.into(),
+            sender_id: agent_id.clone(),
+            recipient: AgentMessageRecipient::Agent {
+                agent_id: other_agent_id(),
+            },
+            kind: AgentMessageKind::Message,
+            message: message.to_owned(),
+        }));
+    }
+    let sequences = tree
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.entry {
+            AgentEntry::AgentMessage {
+                durable_event_seq, ..
+            } => Some(durable_event_seq.get()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sequences, vec![0, 1]);
+    assert_eq!(tree.next_event_seq().get(), 2);
+}
+
+fn tool_calling_response(
+    agent_id: &AgentId,
+    prompt_id: &str,
+    call_ids: Vec<ToolCallId>,
+) -> tau_proto::ProviderResponseFinished {
+    tau_proto::ProviderResponseFinished {
+        agent_prompt_id: prompt_id.into(),
+        agent_id: agent_id.clone(),
+        output_items: call_ids
+            .into_iter()
+            .map(|call_id| {
+                ContextItem::ToolCall(ToolCallItem {
+                    call_id,
+                    name: ToolName::new("tool"),
+                    tool_type: ToolType::Function,
+                    arguments: tau_proto::CborValue::Null,
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })
+            })
+            .collect(),
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
 }
 
 /// Ensures the validation refactor preserves the distinct diagnostic for

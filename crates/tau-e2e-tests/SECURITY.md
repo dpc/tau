@@ -58,12 +58,15 @@ subscription identity.
 Automatic-watch actions admit only live, model-visible records for the current
 closed action with the exact retained child sender, parent recipient, bounded
 configured content or typed runtime state, and stable subscription/generation
-correlation. Unrelated and excess records fail before queue admission. Each
-accepted live record releases one provider prompt; there is no general scheduler
-or arbitrary message-routing control. Replay cannot release an action. This fixture proves a
-clean, quiescent S1 resume of one completed worker and non-persistence of its
-daemon-lifetime watch. S4 proves the bounded counterpart for two sequentially
-started workers, including retained lane and journal ownership under
+correlation. Each accepted record enters the bounded ordered live queue. One
+provider prompt consumes
+the complete already-delivered prefix for the current closed action, so multiple
+accepted records may coalesce into one prompt; there is no general scheduler or
+arbitrary message-routing control. Unrelated or excess records fail admission, and
+replay cannot release an action. This fixture proves a clean, quiescent S1 resume of
+one completed worker and non-persistence of its daemon-lifetime watch. S4 proves the
+bounded counterpart for two sequentially started workers, including retained lane
+and journal ownership under
 reverse-creation activation. S2 proves explicit recreation creates one new subscription
 and admits only its exact bounded live notifications; the initial snapshot
 cannot activate the provider. S5 proves only fail-closed dispatch-uncertain

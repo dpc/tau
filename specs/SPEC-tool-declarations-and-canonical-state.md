@@ -43,8 +43,10 @@ an intermediate runtime tool.
 
 Declarations and canonical tool state are process-lifetime runtime records.
 They never enter agent/session semantic history and have no cold-restart replay
-contract. Disconnect still removes the connection's registry ownership and
-availability projections; it does not regenerate a peer declaration.
+contract. A declaration deferred across session rollover still commits and
+updates this process-global state when its captured connection and configured
+instance remain current. Disconnect still removes the connection's registry
+ownership and availability projections; it does not regenerate a peer declaration.
 
 This implements the tool registration/unregistration rows of
 [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).

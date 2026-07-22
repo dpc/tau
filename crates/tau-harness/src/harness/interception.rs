@@ -17,7 +17,7 @@
 //! / [`Harness::fail_pending_intercept_for_disconnect`], which advance the
 //! chain and then drain the deferred queue.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tau_proto::{
     AgentId, Event, EventName, EventSelector, ExtensionName, HarnessOutputMessage, InterceptAction,
@@ -27,22 +27,20 @@ use tau_proto::{
 use crate::harness::Harness;
 use crate::harness::extensions::ExtensionFrameAdmission;
 
-/// Condition that must become true before a parked prompt dispatch is safe.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PromptDispatchGate {
-    /// The publish that carries this prompt's own user message must commit.
-    UserMessageCommit,
-    /// All currently deferred publishes must drain before the prompt is sent.
-    PublishIdle,
-}
-
-/// One publish-idle dispatch with its immutable earliest activation cut.
+/// One publish-idle dispatch or one distinct committed activation obligation.
+#[derive(Clone)]
 pub(crate) struct DeferredPromptDispatch {
     /// Agent whose inference remains pending.
     pub(crate) cid: AgentId,
-    /// Cut immediately before the earliest committed activation in this batch.
+    /// Closed cut immediately before this committed activation.
     pub(crate) activation_cut: Option<tau_proto::AgentHead>,
-    /// Whether the drained batch contains a committed inference activation.
+    /// Branch watermark containing this committed activation.
+    ///
+    /// The obligation is runnable only while this watermark is an ancestor of
+    /// the selected head. `None` means the owning publish has not committed
+    /// yet.
+    pub(crate) activation_through: Option<tau_proto::AgentHead>,
+    /// Whether this entry owns a committed inference activation.
     pub(crate) committed_activation: bool,
 }
 
@@ -167,7 +165,7 @@ pub(crate) struct DeferredPublish {
 
 impl DeferredPublish {
     /// Borrow the event independent of its eventual commit path.
-    fn event(&self) -> &Event {
+    pub(crate) fn event(&self) -> &Event {
         &self.event
     }
 }
@@ -182,8 +180,54 @@ impl DeferredPublish {
 /// breaks when an interceptor parks the publish.
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
+    /// Runtime conversation whose durable branch advances on commit.
     pub(crate) cid: AgentId,
+    /// Durable agent identity retained if the runtime conversation disappears.
     pub(crate) agent_id: Option<AgentId>,
+    /// Harness session generation that owned this publication at enqueue time.
+    pub(crate) session_generation: u64,
+    /// Suppress the ordinary activation obligation because a stronger
+    /// envelope-bound continuation owns this publication batch.
+    pub(crate) suppress_activation_dispatch: bool,
+    /// Exact action that becomes runnable only after this publication commits.
+    pub(crate) completion: Option<AgentPublishCompletion>,
+    /// Whether successful commit notifies this agent's watchers using the exact
+    /// post-interception event text.
+    pub(crate) notify_watchers: bool,
+}
+
+/// Harness-owned continuation bound to one exact agent publication envelope.
+#[derive(Clone)]
+pub(crate) enum AgentPublishCompletion {
+    /// Resume the successful standalone compaction after the final steer in its
+    /// completion batch commits.
+    StandaloneContinuation {
+        /// Durable standalone transaction that owns the continuation.
+        transaction_id: tau_proto::CompactionTransactionId,
+        /// Provider-qualified model captured by that transaction.
+        model: tau_proto::ModelId,
+        /// Immutable closed transcript cut immediately before its activation.
+        activation_cut: tau_proto::AgentHead,
+        /// Selected compaction boundary that must remain an ancestor on retry.
+        batch_parent: tau_proto::AgentHead,
+        /// Original completion source reused for the checkpoint publication.
+        source: Option<String>,
+        /// Uncommitted suffix beginning with this exact batch publication.
+        retry_prompts: Vec<crate::agent::PendingPrompt>,
+        /// Whether this member owns continuation execution after commit.
+        complete_on_commit: bool,
+        /// Exact interceptor-approved steer retained after persistence
+        /// rejection.
+        approved_retry_event: Option<Event>,
+    },
+}
+
+impl AgentPublishCompletion {
+    /// Return the durable transaction shared by every member of this batch.
+    fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
+        let Self::StandaloneContinuation { transaction_id, .. } = self;
+        transaction_id
+    }
 }
 
 /// Event types where a `Drop` reply from an interceptor is
@@ -271,6 +315,40 @@ fn mandatory_harness_notice(event: &Event) -> bool {
         Event::HarnessNotice(info)
             if info.always_show || info.level == tau_proto::NoticeLevel::Critical
     )
+}
+
+fn event_is_effectively_must_pass(event: &Event, caller_must_pass: bool) -> bool {
+    caller_must_pass
+        || event_must_pass_by_default(&event.name())
+        || mandatory_harness_notice(event)
+        || matches!(
+            event,
+            Event::AgentMetadataSet(set) | Event::AgentMetadataSetRequest(set)
+                if set.mutation_id.is_some()
+        )
+}
+
+/// Return whether a deferred peer publication must cross session rollover.
+///
+/// Process-global declarations/reports retain their semantic effect for the
+/// still-current extension generation. Session-bound observation families
+/// retain only their raw committed fact; the downstream admission-generation
+/// barrier suppresses stale semantics.
+fn rollover_publication_must_commit(event: &Event) -> bool {
+    Harness::peer_event_semantics_survive_rollover(event)
+        || matches!(
+            event,
+            Event::ToolRequest(_)
+                | Event::StartAgentRequest(_)
+                | Event::ExtInternalPromptSubmitRequest(_)
+                | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtAgentContextPublish(_)
+                | Event::ExtensionContextReady(_)
+                | Event::ExtensionSessionContextProviderRegister(_)
+                | Event::ExtSkillAvailable(_)
+                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionContextReady(_)
+        )
 }
 
 fn mandatory_harness_notice_was_modified(original: &Event, replacement: &Event) -> bool {
@@ -561,6 +639,160 @@ impl InterceptorRegistry {
 }
 
 impl Harness {
+    fn is_synchronized_agent_checkpoint_or_completion(
+        event: &Event,
+        sync: Option<&ConversationHeadSync>,
+    ) -> bool {
+        sync.is_some_and(|sync| {
+            sync.completion.is_some() || matches!(event, Event::AgentInferenceDispatchStarted(_))
+        })
+    }
+
+    fn suspend_interceptor_after_destructive_cancel(&mut self, connection_id: &str) {
+        self.suspended_interceptor_connections
+            .insert(connection_id.into());
+    }
+
+    /// Remove not-yet-started publications from the same rejected completion
+    /// batch. The retained envelope republishes their exact prompt suffix.
+    pub(crate) fn discard_deferred_agent_publish_batch(
+        &mut self,
+        cid: &AgentId,
+        completion: &AgentPublishCompletion,
+    ) {
+        let transaction_id = completion.transaction_id();
+        self.deferred_publishes.retain(|publish| {
+            publish
+                .sync_head_for
+                .as_ref()
+                .filter(|sync| &sync.cid == cid)
+                .and_then(|sync| sync.completion.as_ref())
+                .is_none_or(|queued| queued.transaction_id() != transaction_id)
+        });
+    }
+
+    /// Cancel synchronized checkpoints/completions owned by one unloading
+    /// agent, suspend an in-flight responder, and resume unrelated FIFO
+    /// work.
+    pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        let removed_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
+            pending
+                .sync_head_for
+                .as_ref()
+                .is_some_and(|sync| &sync.cid == cid)
+                && Self::is_synchronized_agent_checkpoint_or_completion(
+                    &pending.event,
+                    pending.sync_head_for.as_ref(),
+                )
+        });
+        if removed_pending {
+            let pending = self
+                .pending_intercept
+                .take()
+                .expect("matched pending intercept");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            self.rollback_rejected_activation_successor(&pending.event);
+        }
+        self.deferred_publishes.retain(|publish| {
+            !(publish
+                .sync_head_for
+                .as_ref()
+                .is_some_and(|sync| &sync.cid == cid)
+                && Self::is_synchronized_agent_checkpoint_or_completion(
+                    &publish.event,
+                    publish.sync_head_for.as_ref(),
+                ))
+        });
+        if removed_pending {
+            // Canceling one agent's intercepted completion unblocks the global
+            // FIFO. Preserve and resume every publication not owned by that
+            // completion; another agent's durable work must not disappear with
+            // the unloading owner.
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
+    }
+
+    /// Quiesce synchronized publications for rollover: cancel old-session
+    /// checkpoints/completions, retain required publications, run
+    /// Drop-equivalent cleanup, suspend in-flight responders, and drain the
+    /// retained FIFO.
+    pub(crate) fn quiesce_synchronized_publications_for_rollover(&mut self) {
+        if let Some(pending) = self.pending_intercept.take() {
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            if Self::is_synchronized_agent_checkpoint_or_completion(
+                &pending.event,
+                pending.sync_head_for.as_ref(),
+            ) {
+                self.rollback_rejected_activation_successor(&pending.event);
+            } else {
+                // The switch already advanced session generation. Commit the
+                // accepted observation through its normal path; stale admission
+                // can no longer create or retarget work in the replacement
+                // session.
+                self.advance_pending_intercept(pending, InterceptAction::Pass(None));
+            }
+        }
+        // Specialized session teardown has already completed admission, ACK,
+        // shell, and peer failure paths. Retain mandatory terminal/lifecycle
+        // publications, including SessionShutdown, and force their interception
+        // chains to completion before changing the bound session.
+        let mut retained = VecDeque::with_capacity(self.deferred_publishes.len());
+        while let Some(publish) = self.deferred_publishes.pop_front() {
+            if event_is_effectively_must_pass(&publish.event, publish.must_pass)
+                || rollover_publication_must_commit(&publish.event)
+            {
+                retained.push_back(publish);
+            } else {
+                self.discard_deferred_publish(publish, "session rollover canceled publication");
+            }
+        }
+        self.deferred_publishes = retained;
+        loop {
+            self.drain_deferred_publishes();
+            let Some(pending_must_pass) = self.pending_intercept.take() else {
+                break;
+            };
+            self.suspend_interceptor_after_destructive_cancel(&pending_must_pass.conn_id);
+            self.advance_pending_intercept(pending_must_pass, InterceptAction::Pass(None));
+        }
+    }
+
+    /// Commit an already interceptor-approved retry event without restarting
+    /// the interception chain.
+    pub(crate) fn commit_approved_agent_retry(
+        &mut self,
+        cid: &AgentId,
+        event: Event,
+        completion: AgentPublishCompletion,
+    ) {
+        let notify_watchers = match &completion {
+            AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
+                .first()
+                .is_some_and(crate::agent::PendingPrompt::should_notify_watchers),
+        };
+        let agent_id = self.agent_id_for_event(&event).or_else(|| {
+            self.agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .map(crate::parse_agent_id)
+        });
+        self.commit_event(
+            None,
+            &PeerPublicationContext::default(),
+            event.clone(),
+            event.defaults_to_persist(),
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id,
+                session_generation: self.current_session_generation,
+                suppress_activation_dispatch: true,
+                completion: Some(completion),
+                notify_watchers,
+            }),
+        );
+    }
+
     /// Rewrite queued canonical model state to an empty snapshot after its
     /// provider generation disconnects.
     pub(crate) fn clear_parked_provider_model_updates(
@@ -601,17 +833,54 @@ impl Harness {
                     if canceled.contains(&received.message_id)
             )
         }) {
-            self.pending_intercept = None;
+            let pending = self.pending_intercept.take().expect("matched peer receive");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            self.fail_pending_external_receive(
+                &pending.event,
+                "target session changed before receive commit",
+            );
+            self.discard_peer_activation_reservation(&pending.source.peer_context);
         }
-        self.deferred_publishes.retain(|deferred| {
-            !matches!(
+        let mut retained = VecDeque::with_capacity(self.deferred_publishes.len());
+        while let Some(deferred) = self.deferred_publishes.pop_front() {
+            if matches!(
                 deferred.event(),
                 Event::AgentMessageReceived(received)
                     if canceled.contains(&received.message_id)
-            )
-        });
+            ) {
+                self.discard_deferred_publish(
+                    deferred,
+                    "target session changed before receive commit",
+                );
+            } else {
+                retained.push_back(deferred);
+            }
+        }
+        self.deferred_publishes = retained;
         self.drain_deferred_publishes();
         self.drain_publish_idle_dispatches();
+    }
+
+    /// Cancel one queued publication through the same reservation/ACK cleanup
+    /// owned by an interceptor Drop, without exposing it to another
+    /// interceptor.
+    fn discard_deferred_publish(&mut self, deferred: DeferredPublish, reason: &str) {
+        let DeferredPublish {
+            source,
+            event,
+            persist: _,
+            must_pass: _,
+            sync_head_for: _,
+        } = deferred;
+        if Self::pending_external_receive_message_id(&event)
+            .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
+        {
+            self.fail_pending_external_receive(&event, reason);
+        }
+        if let Event::ShellCommandProgress(progress) = &event {
+            self.discard_uncommitted_shell_canonical_marker(&progress.command_id);
+        }
+        self.discard_peer_activation_reservation(&source.peer_context);
     }
 
     /// True when no event is parked in interception and no publish is
@@ -623,76 +892,48 @@ impl Harness {
     /// True when `cid` already has a prompt dispatch waiting for a
     /// publish/interception condition.
     pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &AgentId) -> bool {
-        self.pending_user_prompt_dispatches
-            .iter()
-            .any(|queued| queued == cid)
-            || self
-                .pending_publish_idle_dispatches
-                .iter()
-                .any(|queued| &queued.cid == cid)
-    }
-
-    /// Send `cid`'s prompt now if the just-published user-message event
-    /// committed inline; otherwise park it until that event commits.
-    pub(crate) fn dispatch_prompt_after_user_message_publish(&mut self, cid: &AgentId) {
-        self.dispatch_or_defer_prompt(cid, PromptDispatchGate::UserMessageCommit);
+        self.pending_publish_idle_dispatches.iter().any(|queued| {
+            &queued.cid == cid
+                && (!queued.committed_activation
+                    || queued.activation_through.is_none()
+                    || self.deferred_activation_is_selected(queued))
+        })
     }
 
     /// Send `cid`'s prompt now if the publish chain is idle; otherwise
     /// park it until interception and deferred publishes fully drain.
     pub(crate) fn dispatch_prompt_after_publish_idle(&mut self, cid: &AgentId) {
-        self.dispatch_or_defer_prompt(cid, PromptDispatchGate::PublishIdle);
+        self.dispatch_or_defer_prompt(cid);
     }
 
     /// Wait for the whole publish batch, then run activation compaction before
     /// inference using the final active fact's parent as the immutable cut.
     pub(crate) fn dispatch_activation_after_publish_idle(&mut self, cid: &AgentId) {
-        if self.publish_chain_is_idle() {
-            let activation_cut = self.activation_cut_before_current_head(cid);
-            if !self.schedule_standalone_auto_compaction_for_activation(cid, true, activation_cut) {
-                self.dispatch_prompt_after_publish_idle(cid);
-            }
+        if !self.publish_chain_is_idle() {
+            self.defer_prompt_dispatch(cid.clone());
             return;
         }
-        self.pending_publish_idle_dispatches
-            .push_back(DeferredPromptDispatch {
-                cid: cid.clone(),
-                activation_cut: None,
-                committed_activation: true,
-            });
+        if !self
+            .pending_publish_idle_dispatches
+            .iter()
+            .any(|deferred| deferred.cid == *cid && deferred.committed_activation)
+        {
+            self.enqueue_committed_activation_dispatch(
+                cid.clone(),
+                self.activation_cut_before_current_head(cid),
+                self.selected_head_for_agent(cid),
+            );
+        }
+        self.drain_publish_idle_dispatches();
     }
 
-    fn dispatch_or_defer_prompt(&mut self, cid: &AgentId, gate: PromptDispatchGate) {
+    fn dispatch_or_defer_prompt(&mut self, cid: &AgentId) {
         if !self.publish_chain_is_idle() {
-            self.defer_prompt_dispatch(cid.clone(), gate);
-            return;
-        }
-        if gate == PromptDispatchGate::UserMessageCommit
-            && self.schedule_standalone_auto_compaction_for_activation(cid, true, None)
-        {
+            self.defer_prompt_dispatch(cid.clone());
             return;
         }
         if !self.agent_context_ready_for(cid) {
-            if gate == PromptDispatchGate::UserMessageCommit {
-                let activation_cut = self.activation_cut_before_current_head(cid);
-                if let Some(existing) = self
-                    .pending_publish_idle_dispatches
-                    .iter_mut()
-                    .find(|queued| &queued.cid == cid)
-                {
-                    existing.activation_cut = existing.activation_cut.or(activation_cut);
-                    existing.committed_activation = true;
-                    return;
-                }
-                self.pending_publish_idle_dispatches
-                    .push_back(DeferredPromptDispatch {
-                        cid: cid.clone(),
-                        activation_cut,
-                        committed_activation: true,
-                    });
-                return;
-            }
-            self.defer_prompt_dispatch(cid.clone(), PromptDispatchGate::PublishIdle);
+            self.defer_prompt_dispatch(cid.clone());
             return;
         }
         self.checkpoint_or_send_prompt(cid, None);
@@ -739,9 +980,15 @@ impl Harness {
             self.set_agent_turn_state(cid, crate::agent::AgentTurnState::Idle);
             return;
         };
-        let activation_cut = captured_activation_cut
-            .or_else(|| self.activation_cut_before_current_head(cid))
-            .or(Some(tau_proto::AgentHead::Root));
+        let activation_cut = self.earliest_activation_cut(
+            cid,
+            captured_activation_cut
+                .or_else(|| self.activation_cut_before_current_head(cid))
+                .or(Some(tau_proto::AgentHead::Root)),
+        );
+        let Some(activation_cut) = activation_cut else {
+            return;
+        };
         let Some((durable_agent_id, prompt_id, through)) =
             self.agents.get_mut(cid).and_then(|agent| {
                 let durable_agent_id = agent.agent_id.clone()?;
@@ -761,8 +1008,7 @@ impl Harness {
                         dispatch: crate::agent::InferenceDispatchOwnership {
                             model: model.clone(),
                             operation: tau_proto::PromptOperation::Inference,
-                            activation_cut: activation_cut
-                                .expect("inference activation cut is always present"),
+                            activation_cut,
                         },
                     };
                 Some((durable_agent_id, prompt_id, through))
@@ -779,43 +1025,121 @@ impl Harness {
                 through,
                 model: Some(model),
                 operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut,
+                activation_cut: Some(activation_cut),
             }),
         );
     }
 
-    fn defer_prompt_dispatch(&mut self, cid: AgentId, gate: PromptDispatchGate) {
+    fn defer_prompt_dispatch(&mut self, cid: AgentId) {
         if self.has_deferred_prompt_dispatch_for(&cid) {
             tracing::debug!(
                 target: "tau_harness::interception",
                 conversation_id = %cid,
-                ?gate,
                 "prompt dispatch already deferred; skipping duplicate",
             );
             return;
         }
-        match gate {
-            PromptDispatchGate::UserMessageCommit => {
-                self.pending_user_prompt_dispatches.push_back(cid);
-            }
-            PromptDispatchGate::PublishIdle => {
-                self.pending_publish_idle_dispatches
-                    .push_back(DeferredPromptDispatch {
-                        cid,
-                        activation_cut: None,
-                        committed_activation: false,
-                    });
-            }
-        }
+        self.pending_publish_idle_dispatches
+            .push_back(DeferredPromptDispatch {
+                cid,
+                activation_cut: None,
+                activation_through: None,
+                committed_activation: false,
+            });
     }
 
-    fn activation_cut_before_current_head(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
+    /// Returns the runtime-selected durable head for one loaded agent.
+    fn selected_head_for_agent(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
+        self.agents.get(cid).map(|agent| {
+            agent
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+        })
+    }
+
+    /// Returns whether one branch-owned deferred activation is selected now.
+    fn deferred_activation_is_selected(&self, deferred: &DeferredPromptDispatch) -> bool {
+        let Some(owner) = deferred.activation_through else {
+            return false;
+        };
+        let Some(agent) = self.agents.get(&deferred.cid) else {
+            return false;
+        };
+        let Some(tree) = agent
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+        else {
+            return false;
+        };
+        let selected = agent
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        tree.is_ancestor_head(owner, selected)
+    }
+
+    /// Queue one exact committed activation obligation.
+    ///
+    /// Comparable obligations remain distinct here. A later committed successor
+    /// acknowledges every covered watermark on its selected branch.
+    pub(crate) fn enqueue_committed_activation_dispatch(
+        &mut self,
+        cid: AgentId,
+        activation_cut: Option<tau_proto::AgentHead>,
+        activation_through: Option<tau_proto::AgentHead>,
+    ) {
+        self.pending_publish_idle_dispatches
+            .retain(|deferred| deferred.cid != cid || deferred.committed_activation);
+        self.pending_publish_idle_dispatches
+            .push_back(DeferredPromptDispatch {
+                cid,
+                activation_cut,
+                activation_through,
+                committed_activation: true,
+            });
+    }
+
+    /// Transfer every selected-branch activation obligation covered by a
+    /// committed inference checkpoint or standalone-compaction start.
+    pub(crate) fn acknowledge_deferred_activations_through(
+        &mut self,
+        cid: &AgentId,
+        through: tau_proto::AgentHead,
+    ) {
+        let tree = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id));
+        let Some(tree) = tree else {
+            return;
+        };
+        self.pending_publish_idle_dispatches.retain(|deferred| {
+            deferred.cid != *cid
+                || !deferred.committed_activation
+                || deferred
+                    .activation_through
+                    .is_none_or(|owner| !tree.is_ancestor_head(owner, through))
+        });
+    }
+
+    /// Computes the closed provider prefix immediately before the selected
+    /// head.
+    ///
+    /// Callers capture this only while the selected head is the activation's
+    /// exact committed watermark. Returns `None` if the runtime agent is
+    /// absent, selects Root, lacks a durable id, its tree is unloaded, or
+    /// its selected node is missing from that tree.
+    pub(crate) fn activation_cut_before_current_head(
+        &self,
+        cid: &AgentId,
+    ) -> Option<tau_proto::AgentHead> {
         let agent = self.agents.get(cid)?;
         let head = agent.head?;
         let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
         let provisional = tree
-            .node(head)
-            .and_then(|node| node.parent_id)
+            .node(head)?
+            .parent_id
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         Some(self.closed_provider_prefix_for_agent(agent.agent_id.as_deref()?, provisional))
     }
@@ -971,6 +1295,16 @@ impl Harness {
                 return;
             };
             let interceptor = interceptor_match.registration;
+            if self
+                .suspended_interceptor_connections
+                .contains(&interceptor.connection_id)
+            {
+                cursor = Some(InterceptorCursor {
+                    set: interceptor_match.set,
+                    registration: interceptor,
+                });
+                continue;
+            }
             tracing::debug!(
                 target: "tau_harness::interception",
                 event = %event.name(),
@@ -1034,6 +1368,17 @@ impl Harness {
         conn_id: &str,
         reply: InterceptReply,
     ) -> Result<(), crate::HarnessError> {
+        if self
+            .suspended_interceptor_connections
+            .remove(&tau_proto::ConnectionId::from(conn_id))
+        {
+            tracing::warn!(
+                target: "tau_harness::interception",
+                connection_id = conn_id,
+                "consuming stale reply for destructively canceled intercept request"
+            );
+            return Ok(());
+        }
         let Some(pending) = self.pending_intercept.take() else {
             tracing::warn!(
                 target: "tau_harness::interception",
@@ -1178,15 +1523,8 @@ impl Harness {
                     );
                     None
                 } else {
-                    let must_pass_default = event_must_pass_by_default(&event_name)
-                        || mandatory_harness_notice(&original_event)
-                        || matches!(
-                            &original_event,
-                            Event::AgentMetadataSet(set)
-                                | Event::AgentMetadataSetRequest(set)
-                                if set.mutation_id.is_some()
-                        );
-                    if must_pass || must_pass_default {
+                    let must_pass_default = event_is_effectively_must_pass(&original_event, false);
+                    if event_is_effectively_must_pass(&original_event, must_pass) {
                         tracing::warn!(
                             target: "tau_harness::interception",
                             event = %event_name,
@@ -1244,13 +1582,44 @@ impl Harness {
         }
     }
 
+    /// Dispatch selected branch obligations only after publication becomes
+    /// idle.
+    ///
+    /// Dormant sibling obligations remain queued. Not-ready agents, blocked
+    /// ownership, and checkpoint ownership stop draining without consumption.
+    /// A committed activation remains queued until its checkpoint or standalone
+    /// start commits and acknowledges every covered selected-branch watermark;
+    /// a rejected successor therefore remains retryable.
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
         while self.publish_chain_is_idle() {
-            let Some(deferred) = self.pending_publish_idle_dispatches.pop_front() else {
+            for index in 0..self.pending_publish_idle_dispatches.len() {
+                let needs_binding = self.pending_publish_idle_dispatches[index]
+                    .committed_activation
+                    && self.pending_publish_idle_dispatches[index]
+                        .activation_through
+                        .is_none();
+                if !needs_binding {
+                    continue;
+                }
+                let cid = self.pending_publish_idle_dispatches[index].cid.clone();
+                let through = self.selected_head_for_agent(&cid);
+                let cut = self.activation_cut_before_current_head(&cid);
+                self.pending_publish_idle_dispatches[index].activation_through = through;
+                self.pending_publish_idle_dispatches[index].activation_cut = cut;
+            }
+            let Some(index) = self
+                .pending_publish_idle_dispatches
+                .iter()
+                .position(|deferred| {
+                    !deferred.committed_activation || self.deferred_activation_is_selected(deferred)
+                })
+            else {
                 break;
             };
+            let deferred = self.pending_publish_idle_dispatches[index].clone();
             let cid = deferred.cid.clone();
             if !self.agents.contains_key(&cid) {
+                self.pending_publish_idle_dispatches.remove(index);
                 continue;
             }
             if self.agents.get(&cid).is_some_and(|agent| {
@@ -1261,12 +1630,15 @@ impl Harness {
                             | crate::agent::ActivationDispatchState::Blocked { .. }
                             | crate::agent::ActivationDispatchState::DispatchUncertain { .. }
                     )
-            }) {
-                continue;
+            }) || self.pending_agent_publish_completions.contains_key(&cid)
+            {
+                break;
             }
             if !self.agent_context_ready_for(&cid) {
-                self.pending_publish_idle_dispatches.push_front(deferred);
                 break;
+            }
+            if !deferred.committed_activation {
+                self.pending_publish_idle_dispatches.remove(index);
             }
             if deferred.committed_activation
                 && self.schedule_standalone_auto_compaction_for_activation(
@@ -1277,9 +1649,28 @@ impl Harness {
                         .or_else(|| self.activation_cut_before_current_head(&cid)),
                 )
             {
+                if self.pending_publish_idle_dispatches.iter().any(|queued| {
+                    queued.cid == cid
+                        && queued.committed_activation
+                        && queued.activation_through == deferred.activation_through
+                }) {
+                    // A synchronous persistence rejection left the branch
+                    // obligation unclaimed. Stop this drain pass instead of
+                    // immediately retrying the same failed successor forever.
+                    break;
+                }
                 continue;
             }
             self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
+            if deferred.committed_activation
+                && self.pending_publish_idle_dispatches.iter().any(|queued| {
+                    queued.cid == cid
+                        && queued.committed_activation
+                        && queued.activation_through == deferred.activation_through
+                })
+            {
+                break;
+            }
         }
     }
 }

@@ -1539,27 +1539,27 @@ impl Harness {
         recipient_id: &AgentId,
         message_bytes: usize,
     ) -> Result<Instant, String> {
-        let loaded_prompt_bytes = self
+        let loaded_wake_bytes = self
             .agent_routes
             .get(recipient_id.as_str())
             .and_then(|cid| self.agents.get(cid))
             .into_iter()
-            .flat_map(|agent| &agent.pending_prompts)
-            .filter_map(|prompt| prompt.peer_admission_bytes);
-        let pending_start_prompt_bytes = self
+            .flat_map(|agent| &agent.pending_message_wakes)
+            .filter_map(|wake| wake.source.peer_admission_bytes());
+        let pending_start_wake_bytes = self
             .pending_start_agent_requests
             .iter()
             .find(|pending| pending.agent_id == recipient_id.as_str())
             .into_iter()
-            .flat_map(|pending| &pending.pending_agent_messages)
-            .filter_map(|prompt| prompt.peer_admission_bytes);
+            .flat_map(|pending| &pending.pending_agent_message_wakes)
+            .filter_map(|wake| wake.source.peer_admission_bytes());
         let parked_receive_bytes = self
             .pending_external_receive_acks
             .values()
             .filter(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
             .map(|pending| pending.expected_receive.message.len());
-        let (queued_count, queued_bytes) = loaded_prompt_bytes
-            .chain(pending_start_prompt_bytes)
+        let (queued_count, queued_bytes) = loaded_wake_bytes
+            .chain(pending_start_wake_bytes)
             .chain(parked_receive_bytes)
             .fold((0usize, 0usize), |(count, bytes), message_bytes| {
                 (count.saturating_add(1), bytes.saturating_add(message_bytes))
@@ -1752,6 +1752,9 @@ impl Harness {
         agent_id: &AgentId,
         consumable_completion: Option<&ToolCallId>,
     ) -> bool {
+        if self.has_wait_preempting_message_wake(agent_id) {
+            return true;
+        }
         self.agents.get(agent_id).is_some_and(|agent| {
             // Accepted activation wakes active waits at queue time. This
             // level-triggered guard closes queue-before-register. A completion
@@ -1759,7 +1762,6 @@ impl Harness {
             // that prompt's call, preserving completion arbitration without
             // hiding activating notices for other completed calls.
             agent.pending_replay_activation
-                || !agent.pending_message_wakes.is_empty()
                 || agent.pending_prompts.iter().any(|prompt| {
                     prompt.creates_inference_activation()
                         && (!prompt.is_activating_background_completion()

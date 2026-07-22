@@ -147,7 +147,9 @@ metadata, not the fact subscribers ultimately observe.
   the same persistence metadata.
 - **`intercept_reply`** *(interceptor → harness)* — Exactly one response to an
   `intercept_request`: `pass` unchanged, `pass` with a replacement event, or
-  `drop`.
+  `drop`. If harness lifecycle cleanup destructively cancels an already-delivered
+  request, the connection is bypassed until its next reply is consumed without
+  action; disconnect clears that suspension.
 
 ## Transport (event delivery)
 

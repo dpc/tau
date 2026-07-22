@@ -353,3 +353,49 @@ fn pre_ready_request_waits_behind_activation() {
         matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == "after Ready")
     }));
 }
+
+/// A request admitted before Ready retains its old session generation through
+/// activation staging, so Ready after rollover commits only the raw
+/// observation.
+#[test]
+fn pre_ready_request_after_rollover_is_observation_only() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    connect_ready_configured_extension(
+        &mut h,
+        "requester",
+        "requester",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut("requester")
+        .expect("requester")
+        .state = crate::extension::ExtensionState::Handshaking;
+    h.handle_extension_event(
+        "requester",
+        TestProtocolItem::Event(request(&agent_id, "stale after Ready")),
+    )
+    .expect("defer request before Ready");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
+        .expect("activate requester");
+
+    assert!(source_committed(&h, "requester", |event| {
+        matches!(
+            event,
+            Event::ExtInternalPromptSubmitRequest(request)
+                if request.text == "stale after Ready"
+        )
+    }));
+    assert!(!event_log_contains_any_source(&h, |event| {
+        matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt) if prompt.text == "stale after Ready"
+        )
+    }));
+}

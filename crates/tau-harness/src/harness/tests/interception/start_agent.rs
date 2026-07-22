@@ -388,11 +388,21 @@ fn stale_session_request_is_observation_only() {
         tau_proto::ClientKind::Tool,
     );
     connect_start_agent_interceptor(&mut h);
+    connect_test_tool(&mut h, "rollover-request-blocker");
+    h.handle_extension_event(
+        "rollover-request-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block deferred start request"));
     h.handle_extension_event_inner(
         "requester",
         request_event("q-stale-session", "session A work"),
     )
-    .expect("park request");
+    .expect("defer request behind parked observation");
 
     h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
@@ -404,7 +414,7 @@ fn stale_session_request_is_observation_only() {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("commit stale-session request");
+    .expect("consume stale-session interceptor reply");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(

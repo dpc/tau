@@ -139,13 +139,15 @@ Keep the fake provider closed and data-driven:
   ID. `AgentStartResult` accepts only the correlated successful result,
   validates harness-minted `self_agent_id` and `sub_agent_id`, and emits its
   configured terminal response.
-- Add closed actions that match every model-visible watch notification by
-  symbolic child slot: received user prompt, final response, and non-initial
-  `WatchTurnState::{Running, Idle}`. Match the typed kind, exact expected content
-  where present, subscription and turn-generation correlation, and the
-  harness-minted child ID before emitting a fixed terminal response. S1 needs
-  these because `agent_start` automatically watches the child; S2 needs them
-  after recreating the watch.
+- Add closed actions that match bounded ordered model-visible watch-notification
+  chains by symbolic child slot: received user prompt, final response, and
+  non-initial `WatchTurnState::{Running, Idle}`. Each provider prompt consumes
+  and validates the complete already-delivered queue prefix; an incomplete
+  prefix emits fixed text without advancing the action, and multiple accepted
+  records may coalesce in one prompt. Match the typed kind, exact expected
+  content where present, subscription and turn-generation correlation, and the
+  harness-minted child ID. S1 needs these actions because `agent_start`
+  automatically watches the child; S2 needs them after recreating the watch.
 - Add a bounded, one-way lane release only if needed to make the child complete
   after the main has terminalized its `AgentStartResult` continuation. Validate
   dependencies as an acyclic graph, enforce a hard deadline, and do not expose a
@@ -181,29 +183,29 @@ raise a fixture limit just to preserve this ladder.
 
 S1 budgets two lanes: exactly four main lane actions (start call/result, the
 post-completion watch action, and Boot B's fresh prompt) and two worker lane
-actions. The three ordered Running/response/Idle records in the watch action
-each cause a real provider turn, so the typed execution oracle requires exactly
-six main provider turns and two worker provider turns across both boots. S2
+actions. The ordered Running/response/Idle records use the closed queue-prefix
+batching rule, so the typed execution oracle requires exactly five main provider
+turns and two worker provider turns across both boots. S2
 omits S1's fresh main prompt and uses exactly six main lane actions: the Boot A
 start pair and watch action, then the Boot B watch call/result and four-fact
 partial-order watch action. It uses exactly two worker actions. Boot A spends
-five main and one worker provider turn; Boot B spends six main and one worker
-turn, totaling eleven main and two worker turns. Add a focused failure if either
+four main and one worker provider turn; Boot B spends five main and one worker
+turn, totaling nine main and two worker turns. Add a focused failure if either
 setup produces an unexpected extra provider prompt; do not silently add an
 unbounded action.
 
 S3 reuses S1's two lanes and compact 1,151-byte scenario JSON: four main actions
-and two worker actions, below the 16 KiB ceiling. Boot A spends five main and one
-worker provider turn; Boot B spends one main and one worker turn, totaling six
+and two worker actions, below the 16 KiB ceiling. Boot A spends four main and one
+worker provider turn; Boot B spends one main and one worker turn, totaling five
 main and two worker turns. Promptless ephemeral creation, typed store seeding,
 roster queries, and absent-route probes consume no fake-provider action.
 
 S4 uses three lanes and compact 1,911-byte scenario JSON: exactly six main
 actions (two adjacent start call/result pairs and two ordered three-record watch
 actions) and two actions in each distinct worker lane, below the 16 KiB ceiling.
-Boot A spends ten main and one provider turn per worker. Boot B activates only
+Boot A spends eight main and one provider turn per worker. Boot B activates only
 the workers, in reverse creation order, and spends one provider turn per worker,
-totaling ten main and two turns per worker. Roster queries and replay consume no
+totaling eight main and two turns per worker. Roster queries and replay consume no
 fake-provider action.
 
 S5 uses two lanes and compact 1,192-byte scenario JSON: exactly five main

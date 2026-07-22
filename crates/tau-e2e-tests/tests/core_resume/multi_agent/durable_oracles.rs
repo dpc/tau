@@ -26,7 +26,7 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 26
+        || snapshot.agent_events[&identities.main].len() != 20
         || snapshot.agent_events[&identities.worker].len() != 6
     {
         return Err(format!(
@@ -117,17 +117,11 @@ fn assert_exact_event_names(
         E::AGENT_PROMPT_CREATED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
-        E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_PROMPT_CREATED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
-        E::AGENT_PROMPT_SUBMITTED,
-        E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
-        E::PROVIDER_RESPONSE_FINISHED,
-        E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_PROMPT_CREATED,
         E::PROVIDER_RESPONSE_FINISHED,
@@ -199,21 +193,7 @@ fn assert_boot_a_agent_payloads(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let expected_main_prompts = [
-        super::MAIN_PROMPT.to_owned(),
-        format!(
-            "[tau-internal]: Watched agent {} started an agent turn",
-            identities.worker
-        ),
-        format!(
-            "[tau-internal]: Watched agent {} emitted a response\n\n<response>\nworker boot-a complete\n</response>",
-            identities.worker
-        ),
-        format!(
-            "[tau-internal]: Watched agent {} stopped its agent turn",
-            identities.worker
-        ),
-    ];
+    let expected_main_prompts = [super::MAIN_PROMPT.to_owned()];
     if main_prompts.len() != expected_main_prompts.len()
         || main_prompts
             .iter()
@@ -355,7 +335,6 @@ fn assert_boot_a_agent_payloads(
     let expected = [
         "worker start accepted",
         "watch notification accepted",
-        "watch notification accepted",
         "worker completion observed",
     ];
     if text_responses.len() != expected.len()
@@ -369,13 +348,12 @@ fn assert_boot_a_agent_payloads(
     assert_inference_rounds(
         main,
         &identities.main,
-        &[0, 3, 6, 10, 12],
+        &[0, 3, 5, 8],
         &[
             tau_proto::AgentHead::Root,
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(0)),
+            tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)),
+            tau_proto::AgentHead::Node(tau_proto::NodeId::new(3)),
             tau_proto::AgentHead::Node(tau_proto::NodeId::new(5)),
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(9)),
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(11)),
         ],
     )?;
     assert_inference_rounds(

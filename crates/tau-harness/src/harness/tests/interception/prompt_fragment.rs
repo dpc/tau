@@ -102,6 +102,56 @@ fn dropped_prompt_fragment_does_not_mutate_projection() {
     assert!(committed_fragments(&h, "test.drop").is_empty());
 }
 
+/// A prompt-fragment declaration deferred behind another intercepted
+/// publication updates its process-global projection across rollover when the
+/// exact extension generation remains live.
+#[test]
+fn rollover_applies_deferred_prompt_fragment_for_current_generation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "fragment-owner",
+        "configured-fragment-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_test_tool(&mut h, "rollover-blocker");
+    h.handle_extension_event(
+        "rollover-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block prompt fragment"));
+    h.handle_extension_event_inner_with_persist(
+        "fragment-owner",
+        prompt_fragment("rollover.fragment", "SURVIVES ROLLOVER"),
+        Some(false),
+    )
+    .expect("defer prompt fragment");
+    assert_eq!(
+        projected_template(&h, "fragment-owner", "rollover.fragment"),
+        None
+    );
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert_eq!(
+        projected_template(&h, "fragment-owner", "rollover.fragment"),
+        Some("SURVIVES ROLLOVER")
+    );
+    assert_eq!(
+        committed_fragments(&h, "rollover.fragment"),
+        vec![(
+            Some(tau_proto::ConnectionId::from("fragment-owner")),
+            "SURVIVES ROLLOVER".to_owned(),
+        )]
+    );
+}
+
 /// A same-name replacement is the only payload that commits and becomes
 /// visible to prompt assembly.
 #[test]
@@ -429,6 +479,73 @@ fn oversized_startup_prompt_fragment_replacement_fails_activation() {
     let stage = &h.extensions.activation_staging["fragment-owner"];
     assert_eq!(stage.retained_message_count, 0);
     assert_eq!(stage.retained_message_bytes, 0);
+}
+
+/// Rollover commits a deferred pre-Ready process-global declaration, converts
+/// its publication reservation into staged capability ownership, and lets a
+/// later Ready install the projection.
+#[test]
+fn rollover_stages_deferred_prompt_fragment_for_later_ready() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "fragment-owner",
+        "configured-fragment-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.extensions
+        .entries
+        .get_mut("fragment-owner")
+        .expect("fragment owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    connect_test_tool(&mut h, "rollover-declaration-blocker");
+    h.handle_extension_event(
+        "rollover-declaration-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block deferred declaration"));
+    h.handle_extension_event(
+        "fragment-owner",
+        TestProtocolItem::Event(prompt_fragment("test.rollover", "ROLLOVER")),
+    )
+    .expect("defer pre-Ready declaration");
+    assert_eq!(
+        h.extensions
+            .pending_prompt_fragment_declarations
+            .get("fragment-owner"),
+        Some(&1)
+    );
+    let stage = &h.extensions.activation_staging["fragment-owner"];
+    assert_eq!(stage.retained_message_count, 1);
+    assert!(stage.retained_message_bytes > 0);
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(
+        !h.extensions
+            .pending_prompt_fragment_declarations
+            .contains_key("fragment-owner")
+    );
+    let stage = &h.extensions.activation_staging["fragment-owner"];
+    assert_eq!(stage.retained_message_count, 1);
+    assert!(stage.retained_message_bytes > 0);
+    assert!(stage.prompt_fragments.contains_key("test.rollover"));
+    assert_eq!(
+        projected_template(&h, "fragment-owner", "test.rollover"),
+        None
+    );
+    h.handle_extension_message("fragment-owner", TestMessage::Ready(Default::default()))
+        .expect("activate fragment owner");
+    assert_eq!(
+        projected_template(&h, "fragment-owner", "test.rollover"),
+        Some("ROLLOVER")
+    );
 }
 
 /// Late subscribers receive no synthesized or historical prompt-fragment state,

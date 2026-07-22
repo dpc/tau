@@ -841,6 +841,88 @@ fn agent_message_fact_replay_projects_without_wake() {
     resumed.shutdown().expect("shutdown");
 }
 
+/// A crash after receive commit retains the typed canonical local wrapper but
+/// cold replay must not recreate its runtime wake or dispatch provider work.
+#[test]
+fn received_agent_message_replay_restores_context_without_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let (agent_id, live_projection) = {
+        let mut h = quiet_provider_harness(&state_dir).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+        h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+            agent_prompt_id: "live-message-before-crash".into(),
+        };
+        h.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: "replay-agent-message".into(),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(&agent_id),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                message: "persisted <message>& body".to_owned(),
+            }),
+        );
+        assert_eq!(h.agents[&cid].pending_message_wakes.len(), 1);
+        let projection = h
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("live tree")
+            .nodes()
+            .last()
+            .expect("received node")
+            .entry
+            .clone();
+        h.shutdown().expect("shutdown");
+        (agent_id, projection)
+    };
+    wait_for_session_unlock(&state_dir, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    resumed
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("load replayed journal");
+    let tree = resumed
+        .agent_store
+        .agent(agent_id.as_str())
+        .expect("replayed tree");
+    assert_eq!(
+        tree.nodes().last().expect("replayed received node").entry,
+        live_projection
+    );
+    let cid = resumed
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("restored route");
+    assert!(resumed.agents[cid].pending_message_wakes.is_empty());
+    let context = crate::prompt::assemble_prompt_context_from(tree, resumed.agents[cid].head)
+        .context
+        .flatten();
+    assert!(context.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(tau_proto::MessageItem { content, .. })
+                if matches!(
+                    content.first(),
+                    Some(tau_proto::ContentPart::Text { text })
+                        if text == "[tau-internal]: You have received a message from manager\n\n<message>\npersisted &lt;message&gt;&amp; body\n</message>"
+                )
+        )
+    }));
+    assert!(event_log_events(&resumed).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.agent_id.as_str() == agent_id
+    )));
+    resumed.shutdown().expect("shutdown");
+}
+
 /// A committed offline agent identity selects its agent journal without a live
 /// route; session membership alone is not identity authority.
 #[test]

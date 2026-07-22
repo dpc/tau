@@ -43,6 +43,16 @@ pub(super) struct ExtensionFrameAdmission {
     pub(super) session_generation: u64,
 }
 
+/// One session-bound capability projection retained until extension activation.
+#[derive(Clone, Debug)]
+pub(super) struct StagedSessionBound<T> {
+    /// Session binding captured from the declaration's committed publication.
+    pub(super) admission: ExtensionFrameAdmission,
+    /// Derived capability value to apply only while that binding remains
+    /// current.
+    pub(super) value: T,
+}
+
 /// Extension-originated announcements accumulated until the extension reaches
 /// `Ready` and can be activated atomically.
 #[derive(Clone, Debug, Default)]
@@ -55,18 +65,20 @@ pub(super) struct ExtensionActivationStage {
     /// Action schema received before `Ready`. Schema publishing is a
     /// replacement, so only the latest staged schema matters.
     pub(super) action_schema: Option<tau_actions::ActionSchema>,
-    /// Committed skill declarations awaiting activation, in commit order.
-    pub(super) skill_announcements: Vec<tau_proto::ExtSkillAvailable>,
-    /// Committed AGENTS.md declarations awaiting activation, in commit order.
-    pub(super) agents_files: Vec<tau_proto::ExtAgentsMdAvailable>,
-    /// Whether the extension registered as an agent context provider before
-    /// `Ready`.
-    pub(super) agent_context_provider_registered: bool,
-    /// Whether the extension registered as a session context provider before
-    /// `Ready`.
-    pub(super) session_context_provider_registered: bool,
-    /// Agent context publishes received before `Ready`, in wire order.
-    pub(super) agent_context_publishes: Vec<tau_proto::ExtAgentContextPublish>,
+    /// Session-bound skill declarations awaiting activation, in commit order.
+    pub(super) skill_announcements: Vec<StagedSessionBound<tau_proto::ExtSkillAvailable>>,
+    /// Session-bound AGENTS.md declarations awaiting activation, in commit
+    /// order.
+    pub(super) agents_files: Vec<StagedSessionBound<tau_proto::ExtAgentsMdAvailable>>,
+    /// Session binding of the latest staged agent-context provider
+    /// registration.
+    pub(super) agent_context_provider_admission: Option<ExtensionFrameAdmission>,
+    /// Session binding of the latest staged session-context provider
+    /// registration.
+    pub(super) session_context_provider_admission: Option<ExtensionFrameAdmission>,
+    /// Session-bound agent context publishes received before `Ready`, in wire
+    /// order.
+    pub(super) agent_context_publishes: Vec<StagedSessionBound<tau_proto::ExtAgentContextPublish>>,
     /// Extension-level prompt fragments received before `Ready`, keyed by name
     /// so repeated publishes replace earlier staged content.
     pub(super) prompt_fragments: BTreeMap<String, PromptFragment>,

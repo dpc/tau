@@ -399,6 +399,57 @@ fn parked_tool_declaration_cannot_mutate_after_disconnect() {
     ));
 }
 
+/// A tool declaration deferred behind another intercepted publication retains
+/// its process-global registry semantics across session rollover for the same
+/// live extension generation.
+#[test]
+fn rollover_applies_deferred_tool_declaration_for_current_generation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "tool-provider",
+        "configured-tool",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_test_tool(&mut h, "rollover-blocker");
+    h.handle_extension_event(
+        "rollover-blocker",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover blocker");
+    h.publish_event(None, draft_event("block tool declaration"));
+    h.handle_extension_event_inner_with_persist(
+        "tool-provider",
+        tool_registration_declaration("rollover_tool", "survives rollover"),
+        Some(false),
+    )
+    .expect("defer declaration");
+    assert!(h.registry.providers_for("rollover_tool").is_empty());
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert_eq!(
+        h.registry.providers_for("rollover_tool")[0]
+            .tool
+            .description
+            .as_deref(),
+        Some("survives rollover")
+    );
+    assert!(matches!(
+        committed_tool_lifecycle_events(&h, "rollover_tool").as_slice(),
+        [
+            (Some(declaration_source), Event::ToolRegistrationDeclared(_)),
+            (Some(canonical_source), Event::ToolRegister(_)),
+        ] if declaration_source == "tool-provider"
+            && canonical_source == HARNESS_CONNECTION_ID
+    ));
+}
+
 /// A same-name interception replacement is revalidated after commit and drives
 /// harness-authored canonical state with stable publisher provenance.
 #[test]

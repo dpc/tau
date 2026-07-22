@@ -35,7 +35,10 @@ provider and routes, the payload is bounded, and the epoch/sequence transition
 is valid. Accepted reports update the ephemeral cache and produce a separate
 protected harness-sourced `harness.provider_quota_changed` full snapshot.
 Unowned, invalid, dropped, or stale-generation reports produce no state change
-or canonical snapshot. Reports and canonical snapshots stay out of semantic
+or canonical snapshot. Session rollover alone does not stale the still-current
+process-global provider connection: a deferred report commits and may update
+current state after exact connection/instance revalidation. Reports and canonical
+snapshots stay out of semantic
 journals and cold replay; runtime debug records retain committed events. Late
 subscribers receive only harness-sourced canonical current state, including an
 empty capability snapshot after clear or route loss. This flow implements

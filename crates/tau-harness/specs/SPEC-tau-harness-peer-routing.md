@@ -1,5 +1,12 @@
 # SPEC-tau-harness-peer-routing: Best-effort typed peer routing
 
+## Record justification
+
+Peer delivery spans runtime discovery, typed socket RPC and callback
+authentication, target admission and auto-start, durable receive/sender
+projections, post-commit acknowledgement, and crash cleanup. No single owning
+module can state the complete best-effort routing contract coherently.
+
 The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agent
 forms `&<session-id>/@<agent-id>` and `<session-id>/<agent-id>`. A bare address
 sends to the session, whose harness selects exactly one eligible loaded or
@@ -61,11 +68,21 @@ in-memory, generation-bound continuation acknowledges only from the
 post-persistence commit hook. Interception rejection, persistence failure,
 target disappearance, disconnect, or rollover before commit fails or removes
 the continuation without success. Only confirmed acknowledgement permits the
-sender's `AgentMessageSent` projection.
+sender's `AgentMessageSent` projection. The same-loop post-commit reaction
+transfers queued byte ownership and installs any payload-free live wake before
+issuing the ACK, but durable receive commit remains the ACK authority; provider
+dispatch and response are not prerequisites. Exact transcript placement and
+activation are specified by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+If receive cancellation removes an already-delivered interception request, the
+responder is bypassed until one stale reply is consumed without action. A
+replacement registration remains suspended, no timeout applies, and disconnect
+resets the connection as specified by
+[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
 
 Delivery is best-effort at-least-once, not distributed exactly-once. A crash or
 transport loss after receive commit but before acknowledgement is indeterminate;
-retry may duplicate the prompt. There is no cross-session WAL, restart resumption,
+retry may duplicate the receive occurrence and live model work. There is no cross-session WAL, restart resumption,
 or deduplication index. Crash ambiguity may duplicate prompts, agents, model work,
 and spend. Immediately before receive commit, bare authority, creation-role
 membership, provider/model/skill availability, endpoint liveness, and generation

@@ -32,8 +32,10 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     let sender_id = AgentId::parse("peer-sender")?;
     let message = "peer navigation activation".to_owned();
     let model_input = format!(
-        "[tau-internal]: You have received a message from {sender_session}/{sender_id}\n\n\
-         <message>\n{message}\n</message>"
+        "[tau-internal]: Authenticated peer message\n\n\
+         <tau_peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">\n\
+         {message}\n\
+         </tau_peer_message>"
     );
     let scenario = ScenarioV2::new(
         "external-message-first-agent-navigation",

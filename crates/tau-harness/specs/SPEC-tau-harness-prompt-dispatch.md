@@ -171,6 +171,14 @@ field validation. Prompt assembly never adds reply routes or actionable
 capabilities; those remain private to the publishing extension. Replay restores
 context without waking the model or rebuilding extension-local authority.
 
+Harness-owned agent-message facts use the analogous placement/checkpoint
+mechanics but remain a distinct typed domain. Each directional durable
+occurrence supplies its only payload-bearing provider projection; local inbound
+messages render the escaped stable-sender `[tau-internal]` wrapper from the
+typed fact, and live activation uses only a sequence-keyed payload-free wake.
+Replay renders context without waking. See
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+
 Compaction-triggered dispatch and continuation refine [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md); that record owns their transaction, checkpoint, replay, and model-correlation behavior.
 
 ## Prompt capability trust boundary

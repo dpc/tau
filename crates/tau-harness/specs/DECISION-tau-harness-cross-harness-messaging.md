@@ -18,3 +18,8 @@ The RPC protects against accidental misrouting, not malicious same-user
 processes. Exact behavior is specified by
 [SPEC-tau-harness-peer-routing](SPEC-tau-harness-peer-routing.md) and
 [SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).
+Receive-commit projection, runtime activation, replay, and provider-context
+cardinality are governed by
+[DECISION-agent-message-transcript-projection](../../../specs/DECISION-agent-message-transcript-projection.md)
+and specified end to end by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).

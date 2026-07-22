@@ -12,9 +12,10 @@ bundled IM bridges have no legacy user-message prompt path.
 Valid committed facts project to compact `<tau_message event="…">` provider
 context. External content and publisher-provided metadata remain untrusted data;
 they grant no identity, routing, tool, or instruction authority. Live incoming
-facts can activate the targeted agent after transcript placement, while replay
-reconstructs context without waking the model. `message.sent` projects as
-assistant context and never activates the model by itself.
+facts immediately create a payload-free wake; branch-applicable transcript
+placement and provider dispatch may follow later. Replay reconstructs context
+without creating a runtime wake. `message.sent` projects as assistant context and
+never activates the model by itself.
 The common prompt shape is defined by
 [`DECISION-common-external-message-envelope`](../specs/DECISION-common-external-message-envelope.md).
 
@@ -102,7 +103,12 @@ Use `sub_agent_id` as `recipient_id`:
 message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-cli/src/event_renderer.rs."})
 ```
 
-The UI may display, summarize, or hide agent-to-agent messages depending on `/set show-messages`. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
+The UI may display, summarize, or hide agent-to-agent messages depending on
+`/set show-messages`. The recipient's durable `agent.message_received` fact is
+also its sole model payload: provider context renders the body XML-escaped in a
+sender-labelled `[tau-internal]` `<message>` wrapper. Live delivery uses a
+payload-free runtime wake and does not persist a second submitted/steered prompt.
+Cold replay restores the same wrapper as context without waking the model.
 
 ## Send a message to another active session
 
@@ -146,8 +152,8 @@ their canonical typed representation.
 Inter-session delivery is best-effort at-least-once. During normal live operation Tau
 reports success only after the exact receive projection commits. If the target
 crashes or the connection is lost after that commit but before acknowledgement,
-a retry can deliver a duplicate prompt; Tau does not provide distributed
-exactly-once deduplication across sessions.
+a retry can deliver a duplicate receive occurrence and activation; Tau does not
+provide distributed exactly-once deduplication across sessions.
 The same crash ambiguity can duplicate an auto-started agent, model work, or
 spend. Before creation, each receiving agent is limited to 32 queued
 inter-session inputs, 256 KiB of queued inter-session message body, 60 accepted
@@ -166,7 +172,7 @@ active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection.
 
 Inbound inter-session text is authenticated agent content, not a harness
-instruction. It is XML-escaped inside a distinct `tau_peer_message` prompt
+instruction. It is XML-escaped inside a distinct `tau_peer_message` context
 envelope carrying harness-authored sender session and agent identity.
 
 ## Watch another agent's responses
@@ -230,7 +236,7 @@ watch notifications transitive.
 
 `agent_start` automatically enables watching for the sub-agent it creates. A
 watch response notification is delivered to the watching agent as a hidden
-internal prompt that is distinct from an explicit `message` tool delivery:
+typed context projection that is distinct from an explicit `message` tool delivery:
 
 ```text
 [tau-internal]: Watched agent engineer_b emitted a response

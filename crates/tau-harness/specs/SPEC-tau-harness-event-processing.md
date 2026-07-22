@@ -23,6 +23,32 @@ single runtime sequence/timestamp, writes debug/event-log records, persists
 eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
 Extension prompt-fragment projection runs only after this ordinary commit.
+When lifecycle teardown destructively cancels an intercepted publication, the
+harness temporarily skips that interceptor registration until it consumes the
+single outstanding stale reply. This preserves the extension connection and
+registration while preventing an uncorrelated old reply from applying to a
+later publication. Replacement registration is accepted while suspended, no
+timeout applies, exactly one reply is consumed without action, and disconnect
+clears the suspension; normal interception resumes after reply consumption or a
+new connection. The owning contract is
+[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
+Deferred publications removed by teardown run the same
+reservation, ACK, and ephemeral-marker cleanup as an interceptor Drop.
+Rollover advances the admission generation before quiescing publication.
+Configured-extension frames retain their original admission session/generation
+through pre-Ready and global activation staging. Documented session-bound raw
+observation families still commit and broadcast across rollover: tool requests,
+start-agent requests, internal-prompt requests, and every per-agent-context and
+session-discovery declaration/readiness event. One common post-commit boundary
+rejects their stale-generation semantics, including tool routing, prompt
+submission, canonical message projection, metadata mutation, and
+context/discovery projection, while releasing any activation reservation.
+Tool declarations, prompt-fragment declarations, provider-model declarations,
+and provider-quota reports are process-global exceptions: rollover retains them
+and their semantic consumer runs only when the captured connection and extension
+instance still exactly match the live generation. The family-specific linked
+specifications are the source of truth for whether a committed peer event is
+session-bound observation or process-global current state.
 Declarations are excluded from semantic persistence and replay for either
 caller-supplied `persist` value; see
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
@@ -91,6 +117,13 @@ Canonical `shell.command_finished` is likewise immutable and must-pass so UI
 completion and optional post-commit transcript injection cannot diverge.
 Canonical shell progress retains its harness-owned mapped command/target
 identity while allowing the established chunk/stream interception changes.
+
+Committed harness-owned agent-message projections are their owning
+transcript's sole payload occurrence. Their post-commit reaction may install a
+runtime-only sequence wake but never submits or steers a second payload prompt.
+Sequence-aware fold placement, provider rendering, replay, and acknowledgement
+are specified by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 `tool.request` and `tool.started` are eligible session-scoped execution restore
 facts. Publications with `persist=true` enter each session's

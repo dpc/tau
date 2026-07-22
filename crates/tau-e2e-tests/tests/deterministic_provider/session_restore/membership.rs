@@ -27,7 +27,7 @@ fn cold_resume_composes_loaded_unloaded_and_ephemeral_membership()
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 5, worker: 1 },
+        ProviderTurnCounts { main: 4, worker: 1 },
     )?;
 
     let ephemeral = observer_a.create_ephemeral_worker(&identities.main)?;

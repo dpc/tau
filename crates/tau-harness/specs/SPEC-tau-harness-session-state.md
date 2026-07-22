@@ -130,6 +130,12 @@ facts and visible queued-user `agent.prompt_steered` facts are anchors, while
 injected user messages, internal prompts, compaction triggers, assistant/tool
 nodes, and agent-message projections are not.
 
+Live agent-message activation is runtime-only branch ownership. Navigation to a
+sibling is allowed but cannot acknowledge or scan an owed wake from the other
+branch; that wake remains dormant until its branch is reselected or endpoint
+lifecycle cleanup retires it. See
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+
 `agent.head_moved` is durable cursor state, but it is not a permanent override
 over later transcript records. Agent-log replay folds head moves and
 node-producing events in chronological order; every later prompt/assistant/tool

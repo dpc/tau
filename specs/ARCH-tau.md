@@ -58,7 +58,7 @@ ordinary commit for live subscribers only; neither event enters semantic replay.
 See
 [SPEC-ui-prompt-draft-and-focus-events](SPEC-ui-prompt-draft-and-focus-events.md).
 
-External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
+External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), agent-message delivery and projection by [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 
 Local configured extensions are trusted host executables with limited protocol
 authority, cooperative inter-harness IPC is a separate same-UID coordination

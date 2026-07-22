@@ -52,6 +52,28 @@ This workflow complements automated tests; it is not a replacement for focused
 regression coverage. Reusable steps live in
 `.agents/skills/tau-e2e-testing-tmux/SKILL.md`.
 
+## Agent-message ownership tests
+
+Keep message tests separated by authority layer:
+
+- protocol/store tests prove one typed sent or received journal occurrence and
+  exact durable sequence;
+- core fold tests prove branch placement, tree-global tool-round adjacency,
+  replay equivalence, and canonical provider rendering;
+- harness tests prove payload-free live wakes, checkpoint acknowledgement,
+  wait interruption, navigation dormancy/reselection, admission release, and
+  pre-persistence rejection;
+- deterministic E2E tests prove canonical watch and authenticated-peer context
+  does not reintroduce delivery-created prompt turns. The production `message`
+  tool's no-wrapper invariant currently has harness vertical-slice coverage,
+  not a strict fake-provider E2E scenario.
+
+Do not use body or logical message-ID searches as occurrence or wake oracles.
+Correlate typed events by owning journal sequence, branch node, checkpoint, and
+activation class. See
+[`SPEC-agent-message-delivery`](../specs/SPEC-agent-message-delivery.md) for the
+end-to-end contract.
+
 ### Warm-process multi-agent smoke
 
 Use this opt-in smoke only with a trusted provider profile explicitly allowlisted

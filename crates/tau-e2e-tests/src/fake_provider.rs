@@ -709,13 +709,16 @@ impl FakeState {
             .get(&prompt.agent_id)
             .map(VecDeque::len)
             .unwrap_or_default();
-        if queued_len == 0 || progress >= expected.len() {
+        let Some(next_progress) = progress.checked_add(queued_len) else {
+            return Err(self.mismatch(cursor, "watch batch progress overflow"));
+        };
+        if queued_len == 0 || expected.len() < next_progress {
             return Err(self.mismatch(cursor, "watch batch stage is empty or over-consumed"));
         }
         self.validate_watch_notification_messages(
             cursor,
             prompt,
-            &expected[progress..progress + 1],
+            &expected[progress..next_progress],
         )?;
         self.agent_lanes
             .entry(prompt.agent_id.clone())
@@ -724,7 +727,7 @@ impl FakeState {
             .watch_notifications
             .get_mut(&prompt.agent_id)
             .expect("validated watch queue exists");
-        queued.pop_front();
+        queued.drain(..queued_len);
         if queued.is_empty() {
             self.watch_notifications.remove(&prompt.agent_id);
         }
@@ -734,7 +737,6 @@ impl FakeState {
                 originator: prompt.originator.clone(),
             },
         ))?;
-        let next_progress = progress + 1;
         let terminal_response = if next_progress == expected.len() {
             self.watch_progress.remove(&prompt.agent_id);
             self.watch_turn_correlations.remove(&prompt.agent_id);
@@ -769,29 +771,36 @@ impl FakeState {
         let actual = self
             .watch_notifications
             .get(&prompt.agent_id)
-            .and_then(|queued| queued.front())
             .cloned()
             .ok_or_else(|| self.mismatch(cursor, "watch chain stage is empty"))?;
-        if progress >= 4 {
+        let Some(next_progress) = progress.checked_add(actual.len()) else {
+            return Err(self.mismatch(cursor, "watch chain progress overflow"));
+        };
+        if actual.is_empty() || 4 < next_progress {
             return Err(self.mismatch(cursor, "watch chain is over-consumed"));
         }
-        let expected = match actual.kind {
-            tau_proto::AgentMessageKind::WatchPrompt => WatchNotificationV2::Prompt {
-                content: contents.prompt,
-            },
-            tau_proto::AgentMessageKind::WatchResponse => WatchNotificationV2::Response {
-                content: contents.response,
-            },
-            tau_proto::AgentMessageKind::WatchTurnState => WatchNotificationV2::TurnState {
-                state: actual
-                    .watch_turn_state
-                    .as_ref()
-                    .ok_or_else(|| self.mismatch(cursor, "watch chain turn state lacks payload"))?
-                    .state,
-            },
-            _ => return Err(self.mismatch(cursor, "watch chain contains an invalid kind")),
-        };
-        self.validate_watch_notification_messages(cursor, prompt, &[expected])?;
+        let expected = actual
+            .iter()
+            .map(|message| match message.kind {
+                tau_proto::AgentMessageKind::WatchPrompt => Ok(WatchNotificationV2::Prompt {
+                    content: contents.prompt.clone(),
+                }),
+                tau_proto::AgentMessageKind::WatchResponse => Ok(WatchNotificationV2::Response {
+                    content: contents.response.clone(),
+                }),
+                tau_proto::AgentMessageKind::WatchTurnState => Ok(WatchNotificationV2::TurnState {
+                    state: message
+                        .watch_turn_state
+                        .as_ref()
+                        .ok_or_else(|| {
+                            self.mismatch(cursor, "watch chain turn state lacks payload")
+                        })?
+                        .state,
+                }),
+                _ => Err(self.mismatch(cursor, "watch chain contains an invalid kind")),
+            })
+            .collect::<ClientResult<Vec<_>>>()?;
+        self.validate_watch_notification_messages(cursor, prompt, &expected)?;
         self.agent_lanes
             .entry(prompt.agent_id.clone())
             .or_insert(lane_index);
@@ -799,7 +808,7 @@ impl FakeState {
             .watch_notifications
             .get_mut(&prompt.agent_id)
             .expect("validated watch queue exists");
-        queued.pop_front();
+        queued.drain(..actual.len());
         if queued.is_empty() {
             self.watch_notifications.remove(&prompt.agent_id);
         }
@@ -809,7 +818,6 @@ impl FakeState {
                 originator: prompt.originator.clone(),
             },
         ))?;
-        let next_progress = progress + 1;
         let terminal_response = if next_progress == 4 {
             let admitted = self
                 .watch_chain_progress

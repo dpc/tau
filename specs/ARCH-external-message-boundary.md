@@ -45,8 +45,9 @@ Valid committed facts project to an escaped `<tau_message event="…">` boundary
 with opaque message/sender references and optional display, authentication, and
 configured-alias metadata as specified by
 [DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
-Incoming facts can activate a live target after transcript placement; replay
-reconstructs context without waking the model. Publisher metadata and message
+Incoming facts immediately create a payload-free live wake; branch-applicable
+transcript placement and provider dispatch may follow later. Replay reconstructs
+context without creating a runtime wake. Publisher metadata and message
 content remain untrusted and confer no identity, instruction, route, tool, or
 egress authority.
 
@@ -80,7 +81,13 @@ Callback correlation precedes peer input admission and any auto-start creation.
 The target event loop owns bounded live single-flight selection, and revalidates
 entrypoint role/provider/skill authority immediately before receive commit.
 Best-effort at-least-once delivery deliberately has no distributed crash
-transaction; an ambiguous retry may duplicate prompt, agent, model work, or spend.
+transaction; an ambiguous retry may duplicate a receive occurrence, activation,
+agent, model work, or spend.
+Each accepted directional occurrence is nevertheless its owning transcript's
+sole canonical payload projection. Live recipient activation is a runtime-only,
+sequence-keyed wake; replay renders the typed fact without waking. Complete
+placement, rendering, checkpoint, and branch behavior is specified by
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
 
 Peer-session discovery uses a metadata-schema-versioned `peer_entrypoint` hint
 only to select bounded probe candidates. A live target RPC confirms the active

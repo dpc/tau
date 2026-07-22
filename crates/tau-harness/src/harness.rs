@@ -98,10 +98,11 @@ use crate::harness::extension_data::{
 };
 use crate::harness::extensions::{
     DeferredExtensionMessage, ExtensionActivationStage, ExtensionFrameAdmission,
-    ExtensionRuntimeState, StagedExtensionPublish,
+    ExtensionRuntimeState, StagedExtensionPublish, StagedSessionBound,
 };
 use crate::harness::interception::{
-    ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
+    AgentPublishCompletion, ConversationHeadSync, DeferredPublish, InterceptorRegistry,
+    PendingIntercept,
 };
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::subagents_tool::SubagentToolState;
@@ -277,36 +278,27 @@ fn default_navigation_mode(
     }
 }
 
-/// Renders one accepted cross-agent delivery as its model-visible prompt.
-///
-/// Initial or redundant watch observations return `None` because they do not
-/// create agent work.
-fn agent_message_received_prompt(message: &tau_proto::AgentMessageReceived) -> Option<String> {
-    let escaped_message = escape_agent_message_for_prompt(&message.message);
-    let sender_label = message
-        .sender_session_id
-        .as_ref()
-        .map(|session_id| format!("{session_id}/{}", message.sender_id))
-        .unwrap_or_else(|| message.sender_id.to_string());
+/// Classifies live activation without carrying or re-rendering message payload.
+fn agent_message_activation_class(
+    message: &tau_proto::AgentMessageReceived,
+) -> Option<crate::agent::AgentMessageActivationClass> {
+    use crate::agent::AgentMessageActivationClass::{
+        IsolatedWatchNotification, OrdinaryAgentInput,
+    };
     match message.kind {
-        tau_proto::AgentMessageKind::Message => Some(format!(
-            "[tau-internal]: You have received a message from {sender_label}\n\n<message>\n{escaped_message}\n</message>"
-        )),
-        tau_proto::AgentMessageKind::WatchResponse => Some(format!(
-            "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{escaped_message}\n</response>"
-        )),
-        tau_proto::AgentMessageKind::WatchPrompt => Some(format!(
-            "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{escaped_message}\n</prompt>"
-        )),
+        tau_proto::AgentMessageKind::Message
+        | tau_proto::AgentMessageKind::WatchResponse
+        | tau_proto::AgentMessageKind::WatchPrompt => Some(OrdinaryAgentInput),
         tau_proto::AgentMessageKind::WatchTurnState => message
             .watch_turn_state
             .as_ref()
-            .and_then(|state| crate::prompt::watch_turn_transition_text(&sender_label, state)),
-        tau_proto::AgentMessageKind::WatchProviderStatus => {
-            let status = message.watch_provider_status.as_ref()?;
-            (!status.initial)
-                .then(|| crate::prompt::watch_provider_status_text(&sender_label, status))
-        }
+            .is_some_and(|state| !state.initial)
+            .then_some(IsolatedWatchNotification),
+        tau_proto::AgentMessageKind::WatchProviderStatus => message
+            .watch_provider_status
+            .as_ref()
+            .is_some_and(|status| !status.initial)
+            .then_some(IsolatedWatchNotification),
     }
 }
 
@@ -1500,17 +1492,29 @@ pub(crate) use subagents_tool::ExternalMessageToolCompletion;
 pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
 pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-message";
 
+/// Agent creation accepted by the harness but not yet installed as a live
+/// route.
 #[derive(Debug)]
 struct PendingStartAgentRequest {
+    /// Connection that owns the accepted start request.
     source_id: String,
+    /// Stable extension name used for lifecycle and result correlation.
     extension_name: String,
+    /// Canonical accepted request payload.
     query: tau_proto::StartAgentRequest,
+    /// Resolved role captured at admission.
     role: String,
+    /// Reserved runtime conversation ID.
     cid: AgentId,
+    /// Optional runtime parent conversation.
     parent_cid: Option<AgentId>,
+    /// Reserved durable public agent ID.
     agent_id: String,
+    /// Persistence mode captured before installation.
     persistence: tau_core::AgentPersistenceMode,
-    pending_agent_messages: VecDeque<PendingPrompt>,
+    /// Committed wakes accepted before installation and transferred exactly
+    /// once to the live agent without duplicating payload authority.
+    pending_agent_message_wakes: VecDeque<crate::agent::PendingMessageWake>,
 }
 
 #[derive(Clone, Debug)]
@@ -1845,10 +1849,10 @@ pub struct Harness {
     pub(crate) current_session_id: SessionId,
     /// Monotonic in-process generation for the active session binding.
     ///
-    /// Incremented on every successful `switch_session` so asynchronous
-    /// completions can prove they still belong to the same logical session
-    /// binding even if a later session recreates the same conversation/tool
-    /// ids.
+    /// Advanced at the start of every `switch_session` attempt, before
+    /// publication quiescence or fallible rebinding work, so no old-session
+    /// completion can acquire current-generation authority even if the
+    /// switch later fails.
     pub(crate) current_session_generation: u64,
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
@@ -2052,6 +2056,10 @@ pub struct Harness {
     pub(crate) debug_log: Option<DebugEventLog>,
     /// Event emission interceptors, exact name first and prefix fallback.
     pub(crate) interceptors: InterceptorRegistry,
+    /// Interceptor connections with one destructively canceled request whose
+    /// uncorrelated reply is still owed. Their registrations remain installed
+    /// but are skipped until that stale reply is consumed.
+    pub(crate) suspended_interceptor_connections: HashSet<tau_proto::ConnectionId>,
     /// Currently in-flight interception. While `Some(_)`, no new
     /// publishes commit — they queue onto `deferred_publishes` until
     /// the awaited [`InterceptReply`] arrives (or the awaited
@@ -2063,21 +2071,9 @@ pub struct Harness {
     /// Publishes that arrived while `pending_intercept` was active.
     /// Drained in FIFO order once the pending intercept resolves.
     pub(crate) deferred_publishes: VecDeque<DeferredPublish>,
-    /// Conversations whose just-published `AgentPromptSubmitted` (or
-    /// equivalent user-message event) has not yet committed because
-    /// it is parked in the interception chain. Each entry triggers
-    /// a `send_prompt_to_agent_for` call once the next
-    /// user-message-bearing event commits — that's when the
-    /// `AgentTree` reflects the prompt and the assembled message
-    /// list will actually contain it. Without this, the agent
-    /// receives a stale message list (the "Ready" loop bug). Owned by
-    /// the defer/dispatch helpers in `harness::interception`.
-    pub(crate) pending_user_prompt_dispatches: VecDeque<AgentId>,
-    /// Conversations whose next agent prompt is ready except that an
-    /// unrelated publish is still parked in the interception chain.
-    /// These do not wait for another user-message fold; they drain
-    /// once interception and deferred publishes are idle. Owned by the
-    /// defer/dispatch helpers in `harness::interception`.
+    /// Publish-idle fallback dispatches and exact committed branch-owned
+    /// activation obligations. Committed entries remain until a durable
+    /// checkpoint or standalone start acknowledges their watermark.
     pub(crate) pending_publish_idle_dispatches: VecDeque<interception::DeferredPromptDispatch>,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
@@ -2162,6 +2158,9 @@ pub struct Harness {
     /// remote work because a correlated terminal failure is already queued.
     suppressed_compaction_dispatches:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Global-round conflicts whose durable compaction failure performs runtime
+    /// cleanup without projecting provider-watch activity.
+    silent_compaction_failure_prompts: HashSet<AgentPromptId>,
     /// Suppressed queued reactive claims that must terminalize as Cancelled
     /// immediately after their durable start commits.
     cancelled_compaction_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
@@ -2171,9 +2170,12 @@ pub struct Harness {
     /// Accepted manual requests waiting for a safe start boundary.
     accepted_manual_compaction_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
-    /// Restored compaction checkpoints already enqueued through interception.
-    enqueued_restored_compaction_checkpoints:
+    /// Standalone inference checkpoints currently queued through publication.
+    enqueued_standalone_inference_checkpoints:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Standalone continuations whose exact completion-bearing steer was
+    /// rejected before commit and must retry on branch reselection.
+    pending_agent_publish_completions: HashMap<AgentId, AgentPublishCompletion>,
     /// Explicit provider operation and resume policy for each in-flight prompt.
     pub(crate) prompt_operations:
         std::collections::HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
@@ -2622,7 +2624,9 @@ fn prompt_anchor_targets<'a>(
     let mut anchors = Vec::new();
     for record in events {
         let is_anchor_event = is_prompt_anchor_event(agent_id, &record.event);
-        let folded_node_id = replay.apply_event_at(record.parent, &record.event);
+        let folded_node_id = replay
+            .apply_persisted_record(record)
+            .expect("loaded agent records already passed canonical replay validation");
         if !is_anchor_event {
             continue;
         }
@@ -2799,10 +2803,10 @@ impl Harness {
             turn_state: TurnState::Idle,
             debug_log: None,
             interceptors: InterceptorRegistry::default(),
+            suspended_interceptor_connections: HashSet::new(),
             pending_intercept: None,
             pending_publish_error: None,
             deferred_publishes: VecDeque::new(),
-            pending_user_prompt_dispatches: VecDeque::new(),
             pending_publish_idle_dispatches: VecDeque::new(),
             available_models: Vec::new(),
             provider_models_by_extension: HashMap::new(),
@@ -2833,10 +2837,12 @@ impl Harness {
             prompt_semantic_output: HashSet::new(),
             local_route_failure_prompts: HashSet::new(),
             suppressed_compaction_dispatches: HashSet::new(),
+            silent_compaction_failure_prompts: HashSet::new(),
             cancelled_compaction_claims: HashSet::new(),
             pending_manual_compaction_tools: HashMap::new(),
             accepted_manual_compaction_tools: HashMap::new(),
-            enqueued_restored_compaction_checkpoints: HashSet::new(),
+            enqueued_standalone_inference_checkpoints: HashSet::new(),
+            pending_agent_publish_completions: HashMap::new(),
             prompt_operations: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
             prompt_tool_call_prompts: HashMap::new(),
@@ -4289,6 +4295,17 @@ impl Harness {
     /// the tree themselves (which would race the interception chain
     /// when a publish parks).
     fn publish_event_for_agent(&mut self, cid: &AgentId, source: Option<&str>, event: Event) {
+        self.publish_event_for_agent_with_completion(cid, source, event, None, false);
+    }
+
+    fn publish_event_for_agent_with_completion(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&str>,
+        event: Event,
+        completion: Option<AgentPublishCompletion>,
+        notify_watchers: bool,
+    ) {
         if !self.agents.contains_key(cid) {
             // The conversation was torn down between when the
             // caller looked it up and now (e.g. side conv that
@@ -4318,6 +4335,10 @@ impl Harness {
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
             agent_id,
+            session_generation: self.current_session_generation,
+            suppress_activation_dispatch: completion.is_some(),
+            completion,
+            notify_watchers,
         });
         self.enqueue_publish(source.as_deref(), event, persist, false, sync);
     }
@@ -4507,7 +4528,7 @@ impl Harness {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
         }
         self.with_derived_publish_source(source.map(Into::into), |harness| {
-            harness.react_to_committed_event(source, &event);
+            harness.react_to_committed_event(source, &event, None);
         });
     }
 
@@ -4621,6 +4642,33 @@ impl Harness {
         if !self.validate_pending_external_receive_before_commit(&event) {
             return;
         }
+        if !self.synchronized_inference_checkpoint_has_live_owner(&event, sync_head_for.as_ref()) {
+            self.rollback_rejected_activation_successor(&event);
+            self.emit_info("dropping stale synchronized inference checkpoint after teardown");
+            return;
+        }
+        if !self.activation_successor_matches_selected_head(&event) {
+            self.rollback_rejected_activation_successor(&event);
+            self.emit_harness_failure(&format!(
+                "dropping stale off-branch activation successor {}",
+                event.name()
+            ));
+            return;
+        }
+        if sync_head_for.as_ref().is_some_and(|sync| {
+            sync.completion.is_some()
+                && (sync.session_generation != self.current_session_generation
+                    || !self.agents.get(&sync.cid).is_some_and(|agent| {
+                        agent.session_id == self.current_session_id
+                            && !agent.terminating
+                            && sync.agent_id.as_ref().is_none_or(|agent_id| {
+                                agent.agent_id.as_deref() == Some(agent_id.as_str())
+                            })
+                    }))
+        }) {
+            self.emit_info("dropping stale completion publication after agent/session teardown");
+            return;
+        }
         // When this publish was stamped with a conversation, fold
         // the event onto that agent's branch directly. This
         // skips the `UiNavigateTree` head-bouncing dance that
@@ -4678,7 +4726,7 @@ impl Harness {
                 .or(source),
             _ => source,
         };
-        let folded_node_id = match self.persist_semantic_event(
+        let append_outcome = match self.persist_semantic_event(
             persistence_source,
             &event,
             persist,
@@ -4686,8 +4734,10 @@ impl Harness {
             sync_head_for.as_ref(),
             recorded_at,
         ) {
-            Ok(folded_node_id) => folded_node_id,
+            Ok(append_outcome) => append_outcome,
             Err(error) => {
+                self.rollback_rejected_activation_successor(&event);
+                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
                 if semantic_event_router::session_membership_id_for_event(&event)
                     .is_some_and(|session_id| session_id == self.current_session_id)
                 {
@@ -4725,10 +4775,15 @@ impl Harness {
         if let Event::AgentPromptCreated(prompt) = &event {
             self.note_agent_prompt_created(prompt);
         }
-        if let Some(sync) = sync_head_for
+        if let Some(sync) = sync_head_for.as_ref()
             && let Some(c) = self.agents.get_mut(&sync.cid)
         {
-            match (&event, folded_node_id) {
+            match (
+                &event,
+                append_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.folded_node_id),
+            ) {
                 (Event::AgentHeadMoved(moved), _) => {
                     c.head = moved.head.as_option();
                     c.branch_generation = c.branch_generation.saturating_add(1);
@@ -4768,6 +4823,56 @@ impl Harness {
                 _ => {}
             }
         }
+        let commits_inference_activation = matches!(
+            event,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                ..
+            }) | Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                inference_activation: true,
+                ..
+            }) | Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                inference_activation: true,
+                ..
+            })
+        );
+        if commits_inference_activation
+            && let Some(sync) = sync_head_for
+                .as_ref()
+                .filter(|sync| !sync.suppress_activation_dispatch)
+        {
+            let activation_through = append_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.folded_node_id)
+                .map(tau_proto::AgentHead::Node)
+                .or_else(|| {
+                    self.agents.get(&sync.cid).map(|agent| {
+                        agent
+                            .head
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+                    })
+                });
+            let activation_cut = self.activation_cut_before_current_head(&sync.cid);
+            self.enqueue_committed_activation_dispatch(
+                sync.cid.clone(),
+                activation_cut,
+                activation_through,
+            );
+        }
+        let agent_publish_completion = sync_head_for
+            .as_ref()
+            .and_then(|sync| {
+                sync.completion
+                    .clone()
+                    .map(|completion| (sync.cid.clone(), completion))
+            })
+            .map(|(cid, completion)| {
+                let through = append_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.folded_node_id)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                (cid, completion, through)
+            });
         // Wrap in a harness-owned delivery so subscribers get the shared
         // runtime timestamp and replay/live envelope metadata.
         let observer_frame = HarnessOutputMessage::deliver_live(
@@ -4866,9 +4971,354 @@ impl Harness {
         }
         self.process_committed_peer_event(source, peer_context, &event);
         self.with_derived_publish_source(source.map(Into::into), |harness| {
-            harness.react_to_committed_event(source, &event);
+            harness.react_to_committed_event(source, &event, append_outcome.as_ref());
         });
+        if sync_head_for
+            .as_ref()
+            .is_some_and(|sync| sync.notify_watchers)
+            && let Event::AgentPromptSteered(steered) = &event
+        {
+            self.notify_agent_watchers_about_user_prompt(steered.agent_id.as_str(), &steered.text);
+        }
+        if let Some((cid, completion, through)) = agent_publish_completion {
+            self.complete_agent_publish(&cid, completion, through);
+        }
         self.complete_pending_external_receive(&event);
+    }
+
+    /// Require an exact live `AwaitingCheckpoint` owner for every delayed
+    /// inference checkpoint before it can append.
+    fn synchronized_inference_checkpoint_has_live_owner(
+        &self,
+        event: &Event,
+        sync: Option<&ConversationHeadSync>,
+    ) -> bool {
+        let Event::AgentInferenceDispatchStarted(started) = event else {
+            return true;
+        };
+        let Some(sync) = sync else {
+            return true;
+        };
+        if sync.session_generation != self.current_session_generation {
+            return false;
+        }
+        let Some(agent) = self.agents.get(&sync.cid) else {
+            return false;
+        };
+        if agent.terminating
+            || agent.session_id != self.current_session_id
+            || agent.agent_id.as_deref() != Some(started.agent_id.as_str())
+            || sync
+                .agent_id
+                .as_ref()
+                .is_some_and(|agent_id| agent_id != &started.agent_id)
+        {
+            return false;
+        }
+        let crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner,
+            agent_prompt_id,
+            through,
+            dispatch,
+        } = &agent.activation_dispatch
+        else {
+            return false;
+        };
+        owner.transaction_id() == started.transaction_id.as_ref()
+            && agent_prompt_id == &started.agent_prompt_id
+            && through == &started.through
+            && started.model.as_ref() == Some(&dispatch.model)
+            && started.operation.as_ref() == Some(&dispatch.operation)
+            && started.activation_cut.as_ref() == Some(&dispatch.activation_cut)
+    }
+
+    /// Validate a delayed activation successor against the selected branch
+    /// immediately before durable persistence.
+    fn activation_successor_matches_selected_head(&self, event: &Event) -> bool {
+        let (agent_id, through) = match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if self
+                    .runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+                    .and_then(|cid| self.agents.get(&cid))
+                    .is_some_and(|agent| {
+                        matches!(
+                            agent.activation_dispatch,
+                            crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
+                        )
+                    }) =>
+            {
+                (&started.agent_id, Some(started.through))
+            }
+            Event::AgentInferenceDispatchStarted(_) => return true,
+            Event::AgentStandaloneCompactionStarted(started) => {
+                (&started.agent_id, started.resume_through)
+            }
+            _ => return true,
+        };
+        let Some(through) = through else {
+            return true;
+        };
+        self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .and_then(|cid| self.agents.get(&cid))
+            .is_some_and(|agent| {
+                let selected = agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                agent
+                    .agent_id
+                    .as_deref()
+                    .and_then(|agent_id| self.agent_store.agent(agent_id))
+                    .is_none_or(|tree| tree.is_ancestor_head(through, selected))
+            })
+    }
+
+    /// Complete the exact post-commit action carried by an agent publication.
+    fn complete_agent_publish(
+        &mut self,
+        cid: &AgentId,
+        completion: AgentPublishCompletion,
+        through: tau_proto::AgentHead,
+    ) {
+        let AgentPublishCompletion::StandaloneContinuation {
+            transaction_id,
+            model,
+            activation_cut,
+            batch_parent: _,
+            source,
+            retry_prompts: _,
+            complete_on_commit,
+            ..
+        } = completion;
+        if !complete_on_commit {
+            return;
+        }
+        let Some((agent_id, agent_prompt_id)) = self.agents.get(cid).map(|agent| {
+            let durable_agent_id = agent.agent_id.as_deref().unwrap_or(cid.as_ref());
+            (
+                crate::parse_agent_id(durable_agent_id),
+                tau_proto::AgentPromptId::from(format!(
+                    "ap-{durable_agent_id}-{}",
+                    agent.next_prompt_index
+                )),
+            )
+        }) else {
+            return;
+        };
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                owner: crate::agent::InferenceCheckpointOwner::Standalone {
+                    id: transaction_id.clone(),
+                },
+                agent_prompt_id: agent_prompt_id.clone(),
+                through,
+                dispatch: crate::agent::InferenceDispatchOwnership {
+                    model: model.clone(),
+                    operation: tau_proto::PromptOperation::Inference,
+                    activation_cut,
+                },
+            };
+        }
+        self.enqueued_standalone_inference_checkpoints
+            .insert((agent_id.clone(), transaction_id.clone()));
+        self.publish_for_agent_from(
+            cid,
+            source.as_deref(),
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id,
+                transaction_id: Some(transaction_id),
+                agent_prompt_id,
+                through,
+                model: Some(model),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(activation_cut),
+            }),
+        );
+    }
+
+    /// Retain a rejected completion-bearing envelope without synthesizing an
+    /// activation token or draining its prompt payload.
+    fn retain_rejected_agent_publish(
+        &mut self,
+        sync: Option<&ConversationHeadSync>,
+        event: &Event,
+    ) {
+        let Some((cid, mut completion)) = sync.and_then(|sync| {
+            sync.completion
+                .clone()
+                .map(|completion| (sync.cid.clone(), completion))
+        }) else {
+            return;
+        };
+        let AgentPublishCompletion::StandaloneContinuation {
+            approved_retry_event,
+            ..
+        } = &mut completion;
+        *approved_retry_event = Some(event.clone());
+        self.discard_deferred_agent_publish_batch(&cid, &completion);
+        self.pending_agent_publish_completions
+            .insert(cid, completion);
+    }
+
+    /// Republish one retained completion envelope only on its owning branch.
+    fn retry_pending_agent_publish_completion(&mut self, cid: &AgentId) {
+        let Some(completion) = self.pending_agent_publish_completions.remove(cid) else {
+            return;
+        };
+        let (batch_parent, retry_prompts, approved_retry_event) = match &completion {
+            AgentPublishCompletion::StandaloneContinuation {
+                batch_parent,
+                retry_prompts,
+                approved_retry_event,
+                ..
+            } => (
+                *batch_parent,
+                retry_prompts.clone(),
+                approved_retry_event.clone(),
+            ),
+        };
+        if retry_prompts.is_empty() {
+            return;
+        };
+        let selected = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.head)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let on_owning_branch = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .is_some_and(|tree| tree.is_ancestor_head(batch_parent, selected));
+        if !on_owning_branch {
+            self.pending_agent_publish_completions
+                .insert(cid.clone(), completion);
+            return;
+        }
+        if let Some(approved_event) = approved_retry_event {
+            let mut approved_completion = completion.clone();
+            let AgentPublishCompletion::StandaloneContinuation {
+                approved_retry_event,
+                complete_on_commit,
+                ..
+            } = &mut approved_completion;
+            *approved_retry_event = None;
+            *complete_on_commit = retry_prompts.len() == 1;
+            self.commit_approved_agent_retry(cid, approved_event, approved_completion);
+            if self.pending_agent_publish_completions.contains_key(cid) {
+                return;
+            }
+            if retry_prompts.len() == 1 {
+                return;
+            }
+            let mut remaining_completion = completion;
+            let AgentPublishCompletion::StandaloneContinuation {
+                approved_retry_event,
+                ..
+            } = &mut remaining_completion;
+            *approved_retry_event = None;
+            self.publish_prompts_as_steered(
+                cid,
+                retry_prompts[1..].to_vec(),
+                Some(remaining_completion),
+            );
+            return;
+        }
+        self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
+    }
+
+    /// Retry the exact standalone-owned inference checkpoint after branch
+    /// reselection, retaining `AwaitingCheckpoint` until a commit succeeds.
+    fn retry_standalone_inference_checkpoint(&mut self, cid: &AgentId) {
+        let Some((agent_id, transaction_id, agent_prompt_id, through, dispatch)) =
+            self.agents.get(cid).and_then(|agent| {
+                let crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                    owner:
+                        crate::agent::InferenceCheckpointOwner::Standalone { id: transaction_id },
+                    agent_prompt_id,
+                    through,
+                    dispatch,
+                } = &agent.activation_dispatch
+                else {
+                    return None;
+                };
+                Some((
+                    crate::parse_agent_id(agent.agent_id.as_deref()?),
+                    transaction_id.clone(),
+                    agent_prompt_id.clone(),
+                    *through,
+                    dispatch.clone(),
+                ))
+            })
+        else {
+            return;
+        };
+        let key = (agent_id.clone(), transaction_id.clone());
+        if self
+            .enqueued_standalone_inference_checkpoints
+            .contains(&key)
+        {
+            return;
+        }
+        let event =
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id,
+                transaction_id: Some(transaction_id),
+                agent_prompt_id,
+                through,
+                model: Some(dispatch.model),
+                operation: Some(dispatch.operation),
+                activation_cut: Some(dispatch.activation_cut),
+            });
+        if !self.activation_successor_matches_selected_head(&event) {
+            return;
+        }
+        self.enqueued_standalone_inference_checkpoints.insert(key);
+        self.publish_for_agent(cid, event);
+    }
+
+    /// Roll back an ordinary successor that did not commit while retaining its
+    /// branch-owned obligation.
+    ///
+    /// A standalone successor instead retains `AwaitingCheckpoint`: its durable
+    /// compaction transaction is the sole continuation owner and is retried on
+    /// eligible branch reselection.
+    fn rollback_rejected_activation_successor(&mut self, event: &Event) {
+        let Event::AgentInferenceDispatchStarted(started) = event else {
+            return;
+        };
+        if let Some(transaction_id) = started.transaction_id.as_ref() {
+            self.enqueued_standalone_inference_checkpoints
+                .remove(&(started.agent_id.clone(), transaction_id.clone()));
+        }
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+        else {
+            return;
+        };
+        let ordinary_reservation = self.agents.get(&cid).is_some_and(|agent| {
+            matches!(
+                &agent.activation_dispatch,
+                crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                    owner: crate::agent::InferenceCheckpointOwner::Inference,
+                    agent_prompt_id,
+                    through,
+                    ..
+                } if agent_prompt_id == &started.agent_prompt_id && through == &started.through
+            )
+        });
+        if !ordinary_reservation {
+            // A standalone-owned checkpoint is the sole continuation owner for
+            // its durable transaction. Keep AwaitingCheckpoint intact when its
+            // successor does not commit; unlike an ordinary activation, it has
+            // no deferred branch obligation from which to reconstruct ownership.
+            return;
+        }
+        if let Some(agent) = self.agents.get_mut(&cid) {
+            agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+        }
+        self.discard_finished_response_prompt_tracking(&started.agent_prompt_id);
+        self.set_agent_turn_state(&cid, AgentTurnState::Idle);
     }
 
     fn pending_external_receive_message_id(event: &Event) -> Option<&tau_proto::AgentMessageId> {
@@ -5148,7 +5598,12 @@ impl Harness {
     /// the just-folded user message. The `c.head` sync that this
     /// dispatch depends on is handled inside `commit_event` for any
     /// publish stamped via `publish_event_for_agent`.
-    fn react_to_committed_event(&mut self, source: Option<&str>, event: &Event) {
+    fn react_to_committed_event(
+        &mut self,
+        source: Option<&str>,
+        event: &Event,
+        append_outcome: Option<&tau_core::AgentAppendOutcome>,
+    ) {
         if let Event::AgentStandaloneCompactionStarted(started) = event {
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
@@ -5181,6 +5636,9 @@ impl Harness {
             if let Some(cid) = cid {
                 if suppressed {
                     return;
+                }
+                if let Some(resume_through) = started.resume_through {
+                    self.acknowledge_deferred_activations_through(&cid, resume_through);
                 }
                 if let Some(agent) = self.agents.get_mut(&cid) {
                     agent.activation_dispatch = crate::agent::ActivationDispatchState::Running {
@@ -5268,6 +5726,9 @@ impl Harness {
                         _ => None,
                     })
             });
+            let suppress_provider_watch = failed_prompt_id
+                .as_ref()
+                .is_some_and(|prompt_id| self.silent_compaction_failure_prompts.remove(prompt_id));
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
@@ -5276,7 +5737,7 @@ impl Harness {
                 };
                 agent.in_flight_prompt = None;
             }
-            if let Some(failed_prompt_id) = failed_prompt_id {
+            if !suppress_provider_watch && let Some(failed_prompt_id) = failed_prompt_id {
                 self.project_agent_watch_provider_state(
                     &cid,
                     failed_prompt_id,
@@ -5290,7 +5751,14 @@ impl Harness {
             {
                 return;
             }
-            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            if suppress_provider_watch {
+                if let Some(agent) = self.agents.get_mut(&cid) {
+                    agent.turn_state = AgentTurnState::Idle;
+                    agent.published_runtime_state = tau_proto::AgentRuntimeState::Idle;
+                }
+            } else {
+                self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            }
             self.try_advance_queue();
         }
         if let Event::AgentCompacted(compacted) = event
@@ -5360,54 +5828,35 @@ impl Harness {
                 agent.in_flight_prompt = None;
             }
             if resume.is_some() {
-                self.fold_pending_prompts_as_steered(&cid);
-                let (agent_prompt_id, through) = self
-                    .agents
-                    .get(&cid)
-                    .map(|agent| {
-                        let durable_agent_id = agent.agent_id.as_deref().unwrap_or(cid.as_ref());
-                        (
-                            tau_proto::AgentPromptId::from(format!(
-                                "ap-{durable_agent_id}-{}",
-                                agent.next_prompt_index
-                            )),
-                            agent
-                                .head
-                                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                        )
-                    })
-                    .expect("compacted agent still exists");
-                if let Some(agent) = self.agents.get_mut(&cid) {
-                    agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-                    agent.activation_dispatch =
-                        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                            owner: crate::agent::InferenceCheckpointOwner::Standalone {
-                                id: transaction_id.clone(),
-                            },
-                            agent_prompt_id: agent_prompt_id.clone(),
-                            through,
-                            dispatch: crate::agent::InferenceDispatchOwnership {
-                                model: compacted.model.clone().expect("qualified compaction model"),
-                                operation: tau_proto::PromptOperation::Inference,
-                                activation_cut: compacted.cut.unwrap_or(through),
-                            },
-                        };
+                let completion = AgentPublishCompletion::StandaloneContinuation {
+                    transaction_id: transaction_id.clone(),
+                    model: compacted.model.clone().expect("qualified compaction model"),
+                    activation_cut: compacted.cut.unwrap_or_else(|| {
+                        self.agents
+                            .get(&cid)
+                            .and_then(|agent| agent.head)
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+                    }),
+                    batch_parent: self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    source: source.map(str::to_owned),
+                    retry_prompts: Vec::new(),
+                    complete_on_commit: true,
+                    approved_retry_event: None,
+                };
+                if !self
+                    .fold_pending_prompts_as_steered_with_completion(&cid, Some(completion.clone()))
+                {
+                    let through = self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                    self.complete_agent_publish(&cid, completion, through);
                 }
-                self.publish_for_agent_from(
-                    &cid,
-                    source,
-                    Event::AgentInferenceDispatchStarted(
-                        tau_proto::AgentInferenceDispatchStarted {
-                            agent_id: compacted.agent_id.clone(),
-                            transaction_id: compacted.transaction_id.clone(),
-                            agent_prompt_id,
-                            through,
-                            model: compacted.model.clone(),
-                            operation: Some(tau_proto::PromptOperation::Inference),
-                            activation_cut: Some(compacted.cut.unwrap_or(through)),
-                        },
-                    ),
-                );
             } else {
                 self.set_agent_turn_state(&cid, AgentTurnState::Idle);
                 if let Some(agent) = self.agents.get_mut(&cid) {
@@ -5419,7 +5868,7 @@ impl Harness {
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(transaction_id) = started.transaction_id.as_ref()
         {
-            self.enqueued_restored_compaction_checkpoints
+            self.enqueued_standalone_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
@@ -5443,6 +5892,7 @@ impl Harness {
                 )
             });
             if checkpoint_matches {
+                self.acknowledge_deferred_activations_through(&cid, started.through);
                 self.acknowledge_message_wakes_through(&cid, started.through);
                 if let Some(agent) = self.agents.get_mut(&cid) {
                     let owner = match &agent.activation_dispatch {
@@ -5538,33 +5988,28 @@ impl Harness {
             self.agent_routes.remove(unloaded.agent_id.as_str());
             self.stopped_agent_ids.insert(unloaded.agent_id.to_string());
             self.discard_input_wait_for(&cid);
+            self.pending_agent_publish_completions.remove(&cid);
+            self.pending_publish_idle_dispatches
+                .retain(|dispatch| dispatch.cid != cid);
+            self.enqueued_standalone_inference_checkpoints
+                .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
             self.agents.remove(&cid);
+            self.cancel_agent_synchronized_publications(&cid);
         }
         if let Event::AgentMessageReceived(message) = event {
-            self.deliver_agent_message(message);
+            self.activate_received_agent_message(message, append_outcome);
         }
         if let Event::SessionAgentLoaded(loaded) = event {
             self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
         }
-        let folds_user_message = matches!(
-            event,
-            Event::AgentPromptSubmitted(_)
-                | Event::AgentUserMessageInjected(_)
-                | Event::AgentPromptSteered(_)
-        );
-        if !folds_user_message {
-            return;
-        }
-        let Some(cid) = self.pending_user_prompt_dispatches.pop_front() else {
-            return;
-        };
-        if !self.agents.contains_key(&cid) {
-            // Agent was torn down while the prompt was in
-            // limbo (e.g. side query that timed out).
-            return;
-        }
-        if !self.schedule_standalone_auto_compaction_for_activation(&cid, true, None) {
-            self.dispatch_prompt_after_publish_idle(&cid);
+        if let Event::AgentHeadMoved(moved) = event
+            && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(moved.agent_id.as_str()))
+        {
+            self.resolve_materialized_message_wakes(&cid);
+            self.retry_pending_agent_publish_completion(&cid);
+            self.retry_standalone_inference_checkpoint(&cid);
+            self.drain_publish_idle_dispatches();
+            self.try_advance_queue();
         }
     }
 
@@ -5630,14 +6075,18 @@ impl Harness {
         }
     }
 
-    fn deliver_agent_message(&mut self, message: &tau_proto::AgentMessageReceived) {
+    fn activate_received_agent_message(
+        &mut self,
+        message: &tau_proto::AgentMessageReceived,
+        append_outcome: Option<&tau_core::AgentAppendOutcome>,
+    ) {
+        let Some(outcome) = append_outcome else {
+            return;
+        };
         let peer_admission_bytes = self
             .pending_external_receive_acks
             .contains_key(&message.message_id)
             .then_some(message.message.len());
-        let Some(text) = agent_message_received_prompt(message) else {
-            return;
-        };
         if let Some(cid) = self
             .agent_routes
             .get(message.recipient_id.as_str())
@@ -5646,40 +6095,72 @@ impl Harness {
             if self.agents.get(&cid).is_none_or(|agent| agent.terminating) {
                 return;
             }
-            if let Some(conv) = self.agents.get_mut(&cid) {
-                let prompt = if matches!(
-                    message.kind,
-                    tau_proto::AgentMessageKind::WatchTurnState
-                        | tau_proto::AgentMessageKind::WatchProviderStatus
-                ) {
-                    PendingPrompt::watch_notification(text)
-                } else {
-                    PendingPrompt::agent_message_received(text)
-                        .with_peer_admission_bytes(peer_admission_bytes)
-                };
-                conv.pending_prompts.push_back(prompt);
+            if let Some(node_id) = outcome.folded_node_id
+                && let Some(agent) = self.agents.get_mut(&cid)
+            {
+                agent.head = Some(node_id);
+                agent.result_dedup.note_head_advanced_to(node_id);
+            }
+            let Some(activation_class) = agent_message_activation_class(message) else {
+                return;
+            };
+            if activation_class == crate::agent::AgentMessageActivationClass::OrdinaryAgentInput {
+                self.promote_lifecycle_notification_turn(&cid);
+            }
+            if let Some(agent) = self.agents.get_mut(&cid)
+                && !agent.pending_message_wakes.iter().any(|wake| {
+                    matches!(
+                        wake.source,
+                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            durable_event_seq,
+                            ..
+                        } if durable_event_seq == outcome.seq
+                    )
+                })
+            {
+                agent
+                    .pending_message_wakes
+                    .push_back(crate::agent::PendingMessageWake {
+                        source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            durable_event_seq: outcome.seq,
+                            activation_class,
+                            peer_admission_bytes,
+                        },
+                        node_id: outcome.folded_node_id,
+                    });
             }
             self.activate_waits_for(&cid);
             self.preempt_queued_tool_calls_for_message_received(&cid);
             self.try_advance_queue();
             return;
         }
+        let Some(activation_class) = agent_message_activation_class(message) else {
+            return;
+        };
         if let Some(pending) = self
             .pending_start_agent_requests
             .iter_mut()
             .find(|pending| pending.agent_id == message.recipient_id.as_str())
+            && !pending.pending_agent_message_wakes.iter().any(|wake| {
+                matches!(
+                    wake.source,
+                    crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                        durable_event_seq,
+                        ..
+                    } if durable_event_seq == outcome.seq
+                )
+            })
         {
-            let prompt = if matches!(
-                message.kind,
-                tau_proto::AgentMessageKind::WatchTurnState
-                    | tau_proto::AgentMessageKind::WatchProviderStatus
-            ) {
-                PendingPrompt::watch_notification(text)
-            } else {
-                PendingPrompt::agent_message_received(text)
-                    .with_peer_admission_bytes(peer_admission_bytes)
-            };
-            pending.pending_agent_messages.push_back(prompt);
+            pending
+                .pending_agent_message_wakes
+                .push_back(crate::agent::PendingMessageWake {
+                    source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                        durable_event_seq: outcome.seq,
+                        activation_class,
+                        peer_admission_bytes,
+                    },
+                    node_id: outcome.folded_node_id,
+                });
         }
     }
 
@@ -5695,11 +6176,14 @@ impl Harness {
         let Some(tree) = self.agent_store.agent(agent_id) else {
             return;
         };
-        let resolved_facts: HashMap<_, _> = tree
+        let resolved_message_inputs: HashMap<_, _> = tree
             .nodes()
             .iter()
             .filter_map(|node| match &node.entry {
                 tau_core::AgentEntry::MessageFact {
+                    durable_event_seq, ..
+                } => Some((*durable_event_seq, node.id)),
+                tau_core::AgentEntry::AgentMessage {
                     durable_event_seq, ..
                 } => Some((*durable_event_seq, node.id)),
                 _ => None,
@@ -5708,11 +6192,9 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             for wake in &mut agent.pending_message_wakes {
                 if wake.node_id.is_none() {
-                    wake.node_id = match &wake.source {
-                        crate::agent::PendingMessageWakeSource::MessageFact {
-                            durable_event_seq,
-                        } => resolved_facts.get(durable_event_seq).copied(),
-                    };
+                    wake.node_id = resolved_message_inputs
+                        .get(&wake.source.durable_event_seq())
+                        .copied();
                 }
             }
         }
@@ -5739,6 +6221,142 @@ impl Harness {
                 wake.node_id
                     .is_none_or(|node_id| !branch.contains(&node_id))
             });
+        }
+    }
+
+    /// Returns whether at least one materialized wake belongs to the selected
+    /// branch. Off-branch wakes remain dormant until navigation reselects them.
+    pub(crate) fn has_ready_message_wake_on_selected_branch(&self, cid: &AgentId) -> bool {
+        let Some(agent) = self.agents.get(cid) else {
+            return false;
+        };
+        let Some(agent_id) = agent.agent_id.as_deref() else {
+            return false;
+        };
+        let Some(tree) = self.agent_store.agent(agent_id) else {
+            return false;
+        };
+        let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
+        agent.pending_message_wakes.iter().any(|wake| {
+            wake.node_id
+                .is_some_and(|node_id| branch.contains(&node_id))
+        })
+    }
+
+    /// Returns whether accepted message input should interrupt a newly
+    /// registered wait.
+    ///
+    /// Unmaterialized wakes remain globally actionable while tool adjacency is
+    /// open. Once materialized, only wakes on the selected branch interrupt;
+    /// sibling-branch wakes stay dormant until navigation reselects them.
+    pub(crate) fn has_wait_preempting_message_wake(&self, cid: &AgentId) -> bool {
+        self.agents.get(cid).is_some_and(|agent| {
+            agent
+                .pending_message_wakes
+                .iter()
+                .any(|wake| wake.node_id.is_none())
+        }) || self.has_ready_message_wake_on_selected_branch(cid)
+    }
+
+    /// Returns the earliest materialized message wake on the selected branch.
+    ///
+    /// Branch order, rather than wake insertion order, defines the immutable
+    /// activation cut used by proactive and reactive compaction.
+    pub(crate) fn earliest_selected_message_wake_node(&self, cid: &AgentId) -> Option<NodeId> {
+        let agent = self.agents.get(cid)?;
+        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let wake_nodes: HashSet<_> = agent
+            .pending_message_wakes
+            .iter()
+            .filter_map(|wake| wake.node_id)
+            .collect();
+        tree.branch_node_ids_from(agent.head)
+            .into_iter()
+            .find(|node_id| wake_nodes.contains(node_id))
+    }
+
+    /// Returns the parent of the earliest selected-branch message wake.
+    pub(crate) fn selected_message_activation_cut(
+        &self,
+        cid: &AgentId,
+    ) -> Option<tau_proto::AgentHead> {
+        let agent = self.agents.get(cid)?;
+        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let wake_node = tree.node(self.earliest_selected_message_wake_node(cid)?)?;
+        Some(
+            wake_node
+                .parent_id
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+        )
+    }
+
+    /// Merges a captured activation cut with the earliest selected message
+    /// wake.
+    ///
+    /// Comparable selected-branch cuts choose the ancestor so every owed
+    /// activation remains in the exact suffix. A cut outside the selected
+    /// branch, or two incomparable cuts, returns `None`; branch-owned callers
+    /// must keep that activation dormant rather than scalarizing it to root.
+    pub(crate) fn earliest_activation_cut(
+        &self,
+        cid: &AgentId,
+        captured: Option<tau_proto::AgentHead>,
+    ) -> Option<tau_proto::AgentHead> {
+        let message = self.selected_message_activation_cut(cid);
+        let (Some(captured), Some(message)) = (captured, message) else {
+            let selected = captured.or(message)?;
+            let agent = self.agents.get(cid)?;
+            let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+            let through = agent
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+            return tree.is_ancestor_head(selected, through).then_some(selected);
+        };
+        let agent = self.agents.get(cid)?;
+        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let through = agent
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        if !tree.is_ancestor_head(captured, through) || !tree.is_ancestor_head(message, through) {
+            None
+        } else if tree.is_ancestor_head(captured, message) {
+            Some(captured)
+        } else if tree.is_ancestor_head(message, captured) {
+            Some(message)
+        } else {
+            None
+        }
+    }
+
+    /// Classifies selected-branch wake work for lifecycle fanout suppression.
+    ///
+    /// Any ordinary input promotes a coalesced isolated-watch turn to ordinary
+    /// lifecycle.
+    pub(crate) fn selected_message_wake_activation_class(
+        &self,
+        cid: &AgentId,
+    ) -> Option<crate::agent::AgentMessageActivationClass> {
+        let agent = self.agents.get(cid)?;
+        let agent_id = agent.agent_id.as_deref()?;
+        let tree = self.agent_store.agent(agent_id)?;
+        let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
+        let mut classes = agent
+            .pending_message_wakes
+            .iter()
+            .filter(|wake| {
+                wake.node_id
+                    .is_some_and(|node_id| branch.contains(&node_id))
+            })
+            .map(|wake| wake.source.activation_class());
+        let first = classes.next()?;
+        if first == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification
+            && classes.all(|class| {
+                class == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification
+            })
+        {
+            Some(crate::agent::AgentMessageActivationClass::IsolatedWatchNotification)
+        } else {
+            Some(crate::agent::AgentMessageActivationClass::OrdinaryAgentInput)
         }
     }
 
@@ -5788,8 +6406,10 @@ impl Harness {
     /// corresponding in-memory view. Session membership facts go to the session
     /// store; agent transcript facts go to the owning agent store. Either store
     /// may choose a durable or memory-only path based on session/agent
-    /// persistence. Returns the id of the just-folded agent transcript node,
-    /// when one was produced.
+    /// persistence. Returns the owning journal sequence and last folded
+    /// transcript node, when applicable. A context input accepted under an
+    /// open tool-calling assistant may commit with no node until the round
+    /// terminalizes.
     fn persist_semantic_event(
         &mut self,
         source: Option<&str>,
@@ -5798,7 +6418,7 @@ impl Harness {
         parent: tau_core::AgentEventParent,
         sync_head_for: Option<&ConversationHeadSync>,
         recorded_at: tau_proto::UnixMicros,
-    ) -> Result<Option<tau_proto::NodeId>, HarnessError> {
+    ) -> Result<Option<tau_core::AgentAppendOutcome>, HarnessError> {
         if let Event::AgentStarted(started) = event
             && self
                 .precommitted_agent_starts
@@ -5856,16 +6476,13 @@ impl Harness {
         else {
             return Ok(None);
         };
-        Ok(self
-            .agent_store
-            .append_agent_event_at(
-                agent_id.as_str(),
-                source,
-                parent,
-                event.clone(),
-                recorded_at,
-            )?
-            .folded_node_id)
+        Ok(Some(self.agent_store.append_agent_event_at(
+            agent_id.as_str(),
+            source,
+            parent,
+            event.clone(),
+            recorded_at,
+        )?))
     }
 
     fn session_restore_event_targets_loaded_agent(&self, event: &Event) -> bool {
@@ -7314,40 +7931,60 @@ impl Harness {
         &mut self,
         source_id: &str,
         skill: tau_proto::ExtSkillAvailable,
+        admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
             .skill_announcements
-            .push(skill);
+            .push(StagedSessionBound {
+                admission,
+                value: skill,
+            });
     }
 
     fn stage_agents_md_available(
         &mut self,
         source_id: &str,
         agents: tau_proto::ExtAgentsMdAvailable,
+        admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
             .agents_files
-            .push(agents);
+            .push(StagedSessionBound {
+                admission,
+                value: agents,
+            });
     }
 
-    fn stage_agent_context_provider_register(&mut self, source_id: &str) {
+    fn stage_agent_context_provider_register(
+        &mut self,
+        source_id: &str,
+        admission: ExtensionFrameAdmission,
+    ) {
         self.extension_activation_stage_mut(source_id)
-            .agent_context_provider_registered = true;
+            .agent_context_provider_admission = Some(admission);
     }
 
-    fn stage_session_context_provider_register(&mut self, source_id: &str) {
+    fn stage_session_context_provider_register(
+        &mut self,
+        source_id: &str,
+        admission: ExtensionFrameAdmission,
+    ) {
         self.extension_activation_stage_mut(source_id)
-            .session_context_provider_registered = true;
+            .session_context_provider_admission = Some(admission);
     }
 
     fn stage_agent_context_publish(
         &mut self,
         source_id: &str,
         publish: tau_proto::ExtAgentContextPublish,
+        admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
             .agent_context_publishes
-            .push(publish);
+            .push(StagedSessionBound {
+                admission,
+                value: publish,
+            });
     }
 
     fn stage_extension_prompt_fragment(
@@ -7679,16 +8316,14 @@ impl Harness {
             let model = &checkpoint.dispatch.model;
             let absence_is_authoritative = all_absence_is_authoritative
                 || authoritatively_removed_models.is_some_and(|models| models.contains(model));
-            if (!self.provider_model_info.contains_key(model) && !absence_is_authoritative)
-                || !self.enqueued_restored_compaction_checkpoints.insert((
-                    checkpoint.agent_id.clone(),
-                    checkpoint.transaction_id.clone(),
-                ))
-            {
+            if !self.provider_model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
-            self.publish_for_agent(
-                &checkpoint.cid,
+            let key = (
+                checkpoint.agent_id.clone(),
+                checkpoint.transaction_id.clone(),
+            );
+            let event =
                 Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
                     agent_id: checkpoint.agent_id,
                     transaction_id: Some(checkpoint.transaction_id),
@@ -7697,8 +8332,13 @@ impl Harness {
                     model: Some(checkpoint.dispatch.model),
                     operation: Some(checkpoint.dispatch.operation),
                     activation_cut: Some(checkpoint.dispatch.activation_cut),
-                }),
-            );
+                });
+            if !self.activation_successor_matches_selected_head(&event)
+                || !self.enqueued_standalone_inference_checkpoints.insert(key)
+            {
+                continue;
+            }
+            self.publish_for_agent(&checkpoint.cid, event);
         }
     }
 
@@ -7788,6 +8428,11 @@ impl Harness {
         self.handle_extension_session_context_ready(source_id, ready)
     }
 
+    fn extension_frame_admission_is_current(&self, admission: &ExtensionFrameAdmission) -> bool {
+        admission.session_id == self.current_session_id
+            && admission.session_generation == self.current_session_generation
+    }
+
     fn activate_staged_extension_capabilities(
         &mut self,
         source_id: &str,
@@ -7840,20 +8485,34 @@ impl Harness {
         if let Some(schema) = stage.action_schema {
             self.publish_action_schema(source_id, schema);
         }
-        for skill in stage.skill_announcements {
-            self.apply_extension_skill_available(source_id, skill);
+        for staged in stage.skill_announcements {
+            if self.extension_frame_admission_is_current(&staged.admission) {
+                self.apply_extension_skill_available(source_id, staged.value);
+            }
         }
-        for agents in stage.agents_files {
-            self.apply_agents_md_available(source_id, agents);
+        for staged in stage.agents_files {
+            if self.extension_frame_admission_is_current(&staged.admission) {
+                self.apply_agents_md_available(source_id, staged.value);
+            }
         }
-        if stage.agent_context_provider_registered {
+        if stage
+            .agent_context_provider_admission
+            .as_ref()
+            .is_some_and(|admission| self.extension_frame_admission_is_current(admission))
+        {
             self.apply_agent_context_provider_registration(source_id);
         }
-        if stage.session_context_provider_registered {
+        if stage
+            .session_context_provider_admission
+            .as_ref()
+            .is_some_and(|admission| self.extension_frame_admission_is_current(admission))
+        {
             self.apply_session_context_provider_registration(source_id);
         }
-        for publish in stage.agent_context_publishes {
-            self.apply_agent_context_publish(source_id, publish);
+        for staged in stage.agent_context_publishes {
+            if self.extension_frame_admission_is_current(&staged.admission) {
+                self.apply_agent_context_publish(source_id, staged.value);
+            }
         }
         for fragment in stage.prompt_fragments.into_values() {
             self.apply_extension_prompt_fragment(
@@ -8663,7 +9322,12 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, persist_override);
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                persist_override,
+                admission,
+            );
             return Ok(());
         }
         if event_name.category() == &tau_proto::EventCategory::Message {
@@ -8720,7 +9384,14 @@ impl Harness {
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -8748,7 +9419,12 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, persist_override);
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                persist_override,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -8815,7 +9491,14 @@ impl Harness {
                 return Ok(());
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsUpdated(_)) {
@@ -8860,7 +9543,12 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, persist_override);
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                persist_override,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -8886,7 +9574,12 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, persist_override);
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                persist_override,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsDeclared(_)) {
@@ -8907,7 +9600,14 @@ impl Harness {
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::ExtPromptFragmentPublish(_)) {
@@ -8939,7 +9639,14 @@ impl Harness {
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::ExtInternalPromptSubmitRequest(_)) {
@@ -8965,7 +9672,14 @@ impl Harness {
                 return Ok(());
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::StartAgentRequest(_)) {
@@ -9024,7 +9738,14 @@ impl Harness {
                 return Ok(());
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(event, Event::ExtensionEvent(_)) {
@@ -9050,7 +9771,14 @@ impl Harness {
                 return Ok(());
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -9092,7 +9820,14 @@ impl Harness {
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -9138,7 +9873,14 @@ impl Harness {
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if matches!(
@@ -9166,7 +9908,14 @@ impl Harness {
                 return Ok(());
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
-            self.enqueue_publish(Some(source_id), event, persist, false, None);
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if event_name.category() == &tau_proto::EventCategory::Provider
@@ -9181,8 +9930,29 @@ impl Harness {
         let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
             return Ok(());
         };
-        self.handle_extension_fallback_event(source_id, event, persist_override);
+        self.handle_extension_fallback_event_with_admission(
+            source_id,
+            event,
+            persist_override,
+            admission,
+        );
         Ok(())
+    }
+
+    /// Return whether one configured-peer event updates process-global state
+    /// that remains valid across a session rollover for the same
+    /// connection/instance.
+    fn peer_event_semantics_survive_rollover(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::ToolRegistrationDeclared(_)
+                | Event::ToolUnregistrationDeclared(_)
+                | Event::ExtPromptFragmentPublish(_)
+                | Event::ProviderModelsDeclared(_)
+                | Event::ProviderQuotaReplaceReported(_)
+                | Event::ProviderQuotaPatchReported(_)
+                | Event::ProviderQuotaClearReported(_)
+        )
     }
 
     /// Process one peer-authored event only after the generic publication path
@@ -9199,6 +9969,19 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
+        if !Self::peer_event_semantics_survive_rollover(event)
+            && peer_context.extension.as_ref().is_some_and(|extension| {
+                extension.admission.session_id != self.current_session_id
+                    || extension.admission.session_generation != self.current_session_generation
+            })
+        {
+            // The raw event has already committed and remains observable. A
+            // rollover generation boundary suppresses session-bound downstream
+            // semantics. Explicitly process-global declarations and current-state
+            // reports continue below under exact connection/instance checks.
+            self.discard_peer_activation_reservation(peer_context);
+            return;
+        }
         if let Some(publisher) = peer_context
             .extension
             .as_ref()
@@ -9310,7 +10093,9 @@ impl Harness {
         let source_id = &extension.source;
         let publisher_extension_id = extension.publisher.clone();
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            entry.instance_id == extension.instance_id
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
                 && entry.kind == ClientKind::Provider
                 && entry.state != ExtensionState::Disconnected
         });
@@ -9361,13 +10146,16 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            entry.connection_id == extension.source
+            extension.admission.session_id == self.current_session_id
+                && extension.admission.session_generation == self.current_session_generation
+                && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher.as_str()
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
+            self.discard_peer_activation_reservation(peer_context);
             return;
         }
         if let Err(error) = self.handle_extension_internal_prompt_submit_request(request) {
@@ -9468,13 +10256,16 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            entry.connection_id == extension.source
+            extension.admission.session_id == self.current_session_id
+                && extension.admission.session_generation == self.current_session_generation
+                && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher.as_str()
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
+            self.discard_peer_activation_reservation(peer_context);
             return;
         }
         if let Some(reservation) = extension.activation_reservation
@@ -9487,14 +10278,21 @@ impl Harness {
         match event {
             Event::ExtensionContextProviderRegister(_) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_agent_context_provider_register(source_id.as_str());
+                    self.stage_agent_context_provider_register(
+                        source_id.as_str(),
+                        extension.admission.clone(),
+                    );
                 } else {
                     self.apply_agent_context_provider_registration(source_id.as_str());
                 }
             }
             Event::ExtAgentContextPublish(publish) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_agent_context_publish(source_id.as_str(), publish.clone());
+                    self.stage_agent_context_publish(
+                        source_id.as_str(),
+                        publish.clone(),
+                        extension.admission.clone(),
+                    );
                 } else {
                     self.apply_agent_context_publish(source_id.as_str(), publish.clone());
                 }
@@ -9631,7 +10429,9 @@ impl Harness {
                 .entries
                 .get(&extension.source)
                 .is_some_and(|entry| {
-                    entry.instance_id == extension.instance_id
+                    entry.connection_id == extension.source
+                        && entry.instance_id == extension.instance_id
+                        && entry.name == extension.publisher.as_str()
                         && entry.kind == ClientKind::Provider
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -10008,13 +10808,16 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            entry.connection_id == extension.source
+            extension.admission.session_id == self.current_session_id
+                && extension.admission.session_generation == self.current_session_generation
+                && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher.as_str()
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
+            self.discard_peer_activation_reservation(peer_context);
             return;
         }
         if let Some(reservation) = extension.activation_reservation
@@ -10027,21 +10830,32 @@ impl Harness {
         match event {
             Event::ExtensionSessionContextProviderRegister(_) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_session_context_provider_register(source_id.as_str());
+                    self.stage_session_context_provider_register(
+                        source_id.as_str(),
+                        extension.admission.clone(),
+                    );
                 } else {
                     self.apply_session_context_provider_registration(source_id.as_str());
                 }
             }
             Event::ExtSkillAvailable(skill) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_extension_skill_available(source_id.as_str(), skill.clone());
+                    self.stage_extension_skill_available(
+                        source_id.as_str(),
+                        skill.clone(),
+                        extension.admission.clone(),
+                    );
                 } else {
                     self.apply_extension_skill_available(source_id.as_str(), skill.clone());
                 }
             }
             Event::ExtAgentsMdAvailable(agents) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_agents_md_available(source_id.as_str(), agents.clone());
+                    self.stage_agents_md_available(
+                        source_id.as_str(),
+                        agents.clone(),
+                        extension.admission.clone(),
+                    );
                 } else {
                     self.apply_agents_md_available(source_id.as_str(), agents.clone());
                 }
@@ -10078,6 +10892,7 @@ impl Harness {
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
             entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
@@ -10115,7 +10930,9 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            entry.instance_id == extension.instance_id
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher.as_str()
                 && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
                 && entry.state != ExtensionState::Disconnected
         });
@@ -10807,20 +11624,6 @@ impl Harness {
             }
             _ => unreachable!("caller filters shell command reports"),
         }
-    }
-
-    fn handle_extension_fallback_event(
-        &mut self,
-        source_id: &str,
-        event: Event,
-        persist_override: Option<bool>,
-    ) {
-        self.handle_extension_fallback_event_with_optional_admission(
-            source_id,
-            event,
-            persist_override,
-            None,
-        );
     }
 
     /// Publish one fallback event while preserving its original frame-admission
@@ -11789,6 +12592,10 @@ impl Harness {
                 .map(|cid| ConversationHeadSync {
                     cid,
                     agent_id: Some(crate::parse_agent_id(agent_id)),
+                    session_generation: self.current_session_generation,
+                    suppress_activation_dispatch: false,
+                    completion: None,
+                    notify_watchers: false,
                 }),
         );
         Ok(())
@@ -12969,6 +13776,8 @@ impl Harness {
         // owned by this connection. Resolution may synchronously commit deferred
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
+        self.suspended_interceptor_connections
+            .remove(&tau_proto::ConnectionId::from(connection_id));
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
@@ -14320,6 +15129,16 @@ impl Harness {
         self.agent_context_ready_for_loaded_agent(&agent_id)
     }
 
+    /// Returns whether the durable agent tree has one unfinished foreground
+    /// provider tool round on any branch.
+    pub(crate) fn agent_has_open_foreground_tool_round(&self, cid: &AgentId) -> bool {
+        self.agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .is_some_and(tau_core::AgentTree::has_open_foreground_tool_round)
+    }
+
     fn agent_context_ready_for_loaded_agent(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.pending_agent_context_ready
             .get(agent_id)
@@ -14710,7 +15529,7 @@ impl Harness {
             parent_cid,
             agent_id,
             persistence,
-            pending_agent_messages: VecDeque::new(),
+            pending_agent_message_wakes: VecDeque::new(),
         }))
     }
 
@@ -14798,7 +15617,7 @@ impl Harness {
             parent_cid,
             agent_id,
             persistence,
-            pending_agent_messages,
+            pending_agent_message_wakes,
         } = pending;
         let parent_call_id = query.tool_call_id.clone();
         let is_tool_backed = parent_call_id.is_some();
@@ -14883,7 +15702,15 @@ impl Harness {
         conv.agent_id = Some(agent_id.clone());
         conv.persistence = persistence;
         conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
-        conv.pending_prompts = pending_agent_messages;
+        conv.pending_message_wakes = pending_agent_message_wakes;
+        if let Some(last_node_id) = conv
+            .pending_message_wakes
+            .iter()
+            .filter_map(|wake| wake.node_id)
+            .next_back()
+        {
+            conv.head = Some(last_node_id);
+        }
         self.agent_routes.insert(agent_id.clone(), cid.clone());
         self.agents.insert(cid.clone(), conv);
         self.precommitted_agent_starts.insert(agent_id.clone());
@@ -14895,6 +15722,10 @@ impl Harness {
             Some(ConversationHeadSync {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
+                session_generation: self.current_session_generation,
+                suppress_activation_dispatch: false,
+                completion: None,
+                notify_watchers: false,
             }),
         );
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, initial_metadata);
@@ -14919,7 +15750,7 @@ impl Harness {
             // Publish the accepted instruction into the side agent transcript and
             // dispatch only after that prompt folds into the agent head.
             self.publish_pending_prompt_for_agent(&cid, PendingPrompt::user(query.instruction))?;
-            self.dispatch_prompt_after_user_message_publish(&cid);
+            self.drain_publish_idle_dispatches();
         }
         Ok(())
     }
@@ -15793,45 +16624,26 @@ impl Harness {
                 conv.head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
             );
+        let selected_message_cut = self.selected_message_activation_cut(cid);
+        let activation_cut = if activation_cut.is_some() || selected_message_cut.is_some() {
+            let Some(cut) = self.earliest_activation_cut(cid, activation_cut) else {
+                return false;
+            };
+            Some(cut)
+        } else {
+            None
+        };
         let provisional_cut = activation_cut.unwrap_or_else(|| {
-            resume_through.map_or_else(
-                || {
-                    conv.head
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-                },
-                |_| {
-                    self.agent_store
-                        .agent(&agent_id)
-                        .and_then(|tree| {
-                            let wake_event_seqs: std::collections::HashSet<_> = conv
-                                .pending_message_wakes
-                                .iter()
-                                .map(|wake| match wake.source {
-                                    crate::agent::PendingMessageWakeSource::MessageFact {
-                                        durable_event_seq,
-                                    } => durable_event_seq,
-                                })
-                                .collect();
-                            tree.branch_node_ids_from(conv.head)
-                                .into_iter()
-                                .find(|node_id| {
-                                    tree.node(*node_id).is_some_and(|node| {
-                                        matches!(
-                                            &node.entry,
-                                            tau_core::AgentEntry::MessageFact {
-                                                durable_event_seq,
-                                                ..
-                                            } if wake_event_seqs.contains(durable_event_seq)
-                                        )
-                                    })
-                                })
-                                .or(conv.head)
-                                .and_then(|node_id| tree.node(node_id))
-                                .and_then(|node| node.parent_id)
-                        })
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-                },
-            )
+            if resume_through.is_some() {
+                self.agent_store
+                    .agent(&agent_id)
+                    .and_then(|tree| conv.head.and_then(|head| tree.node(head)))
+                    .and_then(|node| node.parent_id)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+            } else {
+                conv.head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+            }
         });
         let cut = self.closed_provider_prefix_for_agent(&agent_id, provisional_cut);
         let originator = conv.originator.clone();
@@ -16908,6 +17720,10 @@ impl Harness {
         }
 
         let old_id = self.current_session_id.clone();
+        // Invalidate every admitted old-session action before quiescing
+        // interception. Observation events may still commit, but their captured
+        // admission generation can no longer create or retarget work.
+        self.current_session_generation = self.current_session_generation.saturating_add(1);
         self.publish_event(
             None,
             Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
@@ -16993,9 +17809,15 @@ impl Harness {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
-        self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
-        for (_, mut pending) in self.pending_external_receive_acks.drain() {
+        let canceled_receives = self
+            .pending_external_receive_acks
+            .drain()
+            .map(|(_, pending)| pending)
+            .collect::<Vec<_>>();
+        for mut pending in canceled_receives {
             pending.canceled = true;
+            self.release_peer_input_rate(&pending.recipient_id, pending.rate_admitted_at);
+            self.cleanup_uncommitted_peer_auto_start(&pending.recipient_id);
             if let PendingPeerReceiveCompletion::Remote {
                 client_id,
                 request_id,
@@ -17015,6 +17837,7 @@ impl Harness {
                 );
             }
         }
+        self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
         for cancellation in self.peer_io_cancellations.drain(..) {
             if let Some(cancellation) = cancellation.upgrade() {
                 cancellation.store(true, std::sync::atomic::Ordering::Release);
@@ -17037,6 +17860,14 @@ impl Harness {
         self.uncommitted_peer_auto_starts.clear();
         self.pending_manual_compaction_tools.clear();
         self.accepted_manual_compaction_tools.clear();
+        // Specialized cancellation paths above resolved accepted old-session
+        // work. Suspend any responder whose publication is destructively
+        // canceled, cancel transaction-owned checkpoints, and commit the queued
+        // mandatory SessionShutdown before switching the bound session.
+        self.quiesce_synchronized_publications_for_rollover();
+        self.pending_agent_publish_completions.clear();
+        self.enqueued_standalone_inference_checkpoints.clear();
+        self.pending_publish_idle_dispatches.clear();
         self.clear_session_agent_context();
         self.subagents = SubagentToolState::default();
 
@@ -17064,7 +17895,6 @@ impl Harness {
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
-        self.current_session_generation = self.current_session_generation.saturating_add(1);
         self.current_session_start_reason = reason;
         self.reset_extension_restart_budgets_at(Instant::now());
         if self.session_persistence.is_durable() {
@@ -17406,16 +18236,13 @@ impl Harness {
         }
         let mut count = 0;
         for cid in self.restored_agent_ids(session_id) {
-            let Some(head) = self.agents.get(&cid).map(|conv| conv.head) else {
-                continue;
-            };
             let calls: Vec<ToolCallItem> = self
                 .agents
                 .get(&cid)
                 .and_then(|conv| conv.agent_id.as_deref())
                 .and_then(|agent_id| self.agent_store.agent(agent_id))
                 .map(|tree| {
-                    tree.unresolved_foreground_tool_calls_from(head)
+                    tree.unresolved_foreground_tool_calls()
                         .into_iter()
                         .cloned()
                         .collect()
@@ -18017,6 +18844,9 @@ impl Harness {
     }
 
     fn remove_agent(&mut self, cid: &AgentId) {
+        self.pending_agent_publish_completions.remove(cid);
+        self.pending_publish_idle_dispatches
+            .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
             .peer_internal_tool_agents
             .iter()
@@ -18044,6 +18874,8 @@ impl Harness {
             .and_then(|agent| agent.agent_id.clone());
         if let Some(unloading_agent_id) = unloading_agent_id {
             let unloading_agent_id_proto = crate::parse_agent_id(&unloading_agent_id);
+            self.enqueued_standalone_inference_checkpoints
+                .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
             self.peer_input_rate.remove(&unloading_agent_id_proto);
             self.uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
@@ -18086,6 +18918,7 @@ impl Harness {
         }) else {
             return;
         };
+        self.cancel_agent_synchronized_publications(cid);
         if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
             self.retire_agent_watch_endpoint(&agent_id);
             self.agent_routes.remove(&agent_id);
@@ -18950,25 +19783,35 @@ impl Harness {
             return true;
         }
 
-        let mut pending_message_prompts = VecDeque::new();
+        let Some(agent_id) = creation.map(|started| started.agent_id.clone()) else {
+            return false;
+        };
+        let Ok(tree) = tau_core::AgentTree::try_from_events(agent_id, events) else {
+            return false;
+        };
+        let message_nodes: HashMap<_, _> = tree
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.entry {
+                tau_core::AgentEntry::AgentMessage {
+                    durable_event_seq,
+                    direction: tau_core::AgentMessageDirection::Inbound,
+                    ..
+                } => Some((durable_event_seq, node.id)),
+                _ => None,
+            })
+            .collect();
+        let mut outstanding_message_nodes = HashSet::new();
+        let mut completed = false;
         for (index, record) in events.iter().enumerate() {
             match &record.event {
-                Event::AgentMessageReceived(message) => {
-                    if let Some(prompt) = agent_message_received_prompt(message) {
-                        pending_message_prompts.push_back(prompt);
+                Event::AgentMessageReceived(message)
+                    if agent_message_activation_class(message).is_some() =>
+                {
+                    if let Some(node_id) = message_nodes.get(&record.seq) {
+                        outstanding_message_nodes.insert(*node_id);
                     }
-                }
-                Event::AgentPromptSubmitted(prompt) => {
-                    Self::consume_restored_message_prompt(
-                        &mut pending_message_prompts,
-                        &prompt.text,
-                    );
-                }
-                Event::AgentPromptSteered(prompt) => {
-                    Self::consume_restored_message_prompt(
-                        &mut pending_message_prompts,
-                        &prompt.text,
-                    );
+                    completed = false;
                 }
                 Event::AgentStandaloneCompactionFailed(failed)
                     if failed.reason != tau_proto::StandaloneCompactionFailureReason::Cancelled
@@ -18978,7 +19821,7 @@ impl Harness {
                             historical_originator,
                         ) =>
                 {
-                    return true;
+                    completed = outstanding_message_nodes.is_empty();
                 }
                 Event::ProviderResponseFinished(finished)
                     if finished.originator == *historical_originator
@@ -18988,18 +19831,22 @@ impl Harness {
                             .output_items
                             .iter()
                             .any(|item| matches!(item, ContextItem::ToolCall(_)))
-                        && pending_message_prompts.is_empty()
-                        && Self::response_checkpoint_is_inference(
+                        && let Some(checkpoint) = Self::response_inference_checkpoint(
                             &events[..index],
                             &finished.agent_prompt_id,
                         ) =>
                 {
-                    return true;
+                    let branch: HashSet<_> = tree
+                        .branch_node_ids_from(checkpoint.through.as_option())
+                        .into_iter()
+                        .collect();
+                    outstanding_message_nodes.retain(|node_id| !branch.contains(node_id));
+                    completed = outstanding_message_nodes.is_empty();
                 }
                 _ => {}
             }
         }
-        false
+        completed
     }
 
     /// Confirms that a terminal compaction failure belongs to the side request
@@ -19019,26 +19866,19 @@ impl Harness {
         })
     }
 
-    /// Removes one durable prompt that consumed a previously delivered message.
-    fn consume_restored_message_prompt(pending: &mut VecDeque<String>, text: &str) {
-        if let Some(position) = pending.iter().position(|prompt| prompt == text) {
-            pending.remove(position);
-        }
-    }
-
-    /// Confirms that one terminal response belongs to ordinary inference rather
-    /// than a standalone-compaction continuation.
-    fn response_checkpoint_is_inference(
-        events: &[tau_core::PersistedAgentEvent],
+    /// Returns the ordinary inference checkpoint that owns one terminal
+    /// response.
+    fn response_inference_checkpoint<'a>(
+        events: &'a [tau_core::PersistedAgentEvent],
         prompt_id: &tau_proto::AgentPromptId,
-    ) -> bool {
-        events.iter().rev().any(|record| {
-            matches!(
-                &record.event,
-                Event::AgentInferenceDispatchStarted(started)
-                    if &started.agent_prompt_id == prompt_id
-                        && started.operation == Some(tau_proto::PromptOperation::Inference)
-            )
+    ) -> Option<&'a tau_proto::AgentInferenceDispatchStarted> {
+        events.iter().rev().find_map(|record| {
+            let Event::AgentInferenceDispatchStarted(started) = &record.event else {
+                return None;
+            };
+            (&started.agent_prompt_id == prompt_id
+                && started.operation == Some(tau_proto::PromptOperation::Inference))
+            .then_some(started)
         })
     }
 
@@ -19260,6 +20100,10 @@ impl Harness {
             Some(ConversationHeadSync {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
+                session_generation: self.current_session_generation,
+                suppress_activation_dispatch: false,
+                completion: None,
+                notify_watchers: false,
             }),
         );
         self.publish_delegate_roles_context();
@@ -19334,6 +20178,10 @@ impl Harness {
             Some(ConversationHeadSync {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
+                session_generation: self.current_session_generation,
+                suppress_activation_dispatch: false,
+                completion: None,
+                notify_watchers: false,
             }),
         );
         self.ensure_loaded_agent_for_agent(cid, &agent_id);
@@ -19415,6 +20263,10 @@ impl Harness {
                 Some(ConversationHeadSync {
                     cid: cid.clone(),
                     agent_id: Some(crate::parse_agent_id(agent_id)),
+                    session_generation: self.current_session_generation,
+                    suppress_activation_dispatch: false,
+                    completion: None,
+                    notify_watchers: false,
                 }),
             );
         }
@@ -19501,6 +20353,10 @@ impl Harness {
                     Some(ConversationHeadSync {
                         cid: cid.clone(),
                         agent_id: Some(agent_id_proto.clone()),
+                        session_generation: self.current_session_generation,
+                        suppress_activation_dispatch: false,
+                        completion: None,
+                        notify_watchers: false,
                     }),
                 );
             }
@@ -19552,6 +20408,9 @@ impl Harness {
     /// `system_prompt`, `tools`, or earlier messages busts the cache.
     /// See `linear_agent_prompts_strictly_extend_previous_messages`.
     pub(crate) fn send_prompt_to_agent_for(&mut self, cid: &AgentId) -> Option<AgentPromptId> {
+        if self.agent_has_open_foreground_tool_round(cid) {
+            return None;
+        }
         let owned_model = self
             .agents
             .get(cid)
@@ -20673,50 +21532,18 @@ impl Harness {
         // supplied across that trust boundary before evaluating eligibility.
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         response.context_limit_telemetry = None;
-        self.attach_context_limit_telemetry(&mut response);
-        self.clear_malformed_repetition_output(&mut response);
-        let mut tool_calls = tool_calls_from_output_items(&response.output_items);
-        let assistant_text = assistant_text_from_output_items(&response.output_items);
-        let input_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.prompt_sent_tokens);
-        let cached_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.prompt_cached_tokens);
-        let output_tokens = response
-            .usage
-            .as_ref()
-            .map(|usage| usage.response_received_tokens);
+        let raw_response_contains_tool_calls = response
+            .output_items
+            .iter()
+            .any(|item| matches!(item, ContextItem::ToolCall(_)));
         if self.discard_finished_response_if_canceled(&response.agent_prompt_id) {
             return Ok(());
         }
 
-        let response_cid = self.agent_id_for_prompt(&response.agent_prompt_id);
-        let response_contains_compaction = response
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::Compaction(_)));
-        let compaction_original_input_tokens = response_contains_compaction
-            .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
-            .flatten();
-        self.update_finished_response_context_usage(
-            response_cid.as_ref(),
-            &response.agent_prompt_id,
-            input_tokens,
-            cached_tokens,
-            source,
-        );
-
-        let Some(cid) = response_cid else {
+        let Some(cid) = self.agent_id_for_prompt(&response.agent_prompt_id) else {
             self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
             return Ok(());
         };
-        let context_size_alerts = self
-            .prompt_context_size_alerts
-            .remove(&response.agent_prompt_id)
-            .unwrap_or_default();
         self.assign_finished_response_agent_id(&cid, &mut response);
         let active_compaction_response = self.agents.get(&cid).is_some_and(|agent| {
             matches!(
@@ -20732,6 +21559,66 @@ impl Harness {
         {
             return Ok(());
         }
+        // A tool-bearing response cannot acquire a second foreground round in
+        // this AgentTree. Enforce that ownership boundary before attaching
+        // telemetry or mutating usage, alerts, provider-watch state, or watcher
+        // journals: rejected provider work must have no semantic side effects.
+        if raw_response_contains_tool_calls && self.agent_has_open_foreground_tool_round(&cid) {
+            let standalone = self
+                .prompt_operations
+                .remove(&response.agent_prompt_id)
+                .is_some_and(|operation| {
+                    operation.0 == tau_proto::PromptOperation::StandaloneCompaction
+                })
+                || active_compaction_response;
+            self.emit_harness_failure(
+                "rejecting provider response: agent tree already has an open foreground tool round",
+            );
+            if standalone {
+                self.silent_compaction_failure_prompts
+                    .insert(response.agent_prompt_id.clone());
+                self.reject_standalone_compaction(&cid, &response, source);
+                self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+            } else {
+                self.terminalize_global_round_rejected_prompt(&cid, &response, source);
+            }
+            return Ok(());
+        }
+        self.clear_malformed_repetition_output(&mut response);
+        let mut tool_calls = tool_calls_from_output_items(&response.output_items);
+        let assistant_text = assistant_text_from_output_items(&response.output_items);
+        let input_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_sent_tokens);
+        let cached_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_cached_tokens);
+        let output_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.response_received_tokens);
+        self.attach_context_limit_telemetry(&mut response);
+        let response_contains_compaction = response
+            .output_items
+            .iter()
+            .any(|item| matches!(item, ContextItem::Compaction(_)));
+        let compaction_original_input_tokens = response_contains_compaction
+            .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
+            .flatten();
+        self.update_finished_response_context_usage(
+            Some(&cid),
+            &response.agent_prompt_id,
+            input_tokens,
+            cached_tokens,
+            source,
+        );
+
+        let context_size_alerts = self
+            .prompt_context_size_alerts
+            .remove(&response.agent_prompt_id)
+            .unwrap_or_default();
         if self.try_plan_reactive_context_recovery(&cid, &mut response, source) {
             return Ok(());
         }
@@ -20795,6 +21682,8 @@ impl Harness {
             cached_tokens,
             output_tokens,
         );
+        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
+            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         let prompt_operation = self
             .prompt_operations
             .remove(&response.agent_prompt_id)
@@ -20836,8 +21725,6 @@ impl Harness {
             );
         }
 
-        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
-            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
         let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
         if requested_tool_calls {
@@ -21484,6 +22371,49 @@ impl Harness {
         self.clear_prompt_tool_snapshot(agent_prompt_id);
     }
 
+    /// Terminalize a live ordinary prompt whose tool-bearing response cannot
+    /// acquire the AgentTree's sole foreground round.
+    fn terminalize_global_round_rejected_prompt(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        source: Option<&str>,
+    ) {
+        if let Some((session_id, originator)) = self
+            .agents
+            .get(cid)
+            .map(|agent| (agent.session_id.clone(), agent.originator.clone()))
+        {
+            self.publish_prompt_terminated_from(
+                session_id,
+                response.agent_prompt_id.clone(),
+                AgentPromptTerminationReason::Canceled,
+                originator,
+                source,
+            );
+        }
+        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        if let Some(agent) = self.agents.get_mut(cid) {
+            if agent.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id) {
+                agent.in_flight_prompt = None;
+            }
+            if agent.last_prompt_id.as_ref() == Some(&response.agent_prompt_id) {
+                agent.last_prompt_id = None;
+            }
+            if matches!(
+                &agent.activation_dispatch,
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    agent_prompt_id,
+                    ..
+                } if agent_prompt_id == &response.agent_prompt_id
+            ) {
+                agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            }
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.try_advance_queue();
+    }
+
     fn clear_finished_response_prompt_route(&mut self, agent_prompt_id: &AgentPromptId) {
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
@@ -21856,8 +22786,7 @@ impl Harness {
         if side.requested_tool_calls {
             self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls, source);
         }
-        if self.has_pending_message_received_prompt(cid) {
-            self.fold_pending_prompts_as_steered(cid);
+        if self.has_pending_agent_message_wake(cid) {
             self.dispatch_prompt_after_publish_idle(cid);
             return true;
         }
@@ -22883,6 +23812,7 @@ impl Harness {
                 return;
             }
             self.resolve_materialized_message_wakes(cid);
+            let has_ready_message_wake = self.has_ready_message_wake_on_selected_branch(cid);
             if self
                 .agents
                 .get(cid)
@@ -22891,7 +23821,7 @@ impl Harness {
             {
                 conv.pending_prompts
                     .retain(|prompt| !prompt.is_loop_guard());
-                if conv.pending_prompts.is_empty() {
+                if conv.pending_prompts.is_empty() && !has_ready_message_wake {
                     return;
                 }
             }
@@ -22902,47 +23832,68 @@ impl Harness {
             // until the whole publish chain drains. Waiting for only
             // one user-message commit is not enough when several
             // steered prompts are queued behind one interceptor.
-            if !self.schedule_standalone_auto_compaction_for_activation(cid, true, None) {
-                self.dispatch_prompt_after_publish_idle(cid);
-            }
+            self.dispatch_activation_after_publish_idle(cid);
         }
     }
 
-    fn has_pending_message_received_prompt(&self, cid: &AgentId) -> bool {
+    fn has_pending_agent_message_wake(&self, cid: &AgentId) -> bool {
         self.agents.get(cid).is_some_and(|conv| {
-            conv.pending_prompts
-                .iter()
-                .any(PendingPrompt::is_agent_message_received)
+            conv.pending_message_wakes.iter().any(|wake| {
+                matches!(
+                    wake.source,
+                    crate::agent::PendingMessageWakeSource::AgentMessageReceived { .. }
+                )
+            })
         })
     }
 
-    fn publish_prompts_as_steered(&mut self, cid: &AgentId, prompts: Vec<PendingPrompt>) {
-        for prompt in prompts {
-            if !prompt.is_watch_notification() {
-                self.promote_lifecycle_notification_turn(cid);
-            }
+    fn publish_prompts_as_steered(
+        &mut self,
+        cid: &AgentId,
+        prompts: Vec<PendingPrompt>,
+        completion: Option<AgentPublishCompletion>,
+    ) {
+        let prompt_count = prompts.len();
+        let retry_prompts = prompts.clone();
+        for (index, prompt) in prompts.into_iter().enumerate() {
+            self.promote_lifecycle_notification_turn(cid);
             let agent_id = self
                 .agents
                 .get(cid)
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id");
             let notify_watchers = prompt.should_notify_watchers();
-            let notification_text = notify_watchers.then(|| prompt.text.clone());
             let inference_activation = prompt.creates_inference_activation();
             let internal_kind = prompt.internal_kind();
-            self.publish_for_agent(
+            let event_completion = completion.clone().map(|mut completion| {
+                let AgentPublishCompletion::StandaloneContinuation {
+                    retry_prompts: suffix,
+                    complete_on_commit,
+                    approved_retry_event,
+                    ..
+                } = &mut completion;
+                *suffix = retry_prompts[index..].to_vec();
+                *complete_on_commit = index + 1 == prompt_count;
+                *approved_retry_event = None;
+                completion
+            });
+            let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                inference_activation,
+                agent_id: crate::parse_agent_id(&agent_id),
+                text: prompt.text,
+                message_class: prompt.message_class,
+                internal_kind,
+                ctx_id: prompt.ctx_id,
+            });
+            self.publish_event_for_agent_with_completion(
                 cid,
-                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
-                    inference_activation,
-                    agent_id: crate::parse_agent_id(&agent_id),
-                    text: prompt.text,
-                    message_class: prompt.message_class,
-                    internal_kind,
-                    ctx_id: prompt.ctx_id,
-                }),
+                None,
+                event,
+                event_completion,
+                notify_watchers,
             );
-            if let Some(text) = notification_text {
-                self.notify_agent_watchers_about_user_prompt(&agent_id, &text);
+            if self.pending_agent_publish_completions.contains_key(cid) {
+                break;
             }
         }
     }
@@ -22962,6 +23913,14 @@ impl Harness {
     /// give queued prompts a chance to ride the next per-round prompt
     /// rather than waiting for the whole turn to terminate.
     fn fold_pending_prompts_as_steered(&mut self, cid: &AgentId) {
+        self.fold_pending_prompts_as_steered_with_completion(cid, None);
+    }
+
+    fn fold_pending_prompts_as_steered_with_completion(
+        &mut self,
+        cid: &AgentId,
+        completion: Option<AgentPublishCompletion>,
+    ) -> bool {
         let mut pending: Vec<PendingPrompt> = self
             .agents
             .get_mut(cid)
@@ -22996,12 +23955,13 @@ impl Harness {
             pending = active;
         }
         if pending.is_empty() {
-            return;
+            return false;
         }
         if pending.iter().any(PendingPrompt::is_loop_guard) {
             self.mark_loop_guard_breakers_dispatched(cid);
         }
-        self.publish_prompts_as_steered(cid, pending);
+        self.publish_prompts_as_steered(cid, pending, completion);
+        true
     }
 
     #[cfg(test)]
@@ -23465,19 +24425,6 @@ fn duplicate_model_visible_tool_name(specs: &[tau_proto::ToolSpec]) -> Option<To
         let name = spec.model_visible_name.as_ref().unwrap_or(&spec.name);
         (!names.insert(name.clone())).then(|| name.clone())
     })
-}
-
-fn escape_agent_message_for_prompt(message: &str) -> String {
-    let mut escaped = String::with_capacity(message.len());
-    for ch in message.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
 }
 
 impl Harness {

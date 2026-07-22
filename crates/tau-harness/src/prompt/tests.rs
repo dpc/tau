@@ -1338,7 +1338,12 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
         &items[1],
         ContextItem::Message(MessageItem { role, content, .. })
             if *role == ContextRole::User
-                && matches!(&content[0], ContentPart::Text { text } if text == "please investigate")
+                && matches!(
+                    &content[0],
+                    ContentPart::Text { text }
+                        if text
+                            == "[tau-internal]: You have received a message from manager\n\n<message>\nplease investigate\n</message>"
+                )
     ));
 }
 

@@ -1,5 +1,12 @@
 # SPEC-compaction-and-context-recovery: Compaction and context recovery
 
+## Record justification
+
+Compaction and recovery span core transcript cuts and boundaries, harness
+transaction/checkpoint ownership, provider execution, typed message activation,
+context accounting, cold restore, and CLI/model authority. No component-local
+documentation can state the complete closed-prefix and recovery contract.
+
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
 standalone compaction using the same provider converter. Approximate context
@@ -169,11 +176,30 @@ its operation is inference, and its activation cut equals the start cut. Core
 rejects incomplete or transaction-mismatched ownership correlations. The
 post-commit continuation uses that exact model for route, parameters, tools,
 accounting, and prompt creation regardless of later selection changes; an
-unavailable route is durably terminalized before remote send. It acknowledges only materialized
-typed-message wakes on that branch
-through the watermark. Replay folds transaction outcomes and inference
+unavailable route is durably terminalized before remote send. It acknowledges
+only materialized typed-message wakes on that branch, including sequence-keyed
+canonical agent-message wakes governed by
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), through the
+watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.
+
+If persistence rejects a completion-bearing steer after successful compaction,
+the harness retains the exact interceptor-approved failed event, untouched
+remaining steer suffix, and transaction ownership while the transaction remains
+Running. Owning-branch retry recommits that approved event without rerunning its
+completed interception chain, then sends only the untouched suffix through
+ordinary publication and interception. If persistence rejects its continuation
+checkpoint, the harness retains the exact `AwaitingCheckpoint` tuple. Neither
+path retries off branch: owning-branch reselection republishes one exact suffix
+or checkpoint, and ownership transfers only after the durable successor commits.
+In-flight attempt markers are ephemeral and clear on every noncommit.
+Agent unload or rollover may destructively cancel an already-delivered
+interception request for a checkpoint or completion envelope. The registration
+then remains installed but its connection is bypassed until exactly one stale
+reply is consumed; registration replacement, indefinite suspension, and
+disconnect reset follow
+[DECISION-interceptor-stale-reply-suspension](DECISION-interceptor-stale-reply-suspension.md).
 
 Crash recovery after a successful compaction but before its continuation
 checkpoint retains the transaction's exact model, cut, and owed transcript

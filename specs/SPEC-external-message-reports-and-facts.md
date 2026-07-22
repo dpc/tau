@@ -318,8 +318,9 @@ The harness is an ordinary post-commit consumer:
   project as `ContextRole::User` transcript items.
 - `message.sent` projects as `ContextRole::Assistant` and never activates a
   model by itself.
-- A valid live incoming fact is folded exactly once and requests one agent
-  activation after transcript placement.
+- A valid live incoming fact immediately creates one payload-free activation
+  wake. Its canonical transcript item folds exactly once when branch placement
+  permits.
 - Replay reconstructs the same transcript projection but never wakes an agent,
   resends transport traffic, or emits a new durable event.
 - An unavailable/unloaded/terminating target is not a reason to reject the
@@ -330,13 +331,17 @@ The harness is an ordinary post-commit consumer:
 No reference must resolve before projection. Operation facts show their opaque
 target reference; consumers do not edit or delete prior transcript items.
 
-When an agent has an open tool round, committed facts still broadcast
-immediately. Their derived transcript items enter the existing per-agent
-pending-input queue in journal order and are appended only after all terminal
-results for the open tool calls. A live wake waits for that placement and the
-normal idle boundary. Replay uses the same fold order without a wake. This state
+When an agent tree has its sole open foreground tool round, committed facts still
+broadcast immediately. A derived transcript item enters the per-agent
+pending-input queue only when the tool-calling assistant is equal to or an
+ancestor of the fact's accepted parent. Root, ancestor-above-assistant, and
+sibling-branch facts materialize immediately and are never drained by that round.
+An applicable live wake is owned immediately, while provider dispatch waits for
+placement after all terminal results and the normal idle boundary. Replay uses
+the same branch-applicable fold order without creating a runtime wake. This state
 is generic pending context/input state rather than message-envelope-specific
-state.
+state; see
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
 
 ### Unprojectable committed facts
 

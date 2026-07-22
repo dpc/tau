@@ -643,6 +643,84 @@ fn internal_request_publication_does_not_route_as_peer_input() {
     );
 }
 
+/// Rollover commits a peer request deferred behind an intercepted FIFO head,
+/// while the stale admission generation suppresses routing, bookkeeping, and
+/// derived terminal facts in the replacement session.
+#[test]
+fn rollover_commits_deferred_request_without_semantic_effects() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "rollover-requester",
+        "configured-rollover-requester",
+        tau_proto::ClientKind::Provider,
+    );
+    let _interceptor = connect_test_tool(&mut harness, "rollover-request-blocker");
+    harness
+        .handle_extension_event(
+            "rollover-request-blocker",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register rollover blocker");
+    harness.publish_event(None, draft_event("block request FIFO"));
+
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+    let notices_before = event_log_events(&harness)
+        .iter()
+        .filter(|event| matches!(event, Event::HarnessNotice(_)))
+        .count();
+    harness
+        .handle_extension_event(
+            "rollover-requester",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(request(
+                    "rollover-deferred-request",
+                    "missing_rollover_tool",
+                    agent_id,
+                )),
+                persist: false,
+            })),
+        )
+        .expect("defer request behind intercepted FIFO head");
+    assert!(committed_request_family(&harness, "rollover-deferred-request").is_empty());
+
+    harness
+        .switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(matches!(
+        committed_request_family(&harness, "rollover-deferred-request").as_slice(),
+        [(Some(source), Event::ToolRequest(_))] if source == "rollover-requester"
+    ));
+    assert!(
+        !harness
+            .pending_tools
+            .contains_key("rollover-deferred-request")
+    );
+    assert!(
+        !harness
+            .pending_tool_providers
+            .contains_key("rollover-deferred-request")
+    );
+    assert!(
+        !harness
+            .completed_tool_calls
+            .contains("rollover-deferred-request")
+    );
+    assert_eq!(
+        event_log_events(&harness)
+            .iter()
+            .filter(|event| matches!(event, Event::HarnessNotice(_)))
+            .count(),
+        notices_before
+    );
+}
+
 /// Ownerless peer requests must accept terminal reports from only their exact
 /// routed provider, publish canonical closure, and release all live mappings.
 #[test]

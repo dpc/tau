@@ -23,8 +23,13 @@ Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
 sandbox or per-sender ACL. Callback correlation prevents accidental sender/route
 confusion before bounded admission or model-spending auto-start, while peer text
 remains model input rather than a harness instruction. Delivery is best-effort
-at-least-once: an ambiguous crash or retry can duplicate prompts, agents, model
-work, and spend.
+at-least-once: an ambiguous crash or retry can duplicate receive occurrences,
+agents, model work, and spend. Each accepted directional occurrence is its
+owning journal's sole canonical payload projection. Local inbound provider
+context escapes peer text inside a sender-labelled wrapper; live activation
+uses a payload-free sequence wake, and replay restores context without waking.
+The target commit remains ACK authority, so Tau adds no restart deduplication,
+distributed WAL, or cross-journal transaction.
 
 ## Agent journals and summary checkpoints
 
@@ -384,6 +389,28 @@ no longer descends from the owed watermark, explicit recovery must remain
 blocked. Core validation and warm/cold replay regressions enforce these rules.
 Revisit them when adding any explicit abandon/rewind operation or changing
 compaction replay ownership.
+
+Exact committed publication envelopes create or transfer activation ownership.
+A retained completion envelope or standalone `AwaitingCheckpoint` tuple represents
+durable work and remains bound to its owning branch. Queue/in-flight attempt
+markers are ephemeral: every prevalidation or persistence rejection clears them,
+and agent unload or session rollover discards all warm-process retry state.
+Transaction-owned publications carry their enqueue-time session generation and
+must still match an exact live runtime owner before commit. Destructive lifecycle
+cancellation suspends that interceptor's registration until its one outstanding
+uncorrelated stale reply is consumed, so the reply cannot bind to later session
+work without changing the extension connection lifecycle. Registration
+replacement remains suspended, no timeout applies, exactly one reply is consumed,
+and disconnect clears suspension. The confirmed interface contract is
+[`DECISION-interceptor-stale-reply-suspension`](specs/DECISION-interceptor-stale-reply-suspension.md).
+Unrelated accepted publications retain FIFO order and complete or fail through
+their normal path.
+Rollover advances the session admission generation before quiescence. Raw
+session-bound events whose contracts require observation may still commit, but a
+central post-commit peer guard suppresses their semantic effects and releases
+activation reservations. Process-global tool/prompt-fragment/model declarations
+and provider-quota current-state reports are explicit exceptions: they survive
+rollover only while exact captured connection/instance identity remains current.
 
 The model-callable self `compact` capability is enabled by default and can act
 only on the calling agent. Effective role policy may revoke it by exact tool

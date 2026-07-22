@@ -1,9 +1,11 @@
 use super::*;
 use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
+use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
     BackgroundCompletionPromptMode, MAX_UI_SHELL_COMMAND_ID_BYTES, PendingTool,
-    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
+    RestoredCheckpointAuthority, background_completion_prompt,
+    extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
@@ -3389,6 +3391,8 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
     );
 }
 
+/// Folding an ordinary queued user prompt removes a stale loop-guard pivot from
+/// the same batch so only the user's real progress reaches the next prompt.
 #[test]
 fn loop_guard_folding_user_prompt_drops_stale_pivot_from_batch() {
     let td = TempDir::new().expect("tempdir");
@@ -3420,27 +3424,48 @@ fn loop_guard_folding_user_prompt_drops_stale_pivot_from_batch() {
     )));
 }
 
+/// A loop-guard stop cannot discard the typed wake that owns already-committed
+/// agent-message activation.
 #[test]
-fn loop_guard_block_preserves_agent_message_internal_prompt() {
+fn loop_guard_block_preserves_canonical_agent_message_wake() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    {
-        let conv = h.agents.get_mut(&cid).expect("agent");
-        conv.loop_guard.mark_cycle_blocked("cycle");
-        conv.pending_prompts
-            .push_back(PendingPrompt::agent_message_received(
-                "external message".to_owned(),
-            ));
-    }
+    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .loop_guard
+        .mark_cycle_blocked("cycle");
     seed_tools_running(&mut h, &cid, vec!["done-call".into()]);
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "loop-guard-agent-message".into(),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "external message".to_owned(),
+        }),
+    );
 
     h.maybe_complete_agent_turn_for(&cid, "done-call");
 
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text.contains("external message")
+    )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentPromptSteered(steered) if steered.text == "external message"
+        Event::AgentPromptCreated(prompt)
+            if prompt.agent_id.as_str() == recipient_id
+                && prompt.context.flatten().iter().any(|item| {
+                    text_part(item).is_some_and(|text| text.contains("external message"))
+                })
     )));
 }
 
@@ -7045,11 +7070,10 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// A resumed agent accepts UI-owned branch reselection and extends the selected
+/// durable per-agent head rather than the process-global cursor.
 #[test]
 fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
-    // Branch selection is UI-owned across process restarts. The harness should
-    // honor the durable agent id when the UI replays its selected node after a
-    // resume, so the next user message branches from that per-agent head.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let first_user_head;
@@ -7123,17 +7147,34 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
     }
 }
 
+/// Prompt-anchor reconstruction consumes exact persisted sequences, including
+/// raw message facts, and rewinds to the prompt node's exact durable parent.
 #[test]
-fn ui_tree_prompt_anchor_rewinds_before_prompt_not_to_raw_node() {
-    // Default `/tree <anchor>` navigation uses prompt rewind anchors. A
-    // numeric anchor matching an assistant node id must not silently select
-    // that raw node; raw node selection requires the explicit `node` target.
+fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
+    h.agents.get_mut(&cid).expect("agent").terminating = true;
+    h.commit_message_fact(
+        None,
+        Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("tree-message-fact"),
+            tau_proto::MessageParty {
+                stable_id: "external-user".to_owned(),
+                display_name: None,
+                sender_auth: None,
+            },
+            None,
+            "raw message fact before prompt",
+        )),
+    );
+    let message_fact_node = h.agents[&cid].head.expect("raw message fact node");
+    h.agents.get_mut(&cid).expect("agent").terminating = false;
     append_user_message_via_event(&mut h, "s1", "first prompt");
     let first_prompt_node = h.agents[&cid].head.expect("first prompt node");
     h.publish_for_agent(
@@ -7157,8 +7198,9 @@ fn ui_tree_prompt_anchor_rewinds_before_prompt_not_to_raw_node() {
     )
     .expect("navigate to first prompt anchor");
     assert_eq!(
-        h.agents[&cid].head, None,
-        "anchor 1 rewinds before the first prompt instead of selecting raw node 1"
+        h.agents[&cid].head,
+        Some(message_fact_node),
+        "anchor 1 rewinds to the exact durable parent before the first prompt"
     );
 
     h.handle_ui_navigate_tree(
@@ -9358,11 +9400,12 @@ fn repeated_resume_does_not_duplicate_background_errors() {
     }
 }
 
+/// Session rollover commits the old shutdown, cancels a parked standalone
+/// continuation checkpoint and all warm activation owners, suspends its
+/// responder until the stale reply is consumed, and creates fresh routing only
+/// on the next prompt.
 #[test]
 fn switch_session_clears_loaded_agents_until_next_prompt() {
-    // `/session new` changes the session container. Agents are durable members
-    // of one session, so switching clears live agent routing; the next prompt
-    // creates a fresh durable agent in the new session.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
@@ -9386,6 +9429,70 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("default conversation")
         .agent_id = Some("old-agent".to_owned());
     h.agent_routes.insert("old-agent".to_owned(), cid.clone());
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-session-reset").expect("transaction");
+    h.pending_agent_publish_completions.insert(
+        cid.clone(),
+        AgentPublishCompletion::StandaloneContinuation {
+            transaction_id: transaction_id.clone(),
+            model: model.clone(),
+            activation_cut: tau_proto::AgentHead::Root,
+            batch_parent: tau_proto::AgentHead::Root,
+            source: None,
+            retry_prompts: vec![PendingPrompt::user("stale retry".to_owned())],
+            complete_on_commit: true,
+            approved_retry_event: None,
+        },
+    );
+    h.enqueued_standalone_inference_checkpoints.insert((
+        tau_proto::AgentId::parse("old-agent").expect("agent id"),
+        transaction_id.clone(),
+    ));
+    h.enqueue_committed_activation_dispatch(
+        cid.clone(),
+        Some(tau_proto::AgentHead::Root),
+        Some(tau_proto::AgentHead::Root),
+    );
+    let _interceptor = connect_test_tool(&mut h, "rollover-completion-owner");
+    h.handle_extension_event(
+        "rollover-completion-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register rollover interceptor");
+    let checkpoint_prompt_id = tau_proto::AgentPromptId::from("ap-old-checkpoint");
+    h.agents
+        .get_mut(&cid)
+        .expect("old agent")
+        .activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+        owner: crate::agent::InferenceCheckpointOwner::Standalone {
+            id: transaction_id.clone(),
+        },
+        agent_prompt_id: checkpoint_prompt_id.clone(),
+        through: tau_proto::AgentHead::Root,
+        dispatch: crate::agent::InferenceDispatchOwnership {
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
+        },
+    };
+    h.publish_for_agent(
+        &cid,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: tau_proto::AgentId::parse("old-agent").expect("agent id"),
+            transaction_id: Some(transaction_id.clone()),
+            agent_prompt_id: checkpoint_prompt_id,
+            through: tau_proto::AgentHead::Root,
+            model: Some(model.clone()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    assert!(h.pending_intercept.is_some());
 
     let shell_conn = h
         .extension_connection_id("shell")
@@ -9410,6 +9517,61 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     assert!(saw_session_dir, "switch must announce the new session dir");
 
     assert_eq!(h.current_session_id.as_str(), "s2");
+    assert!(h.pending_agent_publish_completions.is_empty());
+    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.pending_intercept.is_none());
+    assert!(event_log_events(&h).into_iter().any(|event| {
+        matches!(
+            event,
+            Event::SessionShutdown(shutdown) if shutdown.session_id.as_str() == "s1"
+        )
+    }));
+    assert!(!event_log_events(&h).into_iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id)
+        )
+    }));
+    h.handle_extension_event(
+        "rollover-completion-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("replace suspended interceptor registration");
+    let new_session_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
+        session_id: "s2".into(),
+        target_agent_id: None,
+        text: "new session event".to_owned(),
+    });
+    h.publish_event(None, new_session_draft.clone());
+    assert!(h.pending_intercept.is_none());
+    h.handle_extension_event(
+        "rollover-completion-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("stale old-session reply is ignored");
+    assert!(event_log_events(&h).contains(&new_session_draft));
+    let post_stale_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
+        session_id: "s2".into(),
+        target_agent_id: None,
+        text: "interception resumes after stale reply".to_owned(),
+    });
+    h.publish_event(None, post_stale_draft.clone());
+    assert!(h.pending_intercept.is_some());
+    h.handle_extension_event(
+        "rollover-completion-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("registration resumes after stale reply is consumed");
+    assert!(event_log_events(&h).contains(&post_stale_draft));
     assert_eq!(h.current_session_state.context_input_tokens, None);
     assert_eq!(h.current_session_state.context_cached_tokens, None);
     assert_eq!(h.current_session_state.context_percent_used, None);
@@ -11558,6 +11720,233 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
     h.shutdown().expect("shutdown");
 }
 
+/// A reactive rejection must retain the checkpoint cut before the earliest of
+/// multiple coalesced agent-message wakes and replay both wakes in the exact
+/// suffix.
+#[test]
+fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "stable prefix".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = h.agents[&cid].head.expect("prefix");
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "busy-before-wakes".into(),
+    };
+    for (message_id, body) in [
+        ("coalesced-message-one", "coalesced body one"),
+        ("coalesced-message-two", "coalesced body two"),
+    ] {
+        h.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: message_id.into(),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(&agent_id),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                message: body.to_owned(),
+            }),
+        );
+    }
+    assert_eq!(h.agents[&cid].pending_message_wakes.len(), 2);
+    let captured_cut = h.agents[&cid].head.expect("last message wake");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "mixed activation after coalesced wakes".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = h.agents[&cid].head.expect("second wake head");
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
+    let inference = read_nth_prompt_created(&h, 0);
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint)
+                if checkpoint.agent_prompt_id == inference.agent_prompt_id =>
+            {
+                Some(checkpoint)
+            }
+            _ => None,
+        })
+        .expect("activation checkpoint");
+    assert_eq!(
+        checkpoint.activation_cut,
+        Some(tau_proto::AgentHead::Node(prefix))
+    );
+    assert_ne!(
+        checkpoint.activation_cut,
+        Some(tau_proto::AgentHead::Node(captured_cut))
+    );
+    assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(through));
+
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start reactive compaction");
+    let compact = read_nth_prompt_created(&h, 1);
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("reactive compaction start");
+    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid compact response"),
+    )
+    .expect("finish compaction");
+    let continuation = read_nth_prompt_created(&h, 2);
+    let context = serde_json::to_string(&continuation.context).expect("context");
+    assert_eq!(context.matches("coalesced body one").count(), 1);
+    assert_eq!(context.matches("coalesced body two").count(), 1);
+    assert_eq!(
+        context
+            .matches("mixed activation after coalesced wakes")
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Proactive threshold compaction uses the same earliest-wake cut as reactive
+/// recovery and preserves every coalesced wake in the exact resumed suffix.
+#[test]
+fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(1);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "proactive stable prefix".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = h.agents[&cid].head.expect("prefix");
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "busy-before-proactive-wakes".into(),
+    };
+    for (message_id, body) in [
+        ("proactive-message-one", "proactive body one"),
+        ("proactive-message-two", "proactive body two"),
+    ] {
+        h.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: message_id.into(),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(&agent_id),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                message: body.to_owned(),
+            }),
+        );
+    }
+    let captured_cut = h.agents[&cid].head.expect("last message wake");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "mixed proactive activation".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = h.agents[&cid].head.expect("second wake head");
+    {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(1);
+        agent.context_usage_model = Some("test/model".into());
+        agent.turn_state = AgentTurnState::Idle;
+    }
+    assert!(h.schedule_standalone_auto_compaction_for_activation(
+        &cid,
+        true,
+        Some(tau_proto::AgentHead::Node(captured_cut)),
+    ));
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("proactive compaction start");
+    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
+    assert_eq!(
+        started.resume_through,
+        Some(tau_proto::AgentHead::Node(through))
+    );
+    let compact = read_nth_prompt_created(&h, 0);
+    let compact_context = serde_json::to_string(&compact.context).expect("compact context");
+    assert!(!compact_context.contains("proactive body one"));
+    assert!(!compact_context.contains("proactive body two"));
+
+    h.handle_provider_response_finished(
+        strict_fake_compact_response(&compact).expect("valid compact response"),
+    )
+    .expect("finish compaction");
+    let continuation = read_nth_prompt_created(&h, 1);
+    let context = serde_json::to_string(&continuation.context).expect("context");
+    assert_eq!(context.matches("proactive body one").count(), 1);
+    assert_eq!(context.matches("proactive body two").count(), 1);
+    assert_eq!(context.matches("mixed proactive activation").count(), 1);
+    h.shutdown().expect("shutdown");
+}
+
 /// Incoming user work preempts a non-tool extension's reactive compact through
 /// the production preemption path and durably cancels it exactly once.
 #[test]
@@ -11785,10 +12174,14 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     h.try_advance_queue();
     h.try_advance_queue();
 
-    assert!(matches!(
-        h.agents[&cid].activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
-    ));
+    assert!(
+        matches!(
+            h.agents[&cid].activation_dispatch,
+            crate::agent::ActivationDispatchState::Blocked { .. }
+        ),
+        "unexpected activation state: {:?}",
+        h.agents[&cid].activation_dispatch
+    );
     assert!(matches!(
         h.agent_watch_provider_status[&agent_id].state,
         tau_proto::AgentWatchProviderState::Blocked {
@@ -12632,8 +13025,8 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.shutdown().expect("shutdown");
 }
 
-/// A readiness-deferred activation must re-project usage at the actual dispatch
-/// boundary so growth committed while parked cannot bypass compaction.
+/// A readiness-deferred mixed activation must merge its captured user cut with
+/// the earlier selected message-wake cut before proactive compaction.
 #[test]
 fn readiness_deferred_activation_rechecks_projected_compaction() {
     let td = TempDir::new().expect("tempdir");
@@ -12645,29 +13038,15 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
-    info.standalone_compaction_threshold = Some(8_000);
+    info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
-    h.pending_agent_context_ready.insert(
-        crate::parse_agent_id(&agent_id),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
-    );
-
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
-        .expect("park activation");
-    assert!(
-        !event_log_events(&h)
-            .into_iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
-    );
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
-            text: "B".repeat(6_000),
+            text: "stable readiness prefix".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -12676,6 +13055,39 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             ctx_id: None,
         }),
     );
+    let prefix = h.agents[&cid].head.expect("prefix");
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.pending_agent_context_ready.insert(
+        crate::parse_agent_id(&agent_id),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "readiness-message-wake".into(),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&agent_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "readiness message suffix".to_owned(),
+        }),
+    );
+    let message_node = h.agents[&cid].head.expect("message wake");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
+        .expect("park activation");
+    assert!(
+        !event_log_events(&h)
+            .into_iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    assert!(h.pending_publish_idle_dispatches.iter().any(|deferred| {
+        deferred.cid == cid
+            && deferred.activation_cut == Some(tau_proto::AgentHead::Node(message_node))
+    }));
 
     h.pending_agent_context_ready
         .remove(&crate::parse_agent_id(&agent_id));
@@ -12685,12 +13097,526 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
         prompt.operation,
         tau_proto::PromptOperation::StandaloneCompaction
     );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("compaction start");
+    assert_eq!(started.cut, tau_proto::AgentHead::Node(prefix));
     assert!(!event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::AgentPromptCreated(prompt)
             if prompt.operation == tau_proto::PromptOperation::Inference
     )));
     h.shutdown().expect("shutdown");
+}
+
+/// A readiness-deferred activation stays dormant after root navigation instead
+/// of publishing an invalid off-branch inference checkpoint, then dispatches
+/// when its owning branch is reselected.
+#[test]
+fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = false;
+    info.standalone_compaction_threshold = Some(10_000);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(0);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
+        .expect("park branch A activation");
+    let branch_a = h.agents[&cid].head.expect("branch A activation node");
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.pending_agent_context_ready.remove(&agent_id);
+    h.drain_publish_idle_dispatches();
+
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentInferenceDispatchStarted(_)))
+    );
+    assert!(
+        matches!(
+            h.agents[&cid].activation_dispatch,
+            crate::agent::ActivationDispatchState::None
+        ),
+        "off-branch state: {:?}",
+        h.agents[&cid].activation_dispatch
+    );
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(branch_a),
+        }),
+    );
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .expect("reselected activation checkpoint");
+    assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(branch_a));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// Above the proactive threshold, a readiness-deferred activation remains
+/// dormant off branch and starts compaction only after its branch is
+/// reselected.
+#[test]
+fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = false;
+    info.standalone_compaction_threshold = Some(1);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
+        .expect("park branch A activation");
+    let branch_a = h.agents[&cid].head.expect("branch A activation node");
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.pending_agent_context_ready.remove(&agent_id);
+    h.drain_publish_idle_dispatches();
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    assert!(event_log_events(&h).iter().all(|event| {
+        !matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.message.contains("rejected by session store")
+        )
+    }));
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(branch_a),
+        }),
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "reselected activation compaction; state={:?}, deferred={}",
+                h.agents[&cid].activation_dispatch,
+                h.pending_publish_idle_dispatches.len()
+            )
+        });
+    assert_eq!(
+        started.resume_through,
+        Some(tau_proto::AgentHead::Node(branch_a))
+    );
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// Comparable readiness-deferred activations remain distinct until one
+/// selected-branch checkpoint durably covers and transfers both obligations.
+#[test]
+fn readiness_deferred_linear_activations_share_one_checkpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("linear activation A".to_owned()))
+        .expect("park A");
+    let branch_a = h.agents[&cid].head.expect("A");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("linear activation B".to_owned()))
+        .expect("park B");
+    let branch_b = h.agents[&cid].head.expect("B");
+    assert_ne!(branch_a, branch_b);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+
+    h.pending_agent_context_ready.remove(&agent_id);
+    h.drain_publish_idle_dispatches();
+    let checkpoints = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// Readiness coalescing keeps incomparable branch activations as distinct
+/// obligations; dispatching the selected sibling does not consume the dormant
+/// branch, which becomes runnable after the sibling turn finishes and
+/// reselects.
+#[test]
+fn readiness_deferred_incomparable_activations_remain_distinct() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
+        .expect("park branch A");
+    let branch_a = h.agents[&cid].head.expect("branch A");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch B activation".to_owned()))
+        .expect("park branch B");
+    let branch_b = h.agents[&cid].head.expect("branch B");
+    assert_ne!(branch_a, branch_b);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+
+    h.pending_agent_context_ready.remove(&agent_id);
+    h.drain_publish_idle_dispatches();
+    let branch_b_prompt = read_nth_prompt_created(&h, 0);
+    let checkpoints = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+
+    h.handle_provider_response_finished(provider_text_response(
+        &branch_b_prompt.agent_prompt_id,
+        agent_id.clone(),
+        "branch B complete",
+    ))
+    .expect("finish selected sibling");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(branch_a),
+        }),
+    );
+    let checkpoints = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints[1].through,
+        tau_proto::AgentHead::Node(branch_a),
+        "branch_a={branch_a:?}, branch_b={branch_b:?}, checkpoints={checkpoints:?}"
+    );
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// A selected sibling message wake may dispatch while a readiness-deferred
+/// activation stays dormant on another branch; neither ownership token consumes
+/// the other.
+#[test]
+fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
+        .expect("park branch A");
+    let branch_a = h.agents[&cid].head.expect("branch A");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "branch-b-readiness-hold".into(),
+    };
+    h.publish_for_agent(
+        &cid,
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "branch-b-message".into(),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "branch B wake".to_owned(),
+        }),
+    );
+    let branch_b = h.agents[&cid].head.expect("branch B wake node");
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(
+        h.agents[&cid].pending_message_wakes.len(),
+        1,
+        "branch_a={branch_a:?} branch_b={branch_b:?} head={:?} state={:?} checkpoints={:?}",
+        h.agents[&cid].head,
+        h.agents[&cid].activation_dispatch,
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .collect::<Vec<_>>()
+    );
+
+    h.pending_agent_context_ready.remove(&agent_id);
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
+    let branch_b_prompt = read_nth_prompt_created(&h, 0);
+    let first_checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .expect("selected message checkpoint");
+    assert_eq!(
+        first_checkpoint.through,
+        tau_proto::AgentHead::Node(branch_b)
+    );
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(h.agents[&cid].pending_message_wakes.is_empty());
+
+    h.handle_provider_response_finished(provider_text_response(
+        &branch_b_prompt.agent_prompt_id,
+        agent_id.clone(),
+        "branch B complete",
+    ))
+    .expect("finish selected message turn");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(branch_a),
+        }),
+    );
+    let checkpoints = event_log_events(&h)
+        .into_iter()
+        .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        .count();
+    assert_eq!(checkpoints, 2);
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+}
+
+/// A restored standalone continuation rejects off-branch reconciliation without
+/// leaving an attempt marker, retains its exact tuple across journal append
+/// failure, and retries exactly once after owning-branch reselection.
+#[test]
+fn standalone_checkpoint_rejection_retains_awaiting_owner() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let (agent_id, transaction_id, prompt_id, through) =
+        super::lifecycle::seed_restored_compaction_checkpoint(
+            &mut h,
+            &cid,
+            &"test/model".into(),
+            "ct-owner",
+        );
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: Some(transaction_id.clone()),
+            agent_prompt_id: prompt_id.clone(),
+            through,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        });
+
+    h.agents.get_mut(&cid).expect("agent").head = None;
+    assert!(!h.activation_successor_matches_selected_head(&checkpoint));
+    h.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
+    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        0
+    );
+    h.rollback_rejected_activation_successor(&checkpoint);
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone { .. },
+            ..
+        }
+    ));
+
+    h.agents.get_mut(&cid).expect("agent").head = through.as_option();
+    let event_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = event_path.with_extension("cbor.retry-backup");
+    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&event_path).expect("reject checkpoint append");
+    h.enqueued_standalone_inference_checkpoints
+        .insert((agent_id.clone(), transaction_id.clone()));
+    h.publish_for_agent(&cid, checkpoint);
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone { .. },
+            ..
+        }
+    ));
+    assert!(
+        !h.enqueued_standalone_inference_checkpoints
+            .contains(&(agent_id.clone(), transaction_id.clone()))
+    );
+    std::fs::remove_dir(&event_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
+    ));
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: through,
+        }),
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(created) if created.agent_prompt_id == prompt_id
+    )));
+    let committed: Vec<_> = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records")
+        .into_iter()
+        .filter_map(|record| match record.event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].agent_prompt_id, prompt_id);
+    assert_eq!(committed[0].through, through);
+    assert_eq!(
+        committed[0].model.as_ref(),
+        Some(&tau_proto::ModelId::from("test/model"))
+    );
+    assert_eq!(
+        committed[0].operation,
+        Some(tau_proto::PromptOperation::Inference)
+    );
+    assert_eq!(
+        committed[0].activation_cut,
+        Some(tau_proto::AgentHead::Root)
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: through,
+        }),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
 }
 
 fn enable_remote_compaction_for_test_model(h: &mut Harness) {
@@ -14972,12 +15898,29 @@ fn agent_message_interrupts_recipient_active_wait() {
             if result.call_id.as_str() == wait_call_id.as_str()
                 && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
     )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSteered(steered)
-            if steered.agent_id.as_str() == recipient_id.as_str()
-                && steered.text.contains("please stop waiting")
+            if steered.text.contains("please stop waiting")
     )));
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_id.as_str() == recipient_id.as_str() =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("message wake prompt");
+    assert!(prompt.context.flatten().iter().any(|item| {
+        text_part(item).is_some_and(|text| {
+            text.contains("You have received a message from manager")
+                && text.contains("please stop waiting")
+        })
+    }));
 
     h.shutdown().expect("shutdown");
 }
@@ -15091,17 +16034,23 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         background_call_id.as_str(),
         "slow_queued_message_wait",
     );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .pending_prompts
-        .push_back(PendingPrompt::agent_message_received(
-            "queued manager message".to_owned(),
-        ));
-
     let wait_call_id: ToolCallId = "wait-queued-message".into();
     let wait_call = wait_no_args_call(wait_call_id.as_str());
     seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
+    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "queued-manager-message".into(),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "queued manager message".to_owned(),
+        }),
+    );
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("wait interrupted by queued agent message");
 
@@ -15116,9 +16065,16 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             if result.call_id.as_str() == wait_call_id.as_str()
                 && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
     )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text.contains("queued manager message")
+    )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentPromptSteered(steered) if steered.text == "queued manager message"
+        Event::AgentPromptCreated(prompt)
+            if prompt.context.flatten().iter().any(|item| {
+                text_part(item).is_some_and(|text| text.contains("queued manager message"))
+            })
     )));
 
     h.handle_extension_event_inner(
@@ -15351,7 +16307,8 @@ fn passive_background_notice_does_not_wake_input_wait() {
 }
 
 /// Committed endpoint unload crosses the production lifecycle boundary and
-/// drops runtime-only input-wait registration before the agent is removed.
+/// drops runtime-only input waits, retained completion/checkpoint owners,
+/// attempt markers, and deferred activation obligations before removal.
 #[test]
 fn agent_unload_discards_registered_input_wait() {
     let td = TempDir::new().expect("tempdir");
@@ -15363,6 +16320,28 @@ fn agent_unload_discards_registered_input_wait() {
     h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
         .expect("register input wait");
     assert!(h.input_wait_pending_for(&cid));
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-unload-retry").expect("transaction");
+    h.pending_agent_publish_completions.insert(
+        cid.clone(),
+        AgentPublishCompletion::StandaloneContinuation {
+            transaction_id: transaction_id.clone(),
+            model: "test/model".into(),
+            activation_cut: tau_proto::AgentHead::Root,
+            batch_parent: tau_proto::AgentHead::Root,
+            source: None,
+            retry_prompts: vec![PendingPrompt::user("stale unload retry".to_owned())],
+            complete_on_commit: true,
+            approved_retry_event: None,
+        },
+    );
+    h.enqueued_standalone_inference_checkpoints
+        .insert((crate::parse_agent_id(&durable_id), transaction_id));
+    h.enqueue_committed_activation_dispatch(
+        cid.clone(),
+        Some(tau_proto::AgentHead::Root),
+        Some(tau_proto::AgentHead::Root),
+    );
 
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
@@ -15372,6 +16351,13 @@ fn agent_unload_discards_registered_input_wait() {
         }),
     );
     assert!(!h.input_wait_pending_for(&cid));
+    assert!(!h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert!(
+        h.pending_publish_idle_dispatches
+            .iter()
+            .all(|dispatch| dispatch.cid != cid)
+    );
     h.activate_waits_for(&cid);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
     h.shutdown().expect("shutdown");
@@ -20672,11 +21658,29 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
             .is_empty(),
         "initial watch snapshots must not create lifecycle turns"
     );
-    let lifecycle_prompt = PendingPrompt::watch_notification(
-        "[tau-internal]: Watched agent peer started an agent turn".to_owned(),
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "watch-chain-lifecycle".into(),
+            sender_id: crate::parse_agent_id(&c_id),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&b_id),
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: h.current_session_id.clone(),
+                subscription_id: "watch-chain-b-c".to_owned(),
+                state: tau_proto::AgentRuntimeState::Running,
+                initial: false,
+                turn_generation: 1,
+            }),
+            watch_provider_status: None,
+            message: String::new(),
+        }),
     );
-    h.dispatch_prompt_for_agent(&b_cid, lifecycle_prompt)
-        .expect("dispatch lifecycle turn");
+    assert!(
+        h.agents[&b_cid].lifecycle_notification_only_turn,
+        "typed lifecycle wake must isolate watcher fanout"
+    );
     h.set_agent_turn_state(
         &b_cid,
         AgentTurnState::ToolsRunning {
@@ -21959,16 +22963,8 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     h.shutdown().expect("shutdown");
 }
 
-/// Regression: parallel side agents must not steal each
-/// other's branch cursor. Before the per-event `folded_node_id`
-/// sync, `commit_event` synced `c.head` from the global
-/// `tree.head()`. A non-folding event on conv-A (e.g. an
-/// `ProviderResponseFinished` carrying only tool calls) would overwrite
-/// `c.head[conv-A]` with whatever sibling conv-B last folded — so
-/// conv-A's next `ToolRequest` would graft onto conv-B's branch and
-/// the resulting prompt would walk through unrelated history,
-/// producing orphan ToolUse blocks the provider rejects with
-/// `No tool output found for function call …`.
+/// Builds one canonical production `message` tool call for focused routing
+/// tests.
 fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
         id: id.into(),
@@ -22027,6 +23023,8 @@ fn durable_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMes
         .collect()
 }
 
+/// A message addressed to the user records only the sender-side canonical
+/// occurrence and never creates a recipient projection or wake.
 #[test]
 fn message_tool_to_user_emits_only_sender_projection() {
     let td = TempDir::new().expect("tempdir");
@@ -22141,14 +23139,28 @@ fn external_agent_message_request_publishes_received_projection() {
     );
     assert_eq!(received[0].recipient_id.as_str(), recipient_id);
     assert_eq!(received[0].message, "hello from outside");
-    let pending = h
-        .agents
-        .get(&cid)
-        .expect("recipient conversation")
-        .pending_prompts
-        .front()
-        .expect("queued external message prompt");
-    assert!(pending.text.contains("other-session/sender_agent"));
+    let recipient = h.agents.get(&cid).expect("recipient conversation");
+    assert!(recipient.pending_prompts.is_empty());
+    assert!(matches!(
+        recipient.pending_message_wakes.front(),
+        Some(crate::agent::PendingMessageWake {
+            source: crate::agent::PendingMessageWakeSource::AgentMessageReceived { .. },
+            ..
+        })
+    ));
+    let context = crate::prompt::assemble_prompt_context_from(
+        h.agent_store.agent(&recipient_id).expect("recipient tree"),
+        recipient.head,
+    )
+    .context
+    .flatten();
+    assert!(context.iter().any(|item| {
+        text_part(item).is_some_and(|text| {
+            text.contains(
+                "<tau_peer_message sender_session=\"other-session\" sender_agent=\"sender_agent\">",
+            ) && text.contains("hello from outside")
+        })
+    }));
 
     h.shutdown().expect("shutdown");
 }
@@ -23373,7 +24385,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     assert_eq!(h.agents.len(), 1);
 }
 
-/// Queue admission counts already queued peer prompts before any auto-start or
+/// Queue admission counts uncheckpointed peer wakes before any auto-start or
 /// receive projection can create additional model work.
 #[test]
 fn peer_input_queue_limit_rejects_before_auto_start_spend() {
@@ -23385,11 +24397,15 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
         h.agents
             .get_mut(&cid)
             .expect("agent")
-            .pending_prompts
-            .push_back(
-                crate::agent::PendingPrompt::agent_message_received(format!("queued peer {index}"))
-                    .with_peer_admission_bytes(Some(1)),
-            );
+            .pending_message_wakes
+            .push_back(crate::agent::PendingMessageWake {
+                source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                    durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
+                    activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                    peer_admission_bytes: Some(1),
+                },
+                node_id: None,
+            });
     }
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
@@ -23437,10 +24453,16 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
         .iter_mut()
         .find(|pending| pending.agent_id == pending_id)
         .expect("pending endpoint");
-    pending.pending_agent_messages.extend((0..32).map(|index| {
-        PendingPrompt::agent_message_received(format!("pending peer {index}"))
-            .with_peer_admission_bytes(Some(1))
-    }));
+    pending
+        .pending_agent_message_wakes
+        .extend((0..32).map(|index| crate::agent::PendingMessageWake {
+            source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
+                activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                peer_admission_bytes: Some(1),
+            },
+            node_id: None,
+        }));
     let recipient = crate::parse_agent_id(&pending_id);
     assert_eq!(
         h.admit_peer_input(&recipient, 1)
@@ -23453,11 +24475,17 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
         .iter_mut()
         .find(|pending| pending.agent_id == pending_id)
         .expect("pending endpoint");
-    pending.pending_agent_messages.clear();
-    pending.pending_agent_messages.extend((0..4).map(|_| {
-        PendingPrompt::agent_message_received("byte weight".to_owned())
-            .with_peer_admission_bytes(Some(64 * 1024))
-    }));
+    pending.pending_agent_message_wakes.clear();
+    pending
+        .pending_agent_message_wakes
+        .extend((0..4).map(|index| crate::agent::PendingMessageWake {
+            source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
+                activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                peer_admission_bytes: Some(64 * 1024),
+            },
+            node_id: None,
+        }));
     assert_eq!(
         h.admit_peer_input(&recipient, 1)
             .expect_err("byte boundary rejects"),
@@ -23761,16 +24789,22 @@ fn terminating_agent_route_rejects_direct_work() {
         h.agent_message_recipient_status(&recipient_id),
         crate::harness::AgentMessageRecipientStatus::Live
     );
-    h.deliver_agent_message(&tau_proto::AgentMessageReceived {
-        message_id: "msg-during-termination".into(),
-        sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
-        sender_session_id: None,
-        recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
-        kind: tau_proto::AgentMessageKind::Message,
-        watch_turn_state: None,
-        watch_provider_status: None,
-        message: "must be rejected".to_owned(),
-    });
+    h.activate_received_agent_message(
+        &tau_proto::AgentMessageReceived {
+            message_id: "msg-during-termination".into(),
+            sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
+            sender_session_id: None,
+            recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "must be rejected".to_owned(),
+        },
+        Some(&tau_core::AgentAppendOutcome {
+            seq: tau_core::PersistedAgentEventSeq::new(1),
+            folded_node_id: None,
+        }),
+    );
     assert!(h.agents[&cid].pending_prompts.is_empty());
     assert!(
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("rejected".to_owned()))
@@ -23787,11 +24821,10 @@ fn terminating_agent_route_rejects_direct_work() {
     ));
 }
 
-/// Agent-directed messages are displayed in the UI like every message
-/// projection, and the recipient agent receives an internal queued prompt with
-/// stable markup.
+/// A self-send keeps one outbound and one inbound canonical occurrence, one
+/// payload-free receive wake, and no delivery-created prompt copy.
 #[test]
-fn message_tool_to_agent_queues_internal_prompt_markup() {
+fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -23830,27 +24863,470 @@ fn message_tool_to_agent_queues_internal_prompt_markup() {
     assert_eq!(durable_received[0].message_id, received[0].message_id);
 
     let conv = h.agents.get(&cid).expect("conversation");
-    let queued = conv.pending_prompts.back().expect("queued prompt");
-    assert_eq!(
-        queued.message_class,
-        tau_proto::PromptMessageClass::Internal
-    );
-    assert!(queued.text.contains(&format!(
-        "[tau-internal]: You have received a message from {recipient_id}"
+    assert!(conv.pending_prompts.is_empty());
+    assert_eq!(conv.pending_message_wakes.len(), 1);
+    let tree = h.agent_store.agent(&recipient_id).expect("self-send tree");
+    let entries: Vec<_> = tree
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.entry {
+            tau_core::AgentEntry::AgentMessage {
+                durable_event_seq,
+                direction,
+                ..
+            } => Some((*durable_event_seq, *direction)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries.len(), 2);
+    assert_ne!(entries[0].0, entries[1].0);
+    assert_eq!(entries[0].1, tau_core::AgentMessageDirection::Outbound);
+    assert_eq!(entries[1].1, tau_core::AgentMessageDirection::Inbound);
+    let context = crate::prompt::assemble_prompt_context_from(tree, conv.head)
+        .context
+        .flatten();
+    assert!(context.iter().any(|item| {
+        text_part(item).is_some_and(|text| {
+            text.contains(&format!(
+                "[tau-internal]: You have received a message from {recipient_id}"
+            )) && text.contains(
+                "<message>\nsecret &lt;message&gt;&amp;&lt;/message&gt; payload &gt;\n</message>",
+            )
+        })
+    }));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt) if prompt.text.contains("secret <message>")
     )));
-    assert!(queued.text.contains(
-        "<message>\nsecret &lt;message&gt;&amp;&lt;/message&gt; payload &gt;\n</message>"
-    ));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(prompt) if prompt.text.contains("secret <message>")
+    )));
 
     h.shutdown().expect("shutdown");
 }
 
-/// Watch response notifications must not look like explicit `message` tool
-/// deliveries in the model-visible prompt; otherwise the receiving agent cannot
-/// tell whether a sub-agent finished a watched turn or intentionally messaged
-/// it.
+/// Explicit navigation may leave an owed wake dormant, but a sibling checkpoint
+/// must never acknowledge it; reselecting its branch makes it runnable again.
 #[test]
-fn agent_watch_response_queues_distinct_internal_prompt_markup() {
+fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "branch-message-busy".into(),
+    };
+
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "branch-message".into(),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "branch-owned input".to_owned(),
+        }),
+    );
+    let wake_node = h.agents[&cid]
+        .pending_message_wakes
+        .front()
+        .and_then(|wake| wake.node_id)
+        .expect("materialized message wake");
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    let checkpoints_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        .count();
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: crate::parse_agent_id(&recipient_id),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        checkpoints_before,
+        "off-branch wake must remain dormant"
+    );
+    assert_eq!(h.agents[&cid].pending_message_wakes.len(), 1);
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: crate::parse_agent_id(&recipient_id),
+            head: tau_proto::AgentHead::Node(wake_node),
+        }),
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        checkpoints_before + 1
+    );
+    assert!(h.agents[&cid].pending_message_wakes.is_empty());
+}
+
+/// A racing sibling response cannot persist a second foreground tool round or
+/// launch any of its calls after another branch has opened the tree-global
+/// round.
+#[test]
+fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("racing prompt".to_owned()))
+        .expect("dispatch real racing prompt");
+    let active_prompt = read_nth_prompt_created(&h, 0);
+    let second_prompt_id = active_prompt.agent_prompt_id.clone();
+    let request_count_before = h.current_session_state.token_usage.total.requests;
+    let model_request_counts_before = h.current_session_state.token_usage.by_model.clone();
+    assert_eq!(
+        h.agents[&cid].in_flight_prompt.as_ref(),
+        Some(&second_prompt_id)
+    );
+    assert!(matches!(
+        &h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            agent_prompt_id,
+            ..
+        } if agent_prompt_id == &second_prompt_id
+    ));
+    let parent = h.agents[&cid]
+        .head
+        .map(tau_core::AgentEventParent::Under)
+        .unwrap_or(tau_core::AgentEventParent::Root);
+    h.agent_store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            parent,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: "ap-first-round".into(),
+                agent_id: agent_id.clone(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-first-round".into(),
+                    name: ToolName::new("first_tool"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("open first round without terminalizing active racing prompt");
+    assert!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .has_open_foreground_tool_round()
+    );
+
+    let provider_responses_before = loaded_agent_events(&h, "s1")
+        .iter()
+        .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+        .count();
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: second_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-must-not-launch".into(),
+            name: ToolName::new("forbidden_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("racing response is rejected in band");
+
+    assert_eq!(
+        loaded_agent_events(&h, "s1")
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        provider_responses_before
+    );
+    assert!(!h.tool_agents.contains_key("call-must-not-launch"));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::ToolRequest(request)
+            if request.call_id.as_str() == "call-must-not-launch")
+    }));
+    assert!(event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id == second_prompt_id
+                    && terminated.reason
+                        == tau_proto::AgentPromptTerminationReason::Canceled
+        )
+    }));
+    let agent = &h.agents[&cid];
+    assert!(agent.in_flight_prompt.is_none());
+    assert!(agent.last_prompt_id.is_none());
+    assert!(matches!(
+        agent.activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert!(matches!(agent.turn_state, AgentTurnState::Idle));
+    assert!(!h.prompt_agents.contains_key(&second_prompt_id));
+    assert!(!h.prompt_models.contains_key(&second_prompt_id));
+    assert!(!h.prompt_operations.contains_key(&second_prompt_id));
+    assert_eq!(
+        h.current_session_state.token_usage.total.requests,
+        request_count_before
+    );
+    assert_eq!(
+        h.current_session_state.token_usage.by_model,
+        model_request_counts_before
+    );
+}
+
+/// The global-round rejection precedes standalone-compaction telemetry
+/// publication, so even the special invalid-window path cannot record the
+/// racing provider response or launch its tool call.
+#[test]
+fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    {
+        let info = h
+            .provider_model_info
+            .get_mut(&tau_proto::ModelId::from("test/model"))
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(900);
+    }
+    let _ = connect_ready_configured_extension(
+        &mut h,
+        "conn-standalone-race-tool",
+        "configured-standalone-race-tool",
+        tau_proto::ClientKind::Tool,
+    );
+    h.registry.register(
+        "conn-standalone-race-tool",
+        shared_test_tool_spec("forbidden_compaction_tool"),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "busy-standalone-race-watcher".into(),
+    };
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    let compact = read_nth_prompt_created(&h, 0);
+    assert!(
+        compact
+            .tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "forbidden_compaction_tool"),
+        "the rejected call must name a dispatchable tool offered to the provider"
+    );
+    assert!(
+        h.prompt_context_limits
+            .contains_key(&compact.agent_prompt_id),
+        "standalone dispatch must capture harness-owned telemetry evidence"
+    );
+
+    let parent = h.agents[&cid]
+        .head
+        .map(tau_core::AgentEventParent::Under)
+        .unwrap_or(tau_core::AgentEventParent::Root);
+    h.agent_store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            parent,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: "ap-racing-open-round".into(),
+                agent_id: agent_id.clone(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-existing-round".into(),
+                    name: ToolName::new("existing_tool"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("open racing round without moving the runtime branch cursor");
+    let context_before = (
+        h.agents[&cid].context_input_tokens,
+        h.agents[&cid].context_cached_tokens,
+        h.agents[&cid].context_usage_model.clone(),
+        h.agents[&cid].context_usage_head,
+    );
+    let provider_status_before = h.agent_watch_provider_status.clone();
+    let watcher_receives_before = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.recipient_id == watcher_id)
+        .count();
+    let context_publications_before = event_log_events(&h)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::HarnessAgentContextUsageChanged(_) | Event::AgentStatsUpdated(_)
+            )
+        })
+        .count();
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: compact.agent_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-standalone-must-not-launch".into(),
+            name: ToolName::new("forbidden_compaction_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
+        error: Some("standalone context rejection with semantic output".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: Some(tau_proto::ProviderTokenUsage {
+            model: None,
+            prompt_sent_tokens: 999,
+            prompt_cached_tokens: 111,
+            response_received_tokens: 7,
+            stats: Default::default(),
+        }),
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("racing standalone response is rejected in band");
+
+    assert!(!loaded_agent_events(&h, "s1").iter().any(|event| {
+        matches!(event, Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == compact.agent_prompt_id)
+    }));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == compact.agent_prompt_id)
+    }));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::ToolRequest(request)
+            if request.call_id.as_str() == "call-standalone-must-not-launch")
+    }));
+    assert_eq!(
+        (
+            h.agents[&cid].context_input_tokens,
+            h.agents[&cid].context_cached_tokens,
+            h.agents[&cid].context_usage_model.clone(),
+            h.agents[&cid].context_usage_head,
+        ),
+        context_before
+    );
+    assert_eq!(h.agent_watch_provider_status, provider_status_before);
+    let watcher_receives_after: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.recipient_id == watcher_id)
+        .collect();
+    assert_eq!(
+        watcher_receives_after.len(),
+        watcher_receives_before,
+        "{watcher_receives_after:#?}"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::HarnessAgentContextUsageChanged(_) | Event::AgentStatsUpdated(_)
+                )
+            })
+            .count(),
+        context_publications_before
+    );
+    assert!(!h.prompt_models.contains_key(&compact.agent_prompt_id));
+    assert!(
+        !h.prompt_context_limits
+            .contains_key(&compact.agent_prompt_id)
+    );
+    assert!(
+        !h.prompt_context_size_alerts
+            .contains_key(&compact.agent_prompt_id)
+    );
+    assert!(event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::HarnessNotice(notice)
+            if notice.message.contains("already has an open foreground tool round"))
+    }));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::HarnessNotice(notice)
+            if notice.message.contains("used repetition_detected with output items"))
+    }));
+}
+
+/// Watch responses retain their typed canonical wrapper without a generated
+/// payload prompt.
+#[test]
+fn agent_watch_response_uses_distinct_canonical_projection() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -23873,19 +25349,27 @@ fn agent_watch_response_queues_distinct_internal_prompt_markup() {
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchResponse);
 
     let conv = h.agents.get(&cid).expect("conversation");
-    let queued = conv.pending_prompts.back().expect("queued prompt");
-    assert_eq!(
-        queued.message_class,
-        tau_proto::PromptMessageClass::Internal
-    );
-    assert!(queued.text.contains(&format!(
+    assert!(conv.pending_prompts.is_empty());
+    assert_eq!(conv.pending_message_wakes.len(), 1);
+    let context = crate::prompt::assemble_prompt_context_from(
+        h.agent_store.agent(&recipient_id).expect("watcher tree"),
+        conv.head,
+    )
+    .context
+    .flatten();
+    let text = context
+        .iter()
+        .filter_map(text_part)
+        .find(|text| text.contains("Watched agent"))
+        .expect("canonical watch response");
+    assert!(text.contains(&format!(
         "[tau-internal]: Watched agent {recipient_id} emitted a response"
     )));
-    assert!(queued.text.contains(
+    assert!(text.contains(
         "<response>\ndone &lt;response&gt;&amp;&lt;/response&gt; payload &gt;\n</response>"
     ));
-    assert!(!queued.text.contains("You have received a message"));
-    assert!(!queued.text.contains("<message>"));
+    assert!(!text.contains("You have received a message"));
+    assert!(!text.contains("<message>"));
 
     h.shutdown().expect("shutdown");
 }
@@ -23947,25 +25431,31 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert_eq!(received[0].recipient_id, crate::parse_agent_id(&watcher_id));
 
     let watcher = h.agents.get(&watcher_cid).expect("watcher conversation");
-    let queued = watcher
-        .pending_prompts
-        .iter()
-        .find(|prompt| prompt.text.contains("received a user prompt"))
-        .expect("queued prompt notification");
+    assert!(watcher.pending_prompts.is_empty());
     assert_eq!(
-        queued.message_class,
-        tau_proto::PromptMessageClass::Internal
+        watcher.pending_message_wakes.len(),
+        2,
+        "user-prompt content and the watched turn transition activate separately"
     );
-    assert!(queued.text.contains(&format!(
+    let context = crate::prompt::assemble_prompt_context_from(
+        h.agent_store.agent(&watcher_id).expect("watcher tree"),
+        watcher.head,
+    )
+    .context
+    .flatten();
+    let text = context
+        .iter()
+        .filter_map(text_part)
+        .find(|text| text.contains("received a user prompt"))
+        .expect("canonical prompt notification");
+    assert!(text.contains(&format!(
         "[tau-internal]: Watched agent {watched_id} received a user prompt"
     )));
     assert!(
-        queued
-            .text
-            .contains("<prompt>\nplease continue &lt;now&gt;&amp;&lt;/now&gt; &gt;\n</prompt>")
+        text.contains("<prompt>\nplease continue &lt;now&gt;&amp;&lt;/now&gt; &gt;\n</prompt>")
     );
-    assert!(!queued.text.contains("finished its turn"));
-    assert!(!queued.text.contains("<response>"));
+    assert!(!text.contains("finished its turn"));
+    assert!(!text.contains("<response>"));
 
     h.shutdown().expect("shutdown");
 }
@@ -25425,6 +26915,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
             session_id: h.current_session_id.clone(),
             agent_id: agent_id.clone(),
         }),
+        None,
     );
     assert!(!h.agent_navigation_modes.contains_key(&agent_id));
     h.agent_navigation_modes

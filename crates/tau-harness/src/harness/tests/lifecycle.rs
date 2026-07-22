@@ -294,7 +294,7 @@ fn clear_quiet_provider_models(h: &mut Harness) {
 
 /// Seeds the valid durable success boundary required before a restored
 /// standalone continuation can enter `AwaitingCheckpoint`.
-fn seed_restored_compaction_checkpoint(
+pub(super) fn seed_restored_compaction_checkpoint(
     h: &mut Harness,
     cid: &AgentId,
     model: &tau_proto::ModelId,
@@ -360,6 +360,7 @@ fn seed_restored_compaction_checkpoint(
     else {
         panic!("successful resumable compaction awaits its checkpoint");
     };
+    h.agents.get_mut(cid).expect("runtime agent").head = through.as_option();
     let checkpoint_prompt_id = h
         .stage_restored_compaction_recovery(cid, &recovery)
         .expect("production runtime recovery projection");
@@ -5073,7 +5074,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     }
     assert!(!h.provider_model_info.contains_key(&captured));
     assert!(
-        h.enqueued_restored_compaction_checkpoints.is_empty(),
+        h.enqueued_standalone_inference_checkpoints.is_empty(),
         "pre-Ready snapshots must not reconcile restored work"
     );
 
@@ -5088,7 +5089,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     );
     assert!(!h.provider_model_routes.contains_key(&captured));
     assert!(
-        !h.enqueued_restored_compaction_checkpoints
+        !h.enqueued_standalone_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
     );
     let events = event_log_events(&h);
@@ -7751,6 +7752,8 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
     h.shutdown().expect("shutdown");
 }
 
+/// A non-tool extension query that unexpectedly requests a tool receives one
+/// terminal error before side-conversation teardown removes its routing state.
 #[test]
 fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     let td = TempDir::new().expect("tempdir");
@@ -7829,6 +7832,8 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     h.shutdown().expect("shutdown");
 }
 
+/// A pending non-tool side query must terminalize its parent tool call while
+/// retaining committed message activation for the side agent.
 #[test]
 fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     let td = TempDir::new().expect("tempdir");
@@ -7844,12 +7849,23 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         };
         conv.source_connection = Some(HARNESS_CONNECTION_ID.into());
         conv.parent_tool_call_id = None;
-        conv.pending_prompts
-            .push_back(PendingPrompt::agent_message_received("notice".to_owned()));
     }
     seed_agent_thinking(&mut h, &cid, "sp-query-pending");
     h.prompt_agents
         .insert("sp-query-pending".into(), cid.clone());
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "query-pending-message".into(),
+            sender_id: tau_proto::AgentId::parse("manager").expect("sender id"),
+            sender_session_id: None,
+            recipient_id: durable_agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "notice".to_owned(),
+        }),
+    );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: "sp-query-pending".into(),

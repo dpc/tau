@@ -323,6 +323,127 @@ fn parked_registration_blocks_ready_activation() {
     );
 }
 
+/// Rollover commits a parked pre-Ready registration only as a stale
+/// observation, releases its nonzero activation reservation, and lets the
+/// already-recorded Ready complete without installing provider membership.
+#[test]
+fn rollover_releases_stale_context_registration_reservation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.extensions
+        .entries
+        .get_mut("context-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    connect_agent_context_interceptor(&mut h);
+    h.handle_extension_event(
+        "context-owner",
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        )),
+    )
+    .expect("park registration");
+    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
+        .expect("record Ready");
+    let stage = &h.extensions.activation_staging["context-owner"];
+    assert_eq!(stage.retained_message_count, 1);
+    assert!(stage.retained_message_bytes > 0);
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert!(source_committed(&h, "context-owner", |event| {
+        matches!(event, Event::ExtensionContextProviderRegister(_))
+    }));
+    assert_eq!(
+        h.extensions.entries["context-owner"].state,
+        crate::extension::ExtensionState::Ready
+    );
+    assert!(
+        !h.extensions
+            .pending_agent_context_declarations
+            .contains_key("context-owner")
+    );
+    assert!(
+        !h.extensions
+            .activation_staging
+            .contains_key("context-owner")
+    );
+    assert!(
+        !h.agent_context_providers
+            .contains(&tau_proto::ConnectionId::from("context-owner"))
+    );
+}
+
+/// Session-bound context declarations that already committed into a
+/// handshaking extension's activation stage retain their admission generation,
+/// so later `Ready` cannot project them into a replacement session.
+#[test]
+fn rollover_rejects_already_staged_context_declarations_on_ready() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.extensions
+        .entries
+        .get_mut("context-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    let agent_id = tau_proto::AgentId::parse("stale-context-agent").expect("agent id");
+
+    h.handle_extension_event(
+        "context-owner",
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        )),
+    )
+    .expect("stage provider registration");
+    h.handle_extension_event(
+        "context-owner",
+        TestProtocolItem::Event(context(agent_id.as_str(), "old-session")),
+    )
+    .expect("stage context value");
+    assert_eq!(
+        h.extensions.activation_staging["context-owner"].retained_message_count,
+        2
+    );
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
+        .expect("activate owner");
+
+    assert!(source_committed(&h, "context-owner", |event| {
+        matches!(event, Event::ExtensionContextProviderRegister(_))
+    }));
+    assert!(source_committed(&h, "context-owner", |event| {
+        matches!(event, Event::ExtAgentContextPublish(publish) if publish.agent_id == agent_id)
+    }));
+    assert!(
+        !h.agent_context_providers
+            .contains(&tau_proto::ConnectionId::from("context-owner"))
+    );
+    assert_eq!(
+        h.agent_context.template_value(Some(&agent_id)),
+        serde_json::json!({})
+    );
+    assert!(
+        !h.extensions
+            .activation_staging
+            .contains_key("context-owner")
+    );
+}
+
 /// Dropping a pre-Ready value declaration must release its activation charge
 /// and allow an already-recorded Ready to activate without projecting the
 /// value.
@@ -369,6 +490,65 @@ fn dropped_startup_context_releases_reservation_and_ready() {
             &tau_proto::AgentId::parse("agent-1").expect("agent id")
         )),
         serde_json::json!({})
+    );
+}
+
+/// Per-agent readiness admitted before Ready keeps its original session
+/// generation, so releasing activation after rollover cannot clear a
+/// replacement-session dispatch barrier even when the payload names it.
+#[test]
+fn pre_ready_context_readiness_after_rollover_is_observation_only() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "context-owner",
+        "configured-context-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut("context-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    let agent_id = tau_proto::AgentId::parse("replacement-agent").expect("agent id");
+    h.handle_extension_event(
+        "context-owner",
+        TestProtocolItem::Event(Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id: "replacement".into(),
+                agent_id: agent_id.clone(),
+            },
+        )),
+    )
+    .expect("defer readiness before Ready");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.pending_agent_context_ready.insert(
+        agent_id.clone(),
+        [tau_proto::ConnectionId::from("context-owner")]
+            .into_iter()
+            .collect(),
+    );
+    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
+        .expect("activate owner");
+
+    assert!(source_committed(&h, "context-owner", |event| {
+        matches!(
+            event,
+            Event::ExtensionContextReady(ready)
+                if ready.session_id.as_str() == "replacement"
+                    && ready.agent_id == agent_id
+        )
+    }));
+    assert_eq!(
+        h.pending_agent_context_ready.get(&agent_id),
+        Some(
+            &[tau_proto::ConnectionId::from("context-owner")]
+                .into_iter()
+                .collect()
+        )
     );
 }
 

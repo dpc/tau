@@ -160,11 +160,62 @@ impl ActivationDispatchState {
 /// Typed source of one committed message activation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PendingMessageWakeSource {
+    /// Harness-owned inbound agent-message occurrence.
+    AgentMessageReceived {
+        /// Sequence of the canonical received fact in the owning agent log.
+        durable_event_seq: tau_core::PersistedAgentEventSeq,
+        /// Whether this input may create ordinary watcher lifecycle edges.
+        activation_class: AgentMessageActivationClass,
+        /// Peer body weight retained until checkpoint or lifecycle cleanup.
+        peer_admission_bytes: Option<usize>,
+    },
     /// Canonical external-message fact activation.
     MessageFact {
         /// Sequence of the canonical raw fact in the owning agent log.
         durable_event_seq: tau_core::PersistedAgentEventSeq,
     },
+}
+
+impl PendingMessageWakeSource {
+    /// Returns the canonical owning-journal sequence for this wake.
+    pub(crate) fn durable_event_seq(&self) -> tau_core::PersistedAgentEventSeq {
+        match self {
+            Self::AgentMessageReceived {
+                durable_event_seq, ..
+            }
+            | Self::MessageFact { durable_event_seq } => *durable_event_seq,
+        }
+    }
+
+    /// Returns the lifecycle class used when coalescing selected-branch wakes.
+    pub(crate) fn activation_class(&self) -> AgentMessageActivationClass {
+        match self {
+            Self::AgentMessageReceived {
+                activation_class, ..
+            } => *activation_class,
+            Self::MessageFact { .. } => AgentMessageActivationClass::OrdinaryAgentInput,
+        }
+    }
+
+    /// Returns peer admission bytes retained by this wake, if any.
+    pub(crate) fn peer_admission_bytes(&self) -> Option<usize> {
+        match self {
+            Self::AgentMessageReceived {
+                peer_admission_bytes,
+                ..
+            } => *peer_admission_bytes,
+            Self::MessageFact { .. } => None,
+        }
+    }
+}
+
+/// Runtime lifecycle class for one activating received agent-message fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentMessageActivationClass {
+    /// Ordinary agent input that can participate in normal lifecycle fanout.
+    OrdinaryAgentInput,
+    /// Isolated watch input that must not cascade watch lifecycle edges.
+    IsolatedWatchNotification,
 }
 
 /// One committed message activation and its transcript placement.
@@ -356,11 +407,6 @@ pub(crate) enum PendingPromptSource {
     /// A user-style prompt whose watchers should be notified when it becomes
     /// part of the watched agent's active turn.
     WatchNotifiedUser,
-    /// A prompt created from an `agent.message_received` delivery.
-    AgentMessageReceived,
-    /// A lifecycle/provider watch notification; isolated to prevent
-    /// watch-derived activity from cascading along chains.
-    WatchNotification,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
     /// Advisory prompt created by a named context-size alert.
@@ -389,12 +435,6 @@ pub(crate) struct PendingPrompt {
     pub(crate) submission_source: tau_proto::PromptSubmissionSource,
     /// Optional caller correlation id carried with this exact prompt.
     pub(crate) ctx_id: Option<String>,
-    /// Original peer body bytes retained while this prompt awaits dispatch.
-    ///
-    /// This is present only for bounded peer-entrypoint inputs. Keeping the
-    /// admission weight on the queued prompt makes cancellation and queue
-    /// clearing release capacity without a second shadow queue.
-    pub(crate) peer_admission_bytes: Option<usize>,
 }
 
 impl From<String> for PendingPrompt {
@@ -424,7 +464,6 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
-            peer_admission_bytes: None,
         }
     }
 
@@ -451,7 +490,6 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
-            peer_admission_bytes: None,
         }
     }
 
@@ -462,36 +500,6 @@ impl PendingPrompt {
         prompt
     }
 
-    /// Create a hidden watch notification prompt.
-    pub(crate) fn watch_notification(text: String) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::WatchNotification,
-            ctx_id: None,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            peer_admission_bytes: None,
-        }
-    }
-
-    /// Create a hidden queued prompt from an `agent.message_received` delivery.
-    pub(crate) fn agent_message_received(text: String) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::AgentMessageReceived,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            ctx_id: None,
-            peer_admission_bytes: None,
-        }
-    }
-
-    /// Retain original peer body bytes while this prompt awaits dispatch.
-    pub(crate) fn with_peer_admission_bytes(mut self, bytes: Option<usize>) -> Self {
-        self.peer_admission_bytes = bytes;
-        self
-    }
-
     /// Create an internal loop-guard pivot prompt.
     pub(crate) fn loop_guard(text: String) -> Self {
         Self {
@@ -500,7 +508,6 @@ impl PendingPrompt {
             source: PendingPromptSource::LoopGuard,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
-            peer_admission_bytes: None,
         }
     }
 
@@ -513,7 +520,6 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveBackgroundCompletion,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
-            peer_admission_bytes: None,
         }
     }
 
@@ -532,7 +538,6 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveRestoreNotice,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
-            peer_admission_bytes: None,
         }
     }
 
@@ -548,21 +553,6 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_internal(&self) -> bool {
         self.message_class.is_internal()
-    }
-
-    /// Whether this prompt came from an `agent.message_received` delivery.
-    #[must_use]
-    pub(crate) fn is_agent_message_received(&self) -> bool {
-        matches!(
-            self.source,
-            PendingPromptSource::AgentMessageReceived | PendingPromptSource::WatchNotification
-        )
-    }
-
-    /// Whether this prompt is a harness-authored watch notification.
-    #[must_use]
-    pub(crate) fn is_watch_notification(&self) -> bool {
-        self.source == PendingPromptSource::WatchNotification
     }
 
     /// Whether this user prompt should produce a watcher context notification.

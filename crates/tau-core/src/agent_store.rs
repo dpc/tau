@@ -315,14 +315,17 @@ fn parse_agent_id_for_store(agent_id: &str) -> Result<AgentId, AgentStoreError> 
 /// the agent-event sequence and, when the event produced a tree node,
 /// that node's id. Callers maintaining a per-conversation branch
 /// cursor advance it from `folded_node_id` rather than from the
-/// global `tree.head()` so non-folding events (e.g. an
-/// `ProviderResponseFinished` carrying only tool calls) don't sync
-/// the cursor onto a sibling conversation's last fold.
+/// global `tree.head()` so side-state events and context projections deferred
+/// behind an applicable tool round do not sync the cursor onto another branch's
+/// last fold.
 #[derive(Clone, Debug)]
 pub struct AgentAppendOutcome {
     /// Sequence assigned to the record in this agent's event stream.
     pub seq: PersistedAgentEventSeq,
-    /// Folded tree node produced by this event, if any.
+    /// Last tree node produced by this event, if any. A tool terminal that
+    /// closes a round reports the last drained deferred-context node; an
+    /// accepted context input deferred behind that round reports `None`
+    /// until closure.
     pub folded_node_id: Option<NodeId>,
 }
 
@@ -872,8 +875,9 @@ impl AgentStore {
             None
         };
 
-        let folded_node_id = tree.apply_event_at(parent, &event);
-        tree.advance_next_event_seq();
+        let folded_node_id = tree
+            .apply_persisted_record(&record)
+            .expect("persisted record passed append-time validation");
         if matches!(event, Event::AgentStarted(_)) {
             self.created_agents.insert(sid.clone());
         }
@@ -970,12 +974,9 @@ impl AgentStore {
                 .push(record.clone());
             None
         };
-        let folded_node_id = tau_proto::project_message_fact(&event)
-            .and_then(Result::ok)
-            .and_then(|projection| {
-                tree.record_committed_message_fact(Box::new(projection.item), seq)
-            });
-        tree.advance_next_event_seq();
+        let folded_node_id = tree
+            .apply_persisted_record(&record)
+            .expect("canonical raw fact matches its journal owner and sequence");
         if let Some(position) = committed_position {
             let summary = {
                 let summary = self.summaries.entry(aid.clone()).or_default();

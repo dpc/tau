@@ -88,12 +88,13 @@ grammar.
 
 S1 also adds one bounded `WatchNotifications` action containing one to four
 typed `Response`, `Prompt`, or non-initial `TurnState` records. Each provider
-prompt consumes exactly one already-delivered live record; intermediate stages
-return fixed text without advancing the lane action. The action requires the
-retained child identity, exact sender/recipient, kind, content or runtime state,
-and one stable subscription-id/turn-generation pair across its turn-state
-records. It also checks the exact escaped model-visible prompt projection.
-Only records for the current closed action enter the queue; unrelated and excess
+prompt consumes and validates the complete already-delivered queue prefix for
+the current closed action; an incomplete prefix returns fixed text without
+advancing the lane action. The action requires the retained child identity,
+exact sender/recipient, kind, content or runtime state, and one stable
+subscription-id/turn-generation pair across its turn-state records. It also
+checks the exact ordered, escaped model-visible prompt projection. Only records
+for the current closed action enter the queue; unrelated, reordered, and excess
 live traffic fails before admission. Replayed deliveries cannot populate this
 live queue.
 
@@ -205,22 +206,22 @@ liveness, bounded provider stalls, fatal
 provider-disconnect handling without restart, lane isolation, durable session
 projection, clean restore/shutdown, and the spawned public terminal's completed
 tool projection across one quiescent cold resume. S1 specifically spends four
-main-lane actions and two worker-lane actions, producing exactly six main
+main-lane actions and two worker-lane actions, producing exactly five main
 provider turns and two worker provider turns, to prove that a completed,
 production-started durable worker cold-restores as an independently addressable
 idle conversation; its daemon-lifetime automatic watch does not restore.
-S2 repeats the five-main/one-worker Boot A budget in a fresh fixture. Boot B
-spends two main turns on the exact explicit watch pair, four main turns on the
-four model-visible watch notifications, and one worker turn on direct fresh
-input: six main and one worker turn exactly. Extra prompts fail scenario
+S2 repeats the four-main/one-worker Boot A budget in a fresh fixture. Boot B
+spends two main turns on the exact explicit watch pair, three main turns on the
+coalesced ordered watch notifications, and one worker turn on direct fresh
+input: five main and one worker turn exactly. Extra prompts fail scenario
 consumption.
-S3 repeats S1's five-main/one-worker Boot A setup, then creates one promptless
+S3 repeats S1's four-main/one-worker Boot A setup, then creates one promptless
 ephemeral worker. Boot B spends exactly one fresh main and one fresh durable-worker
-turn, for six main and two worker turns across both boots and six lane actions
+turn, for five main and two worker turns across both boots and six lane actions
 total. Probes for the unloaded and vanished ephemeral identities must produce no
 provider prompt or action.
 S4 consumes two sequential start pairs and two three-record automatic-watch
-actions in Boot A: ten main turns and one turn in each distinct worker lane.
+actions in Boot A: eight main turns and one turn in each distinct worker lane.
 Boot B consumes one fresh turn per worker in reverse creation order, with no
 main turn. Exact lane-local continuations and per-agent durable suffixes reject
 lane rebinding and cross-agent transcript leakage; roster rows are compared as
@@ -244,7 +245,7 @@ continuation consumes the tenth action. Exact checkpoint bindings, per-agent
 journals, and provider budgets reject warning-to-model delivery, lane rebinding,
 repair leakage, or automatic redispatch.
 S8 uses two lanes and five scenario actions. Headless Boot A consumes three main
-actions across exactly five main provider turns and one worker action/turn.
+actions across exactly four main provider turns and one worker action/turn.
 Universal PTY Boot B replay consumes nothing, then one explicit worker follow-up
 consumes the fifth action and exactly one worker provider turn; the main consumes
 zero Boot B turns. Stable IDs from typed creation facts drive worker-to-main-to-

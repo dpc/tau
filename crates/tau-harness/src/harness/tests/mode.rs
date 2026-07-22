@@ -692,6 +692,10 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
     let sync = crate::harness::interception::ConversationHeadSync {
         cid,
         agent_id: Some(agent_id),
+        session_generation: h.current_session_generation,
+        suppress_activation_dispatch: false,
+        completion: None,
+        notify_watchers: false,
     };
 
     for event in [

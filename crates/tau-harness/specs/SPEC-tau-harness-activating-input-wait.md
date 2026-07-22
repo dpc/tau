@@ -49,7 +49,10 @@ edge. Live UI reconnect does not
 affect it. Unload, cancellation, rollover, or shutdown drops it, with event-loop
 ordering deciding races exactly once. Cold restore does not recreate a waiter:
 the unresolved foreground tool follows standard interrupted-tool repair while
-durably accepted activation remains available through normal replay.
+durably accepted prompt activation remains available through normal replay.
+Agent-message replay reconstructs canonical context only; its runtime wake and
+automatic activation are intentionally not recreated, as specified by
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 ## Authorization boundary
 

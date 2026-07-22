@@ -1,5 +1,12 @@
 # SPEC-agent-watch: Agent watch
 
+## Record justification
+
+Agent watch behavior spans harness-owned topology and dedupe state, typed
+protocol snapshots, provider-work observation, model-context rendering,
+cross-agent activation, replay, and endpoint cleanup. No one owning module can
+describe the complete observation and lifecycle contract coherently.
+
 ## Topology and endpoint lifecycle
 
 Agent display names are human-facing labels, not topology metadata. For newly
@@ -43,8 +50,8 @@ Direct watch lifecycle facts remain scoped to their individual subscription edge
 ## Model-visible notifications
 
 `agent_watch` is a model-visible cross-agent content exposure boundary. A watcher may
-receive hidden internal prompts containing the watched agent's final response text or
-the text of a user prompt accepted by the watched agent. These notifications must be
+receive hidden typed context projections containing the watched agent's final response
+text or the text of a user prompt accepted by the watched agent. These notifications must be
 clearly labeled as watch notifications, not as explicit `message` tool deliveries:
 
 - `[tau-internal]: Watched agent <agent-id> emitted a response`
@@ -71,6 +78,11 @@ other hidden/non-user inputs. A completed `agent_start` result is the started ch
 agent's terminal final response to its direct delegating watcher and remains watchable
 under the response label.
 
+User-prompt watch fanout occurs only after the corresponding durable steer
+commits. It uses the exact post-interception sanctioned steer text. A rejected
+publication emits no WatchPrompt occurrence; eventual successful retry emits
+exactly one occurrence after commit.
+
 ## Provider-work projection
 
 Provider retries carry closed structured categories, saturating attempt counts, and
@@ -87,3 +99,11 @@ an initial client snapshot without prompting the model. Durable live facts repla
 transcript context without re-fanout; disable, prune, and session change stop delivery.
 Raw provider bodies, status text, errors, headers, account data, secrets, and prompt
 content never cross this boundary.
+
+Every accepted watch-derived `AgentMessageReceived` is the sole canonical
+payload projection for its occurrence and follows the sequence-aware placement
+in [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
+`WatchResponse` and `WatchPrompt` use ordinary live activation. Noninitial
+model-visible turn/provider transitions use isolated activation. Initial and
+redundant structured snapshots have no wake and no provider block. Replay
+retains canonical facts without waking or refanout.

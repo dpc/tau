@@ -60,9 +60,7 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
-        if !prompt.is_watch_notification() {
-            self.promote_lifecycle_notification_turn(agent_id);
-        }
+        self.promote_lifecycle_notification_turn(agent_id);
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
         }
@@ -136,7 +134,7 @@ impl Harness {
             )));
         }
         if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.lifecycle_notification_only_turn = prompt.is_watch_notification();
+            agent.lifecycle_notification_only_turn = false;
         }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
@@ -163,7 +161,7 @@ impl Harness {
         // dispatches now: the AgentTree already reflects the new
         // user message, so the message list assembled inside
         // `send_prompt_to_agent_for` will include it.
-        self.dispatch_prompt_after_user_message_publish(agent_id);
+        self.drain_publish_idle_dispatches();
         Ok(())
     }
 
@@ -202,11 +200,7 @@ impl Harness {
 
             let has_durable_activation = self.agents.get(&agent_id).is_some_and(|agent| {
                 agent.pending_replay_activation
-                    || (!agent.pending_message_wakes.is_empty()
-                        && agent
-                            .pending_message_wakes
-                            .iter()
-                            .all(|wake| wake.node_id.is_some()))
+                    || self.has_ready_message_wake_on_selected_branch(&agent_id)
             });
             if has_durable_activation {
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
@@ -228,6 +222,13 @@ impl Harness {
                 if !self.validate_prompt_render_for_dispatch(&agent_id) {
                     return;
                 }
+                if let Some(activation_class) =
+                    self.selected_message_wake_activation_class(&agent_id)
+                    && let Some(agent) = self.agents.get_mut(&agent_id)
+                {
+                    agent.lifecycle_notification_only_turn = activation_class
+                        == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification;
+                }
                 let model = self
                     .agents
                     .get(&agent_id)
@@ -240,6 +241,20 @@ impl Harness {
                     self.set_agent_turn_state(&agent_id, crate::agent::AgentTurnState::Idle);
                     return;
                 };
+                let captured_activation_cut = self.agents.get(&agent_id).and_then(|agent| {
+                    let durable_agent_id = agent.agent_id.as_deref()?;
+                    agent
+                        .head
+                        .and_then(|head| self.agent_store.agent(durable_agent_id)?.node(head))
+                        .and_then(|node| node.parent_id)
+                        .map(tau_proto::AgentHead::Node)
+                        .or(Some(tau_proto::AgentHead::Root))
+                });
+                let Some(activation_cut) =
+                    self.earliest_activation_cut(&agent_id, captured_activation_cut)
+                else {
+                    return;
+                };
                 let Some((durable_agent_id, prompt_id, through, activation_cut)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;
@@ -250,11 +265,6 @@ impl Harness {
                         agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
                         let through = agent
                             .head
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                        let activation_cut = agent
-                            .head
-                            .and_then(|head| self.agent_store.agent(&durable_agent_id)?.node(head))
-                            .and_then(|node| node.parent_id)
                             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
                         agent.activation_dispatch =
                             crate::agent::ActivationDispatchState::AwaitingCheckpoint {
@@ -312,11 +322,7 @@ impl Harness {
                     .pending_prompts
                     .iter()
                     .any(|prompt| !prompt.is_passive_background_completion())
-                    || (!conv.pending_message_wakes.is_empty()
-                        && conv
-                            .pending_message_wakes
-                            .iter()
-                            .all(|wake| wake.node_id.is_some()))
+                    || self.has_ready_message_wake_on_selected_branch(agent_id)
                     || conv.pending_replay_activation)
                     && matches!(conv.turn_state, AgentTurnState::Idle)
                     && !conv.terminating
@@ -325,6 +331,7 @@ impl Harness {
                         crate::agent::ActivationDispatchState::None
                     )
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
+                    && !self.agent_has_open_foreground_tool_round(agent_id)
             })
             .map(|(agent_id, _)| agent_id.clone())
     }
@@ -363,6 +370,7 @@ impl Harness {
                     )
                     || !matches!(conv.turn_state, AgentTurnState::Idle)
                     || self.has_deferred_prompt_dispatch_for(agent_id)
+                    || self.agent_has_open_foreground_tool_round(agent_id)
             }
             None => true,
         }

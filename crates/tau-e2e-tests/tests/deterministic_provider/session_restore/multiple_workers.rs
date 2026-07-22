@@ -63,7 +63,7 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
     assert_provider_turn_counts_by_agent(
         &observer_a.events,
         &BTreeMap::from([
-            (identities.main.clone(), 10),
+            (identities.main.clone(), 8),
             (identities.alpha.clone(), 1),
             (identities.beta.clone(), 1),
         ]),

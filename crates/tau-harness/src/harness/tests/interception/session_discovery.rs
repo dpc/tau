@@ -287,6 +287,123 @@ fn parked_registration_blocks_ready_activation() {
     );
 }
 
+/// Session discovery declarations that already committed into a handshaking
+/// extension's activation stage keep their admission generation, so a later
+/// `Ready` cannot install old provider or skill state after rollover.
+#[test]
+fn rollover_rejects_already_staged_discovery_declarations_on_ready() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "discovery-owner",
+        "configured-discovery-owner",
+        tau_proto::ClientKind::Core,
+    );
+    h.extensions
+        .entries
+        .get_mut("discovery-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+
+    h.handle_extension_event(
+        "discovery-owner",
+        TestProtocolItem::Event(Event::ExtensionSessionContextProviderRegister(
+            tau_proto::ExtensionSessionContextProviderRegister {},
+        )),
+    )
+    .expect("stage provider registration");
+    h.handle_extension_event(
+        "discovery-owner",
+        TestProtocolItem::Event(skill("stale-skill", "old-session")),
+    )
+    .expect("stage skill");
+    assert_eq!(
+        h.extensions.activation_staging["discovery-owner"].retained_message_count,
+        2
+    );
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
+        .expect("activate owner");
+
+    assert!(source_committed(&h, "discovery-owner", |event| {
+        matches!(event, Event::ExtensionSessionContextProviderRegister(_))
+    }));
+    assert!(source_committed(&h, "discovery-owner", |event| {
+        matches!(event, Event::ExtSkillAvailable(skill) if skill.name == "stale-skill")
+    }));
+    assert!(
+        !h.session_context_providers
+            .contains(&tau_proto::ConnectionId::from("discovery-owner"))
+    );
+    assert!(!h.discovered_skills.contains_key("stale-skill"));
+    assert!(
+        !h.extensions
+            .activation_staging
+            .contains_key("discovery-owner")
+    );
+}
+
+/// Session readiness admitted before Ready keeps its original session
+/// generation, so releasing activation after rollover cannot finish the
+/// replacement session even when the payload names it.
+#[test]
+fn pre_ready_session_readiness_after_rollover_is_observation_only() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "discovery-owner",
+        "configured-discovery-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.extensions
+        .entries
+        .get_mut("discovery-owner")
+        .expect("owner")
+        .state = crate::extension::ExtensionState::Handshaking;
+    h.handle_extension_event(
+        "discovery-owner",
+        TestProtocolItem::Event(Event::ExtensionSessionContextReady(
+            tau_proto::ExtensionSessionContextReady {
+                session_id: "replacement".into(),
+            },
+        )),
+    )
+    .expect("defer readiness before Ready");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.turn_state = TurnState::InitializingSession {
+        session_id: "replacement".into(),
+        reason: tau_proto::SessionStartReason::New,
+        waiting_on: [tau_proto::ConnectionId::from("discovery-owner")]
+            .into_iter()
+            .collect(),
+    };
+    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
+        .expect("activate owner");
+
+    assert!(source_committed(&h, "discovery-owner", |event| {
+        matches!(
+            event,
+            Event::ExtensionSessionContextReady(ready)
+                if ready.session_id.as_str() == "replacement"
+        )
+    }));
+    assert!(matches!(
+        &h.turn_state,
+        TurnState::InitializingSession {
+            session_id,
+            waiting_on,
+            ..
+        } if session_id.as_str() == "replacement"
+            && waiting_on.contains("discovery-owner")
+    ));
+}
+
 /// Dropping a pre-Ready session-discovery declaration must release its count
 /// and byte reservation so a recorded Ready can activate the peer.
 #[test]

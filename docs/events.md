@@ -19,8 +19,9 @@ references to a base fact. Generic consumers do not resolve those references or
 interpret extension data. Transport authentication, admission, deduplication,
 native routing, reply authority, and send/retry policy remain extension-local.
 
-Valid committed canonical incoming facts project as escaped `<tau_message event="…">`
-user context and request one live activation after transcript placement.
+Valid committed canonical incoming facts immediately request one payload-free
+live activation and project as escaped `<tau_message event="…">` user context
+when branch placement permits.
 `message.sent` projects as assistant context and never activates by itself.
 Replay reconstructs the same projection without waking the agent or restoring
 extension-private authority. A malformed or unavailable target cannot veto
@@ -567,8 +568,11 @@ transient runtime observations and never enter semantic replay. See
   have no received projection. User-recipient sent projections are human-visible
   broadcasts that UIs always render fully in the currently visible transcript. UI
    subscribers filter, summarize, or fully display agent-to-agent message
-   projections according to `/set show-messages`. Agent recipients are delivered
-   as hidden internal prompts; external senders render as `session/agent`. If a
+   projections according to `/set show-messages`. The received projection is the
+   sole model payload; local senders render in a stable-sender-labelled escaped
+   `[tau-internal]` wrapper and external senders in an authenticated peer envelope.
+   Live activation is a payload-free runtime wake; replay restores context without
+   waking. If a
    side/delegate agent is about to finish, teardown waits until the message turn
    has been dispatched and answered. Interceptors cannot drop or rewrite these
    validated projections. Agent display names are deliberately absent from these

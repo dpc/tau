@@ -47,7 +47,7 @@ const RESTORE_NOTICE: &str = concat!(
 
 /// Prevents replay-triggered provider work, stable-ID transcript mixing, a
 /// completed `agent_start` repaint, and targeted worker work reaching the main
-/// when the public terminal resumes the closed S1 headless flow.
+/// when the public terminal resumes the closed S8 headless flow.
 #[test]
 fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = scenario();
@@ -77,7 +77,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     assert_provider_turns(
         &observer_a.events,
         &identities,
-        ProviderTurns { main: 5, worker: 1 },
+        ProviderTurns { main: 4, worker: 1 },
     )?;
     let matched_after_a = matched_actions(&fixture)?;
     if matched_after_a != 4 {
