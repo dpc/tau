@@ -9,7 +9,7 @@ room collisions, join errors and exact self-presence correlation, mediated
 invite payloads and leave presence, real-JID allowlist routing,
 hidden-real-JID fail-closed and explicit membership trust behavior, exact
 transport-neutral delivered-report mapping, report-before-result ordering and
-transient metadata,
+`persist=false` metadata,
 own/delayed/history/oversize drops, strict tool arguments, direct exact-to
 full-JID routing, and reconnect state updates.
 

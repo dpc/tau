@@ -12,7 +12,7 @@ use super::semantic_event_router::{session_membership_id_for_event, should_persi
 use crate::parse_agent_id;
 
 /// Metadata requests never enter semantic history for either caller-selected
-/// transient bit, while their canonical successors remain durable.
+/// persistence value, while their canonical successors remain durable.
 #[test]
 fn metadata_requests_are_never_semantically_persisted() {
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
@@ -31,13 +31,13 @@ fn metadata_requests_are_never_semantically_persisted() {
         Event::AgentMetadataSetRequest(set.clone()),
         Event::AgentMetadataUnsetRequest(unset.clone()),
     ] {
-        assert!(!should_persist_event(&request, false));
         assert!(!should_persist_event(&request, true));
+        assert!(!should_persist_event(&request, false));
     }
-    assert!(should_persist_event(&Event::AgentMetadataSet(set), false));
+    assert!(should_persist_event(&Event::AgentMetadataSet(set), true));
     assert!(should_persist_event(
         &Event::AgentMetadataUnset(unset),
-        false
+        true
     ));
 }
 
@@ -52,8 +52,8 @@ fn provider_model_state_never_enters_semantic_history() {
             models: Vec::new(),
         }),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -69,13 +69,13 @@ fn prompt_fragment_declarations_never_enter_semantic_history() {
         ),
     });
 
-    assert!(event.defaults_to_transient());
-    assert!(!should_persist_event(&event, false));
+    assert!(!event.defaults_to_persist());
     assert!(!should_persist_event(&event, true));
+    assert!(!should_persist_event(&event, false));
 }
 
 /// Session-discovery declarations and readiness are runtime observations, never
-/// semantic history, regardless of peer-selected transient metadata.
+/// semantic history, regardless of peer-selected persistence metadata.
 #[test]
 fn session_discovery_events_never_enter_semantic_history() {
     for event in [
@@ -99,9 +99,9 @@ fn session_discovery_events_never_enter_semantic_history() {
             session_id: "session-1".into(),
         }),
     ] {
-        assert!(event.defaults_to_transient());
-        assert!(!should_persist_event(&event, false));
+        assert!(!event.defaults_to_persist());
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -121,9 +121,9 @@ fn per_agent_context_events_never_enter_semantic_history() {
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         }),
     ] {
-        assert!(event.defaults_to_transient());
-        assert!(!should_persist_event(&event, false));
+        assert!(!event.defaults_to_persist());
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -136,13 +136,13 @@ fn internal_prompt_requests_never_enter_semantic_history() {
         text: "wake".to_owned(),
         ctx_id: Some("timer:1".to_owned()),
     });
-    assert!(event.defaults_to_transient());
-    assert!(!should_persist_event(&event, false));
+    assert!(!event.defaults_to_persist());
     assert!(!should_persist_event(&event, true));
+    assert!(!should_persist_event(&event, false));
 }
 
 /// Terminal-output events are live side effects and never enter semantic
-/// history, regardless of caller-selected transient metadata.
+/// history, regardless of caller-selected persistence metadata.
 #[test]
 fn terminal_output_events_never_enter_semantic_history() {
     for event in [
@@ -152,13 +152,13 @@ fn terminal_output_events_never_enter_semantic_history() {
             value: "ready".to_owned(),
         }),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
 /// Opaque custom extension events are runtime subscriber traffic and never
-/// enter semantic history for either caller-selected transient value.
+/// enter semantic history for either caller-selected persistence value.
 #[test]
 fn custom_extension_events_never_enter_semantic_history() {
     let event = Event::ExtensionEvent(
@@ -169,12 +169,12 @@ fn custom_extension_events_never_enter_semantic_history() {
         )
         .expect("custom event"),
     );
-    assert!(!should_persist_event(&event, false));
     assert!(!should_persist_event(&event, true));
+    assert!(!should_persist_event(&event, false));
 }
 
 /// UI draft and focus observations are live liveness signals, never semantic
-/// history, for either caller-selected transient value.
+/// history, for either caller-selected persistence value.
 #[test]
 fn ui_liveness_events_never_enter_semantic_history() {
     for event in [
@@ -188,9 +188,9 @@ fn ui_liveness_events_never_enter_semantic_history() {
             focused: true,
         }),
     ] {
-        assert!(event.defaults_to_transient());
-        assert!(!should_persist_event(&event, false));
+        assert!(!event.defaults_to_persist());
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -230,13 +230,13 @@ fn provider_quota_state_never_enters_semantic_history() {
             route_bindings: Vec::new(),
         }),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
 /// Provider execution reports are committed observations, never replayable
-/// semantic facts, regardless of the peer-selected transient bit.
+/// semantic facts, regardless of the peer-selected persistence value.
 #[test]
 fn provider_execution_reports_never_enter_semantic_history() {
     let prompt_id = tau_proto::AgentPromptId::from("prompt-1");
@@ -290,9 +290,9 @@ fn provider_execution_reports_never_enter_semantic_history() {
             corrected_cache_efficiency: 0.0,
         }),
     ] {
-        assert!(event.defaults_to_transient());
-        assert!(!should_persist_event(&event, false));
+        assert!(!event.defaults_to_persist());
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -334,8 +334,8 @@ fn tool_lifecycle_state_never_enters_semantic_history() {
             tool_name: ToolName::new("runtime_tool"),
         }),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -354,8 +354,8 @@ fn tool_progress_never_enters_semantic_history() {
         Event::ToolProgressReported(progress.clone()),
         Event::ToolProgress(progress),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
@@ -383,23 +383,24 @@ fn shell_reports_never_enter_semantic_history() {
         Event::ShellCommandProgressReported(progress.clone()),
         Event::ShellCommandFinishedReported(finished.clone()),
     ] {
-        assert!(!should_persist_event(&report, false));
         assert!(!should_persist_event(&report, true));
+        assert!(!should_persist_event(&report, false));
     }
     assert!(!should_persist_event(
         &Event::ShellCommandProgress(progress),
-        true
+        false
     ));
     assert!(should_persist_event(
         &Event::ShellCommandFinished(finished),
-        false
+        true
     ));
 }
 
-/// Ensures ordinary transient facts remain live-only so progress/status updates
-/// cannot accidentally enter durable session or agent replay logs.
+/// Ensures ordinary facts with `persist=false` remain live-only so
+/// progress/status updates cannot accidentally enter durable session or agent
+/// replay logs.
 #[test]
-fn transient_non_tool_event_is_not_persisted() {
+fn persist_false_non_tool_event_is_not_persisted() {
     let event = Event::AgentStarted(AgentStarted {
         parent_agent: None,
         agent_id: parse_agent_id("agent-1"),
@@ -409,12 +410,12 @@ fn transient_non_tool_event_is_not_persisted() {
         ephemeral: false,
     });
 
-    assert!(!should_persist_event(&event, true));
-    assert!(should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, false));
+    assert!(should_persist_event(&event, true));
 }
 
 /// Ensures raw extension-owned tool completions stay live-only semantic events
-/// even when published through a non-transient helper path; their
+/// even when published with `persist=true`; their
 /// provider-owned counterparts are the durable transcript facts.
 #[test]
 fn raw_tool_terminal_events_are_not_persisted() {
@@ -450,13 +451,13 @@ fn raw_tool_terminal_events_are_not_persisted() {
         Event::ToolError(error),
         Event::ToolCancelledReported(cancelled),
     ] {
-        assert!(!should_persist_event(&event, false));
         assert!(!should_persist_event(&event, true));
+        assert!(!should_persist_event(&event, false));
     }
 }
 
 /// Start-agent requests are committed live observations, not replayable
-/// semantic facts, for either caller-supplied transient value.
+/// semantic facts, for either caller-supplied persistence value.
 #[test]
 fn raw_start_agent_requests_are_not_persisted() {
     let event = Event::StartAgentRequest(tau_proto::StartAgentRequest {
@@ -469,29 +470,102 @@ fn raw_start_agent_requests_are_not_persisted() {
         parent_agent: None,
     });
 
-    assert!(!should_persist_event(&event, false));
     assert!(!should_persist_event(&event, true));
+    assert!(!should_persist_event(&event, false));
 }
 
-/// Canonical cancellation retains its existing semantic transcript/replay
-/// behavior even though the peer report that caused it is never persisted.
+/// Every established exception remains durable with `persist=false`, while an
+/// ordinary eligible event follows the positive metadata value.
 #[test]
-fn canonical_tool_cancellation_remains_persisted() {
-    let event = Event::ToolCancelled(ToolCancelled {
+fn persist_false_preserves_every_persistence_exception() {
+    let result = ToolResult {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
+        result: CborValue::Text("done".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    };
+    let error = ToolError {
+        call_id: "call-1".into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    };
+    let exceptions = [
+        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+            agent_prompt_id: "prompt-1".into(),
+            agent_id: parse_agent_id("agent-1"),
+            session_id: "session-1".into(),
+            system_prompt: String::new(),
+            context: tau_proto::PromptContext { blocks: Vec::new() },
+            tools: Vec::new(),
+            tools_ref: None,
+            model: "test/model".parse().expect("model id"),
+            model_params: Default::default(),
+            tool_choice: Default::default(),
+            originator: PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            compaction: None,
+            operation: tau_proto::PromptOperation::Inference,
+        }),
+        Event::ProviderToolResult(result),
+        Event::ProviderToolError(error),
+        Event::ToolCancelled(ToolCancelled {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("tool"),
+            tool_type: ToolType::Function,
+        }),
+        Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("tool"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("tool"),
+            tool_type: ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+    ];
+
+    for event in exceptions {
+        assert!(
+            should_persist_event(&event, false),
+            "{} must retain its persistence exception",
+            event.name()
+        );
+    }
+
+    let ordinary = Event::AgentStarted(AgentStarted {
+        parent_agent: None,
+        agent_id: parse_agent_id("agent-1"),
+        role: "default".into(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
     });
-    assert!(should_persist_event(&event, false));
-    assert!(should_persist_event(&event, true));
+    assert!(!should_persist_event(&ordinary, false));
+    assert!(should_persist_event(&ordinary, true));
 }
 
-/// Ensures transient durable tool completions still reach the agent store for
-/// resume/replay; only raw `tool.result` / `tool.error` observer facts are
-/// filtered out before semantic persistence.
+/// A decoded `persist=false` envelope still persists the established canonical
+/// terminal-tool exception, while an ordinary fact follows the positive bit.
 #[test]
-fn transient_provider_terminal_tool_event_is_persisted() {
-    let event = Event::ProviderToolError(ToolError {
+fn inverted_wire_metadata_preserves_persistence_exceptions() {
+    let exception = Event::ProviderToolError(ToolError {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -500,8 +574,26 @@ fn transient_provider_terminal_tool_event_is_persisted() {
         display: None,
         originator: PromptOriginator::User,
     });
+    let wire = serde_json::to_value(tau_proto::Emit::with_persist(exception, false))
+        .expect("encode live-only metadata");
+    assert_eq!(wire["persist"], false);
+    assert!(wire.get("transient").is_none());
+    let decoded: tau_proto::Emit =
+        serde_json::from_value(wire).expect("decode positive persistence schema");
+    let (exception, persist) = decoded.into_parts();
+    assert!(!persist);
+    assert!(should_persist_event(&exception, persist));
 
-    assert!(should_persist_event(&event, true));
+    let ordinary = Event::AgentStarted(AgentStarted {
+        parent_agent: None,
+        agent_id: parse_agent_id("agent-1"),
+        role: "default".into(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    });
+    assert!(!should_persist_event(&ordinary, false));
+    assert!(should_persist_event(&ordinary, true));
 }
 
 /// Ensures session membership facts continue routing by their embedded session

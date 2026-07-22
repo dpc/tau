@@ -704,8 +704,8 @@ fn terminal_output_hooks_preserve_non_transient_emit_metadata() {
     ] {
         let emit = reader.read_emit().expect("read").expect("terminal emit");
         assert!(
-            !emit.transient,
-            "{expected_name} must preserve the existing non-transient wire bit"
+            emit.persist,
+            "{expected_name} must preserve the existing persist=true wire bit"
         );
         assert_eq!(emit.event.name(), expected_name);
     }
@@ -1638,7 +1638,7 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
 
     let emit = reader.read_emit().expect("read").expect("summary query");
     assert!(
-        emit.transient,
+        !emit.persist,
         "idle-summary start requests must explicitly use transient delivery"
     );
     let Event::StartAgentRequest(query) = *emit.event else {

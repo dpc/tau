@@ -61,10 +61,10 @@ failure, or disconnect release both the charge and pending count. Recorded Ready
 cannot activate the extension while such a declaration remains unsettled.
 Readiness is operational traffic and stays behind activation.
 
-All three raw events default transient and are unconditionally excluded from
+All three raw events default to `persist=false` and are unconditionally excluded from
 semantic agent, session, and restore journals for either caller-supplied
-`Emit.transient` value. They have no cold replay or current-state synthesis.
-First-party registration, value, and readiness sends use `transient=true`.
+`Emit.persist` value. They have no cold replay or current-state synthesis.
+First-party registration, value, and readiness sends use `persist=false`.
 
 The local configured-extension trust boundary and bounded-wait risk are
 documented in [`SECURITY.md`](../SECURITY.md). Unrelated authority-matrix rows

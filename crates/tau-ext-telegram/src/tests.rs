@@ -292,7 +292,7 @@ fn expect_successful_send(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageSe
     let HarnessInputMessage::Emit(emit) = message else {
         panic!("emit")
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::MessageSentReported(report) = *emit.event else {
         panic!("message.sent_reported event")
     };
@@ -329,7 +329,7 @@ fn expect_delivered(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageDelivere
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::MessageDeliveredReported(report) = *emit.event else {
         panic!("message.delivered_reported event")
     };

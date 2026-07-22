@@ -1185,7 +1185,8 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
     }
 }
 
-/// Ensures startup frames preserve order and transient metadata before `Ready`.
+/// Ensures startup frames preserve order and persistence metadata before
+/// `Ready`.
 #[test]
 fn startup_frame_order_is_stable() {
     let (_, frames) = run_messages(StartupExtension, (), &[]);
@@ -1197,7 +1198,7 @@ fn startup_frame_order_is_stable() {
     assert!(matches!(
         &frames[4],
         HarnessInputMessage::Emit(emit)
-            if !emit.transient
+            if emit.persist
                 && matches!(
                     emit.event.as_ref(),
                     event if is_outbound_event(event, "durable startup event")
@@ -1206,7 +1207,7 @@ fn startup_frame_order_is_stable() {
     assert!(matches!(
         &frames[5],
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(
                     emit.event.as_ref(),
                     event if is_outbound_event(event, "transient startup event")
@@ -1490,7 +1491,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
         frames[1],
         HarnessInputMessage::Emit(ref emit)
             if matches!(emit.event.as_ref(), Event::ExtensionContextProviderRegister(_))
-                && emit.transient
+                && !emit.persist
     ));
     assert!(matches!(
         frames[2],
@@ -1498,7 +1499,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
             if matches!(
                 emit.event.as_ref(),
                 Event::ExtensionSessionContextProviderRegister(_)
-            ) && emit.transient
+            ) && !emit.persist
     ));
     let HarnessInputMessage::Emit(prompt_fragment_emit) = &frames[3] else {
         panic!("expected prompt fragment publish before Ready: {frames:?}");
@@ -1506,7 +1507,7 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
     let Event::ExtPromptFragmentPublish(publish) = prompt_fragment_emit.event.as_ref() else {
         panic!("expected prompt fragment publish before Ready: {frames:?}");
     };
-    assert!(prompt_fragment_emit.transient);
+    assert!(!prompt_fragment_emit.persist);
     assert_eq!(publish.fragment.name, "shell.cwd");
     assert_eq!(publish.fragment.priority, PromptPriority::new(900));
     assert!(
@@ -1602,19 +1603,19 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
     let ready_events = frames
         .iter()
         .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => Some((emit.event.as_ref(), emit.transient)),
+            HarnessInputMessage::Emit(emit) => Some((emit.event.as_ref(), emit.persist)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(ready_events.iter().any(|(event, transient)| matches!(
+    assert!(ready_events.iter().any(|(event, persist)| matches!(
         event,
         Event::ExtensionContextReady(ready)
             if ready.session_id == "session-1" && ready.agent_id.as_str() == "agent-1"
-    ) && *transient));
-    assert!(ready_events.iter().any(|(event, transient)| matches!(
+    ) && !persist));
+    assert!(ready_events.iter().any(|(event, persist)| matches!(
         event,
         Event::ExtensionSessionContextReady(ready) if ready.session_id == "session-1"
-    ) && *transient));
+    ) && !persist));
 }
 
 /// Ensures detached notice requests still flow through the writer before runner
@@ -1949,13 +1950,13 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
     assert!(matches!(
         &frames[3],
         HarnessInputMessage::Emit(emit)
-            if !emit.transient
+            if emit.persist
                 && is_outbound_event(emit.event.as_ref(), "dynamic startup event")
     ));
     assert!(matches!(
         &frames[4],
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && is_outbound_event(emit.event.as_ref(), "dynamic transient startup event")
     ));
     assert!(matches!(
@@ -2921,7 +2922,7 @@ fn manual_loop_intercept_error_sends_one_reply() {
     let error = runtime
         .dispatch_one(HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(Event::AgentPromptSubmitted(test_prompt("original"))),
-            transient: false,
+            persist: true,
         }))
         .expect_err("intercept error");
     assert_eq!(error.to_string(), "intercept failed");
@@ -3039,7 +3040,7 @@ fn intercept_request_gets_exactly_one_reply() {
         Counts::default(),
         &[HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(Event::AgentPromptSubmitted(test_prompt("original"))),
-            transient: false,
+            persist: true,
         })],
     );
 
@@ -3227,7 +3228,7 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
     assert!(frames.iter().any(|frame| matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(
                 emit.event.as_ref(),
                 Event::ToolRegistrationDeclared(register)
@@ -3272,7 +3273,7 @@ fn rejected_configure_discards_buffered_declaration_and_withholds_ready() {
     assert!(frames.iter().all(|frame| !matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(
                 emit.event.as_ref(),
                 Event::ToolRegistrationDeclared(register)
@@ -3500,7 +3501,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
     assert!(matches!(
         &frames[0],
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(
                 emit.event.as_ref(),
                 Event::ToolRegistrationDeclared(register)
@@ -3510,7 +3511,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
     assert!(matches!(
         &frames[1],
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(
                 emit.event.as_ref(),
                 Event::ToolUnregistrationDeclared(unregister)
@@ -3545,7 +3546,7 @@ fn client_handle_submits_transient_tool_progress_report() {
     assert!(matches!(
         frames_from_writer(&written).as_slice(),
         [HarnessInputMessage::Emit(emit)]
-            if emit.transient
+            if !emit.persist
                 && matches!(
                     emit.event.as_ref(),
                     Event::ToolProgressReported(progress)
@@ -3604,9 +3605,9 @@ fn client_handle_submits_transient_terminal_tool_reports() {
             HarnessInputMessage::Emit(result),
             HarnessInputMessage::Emit(error),
             HarnessInputMessage::Emit(cancelled),
-        ] if result.transient
-            && error.transient
-            && cancelled.transient
+        ] if !result.persist
+            && !error.persist
+            && !cancelled.persist
             && matches!(result.event.as_ref(), Event::ToolResultReported(_))
             && matches!(error.event.as_ref(), Event::ToolErrorReported(_))
             && matches!(cancelled.event.as_ref(), Event::ToolCancelledReported(_))

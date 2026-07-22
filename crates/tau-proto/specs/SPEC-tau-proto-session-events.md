@@ -1,5 +1,12 @@
 # SPEC-tau-proto-session-events: Session events
 
+## Record justification
+
+Session-facing event contracts span protocol DTOs, serde names, `EventName`
+constants, harness routing and persistence, and multiple client projections.
+Documentation beside any one implementation area cannot describe their shared
+wire and lifecycle invariants.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.
@@ -61,7 +68,7 @@ Required and optional fields express only the current protocol semantics.
 ## Agent metadata protocol
 
 `agent.metadata_set_request` and `agent.metadata_unset_request` are
-transient-by-default peer mutation requests. They reuse the canonical payload
+`persist=false`-by-default peer mutation requests. They reuse the canonical payload
 shapes but never enter semantic replay for either Emit metadata value.
 `agent.metadata_set` and `agent.metadata_unset` are separate harness-authored,
 durable, extension-visible agent facts. Metadata keys are strings; values are
@@ -110,7 +117,7 @@ unscoped/session-level draft, normally the start-new-agent prompt; consumers
 must not infer the current agent from absence.
 Only an attached socket UI may author draft observations. The event default is
 transient, although the interactive CLI's established Emit wrapper currently
-sends a false transient bit. The harness preserves that metadata but excludes
+sends a true `persist` bit. The harness preserves that metadata but excludes
 the event from semantic stores and replay for either value. `ui.focus_changed`
 uses the same authority and persistence contract. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).

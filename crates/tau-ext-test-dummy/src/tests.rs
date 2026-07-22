@@ -501,7 +501,7 @@ fn replayed_exit_restart_does_not_prevent_later_live_tool_result() {
 fn intercepted_prompt(prompt: AgentPromptSubmitted) -> HarnessOutputMessage {
     HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(Event::AgentPromptSubmitted(prompt)),
-        transient: false,
+        persist: true,
     })
 }
 

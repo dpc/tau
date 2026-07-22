@@ -436,7 +436,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     let result = expect_message(&mut child, "tool result");
     assert_eq!(
         result,
-        HarnessInputMessage::emit_with_transient(
+        HarnessInputMessage::emit_with_persist(
             Event::ToolResultReported(tau_proto::ToolResult {
                 call_id: "call-1".into(),
                 tool_name: tau_proto::ToolName::new("echo"),
@@ -447,7 +447,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
-            true,
+            false,
         )
     );
 

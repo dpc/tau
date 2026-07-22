@@ -271,8 +271,8 @@ impl Output {
     }
 
     /// Enqueues one durable or transient event frame.
-    fn emit(&self, event: Event, transient: bool) {
-        self.send(HarnessInputMessage::emit_with_transient(event, transient));
+    fn emit(&self, event: Event, persist: bool) {
+        self.send(HarnessInputMessage::emit_with_persist(event, persist));
     }
 
     /// Enqueues one routine notice request.
@@ -526,7 +526,7 @@ fn handle_harness_message(
         HarnessOutputMessage::InterceptRequest(req) => {
             let action = runtime
                 .as_mut()
-                .map(|runtime| runtime.on_intercept(*req.event, req.transient, output))
+                .map(|runtime| runtime.on_intercept(*req.event, req.persist, output))
                 .unwrap_or_else(|| InterceptAction::Pass(None));
             output.intercept_reply(action);
             false
@@ -742,7 +742,7 @@ fn register_host_functions(
         "tau_emit",
         move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&emit_state, "tau_emit")?;
-            enqueue_event(&emit_output, event, false);
+            enqueue_event(&emit_output, event, true);
             Ok(())
         },
     );
@@ -753,7 +753,7 @@ fn register_host_functions(
         "tau_emit_transient",
         move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&emit_state, "tau_emit_transient")?;
-            enqueue_event(&emit_output, event, true);
+            enqueue_event(&emit_output, event, false);
             Ok(())
         },
     );
@@ -1010,12 +1010,12 @@ fn optional_int_field(map: &Map, key: &str) -> Result<Option<i64>, String> {
         .transpose()
 }
 
-fn enqueue_event(output: &Output, event: Dynamic, transient: bool) {
+fn enqueue_event(output: &Output, event: Dynamic, persist: bool) {
     match dynamic_to_json(&event)
         .and_then(|value| serde_json::from_value::<Event>(value).map_err(|e| e.to_string()))
     {
         Ok(event) => {
-            output.emit(event, transient);
+            output.emit(event, persist);
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "script emitted invalid event");
@@ -1180,7 +1180,7 @@ impl ScriptRuntime {
         }
     }
 
-    fn on_intercept(&mut self, event: Event, transient: bool, output: &Output) -> InterceptAction {
+    fn on_intercept(&mut self, event: Event, persist: bool, output: &Output) -> InterceptAction {
         let event = match serde_json::to_value(event)
             .map_err(|e| e.to_string())
             .and_then(|v| json_to_dynamic(&v))
@@ -1198,7 +1198,7 @@ impl ScriptRuntime {
             &mut self.scope,
             &self.ast,
             "on_intercept",
-            (event, transient),
+            (event, persist),
         ) {
             Ok(value) => parse_intercept_action(value).unwrap_or_else(|message| {
                 report_callback_error(output, format!("invalid on_intercept result: {message}"));

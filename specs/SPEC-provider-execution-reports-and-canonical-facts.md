@@ -15,7 +15,7 @@ payload DTO. Reports use ordinary generic Emit admission, interception, commit, 
 broadcast before the harness performs prompt or retry correlation.
 
 Only the exact live configured Provider generation may author these reports. Generic
-admission preserves the submitted transient bit. Reports default transient and are
+admission preserves the submitted `persist` bit. Reports default to `persist=false` and are
 categorically excluded from agent, session, and restore history for either bit. The
 runtime log retains their observation order, but replay never reruns report semantics.
 

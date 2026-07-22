@@ -102,10 +102,10 @@ nonfatal. After global initial preflight, protocol failure isolates the connecti
 
 ## Persistence and replay
 
-All four events default transient and are unconditionally excluded from semantic agent,
-session, and restore journals for either caller `Emit.transient` value. Raw callers keep
+All four events default to `persist=false` and are unconditionally excluded from semantic agent,
+session, and restore journals for either caller `Emit.persist` value. Raw callers keep
 that value as generic publication metadata. First-party registration, skill, AGENTS.md,
-and readiness sends use `transient=true`.
+and readiness sends use `persist=false`.
 
 The raw events and runtime projections have no cold restore, historical replay, or
 subscribe-time synthesis. Derived diagnostics and AGENTS injections keep their

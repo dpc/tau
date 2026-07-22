@@ -139,12 +139,12 @@ are messages — not events — because the wrapper is point-to-point protocol
 metadata, not the fact subscribers ultimately observe.
 
 - **`emit`** *(peer → harness)* — A peer's request to publish an event. Carries
-  the inner event and a `transient` flag controlling whether eligible semantic
-  facts should skip durable history. The harness owns source attribution,
+  the inner event and a `persist` flag controlling whether eligible semantic
+  facts should enter durable history. The harness owns source attribution,
   interception, sequencing, persistence, and eventual delivery.
 - **`intercept_request`** *(harness → interceptor)* — Directed delivery of an
   emission that has not reached the event log yet. Carries the offered event and
-  the same transient metadata.
+  the same persistence metadata.
 - **`intercept_reply`** *(interceptor → harness)* — Exactly one response to an
   `intercept_request`: `pass` unchanged, `pass` with a replacement event, or
   `drop`.
@@ -229,8 +229,8 @@ Requests choose a storage scope and an operation:
 - Supported operations are whole-file read/write/create/append/delete/rename and
   direct-child directory listing.
 
-Semantic events may still be live/memory-only even when their message wrapper is
-not marked `transient`: session `--ephemeral` and per-agent ephemerality both
+Semantic events may still be live/memory-only even when their message wrapper has
+`persist=true`: session `--ephemeral` and per-agent ephemerality both
 fold state for the running daemon without necessarily writing the corresponding
 session or agent event stream to disk.
 

@@ -139,8 +139,8 @@ impl<State> ExtensionBuilder<State> {
     /// Emits one transient startup event before the terminal `Ready` frame.
     pub fn startup_transient_event(&mut self, event: tau_proto::Event) -> &mut Self {
         self.startup_events
-            .push(StartupDeclaration::Emit(tau_proto::Emit::with_transient(
-                event, true,
+            .push(StartupDeclaration::Emit(tau_proto::Emit::with_persist(
+                event, false,
             )));
         self
     }
@@ -165,8 +165,8 @@ impl<State> ExtensionBuilder<State> {
     ///
     /// This is a startup publication helper only. The extension remains
     /// responsible for subscribing to lifecycle events, publishing context, and
-    /// emitting runtime readiness events. The registration uses transient wire
-    /// metadata.
+    /// emitting runtime readiness events. The registration uses `persist=false`
+    /// wire metadata.
     pub fn register_context_provider(&mut self) -> &mut Self {
         self.startup_transient_event(tau_proto::Event::ExtensionContextProviderRegister(
             tau_proto::ExtensionContextProviderRegister {},
@@ -178,7 +178,7 @@ impl<State> ExtensionBuilder<State> {
     ///
     /// This is a startup publication helper only. Runtime session folding,
     /// context publication, and readiness events remain extension-owned. The
-    /// registration uses transient wire metadata.
+    /// registration uses `persist=false` wire metadata.
     pub fn register_session_context_provider(&mut self) -> &mut Self {
         self.startup_transient_event(tau_proto::Event::ExtensionSessionContextProviderRegister(
             tau_proto::ExtensionSessionContextProviderRegister {},
@@ -600,11 +600,11 @@ impl<State> ExtensionBuilder<State> {
                             declaration.local_tool_name, registration.tool.name
                         )));
                     }
-                    tau_proto::Emit::with_transient(
+                    tau_proto::Emit::with_persist(
                         tau_proto::Event::ToolRegistrationDeclared(
                             scope.scope_registration(registration)?,
                         ),
-                        true,
+                        false,
                     )
                 }
             };

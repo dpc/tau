@@ -413,8 +413,8 @@ impl<State> ManualExtensionRuntime<State> {
     pub fn startup_transient_event(&mut self, event: tau_proto::Event) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
         self.handle
-            .send_startup(tau_proto::HarnessInputMessage::emit_with_transient(
-                event, true,
+            .send_startup(tau_proto::HarnessInputMessage::emit_with_persist(
+                event, false,
             ))
     }
 
@@ -439,9 +439,9 @@ impl<State> ManualExtensionRuntime<State> {
             .tool_name_scope()?
             .scope_registration(registration)?;
         self.handle
-            .send_startup(tau_proto::HarnessInputMessage::emit_with_transient(
+            .send_startup(tau_proto::HarnessInputMessage::emit_with_persist(
                 tau_proto::Event::ToolRegistrationDeclared(registration),
-                true,
+                false,
             ))
     }
 

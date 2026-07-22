@@ -26,7 +26,7 @@ Provider extensions similarly report bounded quota replacements, patches, and
 clears before validation; only the harness publishes accepted current snapshots,
 as specified by
 [SPEC-provider-quota-pacing](SPEC-provider-quota-pacing.md).
-Every authenticated configured extension kind may publish transient-by-default
+Every authenticated configured extension kind may publish `persist=false`-by-default
 prompt-fragment declarations. The harness commits each surviving declaration
 before replacing its exact live connection's runtime prompt projection, as
 specified by

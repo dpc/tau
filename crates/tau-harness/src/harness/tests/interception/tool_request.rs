@@ -164,7 +164,7 @@ fn committed_request_routes_after_publication_with_harness_derived_source() {
             "requester-connection",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("peer-success", "request_test", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route committed request");
@@ -232,11 +232,11 @@ fn committed_request_routes_after_publication_with_harness_derived_source() {
     assert_eq!(names, ["tool.request", "tool.started"]);
 }
 
-/// Supplied transience controls restore persistence, and a durable peer request
-/// records stable configured publisher identity rather than its live
-/// connection.
+/// Supplied persistence metadata controls restore persistence, and a durable
+/// peer request records stable configured publisher identity rather than its
+/// live connection.
 #[test]
-fn request_preserves_transience_and_stable_restore_publisher() {
+fn request_preserves_persistence_and_stable_restore_publisher() {
     let tmp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
@@ -248,13 +248,13 @@ fn request_preserves_transience_and_stable_restore_publisher() {
     let cid = ensure_test_user_agent(&mut harness);
     let agent_id = durable_agent_id_for_conversation(&harness, &cid);
 
-    for (call_id, transient) in [("durable-request", false), ("transient-request", true)] {
+    for (call_id, persist) in [("durable-request", true), ("transient-request", false)] {
         harness
             .handle_extension_event(
                 "run-local-requester",
                 TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                     event: Box::new(request(call_id, "missing", agent_id.clone())),
-                    transient,
+                    persist,
                 })),
             )
             .expect("commit request");
@@ -317,7 +317,7 @@ fn stale_parked_request_commits_without_routing() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("stale-request", "missing", agent_id)),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("park request");
@@ -345,7 +345,8 @@ fn stale_parked_request_commits_without_routing() {
 }
 
 /// An invalid same-name replacement falls back to the original request, while
-/// preserving its publisher and transience through ordinary interception.
+/// preserving its publisher and persistence metadata through ordinary
+/// interception.
 #[test]
 fn empty_call_id_replacement_falls_back_to_original_request() {
     let tmp = TempDir::new().expect("tempdir");
@@ -374,7 +375,7 @@ fn empty_call_id_replacement_falls_back_to_original_request() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("original-request", "missing", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("park original");
@@ -418,7 +419,7 @@ fn unavailable_request_closes_with_ordered_harness_outcomes() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("unavailable-request", "absent", agent_id)),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("close unavailable request");
@@ -491,7 +492,7 @@ fn request_authority_and_empty_call_id_fail_before_commit() {
                 source,
                 TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                     event: Box::new(request(call_id, "missing", agent_id.clone())),
-                    transient: true,
+                    persist: false,
                 })),
             )
             .expect("reject request");
@@ -531,7 +532,7 @@ fn unloaded_agent_restore_failure_aborts_request_commit() {
                     "missing",
                     tau_proto::AgentId::parse("not-loaded").expect("agent id"),
                 )),
-                transient: false,
+                persist: true,
             })),
         )
         .expect("store failure is surfaced as a harness fact");
@@ -571,7 +572,7 @@ fn unloaded_agent_restore_failure_aborts_request_commit() {
 }
 
 /// Pre-Ready requests remain ordinary retained operational messages, including
-/// the exact encoded transient envelope charged to activation accounting.
+/// the exact encoded `persist=false` envelope charged to activation accounting.
 #[test]
 fn pre_ready_request_preserves_retained_accounting() {
     let tmp = TempDir::new().expect("tempdir");
@@ -591,14 +592,14 @@ fn pre_ready_request_preserves_retained_accounting() {
     let cid = ensure_test_user_agent(&mut harness);
     let agent_id = durable_agent_id_for_conversation(&harness, &cid);
     let event = request("retained-request", "missing", agent_id);
-    let expected_bytes = Harness::encoded_emit_size(&event, true);
+    let expected_bytes = Harness::encoded_emit_size(&event, false);
 
     harness
         .handle_extension_event(
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(event),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("retain request");
@@ -676,7 +677,7 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 "requester",
                 TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                     event: Box::new(request(&call_id, "peer_terminal", agent_id)),
-                    transient: true,
+                    persist: false,
                 })),
             )
             .expect("route peer request");
@@ -787,7 +788,7 @@ fn routed_peer_request_owner_disconnect_closes_and_cleans_up() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("disconnect-request", "disconnect_tool", agent_id)),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route request");
@@ -834,7 +835,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("peer-internal", "skill", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route internal request");
@@ -883,7 +884,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("peer-internal-error", "skill", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route internal error fixture");
@@ -914,7 +915,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
                     "message",
                     agent_id.clone(),
                 )),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("dispatch invalid message request");
@@ -936,7 +937,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("peer-internal-unload", "skill", agent_id)),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route pending internal request");
@@ -1007,7 +1008,7 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
                     "peer_background",
                     agent_id,
                 )),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("route ephemeral internal request");
@@ -1052,7 +1053,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
                     "peer_background",
                     agent_id.clone(),
                 )),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("background peer-internal request");
@@ -1131,7 +1132,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
                     "peer_background",
                     agent_id.clone(),
                 )),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("background error fixture");
@@ -1171,7 +1172,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
                     "peer_background",
                     agent_id,
                 )),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("background unload fixture");
@@ -1217,7 +1218,7 @@ fn durable_request_replay_is_observation_only() {
             "run-local-requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("replayed-request", "missing", agent_id)),
-                transient: false,
+                persist: true,
             })),
         )
         .expect("commit durable request");
@@ -1264,9 +1265,9 @@ fn ui_cannot_publish_tool_request() {
     harness
         .handle_client_message(
             "ui",
-            tau_proto::HarnessInputMessage::emit_with_transient(
+            tau_proto::HarnessInputMessage::emit_with_persist(
                 request("ui-request", "missing", agent_id),
-                true,
+                false,
             ),
         )
         .expect("reject UI request");
@@ -1304,7 +1305,7 @@ fn request_interception_replace_and_drop_control_downstream_work() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("replace-original", "original", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("park replace request");
@@ -1333,7 +1334,7 @@ fn request_interception_replace_and_drop_control_downstream_work() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("dropped-request", "missing", agent_id.clone())),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("park dropped request");
@@ -1353,7 +1354,7 @@ fn request_interception_replace_and_drop_control_downstream_work() {
             "requester",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(request("wrong-name-original", "missing", agent_id)),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("park wrong-name replacement");

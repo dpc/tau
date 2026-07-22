@@ -121,6 +121,6 @@ fn quota_report_family_round_trips_as_transient_wire_state() {
             event
         );
         assert_eq!(event.name(), name);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
     }
 }

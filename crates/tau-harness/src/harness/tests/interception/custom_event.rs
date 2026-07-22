@@ -133,7 +133,7 @@ fn attached_ui_can_publish_but_other_socket_peers_cannot() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner_with_transient("ui", custom("demo.ui", "accepted"), Some(false))
+    h.handle_client_event_inner_with_persist("ui", custom("demo.ui", "accepted"), Some(true))
         .expect("publish UI custom event");
     assert!(source_committed(&h, "ui", |event| {
         event.name().to_string() == "demo.ui"
@@ -240,10 +240,10 @@ fn same_name_replacement_changes_payload_and_retains_source() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "publisher",
         custom("demo.replace", "original"),
-        Some(true),
+        Some(false),
     )
     .expect("park custom event");
     h.handle_extension_event(
@@ -350,10 +350,10 @@ fn different_name_replacement_preserves_original_event() {
     }));
 }
 
-/// Both caller transient values commit live but custom events never appear in
+/// Both caller persistence values commit live but custom events never appear in
 /// semantic historical catch-up.
 #[test]
-fn custom_events_are_live_only_for_both_transient_values() {
+fn custom_events_are_live_only_for_both_persistence_values() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
@@ -379,11 +379,11 @@ fn custom_events_are_live_only_for_both_transient_values() {
     )
     .expect("register interceptor");
 
-    for transient in [false, true] {
-        h.handle_extension_event_inner_with_transient(
+    for persist in [false, true] {
+        h.handle_extension_event_inner_with_persist(
             "publisher",
-            custom("demo.persistence", &transient.to_string()),
-            Some(transient),
+            custom("demo.persistence", &persist.to_string()),
+            Some(persist),
         )
         .expect("publish custom event");
         assert!(
@@ -396,7 +396,7 @@ fn custom_events_are_live_only_for_both_transient_values() {
                     matches!(
                         &routed.frame,
                         HarnessOutputMessage::InterceptRequest(request)
-                            if request.transient == transient
+                            if request.persist == persist
                                 && matches!(
                                     request.event.as_ref(),
                                     Event::ExtensionEvent(event)

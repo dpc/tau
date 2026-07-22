@@ -598,14 +598,14 @@ fn pre_ready_shell_report_is_deferred_until_activation() {
         .expect("shell owner")
         .state = crate::extension::ExtensionState::Handshaking;
     let report = progress_report(&route_id, command.target_agent_id, "deferred");
-    let expected_bytes = Harness::encoded_emit_size(&report, true);
+    let expected_bytes = Harness::encoded_emit_size(&report, false);
 
     harness
         .handle_extension_event(
             "shell-owner",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(report),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("defer pre-Ready report");

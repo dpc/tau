@@ -2340,10 +2340,10 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                         | Event::ProviderQuotaPatchReported(_)
                         | Event::ProviderQuotaClearReported(_)
                 )
-                .then_some(emit.transient)
+                .then_some(!emit.persist)
             })
             .all(std::convert::identity),
-        "first-party quota reports must set explicit transient metadata"
+        "first-party quota reports must set explicit persist=false metadata"
     );
     let status = frames
         .iter()
@@ -4699,7 +4699,7 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
             matches!(
                 frame,
                 HarnessInputMessage::Emit(emit)
-                    if emit.transient
+                    if !emit.persist
                         && matches!(
                             emit.event.as_ref(),
                             Event::ProviderModelsDeclared(updated)

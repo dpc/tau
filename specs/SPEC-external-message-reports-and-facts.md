@@ -1,5 +1,12 @@
 # SPEC-external-message-reports-and-facts: External-message reports and canonical facts
 
+## Record justification
+
+The report-to-fact contract spans shared protocol DTOs, harness authority,
+validation, canonicalization and persistence, plus Slack, Telegram, and XMPP
+producers and tool-completion integration. No one implementation area owns the
+complete ordering, identity, replay, and failure behavior.
+
 Architectural or externally meaningful functional changes are governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
 The underlying choice is recorded by
@@ -244,7 +251,7 @@ transport.
 
 ## Publication, persistence, and replay
 
-1. A configured extension sends ordinary transient `Emit` containing one
+1. A configured extension sends ordinary `Emit` with `persist=false` containing one
    `message.*_reported` event.
 2. Generic peer emission authenticates the declared message-bridge capability,
    snapshots the stable configured publisher identity, and passes the report

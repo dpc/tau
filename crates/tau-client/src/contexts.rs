@@ -344,10 +344,10 @@ impl<'a, State> InterceptContext<'a, State> {
         self.request.event.as_ref()
     }
 
-    /// Returns true when the original publish request was transient.
+    /// Returns whether the original publish requested semantic persistence.
     #[must_use]
-    pub fn transient(&self) -> bool {
-        self.request.transient
+    pub fn persist(&self) -> bool {
+        self.request.persist
     }
 
     /// Returns a cloneable handle for sending frames to the harness.

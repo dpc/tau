@@ -2,13 +2,6 @@
 
 Authority: confirmed, 2026-07-22, dpc
 
-## Status
-
-The harness-extension protocol and its implementation still use the inverse
-`transient` field. The approved end state replaces that field atomically with
-the positive `persist` field described here while preserving every event
-family's existing semantic persistence behavior.
-
 Generic event publication metadata uses `persist: bool`: `true` requests
 ordinary eligible semantic persistence, while `false` requests live-only
 publication. Every former `transient=false` value becomes `persist=true`, and

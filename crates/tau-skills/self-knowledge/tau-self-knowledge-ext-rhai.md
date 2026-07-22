@@ -63,7 +63,7 @@ fn on_event(event, meta) {
     }
 }
 
-fn on_intercept(event, transient) {
+fn on_intercept(event, persist) {
     event.payload.text = event.payload.text.replace("tao", "tau");
     return #{ kind: "pass", event: event };
 }
@@ -75,7 +75,7 @@ fn on_intercept(event, transient) {
 
 `on_event(event, meta)` is optional and is called for delivered subscribed events. `meta.replay` is true for subscribe-time catch-up history, and `meta.recorded_at` is present when the harness supplies the event timestamp. Scripts with external side effects should skip replayed events.
 
-`on_intercept(event, transient)` is optional and returns one of:
+`on_intercept(event, persist)` is optional and returns one of:
 
 - `()` / `"pass"` / `#{ kind: "pass" }` to pass the original event.
 - `#{ kind: "pass", event: event }` to pass a replacement event.

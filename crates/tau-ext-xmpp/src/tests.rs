@@ -953,7 +953,7 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("message.sent_reported") else {
         panic!("emit")
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::MessageSentReported(report) = *emit.event else {
         panic!("message.sent_reported report")
     };
@@ -1984,7 +1984,7 @@ fn allowed_muc_message_submits_replay_stable_report() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::MessageDeliveredReported(report) = *emit.event else {
         panic!("message.delivered_reported event")
     };

@@ -2295,7 +2295,7 @@ where
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
     }))?;
-    writer.write_message(&HarnessInputMessage::emit_with_transient(
+    writer.write_message(&HarnessInputMessage::emit_with_persist(
         Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![ProviderModelInfo {
                 id: "echo/model".into(),
@@ -2315,7 +2315,7 @@ where
                 standalone_compaction_threshold: None,
             }],
         }),
-        true,
+        false,
     ))?;
     writer.write_message(&HarnessInputMessage::Ready(Ready {
         message: Some("echo provider ready".to_owned()),
@@ -4254,12 +4254,12 @@ impl Harness {
     }
 
     /// Publishes an event to both the event bus and the event log.
-    /// Convenience wrapper that uses the event's default transience
+    /// Convenience wrapper that uses the event's default persistence metadata
     /// and never marks the publish as `must_pass`.
     pub(crate) fn publish_event(&mut self, source: Option<&str>, event: Event) {
         let source = self.resolved_publish_source(source);
-        let transient = event.defaults_to_transient();
-        self.enqueue_publish(source.as_deref(), event, transient, false, None);
+        let persist = event.defaults_to_persist();
+        self.enqueue_publish(source.as_deref(), event, persist, false, None);
     }
 
     fn resolved_publish_source(&self, source: Option<&str>) -> Option<ConnectionId> {
@@ -4306,7 +4306,7 @@ impl Harness {
             self.publish_event(source, event);
             return;
         }
-        let transient = event.defaults_to_transient();
+        let persist = event.defaults_to_persist();
         let source = self.resolved_publish_source(source);
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
@@ -4319,7 +4319,7 @@ impl Harness {
             cid: cid.clone(),
             agent_id,
         });
-        self.enqueue_publish(source.as_deref(), event, transient, false, sync);
+        self.enqueue_publish(source.as_deref(), event, persist, false, sync);
     }
 
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
@@ -4610,11 +4610,11 @@ impl Harness {
         source: Option<&str>,
         peer_context: &interception::PeerPublicationContext,
         event: Event,
-        transient: bool,
+        persist: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
         if event.message_agent_target().is_some() {
-            debug_assert!(!transient, "canonical message facts must be durable");
+            debug_assert!(persist, "canonical message facts must be durable");
             self.commit_message_fact(source, event);
             return;
         }
@@ -4681,7 +4681,7 @@ impl Harness {
         let folded_node_id = match self.persist_semantic_event(
             persistence_source,
             &event,
-            transient,
+            persist,
             parent_for_fold,
             sync_head_for.as_ref(),
             recorded_at,
@@ -5794,7 +5794,7 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: &Event,
-        transient: bool,
+        persist: bool,
         parent: tau_core::AgentEventParent,
         sync_head_for: Option<&ConversationHeadSync>,
         recorded_at: tau_proto::UnixMicros,
@@ -5819,7 +5819,7 @@ impl Harness {
             }
             return Ok(None);
         }
-        if !semantic_event_router::should_persist_event(event, transient) {
+        if !semantic_event_router::should_persist_event(event, persist) {
             return Ok(None);
         }
         let source = source.map(tau_proto::ConnectionId::from);
@@ -7364,10 +7364,10 @@ impl Harness {
         self.extension_activation_stage_mut(source_id).intercept = Some(intercept);
     }
 
-    fn stage_extension_publish(&mut self, source_id: &str, event: Event, transient: bool) {
+    fn stage_extension_publish(&mut self, source_id: &str, event: Event, persist: bool) {
         self.extension_activation_stage_mut(source_id)
             .emitted_events
-            .push(StagedExtensionPublish { event, transient });
+            .push(StagedExtensionPublish { event, persist });
     }
 
     fn stage_action_schema(&mut self, source_id: &str, schema: tau_actions::ActionSchema) {
@@ -7862,7 +7862,7 @@ impl Harness {
             );
         }
         for staged in stage.emitted_events {
-            self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
+            self.enqueue_publish(Some(source_id), staged.event, staged.persist, false, None);
         }
         stage.deferred_messages
     }
@@ -8582,11 +8582,11 @@ impl Harness {
                 // concrete-event semantics here. Move each family to
                 // committed-event processing or a dedicated protocol message
                 // instead.
-                let (event, transient) = emit.into_parts();
+                let (event, persist) = emit.into_parts();
                 self.handle_extension_event_inner_with_admission(
                     source_id,
                     event,
-                    Some(transient),
+                    Some(persist),
                     admission,
                 )?;
             }
@@ -8623,19 +8623,19 @@ impl Harness {
         source_id: &str,
         event: Event,
     ) -> Result<(), HarnessError> {
-        self.handle_extension_event_inner_with_transient(source_id, event, None)
+        self.handle_extension_event_inner_with_persist(source_id, event, None)
     }
 
-    fn handle_extension_event_inner_with_transient(
+    fn handle_extension_event_inner_with_persist(
         &mut self,
         source_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
     ) -> Result<(), HarnessError> {
         self.handle_extension_event_inner_with_admission(
             source_id,
             event,
-            transient_override,
+            persist_override,
             self.current_extension_frame_admission(),
         )
     }
@@ -8644,7 +8644,7 @@ impl Harness {
         &mut self,
         source_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
         admission: ExtensionFrameAdmission,
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
@@ -8663,7 +8663,7 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, transient_override);
+            self.handle_extension_fallback_event(source_id, event, persist_override);
             return Ok(());
         }
         if event_name.category() == &tau_proto::EventCategory::Message {
@@ -8719,8 +8719,8 @@ impl Harness {
                     .entry(source_id.into())
                     .or_default() += 1;
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(
@@ -8748,7 +8748,7 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, transient_override);
+            self.handle_extension_fallback_event(source_id, event, persist_override);
             return Ok(());
         }
         if matches!(
@@ -8782,7 +8782,7 @@ impl Harness {
             self.handle_extension_fallback_event_with_admission(
                 source_id,
                 event,
-                transient_override,
+                persist_override,
                 admission,
             );
             return Ok(());
@@ -8814,8 +8814,8 @@ impl Harness {
                 ));
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsUpdated(_)) {
@@ -8860,7 +8860,7 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, transient_override);
+            self.handle_extension_fallback_event(source_id, event, persist_override);
             return Ok(());
         }
         if matches!(
@@ -8886,7 +8886,7 @@ impl Harness {
                 );
                 return Ok(());
             }
-            self.handle_extension_fallback_event(source_id, event, transient_override);
+            self.handle_extension_fallback_event(source_id, event, persist_override);
             return Ok(());
         }
         if matches!(event, Event::ProviderModelsDeclared(_)) {
@@ -8906,8 +8906,8 @@ impl Harness {
                     .entry(source_id.into())
                     .or_default() += 1;
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(event, Event::ExtPromptFragmentPublish(_)) {
@@ -8938,8 +8938,8 @@ impl Harness {
                     .entry(source_id.into())
                     .or_default() += 1;
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(event, Event::ExtInternalPromptSubmitRequest(_)) {
@@ -8964,8 +8964,8 @@ impl Harness {
                 );
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(event, Event::StartAgentRequest(_)) {
@@ -8990,11 +8990,11 @@ impl Harness {
                 );
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
             self.enqueue_publish_with_admission(
                 Some(source_id),
                 event,
-                transient,
+                persist,
                 false,
                 None,
                 admission,
@@ -9023,8 +9023,8 @@ impl Harness {
                 );
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(event, Event::ExtensionEvent(_)) {
@@ -9049,8 +9049,8 @@ impl Harness {
                 );
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(
@@ -9091,8 +9091,8 @@ impl Harness {
                     .entry(source_id.into())
                     .or_default() += 1;
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(
@@ -9137,8 +9137,8 @@ impl Harness {
                     .entry(source_id.into())
                     .or_default() += 1;
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if matches!(
@@ -9165,8 +9165,8 @@ impl Harness {
                 );
                 return Ok(());
             }
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
             return Ok(());
         }
         if event_name.category() == &tau_proto::EventCategory::Provider
@@ -9181,7 +9181,7 @@ impl Harness {
         let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
             return Ok(());
         };
-        self.handle_extension_fallback_event(source_id, event, transient_override);
+        self.handle_extension_fallback_event(source_id, event, persist_override);
         Ok(())
     }
 
@@ -9205,7 +9205,7 @@ impl Harness {
             .map(|extension| tau_proto::MessagePublisherId::new(extension.publisher.to_string()))
             && let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher)
         {
-            self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, true, None);
+            self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, true, true, None);
             return;
         }
         if matches!(
@@ -9452,7 +9452,7 @@ impl Harness {
             }
             _ => return,
         };
-        self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, false, false, None);
+        self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, true, false, None);
     }
 
     /// Apply one per-agent context declaration, value, or readiness
@@ -9927,7 +9927,7 @@ impl Harness {
         self.enqueue_publish(
             Some(HARNESS_CONNECTION_ID),
             Event::ToolProgress(progress),
-            true,
+            false,
             true,
             None,
         );
@@ -10175,7 +10175,7 @@ impl Harness {
         reservation: interception::ActivationReservation,
         event: &Event,
     ) -> bool {
-        let replacement_bytes = Self::encoded_emit_size(event, reservation.transient);
+        let replacement_bytes = Self::encoded_emit_size(event, reservation.persist);
         let Some(stage) = self.extensions.activation_staging.get_mut(source_id) else {
             return false;
         };
@@ -10813,12 +10813,12 @@ impl Harness {
         &mut self,
         source_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
     ) {
         self.handle_extension_fallback_event_with_optional_admission(
             source_id,
             event,
-            transient_override,
+            persist_override,
             None,
         );
     }
@@ -10829,13 +10829,13 @@ impl Harness {
         &mut self,
         source_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
         admission: ExtensionFrameAdmission,
     ) {
         self.handle_extension_fallback_event_with_optional_admission(
             source_id,
             event,
-            transient_override,
+            persist_override,
             Some(admission),
         );
     }
@@ -10846,26 +10846,26 @@ impl Harness {
         &mut self,
         source_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
         admission: Option<ExtensionFrameAdmission>,
     ) {
         if !Self::is_extension_fallback_emit_allowed(&event) {
             return;
         }
-        let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+        let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
         if self.should_stage_extension_capabilities(source_id) {
-            self.stage_extension_publish(source_id, event, transient);
+            self.stage_extension_publish(source_id, event, persist);
         } else if let Some(admission) = admission {
             self.enqueue_publish_with_admission(
                 Some(source_id),
                 event,
-                transient,
+                persist,
                 false,
                 None,
                 admission,
             );
         } else {
-            self.enqueue_publish(Some(source_id), event, transient, false, None);
+            self.enqueue_publish(Some(source_id), event, persist, false, None);
         }
     }
 
@@ -10897,7 +10897,7 @@ impl Harness {
                 level,
                 always_show: false,
             }),
-            true,
+            false,
             false,
             None,
         );
@@ -10919,11 +10919,11 @@ impl Harness {
         &mut self,
         client_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
     ) {
         if self.is_attached_socket_ui(client_id) {
-            let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-            self.enqueue_publish(Some(client_id), event, transient, false, None);
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish(Some(client_id), event, persist, false, None);
         }
     }
 
@@ -11082,8 +11082,8 @@ impl Harness {
                 // peer event families must not acquire semantic work at intake;
                 // process them downstream of commit or use a dedicated message
                 // for directed/control operations.
-                let (event, transient) = emit.into_parts();
-                self.handle_client_event_inner_with_transient(client_id, event, Some(transient))?;
+                let (event, persist) = emit.into_parts();
+                self.handle_client_event_inner_with_persist(client_id, event, Some(persist))?;
                 Ok(true)
             }
             // Other input messages from clients are ignored.
@@ -11102,21 +11102,21 @@ impl Harness {
         client_id: &str,
         event: Event,
     ) -> Result<bool, HarnessError> {
-        self.handle_client_event_inner_with_transient(client_id, event, None)
+        self.handle_client_event_inner_with_persist(client_id, event, None)
     }
 
-    fn handle_client_event_inner_with_transient(
+    fn handle_client_event_inner_with_persist(
         &mut self,
         client_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
     ) -> Result<bool, HarnessError> {
         let event_name = event.name();
         if event_name.category() == &tau_proto::EventCategory::Message {
             return Ok(true);
         }
         if event_name.category() == &tau_proto::EventCategory::Provider {
-            self.handle_extension_event_inner_with_transient(client_id, event, transient_override)?;
+            self.handle_extension_event_inner_with_persist(client_id, event, persist_override)?;
             return Ok(true);
         }
 
@@ -11128,22 +11128,22 @@ impl Harness {
             event,
             Event::AgentMetadataSetRequest(_) | Event::AgentMetadataUnsetRequest(_)
         ) {
-            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
+            self.enqueue_attached_socket_ui_publish(client_id, event, persist_override);
             return Ok(true);
         }
         if matches!(event, Event::UiPromptDraft(_) | Event::UiFocusChanged(_)) {
-            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
+            self.enqueue_attached_socket_ui_publish(client_id, event, persist_override);
             return Ok(true);
         }
         if matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
-            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
+            self.enqueue_attached_socket_ui_publish(client_id, event, persist_override);
             return Ok(true);
         }
         if matches!(event, Event::ExtensionEvent(_)) {
-            self.enqueue_attached_socket_ui_publish(client_id, event, transient_override);
+            self.enqueue_attached_socket_ui_publish(client_id, event, persist_override);
             return Ok(true);
         }
-        self.handle_client_fallback_event(client_id, event, transient_override);
+        self.handle_client_fallback_event(client_id, event, persist_override);
         Ok(true)
     }
 
@@ -11470,7 +11470,7 @@ impl Harness {
         &mut self,
         client_id: &str,
         event: Event,
-        transient_override: Option<bool>,
+        persist_override: Option<bool>,
     ) {
         if !Self::is_client_fallback_emit_allowed(&event)
             || Self::requires_tool_event_intake(&event)
@@ -11478,8 +11478,8 @@ impl Harness {
         {
             return;
         }
-        let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-        self.enqueue_publish(Some(client_id), event, transient, false, None);
+        let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+        self.enqueue_publish(Some(client_id), event, persist, false, None);
     }
 
     fn handle_ui_role_select(
@@ -11781,7 +11781,7 @@ impl Harness {
         self.enqueue_publish(
             None,
             event,
-            false,
+            true,
             true,
             self.agent_routes
                 .get(agent_id)
@@ -14087,7 +14087,7 @@ impl Harness {
         self.enqueue_publish(
             Some("harness"),
             Event::HarnessNotice(notice),
-            false,
+            true,
             always_show,
             None,
         );
@@ -14890,7 +14890,7 @@ impl Harness {
         self.enqueue_publish(
             None,
             started,
-            false,
+            true,
             true,
             Some(ConversationHeadSync {
                 cid: cid.clone(),
@@ -19219,7 +19219,7 @@ impl Harness {
         self.enqueue_publish(
             None,
             started,
-            false,
+            true,
             true,
             Some(ConversationHeadSync {
                 cid: cid.clone(),
@@ -19293,7 +19293,7 @@ impl Harness {
         self.enqueue_publish(
             None,
             started,
-            false,
+            true,
             true,
             Some(ConversationHeadSync {
                 cid: cid.clone(),
@@ -19374,7 +19374,7 @@ impl Harness {
             self.enqueue_publish(
                 None,
                 started,
-                false,
+                true,
                 true,
                 Some(ConversationHeadSync {
                     cid: cid.clone(),
@@ -19460,7 +19460,7 @@ impl Harness {
                         mutation_id: None,
                         inheritable: entry.inheritable,
                     }),
-                    false,
+                    true,
                     false,
                     Some(ConversationHeadSync {
                         cid: cid.clone(),

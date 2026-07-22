@@ -1315,7 +1315,7 @@ impl SendDeliveryWorker {
         };
         let report_sent = self
             .output
-            .send_confirmed(HarnessInputMessage::emit_with_transient(report, true));
+            .send_confirmed(HarnessInputMessage::emit_with_persist(report, false));
         let result_sent = report_sent && self.output.report_tool_result_confirmed(result.clone());
         if !result_sent {
             self.output_failed.store(true, Ordering::Release);

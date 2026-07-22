@@ -16,7 +16,7 @@ admission.
 Generic Emit captures the stable configured publisher and exact run-local
 connection generation before interception.
 `extension.prompt_fragment_publish` defaults to transient. Generic Emit preserves
-any caller-supplied `Emit.transient` value as generic publication metadata,
+any caller-supplied `Emit.persist` value as generic publication metadata,
 applies ordinary same-name interception, commits and broadcasts the surviving
 payload, then updates the prompt-fragment projection. Replacement cannot change
 the publisher or event name. Drop performs no projection work. A declaration
@@ -32,7 +32,7 @@ extension. Registration, prompt assembly, and slot replacement never occur in
 Emit intake.
 
 Declarations default to transient and never enter semantic session or agent
-journals, regardless of the caller's `Emit.transient` value. They have no restore
+journals, regardless of the caller's `Emit.persist` value. They have no restore
 processing, historical replay, or subscribe-time current-state synthesis. The
 runtime projection survives session switches and is removed when its contributing
 connection disconnects.

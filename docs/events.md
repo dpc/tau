@@ -366,12 +366,12 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   with any known live, completed, or durable transcript tool call are refused
   with `harness.notice` only, not a call-id-keyed terminal event. Transcript
   tool-call truth comes from the provider response's `ContextItem::ToolCall`,
-  not this routing event. When non-transient, the event is persisted in the session restore log,
+  not this routing event. With `persist=true`, the event is persisted in the session restore log,
   not the agent transcript log, so restore handlers can correlate execution
   state without re-running live tool execution.
   Configured Provider, Tool, and Core extensions publish the request through
   ordinary generic Emit; it commits before duplicate-call checks or registry
-  routing. `Emit.transient=true` keeps it live-only, while `false` records the
+  routing. `Emit.persist=false` keeps it live-only, while `true` records the
   stable configured publisher in session restore history. Historical delivery
   never routes or executes it.
   See [SPEC-tool-requests-and-routing](../specs/SPEC-tool-requests-and-routing.md).
@@ -479,7 +479,7 @@ harness/agent.
 
 Every authenticated configured extension kind may author the four session-discovery
 events below without a capability; unconfigured/socket peers may not. Registration does
-not gate skill, AGENTS.md, or readiness publication. Their raw events default transient,
+not gate skill, AGENTS.md, or readiness publication. Their raw events default to `persist=false`,
 never enter semantic journals or replay/synthesis, and commit before projection, derived
 facts, or readiness release.
 See
@@ -542,7 +542,7 @@ transient runtime observations and never enter semantic replay. See
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call
   attribution, and human-readable task name (used by the `agent_start` tool).
-  Configured extension requests default transient and commit through ordinary
+  Configured extension requests default to `persist=false` and commit through ordinary
   interception before role/parent validation, duplicate route rebinding,
   acceptance/rejection, or child creation. Unconfigured and socket peers may not
   publish them; stale connection or session generations are observation-only.
@@ -583,7 +583,7 @@ transient runtime observations and never enter semantic replay. See
   extension kind and attached local UI may publish one; unconfigured,
   disconnected, non-UI socket, and dedicated external-message peers may not.
   The harness commits it through ordinary interception for exact/prefix live
-  subscribers. It remains runtime/debug-log state for either transient value and
+  subscribers. It remains runtime/debug-log state for either `persist` value and
   has no semantic or historical replay unless a separately approved typed event
   is added. Wire delivery does not yet carry authenticated publisher identity.
   See [`SPEC-custom-extension-events`](../specs/SPEC-custom-extension-events.md).
@@ -605,14 +605,14 @@ intent.
   session-level/unscoped, normally the start-new-agent prompt. Legacy peers whose
   payloads predate this field also decode as absent, so future restore/sync
   consumers must not infer the current agent from absence. Only an attached
-  socket UI may publish one. The CLI currently sends a false transient wire bit,
+  socket UI may publish one. The CLI currently sends `persist=true`,
   but the harness preserves that metadata while excluding drafts from semantic
   stores and historical replay for either value.
 - **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
   session when terminal focus events are available. It is a live subscriber
   observation, not transcript truth; Tau currently has no first-party focus
-  subscriber. It defaults to transient, while the CLI currently sends a false
-  transient wire bit. It has the same authority and no-store contract as prompt drafts.
+  subscriber. It defaults to transient, while the CLI currently sends
+  `persist=true`. It has the same authority and no-store contract as prompt drafts.
   See
   [`SPEC-ui-prompt-draft-and-focus-events`](../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 - **`ui.role_select`** — User requests a role switch. The harness resolves

@@ -18,8 +18,8 @@ use crate::extension::ExtensionEntry;
 pub(super) struct StagedExtensionPublish {
     /// Event payload withheld until the source extension reaches `Ready`.
     pub(super) event: Event,
-    /// Whether the staged event should skip durable session history.
-    pub(super) transient: bool,
+    /// Whether eligible staged semantic facts should enter durable history.
+    pub(super) persist: bool,
 }
 
 /// Operational message withheld behind activation with its global arrival

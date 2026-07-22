@@ -4,11 +4,11 @@ use tau_proto::{Event, SessionId};
 
 /// Return whether an event should enter durable semantic stores.
 ///
-/// Transient events normally exist only for live observers.
-/// `AgentPromptCreated` and canonical terminal tool completions are exceptions
-/// because `AgentTree` folds them into prompt-generation and terminal-tool
-/// state.
-pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
+/// Events that do not request persistence normally exist only for live
+/// observers. `AgentPromptCreated` and canonical terminal tool completions are
+/// exceptions because `AgentTree` folds them into prompt-generation and
+/// terminal-tool state.
+pub(crate) fn should_persist_event(event: &Event, persist: bool) -> bool {
     if event.is_message_report()
         || matches!(
             event,
@@ -56,7 +56,7 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
     {
         return false;
     }
-    !transient || is_transient_persistence_exception(event)
+    persist || is_persistence_exception(event)
 }
 
 /// Return the session log target for session membership events.
@@ -68,7 +68,7 @@ pub(crate) fn session_membership_id_for_event(event: &Event) -> Option<SessionId
     }
 }
 
-fn is_transient_persistence_exception(event: &Event) -> bool {
+fn is_persistence_exception(event: &Event) -> bool {
     matches!(
         event,
         Event::AgentPromptCreated(_)

@@ -210,14 +210,14 @@ fn legacy_extension_notice_emit_is_denied() {
     harness
         .handle_extension_message(
             "publisher",
-            HarnessInputMessage::emit_with_transient(
+            HarnessInputMessage::emit_with_persist(
                 Event::HarnessNotice(tau_proto::HarnessNotice {
                     kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                     message: "legacy".to_owned(),
                     level: tau_proto::NoticeLevel::Info,
                     always_show: false,
                 }),
-                true,
+                false,
             ),
         )
         .expect("deny legacy Emit");
@@ -265,7 +265,7 @@ fn output_uses_ordinary_transient_interception_and_broadcast() {
             _ => None,
         })
         .expect("notice intercept request");
-    assert!(intercept.transient);
+    assert!(!intercept.persist);
     assert!(matches!(
         intercept.event.as_ref(),
         Event::HarnessNotice(notice)

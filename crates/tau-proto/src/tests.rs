@@ -72,7 +72,7 @@ fn metadata_requests_have_distinct_transient_wire_names() {
         ),
     ] {
         assert_eq!(event.name(), name);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         let encoded = serde_json::to_value(&event).expect("encode request");
         let expected_name = name.to_string();
         assert_eq!(
@@ -84,8 +84,8 @@ fn metadata_requests_have_distinct_transient_wire_names() {
             event
         );
     }
-    assert!(!Event::AgentMetadataSet(set).defaults_to_transient());
-    assert!(!Event::AgentMetadataUnset(unset).defaults_to_transient());
+    assert!(Event::AgentMetadataSet(set).defaults_to_persist());
+    assert!(Event::AgentMetadataUnset(unset).defaults_to_persist());
 }
 
 /// Prefix syntax rejects ambiguous separators and non-provider-safe bytes.
@@ -1464,13 +1464,13 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         HarnessInputMessage::Emit(Emit {
             event: Box::new(Event::ExtensionEvent(
                 CustomEvent::try_new(
-                    "demo.transient_progress".parse().expect("event name"),
+                    "demo.persist_progress".parse().expect("event name"),
                     Some("s1".into()),
                     CborValue::Text("working".to_owned()),
                 )
                 .expect("valid custom event"),
             )),
-            transient: true,
+            persist: false,
         }),
         HarnessInputMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
@@ -1568,7 +1568,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         ))),
         HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(sample_session_started()),
-            transient: false,
+            persist: true,
         }),
         HarnessOutputMessage::AgentPromptCreatedResult(Box::new(AgentPromptCreatedResult {
             request_id: "prompt-1".to_owned(),
@@ -1670,7 +1670,7 @@ fn message_fact_events_have_distinct_required_v11_wire_shapes() {
         .collect::<Vec<_>>();
     assert_eq!(facts.len(), 6);
     for fact in facts {
-        assert!(!fact.defaults_to_transient());
+        assert!(fact.defaults_to_persist());
         let json = serde_json::to_value(&fact).expect("serialize fact to JSON");
         assert!(
             json["payload"].get("extension_data").is_some(),
@@ -1745,7 +1745,7 @@ fn message_reports_are_transient_and_convert_to_canonical_facts() {
             _ => unreachable!("message fixture is canonical"),
         };
         assert!(report.is_message_report());
-        assert!(report.defaults_to_transient());
+        assert!(!report.defaults_to_persist());
         assert!(report.name().to_string().ends_with("_reported"));
         assert_eq!(report.into_canonical_message_fact(), Some(fact));
     }
@@ -1756,7 +1756,7 @@ fn message_reports_are_transient_and_convert_to_canonical_facts() {
 /// sync. Keep serialized event tags, parsed names, and `Event::name()`
 /// synchronized.
 #[test]
-fn first_party_event_wire_tags_match_event_names_and_transience() {
+fn first_party_event_wire_tags_match_event_names_and_persistence() {
     let events = representative_events();
     let mut seen = std::collections::BTreeSet::new();
     for event in events {
@@ -1773,9 +1773,9 @@ fn first_party_event_wire_tags_match_event_names_and_transience() {
         assert_eq!(tag, name.to_string(), "wire tag and Event::name diverged");
         assert_eq!(tag.parse::<EventName>(), Ok(name.clone()));
         assert_eq!(
-            event.defaults_to_transient(),
-            expected_default_transient(&event),
-            "unexpected default transient setting for {tag}"
+            event.defaults_to_persist(),
+            expected_default_persist(&event),
+            "unexpected default persistence setting for {tag}"
         );
         assert!(seen.insert(tag.to_owned()), "duplicate sample for {tag}");
     }
@@ -1783,9 +1783,9 @@ fn first_party_event_wire_tags_match_event_names_and_transience() {
     assert_eq!(seen, expected_first_party_event_names());
 }
 
-fn expected_default_transient(event: &Event) -> bool {
-    event.is_message_report()
-        || matches!(
+fn expected_default_persist(event: &Event) -> bool {
+    !event.is_message_report()
+        && !matches!(
             event,
             Event::ToolRegistrationDeclared(_)
                 | Event::ToolUnregistrationDeclared(_)
@@ -2014,7 +2014,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     });
     assert_eq!(sent.name(), EventName::AGENT_MESSAGE_SENT);
     assert_eq!(sent.name().to_string(), "agent.message_sent");
-    assert!(!sent.defaults_to_transient());
+    assert!(sent.defaults_to_persist());
 
     let received = Event::AgentMessageReceived(AgentMessageReceived {
         message_id: "msg-2".into(),
@@ -2028,7 +2028,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
     assert_eq!(received.name().to_string(), "agent.message_received");
-    assert!(!received.defaults_to_transient());
+    assert!(received.defaults_to_persist());
 }
 
 /// Ensures legacy agent-message payloads omit the default message kind but
@@ -2413,14 +2413,15 @@ fn custom_event_allows_extension_owned_event_names() {
 #[test]
 fn input_emit_and_output_deliver_are_distinct_wire_messages() {
     let event = sample_session_started();
-    let input = HarnessInputMessage::emit_with_transient(event.clone(), true);
+    let input = HarnessInputMessage::emit_with_persist(event.clone(), false);
     let output =
         HarnessOutputMessage::deliver_live(UnixMicros::new(1_700_000_000_000_000), event.clone());
 
     let input_json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(input_json["message"], "emit");
     assert_eq!(input_json["payload"]["event"]["event"], "session.started");
-    assert_eq!(input_json["payload"]["transient"], true);
+    assert_eq!(input_json["payload"]["persist"], false);
+    assert!(input_json["payload"].get("transient").is_none());
 
     let output_json = serde_json::to_value(&output).expect("serialize output");
     assert_eq!(output_json["message"], "deliver");
@@ -2433,6 +2434,7 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
     // history pays for the extra field on the wire.
     assert!(output_json["payload"].get("replay").is_none());
     assert!(output_json["payload"].get("seq").is_none());
+    assert!(output_json["payload"].get("persist").is_none());
     assert!(output_json["payload"].get("transient").is_none());
 
     let input_bytes = encode_harness_input_to_vec(&input).expect("encode input");
@@ -2440,6 +2442,67 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
 
     let output_bytes = encode_harness_output_to_vec(&output).expect("encode output");
     assert!(decode_harness_input_from_slice(&output_bytes).is_err());
+}
+
+/// Both persistence polarities are explicit on the new wire schema, and an
+/// envelope containing only the removed `transient` field cannot decode.
+#[test]
+fn emit_wire_requires_explicit_positive_persistence_metadata() {
+    let durable = HarnessInputMessage::emit(sample_session_started());
+    let live_only = HarnessInputMessage::emit_transient(sample_session_started());
+
+    for (message, expected) in [(durable, true), (live_only, false)] {
+        let json = serde_json::to_value(&message).expect("serialize emit");
+        assert_eq!(json["payload"]["persist"], expected);
+        assert!(json["payload"].get("transient").is_none());
+        assert_eq!(
+            serde_json::from_value::<HarnessInputMessage>(json).expect("decode emit"),
+            message
+        );
+    }
+
+    let removed_schema = serde_json::json!({
+        "message": "emit",
+        "payload": {
+            "event": serde_json::to_value(sample_session_started()).expect("serialize event"),
+            "transient": false
+        }
+    });
+    assert!(
+        serde_json::from_value::<HarnessInputMessage>(removed_schema).is_err(),
+        "the removed field must not supply the required positive persistence bit"
+    );
+}
+
+/// Interception carries both explicit persistence polarities and cannot decode
+/// an envelope that supplies only the removed negative field.
+#[test]
+fn intercept_request_wire_requires_explicit_positive_persistence_metadata() {
+    for persist in [true, false] {
+        let message = HarnessOutputMessage::InterceptRequest(InterceptRequest {
+            event: Box::new(sample_session_started()),
+            persist,
+        });
+        let json = serde_json::to_value(&message).expect("serialize intercept request");
+        assert_eq!(json["payload"]["persist"], persist);
+        assert!(json["payload"].get("transient").is_none());
+        assert_eq!(
+            serde_json::from_value::<HarnessOutputMessage>(json).expect("decode intercept request"),
+            message
+        );
+    }
+
+    let removed_schema = serde_json::json!({
+        "message": "intercept_request",
+        "payload": {
+            "event": serde_json::to_value(sample_session_started()).expect("serialize event"),
+            "transient": false
+        }
+    });
+    assert!(
+        serde_json::from_value::<HarnessOutputMessage>(removed_schema).is_err(),
+        "the removed field must not supply required interceptor persistence metadata"
+    );
 }
 
 /// Routine extension notices use a flat dedicated request with no peer-owned
@@ -2774,7 +2837,7 @@ fn provider_model_event_names_match_wire_family() {
         assert_eq!(event.name().to_string(), expected);
         let json = serde_json::to_value(&event).expect("serialize");
         assert_eq!(json["event"], expected);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         let mut cbor = Vec::new();
         ciborium::into_writer(&event, &mut cbor).expect("encode cbor");
         assert_eq!(
@@ -2828,7 +2891,7 @@ fn tool_lifecycle_event_names_and_provenance_match_wire_family() {
         assert_eq!(event.name().to_string(), expected);
         let json = serde_json::to_value(&event).expect("serialize");
         assert_eq!(json["event"], expected);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         let mut cbor = Vec::new();
         ciborium::into_writer(&event, &mut cbor).expect("encode cbor");
         assert_eq!(
@@ -2860,7 +2923,7 @@ fn tool_progress_report_and_canonical_fact_have_distinct_wire_names() {
         (Event::ToolProgress(progress.clone()), "tool.progress"),
     ] {
         assert_eq!(event.name().to_string(), expected);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         let json = serde_json::to_value(&event).expect("serialize progress event");
         assert_eq!(json["event"], expected);
         assert_eq!(
@@ -3053,7 +3116,7 @@ fn provider_execution_reports_use_distinct_transient_wires() {
     ];
     for (event, expected_name) in reports {
         assert_eq!(event.name(), expected_name);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         let json = serde_json::to_value(&event).expect("encode report");
         assert_eq!(json["event"], expected_name.to_string());
         assert_eq!(
@@ -3431,14 +3494,13 @@ fn event_delivery_helpers_expose_replay_marker_and_inner_event() {
     assert_eq!(non_delivery.into_delivered_event(), None);
 }
 
-/// Ensures transient-default classification matches progress-style events.
+/// Ensures positive default-persistence classification separates live-only and
+/// durable event families.
 #[test]
-fn event_defaults_to_transient_marks_progress_kinds() {
-    // The set named by `defaults_to_transient` is the contract the
-    // harness relies on to decide which events skip durable semantic
-    // logs when a component publishes them without explicit transient
-    // metadata. Lock it down here so any future
-    // edit to the matcher is intentional.
+fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
+    // The set named by `defaults_to_persist` is the contract the harness relies
+    // on when a component publishes without explicit persistence metadata.
+    // Lock it down here so any future edit to the matcher is intentional.
     let transient = [
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: "sp-1".into(),
@@ -3554,7 +3616,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
     ];
     for event in &transient {
         assert!(
-            event.defaults_to_transient(),
+            !event.defaults_to_persist(),
             "{} should default to transient",
             event.name()
         );
@@ -3595,7 +3657,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
     ];
     for event in &durable {
         assert!(
-            !event.defaults_to_transient(),
+            event.defaults_to_persist(),
             "{} should be durable",
             event.name()
         );
@@ -4823,7 +4885,7 @@ fn agent_navigation_mode_request_round_trips_with_snake_case_actions() {
         let value = serde_json::to_value(&event).expect("serialize navigation request");
         assert_eq!(value["event"], "ui.set_agent_navigation_mode");
         assert_eq!(value["payload"]["action"], spelling);
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         assert_eq!(
             serde_json::from_value::<Event>(value).expect("round trip"),
             event
@@ -4831,7 +4893,8 @@ fn agent_navigation_mode_request_round_trips_with_snake_case_actions() {
     }
 }
 
-/// Locks requester-result applied/rejection wire spellings and transience.
+/// Locks requester-result applied/rejection wire spellings and default
+/// persistence.
 #[test]
 fn agent_navigation_mode_results_round_trip() {
     for outcome in [
@@ -4851,7 +4914,7 @@ fn agent_navigation_mode_results_round_trip() {
         });
         let value = serde_json::to_value(&event).expect("serialize result");
         assert_eq!(value["event"], "ui.set_agent_navigation_mode_result");
-        assert!(event.defaults_to_transient());
+        assert!(!event.defaults_to_persist());
         assert_eq!(
             serde_json::from_value::<Event>(value).expect("round trip"),
             event

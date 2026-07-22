@@ -48,7 +48,7 @@ fn on_event(event, meta) {
     }
 }
 
-fn on_intercept(event, transient) {
+fn on_intercept(event, persist) {
     event.payload.text = event.payload.text.replace("tao", "tau");
     return #{ kind: "pass", event: event };
 }
@@ -60,7 +60,7 @@ fn on_intercept(event, transient) {
 
 `on_event(event, meta)` is optional. `meta.replay` is `true` when the delivery is subscribe-time catch-up history rather than a live occurrence; `meta.recorded_at` carries the original commit timestamp when Tau supplies it. Scripts with user-visible side effects should skip replayed events.
 
-`on_intercept(event, transient)` is optional. Return values are:
+`on_intercept(event, persist)` is optional. Return values are:
 
 - `()` or `"pass"` or `#{ kind: "pass" }` — pass the original event.
 - `#{ kind: "pass", event: event }` — pass a replacement event.

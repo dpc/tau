@@ -2,7 +2,7 @@
 
 `std-notifications` is a user-facing side-effect bridge. It listens to harness events and emits terminal-facing notification actions; it does not own agent execution.
 
-Bell and OSC hook actions retain their existing non-transient Emit metadata. The
+Bell and OSC hook actions retain their existing `Emit.persist=true` metadata. The
 harness nevertheless classifies both event names as no-store live side effects,
 and terminal UIs reject replay before acting, under
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
@@ -65,7 +65,7 @@ their own result arrives.
 Idle summary side-agent requests include a bounded copy of the captured user
 prompt and assistant response in the instruction. Do not assume the side
 conversation has inherited the transcript that triggered the notification.
-The producer explicitly emits these requests transiently and namespaces its
+The producer explicitly emits these requests with `persist=false` and namespaces its
 monotonic query ids with a random process-generation nonce so a respawn cannot
 rebind distinct summary work to an older live request. Their generic
 commit-before-effects and point-to-point result contract is

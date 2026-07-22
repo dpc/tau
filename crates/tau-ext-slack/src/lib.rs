@@ -1428,9 +1428,9 @@ impl Output {
 
     /// Submit one transient tool progress observation.
     fn report_tool_progress(&self, progress: ToolProgress) {
-        let _ = self.send(HarnessInputMessage::emit_with_transient(
+        let _ = self.send(HarnessInputMessage::emit_with_persist(
             Event::ToolProgressReported(progress),
-            true,
+            false,
         ));
     }
 
@@ -1449,9 +1449,9 @@ impl Output {
                 let _ = handle.report_tool_terminal_detached(outcome);
             }
             Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_transient(
+                let _ = tx.send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
-                    true,
+                    false,
                 ));
             }
         }
@@ -1461,9 +1461,9 @@ impl Output {
     fn report_tool_result_confirmed(&self, result: ToolResult) -> bool {
         match self {
             Self::Channel(tx) => tx
-                .send(HarnessInputMessage::emit_with_transient(
+                .send(HarnessInputMessage::emit_with_persist(
                     Event::ToolResultReported(result),
-                    true,
+                    false,
                 ))
                 .is_ok(),
             Self::Client(handle) => handle.report_tool_result(result).is_ok(),
@@ -2539,7 +2539,7 @@ impl Extension {
         drop(state);
         let sent = self
             .output
-            .send_confirmed(HarnessInputMessage::emit_with_transient(event, true));
+            .send_confirmed(HarnessInputMessage::emit_with_persist(event, false));
         if !sent {
             self.output_failed.store(true, Ordering::Release);
             #[cfg(test)]
@@ -3426,7 +3426,7 @@ impl Extension {
         };
         let sent = self
             .output
-            .send_confirmed(HarnessInputMessage::emit_with_transient(event, true));
+            .send_confirmed(HarnessInputMessage::emit_with_persist(event, false));
         if !sent {
             self.retire_after_output_failure();
             if let Some(admission) = admission {

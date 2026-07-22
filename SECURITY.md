@@ -243,7 +243,7 @@ liveness observations. Dedicated external-message, non-UI, disconnected, and
 extension-path peers cannot. Drafts contain the full current prompt buffer and
 remain visible to privileged interceptors, subscribed live peers, and debug
 logging, but neither liveness event enters semantic stores or replay for either
-transient value. The shared decoded-message bound applies; no smaller trusted-UI
+`persist` value. The shared decoded-message bound applies; no smaller trusted-UI
 payload bound is promised. See
 [SPEC-ui-prompt-draft-and-focus-events](specs/SPEC-ui-prompt-draft-and-focus-events.md).
 Configured Provider peers likewise submit transient
@@ -259,7 +259,7 @@ Configured Provider execution uses five transient `_reported` observations throu
 same trusted local boundary. Reports commit before exact live-generation and
 prompt/retry correlation; only harness-sourced successors assert canonical execution
 facts or directed retry outcomes. Reports are excluded from semantic journals for
-either supplied transient value. Raw terminal report delivery/debug projections clear
+either supplied `persist` value. Raw terminal report delivery/debug projections clear
 provider-image bytes. This boundary validates routing and lifecycle ownership; it does
 not treat configured provider payloads as hostile extension input or add spoofing
 hardening. See

@@ -37,7 +37,7 @@ between namespaces. The extension publishes transient
 extension updates its in-memory cache only after seeing those events, publishes
 fresh `agent_context.workdir` after each committed change, and emits
 `extension.context_ready` only after publishing the initial cwd context for a
-loaded agent. Both publications use transient wire metadata and commit before
+loaded agent. Both publications use `persist=false` wire metadata and commit before
 the harness updates prompt projection or releases readiness. Metadata values are
 inheritable so child agents start in the parent's remembered workdir. Stored
 stale or malformed values remain
@@ -136,7 +136,7 @@ Because the shell extension registers as a session context provider, after it
 has sent the session-wide skill and AGENTS.md announcements for a
 `session.started` event, it emits `extension.session_context_ready` so the
 harness can safely run startup role required-skill validation.
-All four session-discovery publications use transient wire metadata and retain the
+All four session-discovery publications use `persist=false` wire metadata and retain the
 skills-then-AGENTS.md-then-readiness order required by
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Its startup `shell.workdir` prompt-fragment event is a transient declaration that

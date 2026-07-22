@@ -145,7 +145,7 @@ fn proactive_send_submits_report_before_tool_result() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("sent report") else {
         panic!("expected sent report");
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::MessageSentReported(report) = *emit.event else {
         panic!("expected sent report");
     };
@@ -154,7 +154,7 @@ fn proactive_send_submits_report_before_tool_result() {
     assert!(matches!(
         rx.recv().expect("tool result"),
         HarnessInputMessage::Emit(emit)
-            if emit.transient
+            if !emit.persist
                 && matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
     assert_eq!(client.sent_pairs().len(), 1);

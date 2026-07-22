@@ -45,11 +45,11 @@ the source reaches Ready and earlier ordered activation work settles.
 
 ## Persistence and first-party producer
 
-The raw request defaults transient and is unconditionally excluded from semantic
+The raw request defaults to `persist=false` and is unconditionally excluded from semantic
 agent, session, and restore journals for either caller-supplied
-`Emit.transient` value. It has no cold replay or current-state synthesis.
+`Emit.persist` value. It has no cold replay or current-state synthesis.
 Harness-owned prompt facts keep their existing transcript classifications.
-`tau-ext-utils` sends timer wake requests with `transient=true`.
+`tau-ext-utils` sends timer wake requests with `persist=false`.
 
 The configured-local-extension boundary is documented in
 [`SECURITY.md`](../SECURITY.md). Unrelated authority-matrix rows remain outside

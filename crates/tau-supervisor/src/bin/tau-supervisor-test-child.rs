@@ -104,7 +104,7 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
             tau_proto::EventName::TOOL_STARTED,
         )],
     }))?;
-    writer.write_message(&HarnessInputMessage::emit_with_transient(
+    writer.write_message(&HarnessInputMessage::emit_with_persist(
         Event::ToolRegistrationDeclared(ToolRegistrationDeclared {
             tool: ToolSpec {
                 name: tau_proto::ToolName::new("echo"),
@@ -121,7 +121,7 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
             tool_group: None,
             prompt_fragment: None,
         }),
-        true,
+        false,
     ))?;
     writer.write_message(&HarnessInputMessage::Ready(Ready {
         message: Some("ready".to_owned()),
@@ -134,7 +134,7 @@ fn write_echo_result(
     writer: &mut PeerOutputWriter<impl Write>,
     invoke: ToolStarted,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit_with_transient(
+    writer.write_message(&HarnessInputMessage::emit_with_persist(
         Event::ToolResultReported(ToolResult {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -148,7 +148,7 @@ fn write_echo_result(
             display: None,
             originator: tau_proto::PromptOriginator::User,
         }),
-        true,
+        false,
     ))?;
     writer.flush()?;
     Ok(())

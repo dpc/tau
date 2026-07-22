@@ -15,7 +15,7 @@ FIFO closure/drain, native duplicate suppression, exact target identity,
 responsive and stale peers, off-phase Pong deadlines, non-Pong traffic, and
 shutdown/deadline interruption of blocked socket writes.
 Delivery coverage fixes the absolute retry horizon, active-worker/ledger bounds,
-report-before-result ordering, transient metadata, cancellation, writer failure, and stable replay
+report-before-result ordering, `persist=false` metadata, cancellation, writer failure, and stable replay
 without reposting or rewriting. Native IDs are rejected as route arguments, not
 merely hidden.
 

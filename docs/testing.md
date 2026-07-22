@@ -219,7 +219,7 @@ and shutdown.
 Provider fixtures submit explicit transient `provider.response_updated_reported` append
 deltas and `provider.response_finished_reported` terminal payloads; consumer assertions
 use the harness-canonical names. Raw-boundary fixtures assert the `_reported` names and
-transient bit; wrong-owner reports still commit but derive no canonical fact.
+`persist=false` bit; wrong-owner reports still commit but derive no canonical fact.
 Multi-update assistant/reasoning cases send only the
 newly appended suffix. Do not feed full accumulated snapshots through delta helpers
 unless the test explicitly checks legacy/invalid payload handling. Final-response tests

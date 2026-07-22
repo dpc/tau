@@ -15,7 +15,7 @@ clients, and configured or unconfigured extension-path peers have no authority.
 Harness-internal direct publication remains outside peer admission.
 
 Admission performs no liveness-domain work. Accepted events retain their
-caller-selected `Emit.transient` value and enter ordinary generic interception,
+caller-selected `Emit.persist` value and enter ordinary generic interception,
 commit, and live broadcast with the UI's run-local source. Interceptors may drop
 an observation or replace any payload field while retaining the exact event name
 and source. Ordinary subscribers react only after commit.
@@ -27,13 +27,13 @@ socket immediately loses authority; there is no pre-Ready queue for this row.
 
 Both event variants default to transient when published without explicit
 metadata. The interactive CLI's established producer path instead uses
-`HarnessInputMessage::emit`, so its actual `Emit.transient` value is false. The
+`HarnessInputMessage::emit`, so its actual `Emit.persist` value is true. The
 harness preserves that value for interception and generic publication rather
 than coercing it.
 
 Both observations retain runtime sequencing, debug publication, and live
 broadcast but never enter agent, session, or restore semantic stores for either
-transient value. They have no cold replay, current-state snapshot, or late
+`persist` value. They have no cold replay, current-state snapshot, or late
 historical catch-up. Changing CLI producer metadata or debug-log treatment
 requires a separate approved interface or persistence change.
 

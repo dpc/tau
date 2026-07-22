@@ -97,10 +97,10 @@ fn provider_quota_report_commits_before_canonical_snapshot() {
     harness.set_provider_models("quota-provider", vec![quota_model()]);
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-commit-order", 1_000),
-            Some(true),
+            Some(false),
         )
         .expect("submit quota report");
 
@@ -197,7 +197,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
     ];
     for report in reports {
         harness
-            .handle_extension_event_inner_with_transient("quota-provider", report, Some(true))
+            .handle_extension_event_inner_with_persist("quota-provider", report, Some(false))
             .expect("submit quota report");
     }
 
@@ -239,10 +239,10 @@ fn provider_quota_unowned_report_commits_without_canonical_state() {
     );
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-unowned", 1_000),
-            Some(false),
+            Some(true),
         )
         .expect("submit unowned quota report");
 
@@ -254,8 +254,8 @@ fn provider_quota_unowned_report_commits_without_canonical_state() {
     ));
 }
 
-/// Even a non-transient quota Emit remains runtime-only: cold resume restores
-/// neither raw reports nor canonical quota current state.
+/// Even a quota `Emit` with `persist=true` remains runtime-only: cold resume
+/// restores neither raw reports nor canonical quota current state.
 #[test]
 fn provider_quota_reports_and_state_do_not_cold_replay() {
     let temp = TempDir::new().expect("temp dir");
@@ -270,12 +270,12 @@ fn provider_quota_reports_and_state_do_not_cold_replay() {
         );
         harness.set_provider_models("quota-provider", vec![quota_model()]);
         harness
-            .handle_extension_event_inner_with_transient(
+            .handle_extension_event_inner_with_persist(
                 "quota-provider",
                 quota_replace_report("epoch-no-replay", 1_000),
-                Some(false),
+                Some(true),
             )
-            .expect("submit non-transient quota report");
+            .expect("submit persist=true quota report");
         assert!(!harness.provider_quota.is_empty());
         harness.shutdown().expect("shutdown harness");
     }
@@ -310,10 +310,10 @@ fn provider_quota_report_rejects_non_provider_authority() {
     ] {
         connect_ready_configured_extension(&mut harness, source, source, kind);
         harness
-            .handle_extension_event_inner_with_transient(
+            .handle_extension_event_inner_with_persist(
                 source,
                 quota_replace_report("epoch-forbidden", 1_000),
-                Some(true),
+                Some(false),
             )
             .expect("reject configured wrong-kind quota report");
     }
@@ -323,10 +323,10 @@ fn provider_quota_report_rejects_non_provider_authority() {
         tau_proto::ClientKind::Provider,
     );
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "unconfigured-provider",
             quota_replace_report("epoch-forbidden", 1_000),
-            Some(true),
+            Some(false),
         )
         .expect("reject unconfigured provider claim");
     for (source, kind) in [
@@ -335,10 +335,10 @@ fn provider_quota_report_rejects_non_provider_authority() {
     ] {
         connect_test_client(&mut harness, source, kind);
         harness
-            .handle_client_event_inner_with_transient(
+            .handle_client_event_inner_with_persist(
                 source,
                 quota_replace_report("epoch-forbidden", 1_000),
-                Some(true),
+                Some(false),
             )
             .expect("reject client-path quota report");
     }
@@ -374,10 +374,10 @@ fn provider_quota_report_replacement_drives_canonical_state() {
         .expect("register interceptor");
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-replaced", 1_000),
-            Some(true),
+            Some(false),
         )
         .expect("submit quota report");
     harness
@@ -401,10 +401,10 @@ fn provider_quota_report_replacement_drives_canonical_state() {
     );
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-invalid-replacement", 5_000),
-            Some(true),
+            Some(false),
         )
         .expect("submit second quota report");
     let mut invalid_replacement = quota_replace_report("epoch-invalid-replacement", 6_000);
@@ -465,10 +465,10 @@ fn dropping_provider_quota_report_prevents_canonical_state() {
         .expect("register interceptor");
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-dropped", 1_000),
-            Some(true),
+            Some(false),
         )
         .expect("submit quota report");
     harness
@@ -510,10 +510,10 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
         )
         .expect("register interceptor");
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "quota-provider",
             quota_replace_report("epoch-stale", 1_000),
-            Some(true),
+            Some(false),
         )
         .expect("submit quota report");
 
@@ -895,7 +895,7 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
         tau_proto::ClientKind::Provider,
     );
     harness
-        .handle_extension_event_inner_with_transient("quota-provider", original.clone(), Some(true))
+        .handle_extension_event_inner_with_persist("quota-provider", original.clone(), Some(false))
         .expect("reject peer-authored canonical state");
     assert!(committed_quota_events(&harness).is_empty());
 

@@ -218,7 +218,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             }
             HarnessInputMessage::Emit(emit) => match *emit.event {
                 Event::ProviderModelsDeclared(_) => {
-                    assert!(emit.transient, "model declaration must be transient");
+                    assert!(!emit.persist, "model declaration must be transient");
                 }
                 other => panic!("unexpected provider startup event: {other:?}"),
             },
@@ -341,7 +341,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             .expect("provider prompt acknowledgement should arrive");
         if let HarnessInputMessage::Emit(emit) = message {
             assert!(
-                emit.transient,
+                !emit.persist,
                 "provider reports must be explicitly transient"
             );
             match *emit.event {
@@ -381,7 +381,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             && let Event::ProviderResponseFinishedReported(r) = *emit.event
         {
             assert!(
-                emit.transient,
+                !emit.persist,
                 "provider reports must be explicitly transient"
             );
             break r;

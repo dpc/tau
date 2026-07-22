@@ -58,9 +58,9 @@ declaration. A pre-Ready peer's complete raw Emit remains in the bounded
 activation, then undergoes ordinary interception, commit, and processing in wire
 order.
 
-Raw requests default transient and are unconditionally excluded from semantic
+Raw requests default to `persist=false` and are unconditionally excluded from semantic
 agent, session, and restore journals for either caller-supplied
-`Emit.transient` value. They have no cold replay or current-state synthesis.
+`Emit.persist` value. They have no cold replay or current-state synthesis.
 Canonical child lifecycle, membership, transcript, acceptance, and result
 behavior retains its existing classification.
 

@@ -38,10 +38,10 @@ observation and cannot mutate successor-generation state.
 
 The four raw inputs, session-provider membership, skill candidate/winner state,
 AGENTS.md file slots, and readiness wait correlation are daemon-runtime-only. The raw
-events default transient, are excluded from semantic agent, session, and restore journals
-regardless of either caller-supplied `Emit.transient` value, and have no cold restore,
+events default to `persist=false`, are excluded from semantic agent, session, and restore journals
+regardless of either caller-supplied `Emit.persist` value, and have no cold restore,
 historical replay, or current-state synthesis. First-party sends set wire
-`transient=true`; raw callers retain their supplied bit as generic publication metadata.
+`persist=false`; raw callers retain their supplied bit as generic publication metadata.
 Derived skill notices and durable AGENTS.md `agent.user_message_injected` facts retain
 their separate classifications.
 

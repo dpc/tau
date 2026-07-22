@@ -157,7 +157,7 @@ fn attached_ui_has_authority_but_external_message_peer_does_not() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
 
     connect_socket_ui(&mut h, "ui");
-    h.handle_client_event_inner_with_transient("ui", bell(), Some(false))
+    h.handle_client_event_inner_with_persist("ui", bell(), Some(true))
         .expect("publish UI bell");
     assert!(source_committed(&h, "ui", |event| {
         matches!(event, Event::TermBell(_))
@@ -165,7 +165,7 @@ fn attached_ui_has_authority_but_external_message_peer_does_not() {
 
     connect_socket_ui(&mut h, "external");
     h.external_message_peers.insert("external".into());
-    h.handle_client_event_inner_with_transient("external", user_var("denied"), Some(false))
+    h.handle_client_event_inner_with_persist("external", user_var("denied"), Some(true))
         .expect("reject external user variable");
     assert!(!source_committed(&h, "external", |event| {
         matches!(event, Event::Osc1337SetUserVar(_))
@@ -243,7 +243,7 @@ fn interception_replacement_retains_source_and_replaces_payload() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner_with_transient("publisher", user_var("original"), Some(true))
+    h.handle_extension_event_inner_with_persist("publisher", user_var("original"), Some(false))
         .expect("park user variable");
     h.handle_extension_event(
         "interceptor",

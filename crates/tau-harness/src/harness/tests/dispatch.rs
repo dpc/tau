@@ -4932,7 +4932,7 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
                 tool_name: ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
             })),
-            transient: false,
+            persist: true,
         })),
     )
     .expect("emitted cancellation ignored");
@@ -4972,7 +4972,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 provider_response_id: None,
                 ws_pool_delta: None,
             })),
-            transient: false,
+            persist: true,
         })),
     )
     .expect("emitted provider event ignored");
@@ -23362,7 +23362,7 @@ fn inbound_agent_message_events_are_ignored() {
             "extension",
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(forged),
-                transient: false,
+                persist: true,
             }),
         )
         .expect("extension emit");
@@ -23473,7 +23473,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             "extension",
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(forged.clone()),
-                transient: false,
+                persist: true,
             }),
         )
         .expect("extension emit");
@@ -23541,7 +23541,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             "extension",
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(event),
-                transient: false,
+                persist: true,
             }),
         )
         .expect("extension emit ignored");
@@ -23599,7 +23599,7 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
             event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
-            transient: false,
+            persist: true,
         }),
     )
     .expect("non-owner diagnostic emit");
@@ -23620,7 +23620,7 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
             event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
-            transient: false,
+            persist: true,
         }),
     )
     .expect("owner diagnostic emit");

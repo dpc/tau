@@ -2871,7 +2871,7 @@ pub struct UiPromptSubmitted {
 /// the prompt buffer.
 ///
 /// Defaults to transient, but caller-selected Emit metadata remains
-/// independent: the interactive CLI currently sends `transient=false`. The
+/// independent: the interactive CLI currently sends `persist=true`. The
 /// harness preserves either bit while excluding drafts from semantic stores and
 /// replay. Subscribers use it to detect "user is alive" without polling: e.g.
 /// std-notifications resets its idle deadline on every draft event so the
@@ -2937,7 +2937,7 @@ pub struct SessionReplayComplete {
 /// Tau terminal window.
 ///
 /// Like [`UiPromptDraft`], this event defaults to transient while the
-/// interactive CLI currently sends `transient=false`; the harness preserves
+/// interactive CLI currently sends `persist=true`; the harness preserves
 /// either bit and excludes the observation from semantic stores and replay.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiFocusChanged {
@@ -5287,11 +5287,12 @@ impl Event {
         .into()
     }
 
-    /// Returns true for protocol events that are runtime-only by default when
-    /// sent directly without an explicit [`crate::Emit`] durability override.
+    /// Returns true for protocol events that request persistence by default
+    /// when sent directly without an explicit [`crate::Emit`] durability
+    /// override.
     #[must_use]
-    pub const fn defaults_to_transient(&self) -> bool {
-        matches!(
+    pub const fn defaults_to_persist(&self) -> bool {
+        !matches!(
             self,
             Self::ToolRegistrationDeclared(_)
                 | Self::ToolUnregistrationDeclared(_)

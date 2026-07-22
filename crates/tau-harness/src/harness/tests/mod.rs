@@ -1741,7 +1741,7 @@ fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
             _ => None,
         })
         .expect("intercept request delivered");
-    ((*intercepted.event).clone(), intercepted.transient)
+    ((*intercepted.event).clone(), intercepted.persist)
 }
 
 fn draft_event(text: &str) -> Event {

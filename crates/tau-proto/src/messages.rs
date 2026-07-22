@@ -320,9 +320,9 @@ impl EventDelivery {
 /// Extension/client request to emit one event with harness-owned delivery
 /// metadata.
 ///
-/// The inner `event` is the fact that subscribers see. `transient` controls
-/// whether the harness writes eligible semantic facts to durable session or
-/// agent event history; it is not part of the emitted fact itself.
+/// The inner `event` is the fact that subscribers see. `persist` requests that
+/// the harness write eligible semantic facts to durable session or agent event
+/// history; it is not part of the emitted fact itself.
 ///
 /// `Emit` is strictly for peer → harness event emission. Harness → peer event
 /// delivery uses [`HarnessOutputMessage::Deliver`] instead.
@@ -330,9 +330,8 @@ impl EventDelivery {
 pub struct Emit {
     /// Event the peer asks the harness to publish.
     pub event: Box<Event>,
-    /// True when the event should skip durable semantic logs.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
+    /// Whether eligible semantic facts should enter durable logs.
+    pub persist: bool,
 }
 
 /// Typed recipient authority for one cross-harness agent message.
@@ -454,23 +453,23 @@ impl Emit {
     pub fn new(event: Event) -> Self {
         Self {
             event: Box::new(event),
-            transient: false,
+            persist: true,
         }
     }
 
-    /// Creates an emit request with explicit transient metadata.
+    /// Creates an emit request with explicit persistence metadata.
     #[must_use]
-    pub fn with_transient(event: Event, transient: bool) -> Self {
+    pub fn with_persist(event: Event, persist: bool) -> Self {
         Self {
             event: Box::new(event),
-            transient,
+            persist,
         }
     }
 
-    /// Consumes this request and returns the inner event plus transient flag.
+    /// Consumes this request and returns the inner event plus persistence flag.
     #[must_use]
     pub fn into_parts(self) -> (Event, bool) {
-        (*self.event, self.transient)
+        (*self.event, self.persist)
     }
 }
 
@@ -482,9 +481,8 @@ impl Emit {
 pub struct InterceptRequest {
     /// Event being offered to the interceptor.
     pub event: Box<Event>,
-    /// Original transient metadata from the publish request.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
+    /// Original persistence metadata from the publish request.
+    pub persist: bool,
 }
 
 /// What an interceptor wants the harness to do with the event it was given.
@@ -1068,16 +1066,17 @@ impl HarnessInputMessage {
         Self::Emit(Emit::new(event))
     }
 
-    /// Wraps an event emission request with the transient flag set.
+    /// Wraps an event emission request for live-only publication.
     #[must_use]
     pub fn emit_transient(event: Event) -> Self {
-        Self::Emit(Emit::with_transient(event, true))
+        Self::Emit(Emit::with_persist(event, false))
     }
 
-    /// Wraps an event emission request with caller-selected transient metadata.
+    /// Wraps an event emission request with caller-selected persistence
+    /// metadata.
     #[must_use]
-    pub fn emit_with_transient(event: Event, transient: bool) -> Self {
-        Self::Emit(Emit::with_transient(event, transient))
+    pub fn emit_with_persist(event: Event, persist: bool) -> Self {
+        Self::Emit(Emit::with_persist(event, persist))
     }
 }
 

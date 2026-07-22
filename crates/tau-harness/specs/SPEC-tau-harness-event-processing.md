@@ -1,10 +1,21 @@
 # SPEC-tau-harness-event-processing: Event Processing
 
+## Record justification
+
+Publication spans harness intake, admission and activation staging, interceptor
+selection, debug logging, semantic stores, broadcast, replay, and downstream
+domain consumers. No one owning module can state the complete commit and
+persistence contract coherently.
+
 Changes to event persistence, sequencing authority, replay, or logging behavior
 are subject to
 [DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
 ## Event sequencing, interception, and persistence
+
+[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
+governs publication metadata spelling and polarity; event-family exclusions and
+persistence exceptions remain independent.
 
 All ordinary event publication should flow through the central publish path:
 `enqueue_publish` runs interceptors in priority order, `commit_event` stamps a
@@ -13,35 +24,35 @@ eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
 Extension prompt-fragment projection runs only after this ordinary commit.
 Declarations are excluded from semantic persistence and replay for either
-caller-supplied transience value; see
+caller-supplied `persist` value; see
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
 Session registration/discovery projection and readiness release likewise run only after
 ordinary commit; their raw events are excluded from semantic persistence for either
-caller transience value. See
+caller `persist` value. See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Per-agent context registration, value projection, and readiness release also
 run only after ordinary commit. The three raw events are excluded from semantic
-persistence for either caller transience value. See
+persistence for either caller `persist` value. See
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Internal-prompt requests likewise cross ordinary commit before target
 validation and prompt submission. Raw requests remain outside semantic history
-for either caller transience value. See
+for either caller `persist` value. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 Start-agent requests also commit before validation, duplicate rebinding,
 acceptance/result routing, and child creation. Raw requests remain outside
-semantic history for either caller transience value. See
+semantic history for either caller `persist` value. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 Terminal-output events likewise use ordinary interception and commit before a
 subscribed UI acts. They remain outside semantic history for either caller
-transience value, and terminal consumers reject replay delivery. See
+`persist` value, and terminal consumers reject replay delivery. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
 Custom extension-owned events also use ordinary interception and commit before
 direct subscriber delivery. Opaque custom events remain outside semantic history
-for either caller transience value. See
+for either caller `persist` value. See
 [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
 Attached-UI prompt-draft and focus observations likewise use ordinary
 interception and commit before live subscriber reaction. Both remain outside
-semantic history for either caller transience value. See
+semantic history for either caller `persist` value. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 Tool/Core user-shell reports also cross ordinary interception and commit before
 the downstream consumer revalidates captured generation/session and private
@@ -51,7 +62,7 @@ publishes canonical progress/completion. See
 Dedicated configured-extension notice requests are handled inline and converted
 to harness-authored `extension.notice` events. The request carries only message
 and level; the harness caps critical to warning and fixes source, kind,
-`always_show = false`, and transience. The resulting event uses ordinary
+`always_show = false`, and live-only publication. The resulting event uses ordinary
 interception, commit, and live broadcast but never semantic persistence or
 replay. Debug JSONL and protocol metering retain the raw
 `message.extension_notice_request` input separately from the later published
@@ -82,14 +93,14 @@ Canonical shell progress retains its harness-owned mapped command/target
 identity while allowing the established chunk/stream interception changes.
 
 `tool.request` and `tool.started` are eligible session-scoped execution restore
-facts. Non-transient facts are persisted in each session's
+facts. Publications with `persist=true` enter each session's
 `restore-events.cbor` stream (or the
 equivalent in-memory stream for ephemeral sessions), replayed only to peers that
 request matching `historical_selectors`, and deliberately kept out of agent
 transcript logs. Live tool execution remains driven only by non-replay
 `tool.started` deliveries.
-For peer-authored requests, generic Emit preserves the supplied `transient`
-value. Only non-transient requests enter the restore stream, where their source
+For peer-authored requests, generic Emit preserves the supplied `persist`
+value. Only requests with `persist=true` enter the restore stream, where their source
 is the stable configured publisher name rather than the run-local connection.
 The live committed peer envelope alone invokes correlation and routing;
 historical delivery never does. The complete peer request flow is
@@ -115,7 +126,7 @@ lifetime. Metadata requests use exact attached-socket-UI authority, commit befor
 validation, and produce separate harness-authored canonical facts; fallback
 publication is limited to explicitly allowed UI/live events. Prompt-draft, focus,
 and extension-owned custom events use exact attached-UI authority rather
-than fallback and preserve the explicit transient override or event default.
+than fallback and preserve the explicit persistence override or event default.
 Metadata request replacements preserve correlation identity where applicable,
 then commit and validate downstream.
 Tool lifecycle/terminal facts and harness-owned lifecycle,
@@ -201,7 +212,7 @@ Configured Provider peers submit the five provider execution `_reported` events 
 generic Emit. Reports commit before the harness validates the captured current
 generation and prompt/retry correlation. Canonical provider facts and directed retry
 outcomes use harness source; reports remain outside semantic history for either supplied
-transient value. Full terminal alternatives and the intentionally non-transactional
+`persist` value. Full terminal alternatives and the intentionally non-transactional
 report-to-canonical boundary are specified by
 [SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 

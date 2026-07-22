@@ -21,8 +21,10 @@ immutable logical-to-wire tool-name scope, constructs state, and dispatches
 initial Configure handlers exactly once. It then writes static declarations,
 accepted Configure-derived declarations, and `Ready`, in that order.
 `startup_event` preserves durable `Emit` metadata, while
-`startup_transient_event` sets `Emit.transient` for runtime-only declarations;
+`startup_transient_event` sets `Emit.persist=false` for runtime-only declarations;
 both retain their builder order before `Ready`.
+[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
+governs the positive publication field and polarity.
 Tool helpers always publish transient `tool.registration_declared` /
 `tool.unregistration_declared` inputs rather than harness-owned canonical state;
 the complete downstream contract is
@@ -39,7 +41,7 @@ canonical-shaped dispatch outcomes to `tool.*_reported` wire events so
 production handles and test-channel adapters cannot drift. Contextual tool
 helpers bind the routed call id, final wire name, and originator where present;
 raw `ClientHandle` helpers deliberately perform no correlation or name scoping.
-All report helpers set explicit transient metadata. Generic `emit` remains
+All report helpers set explicit `persist=false` metadata. Generic `emit` remains
 wire-mechanical and does not rewrite canonical names. Local flush or queue
 admission does not acknowledge report commit, routed-call validation, or
 canonical completion. See
@@ -200,8 +202,8 @@ The session-provider registration helper and session-readiness helper emit trans
 wire publications. Session skill and AGENTS.md producers must do the same; the harness
 commits them before downstream effects under
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
-The per-agent registration and readiness helpers also emit transient wire
-publications. Per-agent value producers use transient publication; the harness
+The per-agent registration and readiness helpers also emit with `persist=false`.
+Per-agent value producers use `persist=false`; the harness
 commits all three events before projection or wait release under
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Prompt-fragment startup events are transient declarations: the harness commits

@@ -974,7 +974,7 @@ fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
             .recv_timeout(Duration::from_secs(1))
             .expect("message report")
             && {
-                assert!(emit.transient);
+                assert!(!emit.persist);
                 true
             }
             && let Event::MessageDeliveredReported(report) = *emit.event
@@ -999,7 +999,7 @@ fn recv_message_report(rx: &mpsc::Receiver<HarnessInputMessage>, expected: &str)
                     | Event::MessageReactionRemovedReported(_)
             )
         {
-            assert!(emit.transient);
+            assert!(!emit.persist);
             return *emit.event;
         }
     }

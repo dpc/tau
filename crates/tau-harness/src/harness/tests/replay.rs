@@ -189,17 +189,17 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
 
         h.handle_extension_event(
             "bridge-connection",
-            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_persist(
                 emitted_report.clone(),
-                true,
+                false,
             ))),
         )
         .expect("first extension emit");
         h.handle_extension_event(
             "bridge-connection",
-            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_transient(
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_persist(
                 emitted_report,
-                false,
+                true,
             ))),
         )
         .expect("duplicate extension emit");
@@ -1763,7 +1763,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     );
     assert!(
         events.iter().all(|event| {
-            !event.defaults_to_transient() || matches!(event, Event::AgentPromptCreated(_))
+            event.defaults_to_persist() || matches!(event, Event::AgentPromptCreated(_))
         }),
         "only prompt-created transient facts may enter this semantic log"
     );

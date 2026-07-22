@@ -1546,10 +1546,10 @@ fn extension_message_report_produces_stamped_durable_fact() {
             if prepared.publisher_extension_id.as_str() == configured_name
     ));
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         conn_id,
         Event::MessageDeliveredReported(report),
-        Some(true),
+        Some(false),
     )
     .expect("report intake");
 
@@ -1639,7 +1639,7 @@ fn extension_cannot_emit_canonical_message_fact() {
         "hello",
     ));
 
-    h.handle_extension_event_inner_with_transient("bridge", canonical, Some(false))
+    h.handle_extension_event_inner_with_persist("bridge", canonical, Some(true))
         .expect("extension intake");
 
     assert!(
@@ -1721,7 +1721,7 @@ fn ordinary_tool_and_provider_extensions_cannot_emit_message_reports() {
             .get_mut(connection_id)
             .expect("extension")
             .state = ExtensionState::Ready;
-        h.handle_extension_event_inner_with_transient(
+        h.handle_extension_event_inner_with_persist(
             connection_id,
             Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
                 tau_proto::MessagePublisherId::new("forged"),
@@ -1735,7 +1735,7 @@ fn ordinary_tool_and_provider_extensions_cannot_emit_message_reports() {
                 None,
                 "hello",
             )),
-            Some(true),
+            Some(false),
         )
         .expect("report intake");
         assert!(event_log_events(&h).iter().all(|event| {
@@ -4422,7 +4422,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
                 )
                 .expect("valid custom event"),
             )),
-            transient: false,
+            persist: true,
         }),
     )
     .expect("stage emit");
@@ -4549,21 +4549,21 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
         )
         .expect("subscribe to terminal output");
 
-    for (event, transient) in [
-        (Event::TermBell(tau_proto::TermBell {}), false),
+    for (event, persist) in [
+        (Event::TermBell(tau_proto::TermBell {}), true),
         (
             Event::Osc1337SetUserVar(tau_proto::Osc1337SetUserVar {
                 name: "status".to_owned(),
                 value: "ready".to_owned(),
             }),
-            true,
+            false,
         ),
     ] {
         h.handle_extension_message(
             conn_id,
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(event),
-                transient,
+                persist,
             }),
         )
         .expect("defer terminal output");
@@ -5004,7 +5004,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
                 )
                 .expect("valid custom event"),
             )),
-            transient: false,
+            persist: true,
         }),
     )
     .expect("stage emit");
@@ -7469,7 +7469,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
                 agent_id: crate::parse_agent_id("agent-1"),
                 originator: tau_proto::PromptOriginator::User,
             })),
-            transient: true,
+            persist: false,
         })),
     )
     .expect("reject reused extension call id");

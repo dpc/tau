@@ -17,7 +17,7 @@ Harness-internal direct publication remains outside peer admission.
 
 Admission performs no terminal side effect. Accepted peer events use ordinary
 generic Emit interception, commit, and broadcast with their authenticated source
-and caller-selected `Emit.transient` unchanged. Interceptors may drop an event or
+and caller-selected `Emit.persist` unchanged. Interceptors may drop an event or
 replace it with the same event name; a dropped event never reaches a terminal UI.
 
 ## Activation and persistence
@@ -29,7 +29,7 @@ original arrival order.
 
 Both events are live side effects. They retain runtime sequencing, debug
 publication, interception, and live broadcast, but never enter agent, session, or
-restore semantic stores for either caller-selected transient value. Existing
+restore semantic stores for either caller-selected `persist` value. Existing
 producers may therefore retain their current wire metadata without making these
 events replayable.
 
@@ -41,7 +41,7 @@ subscription filtering. A replay must never repeat a bell or OSC escape sequence
 
 The CLI base64-encodes OSC values and validates OSC names before writing terminal
 bytes. `tau-ext-std-notifications` is the first-party producer: it validates
-rendered names, bounds rendered values, and retains its existing non-transient
+rendered names, bounds rendered values, and retains its existing `persist=true`
 Emit metadata. These validations are defense in depth and do not replace harness
 event authority.
 

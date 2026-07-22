@@ -1980,9 +1980,9 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
 }
 
 /// First-party replace, patch, and coordinator-generated clear observations use
-/// their report variants with explicit transient Emit metadata.
+/// their report variants with explicit `persist=false` metadata.
 #[test]
-fn quota_report_messages_are_explicitly_transient_for_every_operation() {
+fn quota_report_messages_use_persist_false_for_every_operation() {
     let provider = ProviderName::new("chatgpt");
     let mut quota = QuotaCoordinator::default();
     let replace = quota
@@ -2010,7 +2010,7 @@ fn quota_report_messages_are_explicitly_transient_for_every_operation() {
         let HarnessInputMessage::Emit(emit) = quota_report_message(event) else {
             panic!("quota helper must produce Emit");
         };
-        assert!(emit.transient);
+        assert!(!emit.persist);
         assert_eq!(emit.event.name(), expected_name);
     }
 }

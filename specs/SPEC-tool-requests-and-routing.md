@@ -40,8 +40,8 @@ committed request's agent id, arguments, tool identity, and originator;
 request-time rejection preserves its tool identity and originator. Later
 terminal reports retain their routed producer metadata.
 
-Generic intake preserves `Emit.transient`. A transient request is live-only. A
-non-transient request enters the session restore stream with the stable
+Generic intake preserves `Emit.persist`. A request with `persist=false` is live-only.
+A request with `persist=true` enters the session restore stream with the stable
 configured publisher name, not its run-local connection id. Replay and
 subscribe-time historical delivery expose the stored fact only to matching
 selectors and never rerun downstream routing, execution, outcomes, or recovery.

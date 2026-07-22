@@ -9823,7 +9823,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::handle_extension_event_inner_with_transient",
+      "function": "Harness::handle_extension_event_inner_with_persist",
       "line": 7819,
       "cyclomatic": 9.0,
       "coverage": 94.73684210526315,
@@ -19444,7 +19444,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::handle_client_event_inner_with_transient",
+      "function": "Harness::handle_client_event_inner_with_persist",
       "line": 8764,
       "cyclomatic": 5.0,
       "coverage": 100.0,
@@ -38056,7 +38056,7 @@
     },
     {
       "file": "/build/source/crates/tau-client/src/contexts.rs",
-      "function": "InterceptContext::transient",
+      "function": "InterceptContext::persist",
       "line": 302,
       "cyclomatic": 1.0,
       "coverage": 0.0,
@@ -39019,7 +39019,7 @@
     },
     {
       "file": "/build/source/crates/tau-proto/src/tests.rs",
-      "function": "expected_default_transient",
+      "function": "expected_default_persist",
       "line": 1540,
       "cyclomatic": 1.0,
       "coverage": null,
@@ -59584,7 +59584,7 @@
     },
     {
       "file": "/build/source/crates/tau-proto/src/messages.rs",
-      "function": "Emit::with_transient",
+      "function": "Emit::with_persist",
       "line": 439,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -59647,7 +59647,7 @@
     },
     {
       "file": "/build/source/crates/tau-proto/src/messages.rs",
-      "function": "HarnessInputMessage::emit_with_transient",
+      "function": "HarnessInputMessage::emit_with_persist",
       "line": 850,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -60160,7 +60160,7 @@
     },
     {
       "file": "/build/source/crates/tau-proto/src/events.rs",
-      "function": "Event::defaults_to_transient",
+      "function": "Event::defaults_to_persist",
       "line": 5038,
       "cyclomatic": 1.0,
       "coverage": 100.0,

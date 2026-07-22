@@ -127,7 +127,7 @@ fn echo_provider_declares_transient_models_before_ready() {
     assert!(matches!(
         reader.read_message().expect("read model declaration"),
         Some(HarnessInputMessage::Emit(emit))
-            if emit.transient
+            if !emit.persist
                 && matches!(emit.event.as_ref(), Event::ProviderModelsDeclared(_))
     ));
     assert!(matches!(

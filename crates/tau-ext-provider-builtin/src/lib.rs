@@ -559,7 +559,7 @@ fn quota_report_message(event: Event) -> HarnessInputMessage {
             | Event::ProviderQuotaPatchReported(_)
             | Event::ProviderQuotaClearReported(_)
     ));
-    HarnessInputMessage::emit_with_transient(event, true)
+    HarnessInputMessage::emit_with_persist(event, false)
 }
 
 fn quota_profile_identity(config: &ResolvedConfig) -> QuotaProfileIdentity {

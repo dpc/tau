@@ -470,7 +470,7 @@ mod tests {
         let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
             panic!("expected emit");
         };
-        assert!(emit.transient);
+        assert!(!emit.persist);
         let Event::ToolCancelledReported(cancelled) = *emit.event else {
             panic!("expected ToolCancelledReported");
         };

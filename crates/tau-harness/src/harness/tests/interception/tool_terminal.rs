@@ -454,13 +454,13 @@ fn pre_ready_terminal_report_preserves_retained_byte_accounting() {
         "owned_tool",
         "retained",
     ));
-    let expected_bytes = Harness::encoded_emit_size(&report, true);
+    let expected_bytes = Harness::encoded_emit_size(&report, false);
     harness
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(report),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("retain pre-Ready report");

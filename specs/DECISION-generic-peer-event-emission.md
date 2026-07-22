@@ -50,15 +50,17 @@ broadcast nor passed to downstream domain consumers.
 
 There is no new catch-all durable event journal. Existing event-schema policy
 continues to select agent, session, restore, current-state, or no durable
-storage. `Emit.transient` applies uniformly as generic publication metadata;
+storage. `Emit.persist` applies uniformly as generic publication metadata;
 `Emit` intake must not override it for a concrete event. Peer requests and
-reports are transient unless a separately approved contract defines idempotent
-durable recovery. A committed transient event has runtime ordering and live
-delivery but no cold-restart replay guarantee.
+reports use `persist=false` unless a separately approved contract defines
+idempotent durable recovery. A committed event with `persist=false` has runtime
+ordering and live delivery but no cold-restart replay guarantee.
+The field spelling, polarity, and no-compatibility transition are governed by
+[DECISION-positive-persistence-publication-metadata](DECISION-positive-persistence-publication-metadata.md).
 
 `tool.request` retains its existing caller-selected session-restore
 classification as an explicit exception. Generic intake preserves
-`Emit.transient`: `true` is live-only, while `false` records the request for
+`Emit.persist`: `false` is live-only, while `true` records the request for
 execution-state correlation. A restored request is observation only and never
 reruns routing, execution, or recovery. Durable peer requests record the stable
 configured publisher name rather than their run-local connection id. This
@@ -86,7 +88,7 @@ as publisher identity. A run-local connection ID may identify a live UI or
 other unconfigured peer, but it is not durable authority. Any peer-authored
 event retained for replay must persist a stable publisher identity and restore
 it in the replay delivery envelope. Events whose publisher has no stable
-identity must remain transient. Canonical derived facts embed stable provenance
+identity must use `persist=false`. Canonical derived facts embed stable provenance
 in their typed payload when that provenance remains semantic after replay.
 
 The runtime sequence orders a triggering event before derived events in one
@@ -175,7 +177,7 @@ durable message fact through the ordinary harness publication path. Transcript
 projection and agent wake occur only after that canonical fact commits. A
 claimed `publisher_extension_id` in a report has no authority. The committed
 report and canonical fact are intentionally different records; the former is
-transient unless a later decision adds report recovery.
+published with `persist=false` unless a later decision adds report recovery.
 
 ## Interception
 

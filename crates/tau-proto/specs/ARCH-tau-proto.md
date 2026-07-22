@@ -52,10 +52,12 @@ payload DTOs; `command_id` is the private provider route in reports and the
 public UI lifecycle id in canonical facts. See
 [SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 The unchanged `tool.request` name is a peer routing intent from configured
-Provider/Tool/Core extensions. Its enclosing `Emit.transient` selects live-only
-or session-restore publication; durable replay carries stable configured
+Provider/Tool/Core extensions. Its enclosing `Emit.persist` selects live-only
+(`false`) or session-restore (`true`) publication; durable replay carries stable configured
 publisher provenance but never requests execution. See
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
+[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
+governs the positive publication field and polarity.
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately
@@ -110,10 +112,10 @@ harness-authored `provider.models_updated` snapshots derived downstream from
 provider `provider.models_declared` events.
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
-with `agent_id`, `text`, and optional `ctx_id`. It defaults transient; its
+with `agent_id`, `text`, and optional `ctx_id`. It defaults to `persist=false`; its
 commit-before-effects contract is
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
-`agent.start_request` is another transient-by-default configured-extension
+`agent.start_request` is another `persist=false`-by-default configured-extension
 request. The raw event commits live but never enters semantic history; accepted
 and terminal outcomes retain their existing shared/directed routing. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
@@ -172,12 +174,13 @@ lifecycle, persistence, runtime/navigation classification for live rows, and
 content-minimized creation labels. It is not an event and has no
 extension/external request path.
 
-The four session-discovery DTOs retain their existing wire names and default to transient:
+The four session-discovery DTOs retain their existing wire names and default to
+`persist=false`:
 session-provider registration, skill availability, AGENTS.md availability, and session
 readiness. Their commit-before-effects contract is
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 The three per-agent context DTOs likewise retain their wire names and default to
-transient: provider registration, keyed agent context publication, and agent
+`persist=false`: provider registration, keyed agent context publication, and agent
 readiness. Their commit-before-effects contract is
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 
@@ -194,12 +197,12 @@ See [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.m
 
 `ui.prompt_draft` and `ui.focus_changed` retain their typed payloads and transient
 event defaults. Caller-selected Emit metadata remains separate: the interactive
-CLI currently sends both with `transient=false`, while the harness excludes both
+CLI currently sends both with `persist=true`, while the harness excludes both
 from semantic stores for either value. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 `agent.metadata_set_request` and `agent.metadata_unset_request` reuse the
-canonical metadata payload shapes but are distinct transient-by-default peer
+canonical metadata payload shapes but are distinct `persist=false`-by-default peer
 requests. Only harness-authored `agent.metadata_set` and
 `agent.metadata_unset` are durable facts. See
 [SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).

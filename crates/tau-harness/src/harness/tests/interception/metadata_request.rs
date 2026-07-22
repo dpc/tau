@@ -56,10 +56,10 @@ fn configured_extension_request_precedes_canonical_fact() {
         tau_proto::ClientKind::Action,
     );
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "requester",
         set_request(&agent_id, "accepted", None),
-        Some(false),
+        Some(true),
     )
     .expect("publish metadata request");
     h.handle_extension_event_inner("requester", unset_request(&agent_id))

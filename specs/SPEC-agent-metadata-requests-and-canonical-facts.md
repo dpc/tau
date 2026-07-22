@@ -56,8 +56,8 @@ slice does not make them generally immutable or must-pass.
 
 ## Persistence, replay, and producers
 
-Requests default transient and never enter semantic agent, session, or restore
-journals for either caller-supplied transient value. They are operational
+Requests default to `persist=false` and never enter semantic agent, session, or restore
+journals for either caller-supplied `persist` value. They are operational
 observations and never rerun after restart. Canonical facts remain durable,
 extension-visible state; replay synthesizes the latest folded values before
 `session.agent_loaded` and removes live mutation ids.

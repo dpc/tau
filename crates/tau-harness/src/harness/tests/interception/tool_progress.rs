@@ -200,8 +200,8 @@ fn progress_report_without_exact_route_commits_without_canonical_fact() {
 }
 
 /// A pre-Ready progress submission remains ordinary retained operational
-/// traffic: its exact transient envelope is charged, deferred, and processed
-/// only after activation.
+/// traffic: its exact `persist=false` envelope is charged, deferred, and
+/// processed only after activation.
 #[test]
 fn pre_ready_progress_report_preserves_retained_byte_accounting() {
     let tmp = TempDir::new().expect("tempdir");
@@ -220,14 +220,14 @@ fn pre_ready_progress_report_preserves_retained_byte_accounting() {
         .state = crate::extension::ExtensionState::Handshaking;
     seed_routed_call(&mut harness, "call-retained", "tool-owner");
     let report = progress_report("call-retained", "retained");
-    let expected_bytes = Harness::encoded_emit_size(&report, true);
+    let expected_bytes = Harness::encoded_emit_size(&report, false);
 
     harness
         .handle_extension_event(
             "tool-owner",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(report),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("defer report before Ready");

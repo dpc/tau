@@ -24,7 +24,7 @@ outside peer admission.
 ## Publication and activation
 
 Admission performs no custom-event semantic work. Accepted events retain the
-caller-selected `Emit.transient` value and enter ordinary generic interception,
+caller-selected `Emit.persist` value and enter ordinary generic interception,
 commit, and broadcast with their authenticated run-local source. Interceptors
 may drop an event or replace its opaque payload and session metadata while
 retaining the exact nested event name. A replacement with another nested name is
@@ -38,7 +38,7 @@ unreleased frames.
 ## Persistence and consumers
 
 Custom events retain runtime sequencing, debug publication, and live broadcast,
-but never enter agent, session, or restore semantic stores for either transient
+but never enter agent, session, or restore semantic stores for either `persist`
 value. There is no cold replay or late historical catch-up. A durable custom
 fact requires a separately approved typed event contract.
 

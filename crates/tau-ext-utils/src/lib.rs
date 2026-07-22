@@ -207,7 +207,7 @@ struct FireRecord {
 }
 
 impl FireRecord {
-    /// Convert one due timer into its explicitly transient wire request.
+    /// Convert one due timer into an explicit `persist=false` wire request.
     fn into_internal_prompt_message(self) -> HarnessInputMessage {
         HarnessInputMessage::emit_transient(Event::ExtInternalPromptSubmitRequest(
             ExtInternalPromptSubmitRequest {
@@ -948,10 +948,10 @@ mod tests {
         }
     }
 
-    /// Due timer wakeups must explicitly request transient wire publication so
+    /// Due timer wakeups must explicitly request `persist=false` publication so
     /// first-party behavior does not depend only on the event default.
     #[test]
-    fn timer_wakeup_message_is_explicitly_transient() {
+    fn timer_wakeup_message_uses_persist_false() {
         let message = FireRecord {
             agent_id: AgentId::parse("agent-one").expect("agent id"),
             timer_id: "wake".to_owned(),
@@ -962,7 +962,7 @@ mod tests {
         assert!(matches!(
             message,
             HarnessInputMessage::Emit(emit)
-                if emit.transient
+                if !emit.persist
                     && matches!(
                         emit.event.as_ref(),
                         Event::ExtInternalPromptSubmitRequest(request)

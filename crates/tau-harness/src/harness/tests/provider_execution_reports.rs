@@ -51,7 +51,7 @@ fn prompt_submitted_report_commits_before_harness_canonical_fact() {
         .insert("prompt-1".into(), "provider".into());
 
     harness
-        .handle_extension_event_inner_with_transient("provider", submitted("prompt-1"), Some(false))
+        .handle_extension_event_inner_with_persist("provider", submitted("prompt-1"), Some(true))
         .expect("submit report");
 
     assert_eq!(
@@ -73,14 +73,14 @@ fn prompt_submitted_report_commits_before_harness_canonical_fact() {
             .session_restore_events(harness.current_session_id.as_str())
             .expect("restore events")
             .is_empty(),
-        "explicit transient=false must not make reports restore facts"
+        "explicit persist=true must not make reports restore facts"
     );
 }
 
-/// Pre-Ready execution reports retain their complete Emit envelope and only
+/// Pre-Ready execution reports retain their complete `Emit` envelope and only
 /// cross the generic commit/correlation boundary after activation.
 #[test]
-fn pre_ready_provider_execution_report_retains_transient_envelope() {
+fn pre_ready_provider_execution_report_retains_persistence_envelope() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
     connect_ready_configured_extension(
@@ -99,14 +99,14 @@ fn pre_ready_provider_execution_report_retains_transient_envelope() {
         .pending_provider_prompts
         .insert("prompt-1".into(), "provider".into());
     let report = submitted("prompt-1");
-    let expected_bytes = Harness::encoded_emit_size(&report, true);
+    let expected_bytes = Harness::encoded_emit_size(&report, false);
 
     harness
         .handle_extension_event(
             "provider",
             TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(report),
-                transient: true,
+                persist: false,
             })),
         )
         .expect("stage report");
@@ -134,7 +134,7 @@ fn pre_ready_provider_execution_report_retains_transient_envelope() {
             .session_restore_events(harness.current_session_id.as_str())
             .expect("restore events")
             .is_empty(),
-        "the staged transient envelope must remain transient"
+        "the staged persist=false envelope must remain live-only"
     );
 }
 
@@ -160,20 +160,20 @@ fn provider_execution_authority_is_default_deny() {
         .insert("prompt-1".into(), "configured-provider".into());
 
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "kind-only-provider",
             submitted("prompt-1"),
-            Some(true),
+            Some(false),
         )
         .expect("kind-only report");
     harness
-        .handle_extension_event_inner_with_transient(
+        .handle_extension_event_inner_with_persist(
             "configured-provider",
             Event::ProviderPromptSubmitted(tau_proto::ProviderPromptSubmitted {
                 agent_prompt_id: "prompt-1".into(),
                 originator: tau_proto::PromptOriginator::User,
             }),
-            Some(true),
+            Some(false),
         )
         .expect("canonical spoof");
 

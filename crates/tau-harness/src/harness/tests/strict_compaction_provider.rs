@@ -190,7 +190,7 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
                         originator: prompt.originator.clone(),
                     },
                 )),
-                transient: true,
+                persist: false,
             },
         )))?;
         let reply = reply_for_prompt(&prompt);
@@ -215,7 +215,7 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
                         ws_pool_delta: None,
                     },
                 )),
-                transient: true,
+                persist: false,
             },
         )))?;
         writer.flush()?;

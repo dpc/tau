@@ -46,7 +46,7 @@ impl DebugEventLog {
             } => {
                 let name = match message.as_ref() {
                     tau_proto::HarnessInputMessage::Emit(emit) => {
-                        if emit.event.defaults_to_transient() {
+                        if !emit.event.defaults_to_persist() {
                             return;
                         }
                         emit.event.name().to_string()

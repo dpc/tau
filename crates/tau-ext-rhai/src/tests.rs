@@ -147,7 +147,7 @@ fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
 
 fn emitted_transient(message: &HarnessInputMessage) -> Option<bool> {
     match message {
-        HarnessInputMessage::Emit(emit) => Some(emit.transient),
+        HarnessInputMessage::Emit(emit) => Some(!emit.persist),
         _ => None,
     }
 }
@@ -672,12 +672,12 @@ fn intercept_callback_can_drop_event() {
                     }],
                 };
             }
-            fn on_intercept(event, transient) { return "drop"; }
+            fn on_intercept(event, persist) { return "drop"; }
         "#,
     );
     let req = HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(prompt_event("hello")),
-        transient: false,
+        persist: true,
     });
 
     let frames = run_frames(&[configure_with_script(&script), req]);
@@ -708,7 +708,7 @@ fn intercept_callback_can_return_replacement_event() {
                     }],
                 };
             }
-            fn on_intercept(event, transient) {
+            fn on_intercept(event, persist) {
                 event.payload.text = "changed";
                 return #{ kind: "pass", event: event };
             }
@@ -716,7 +716,7 @@ fn intercept_callback_can_return_replacement_event() {
     );
     let req = HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(prompt_event("hello")),
-        transient: false,
+        persist: true,
     });
 
     let frames = run_frames(&[configure_with_script(&script), req]);

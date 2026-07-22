@@ -61,7 +61,7 @@ Deadline or shutdown drops the WebSocket rather than attempting a potentially
 blocked close write. Stale connections reconnect through the same installation
 validation path rather than waiting indefinitely for another inbound frame.
 
-Admitted creates, edits, deletes, and reactions submit ordinary transient
+Admitted creates, edits, deletes, and reactions submit ordinary `persist=false`
 `message.delivered_reported`, `message.edited_reported`, `message.deleted_reported`,
 `message.reaction_added_reported`, or `message.reaction_removed_reported` reports. Slack derives
 opaque fact IDs from native channel/message coordinates and uses

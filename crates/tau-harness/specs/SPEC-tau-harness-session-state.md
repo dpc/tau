@@ -110,8 +110,9 @@ they are extension-owned non-session storage.
 
 Per-agent metadata is durable, extension-visible, and interceptable coordination
 state rather than a secret store; key ownership is conventional and writers
-remain subject to harness validation. Peers publish transient metadata mutation
-requests; only the validated harness-authored canonical facts enter this durable
+remain subject to harness validation. Peers publish metadata mutation requests
+with `persist=false`;
+only the validated harness-authored canonical facts enter this durable
 state. See
 [SPEC-agent-metadata-requests-and-canonical-facts](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
 

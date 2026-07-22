@@ -113,10 +113,10 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/dropped", 1),
-        Some(true),
+        Some(false),
     )
     .expect("declare models");
     assert!(matches!(
@@ -160,10 +160,10 @@ fn replaced_provider_model_declaration_drives_canonical_state() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/original", 1),
-        Some(true),
+        Some(false),
     )
     .expect("declare models");
     h.handle_extension_event(
@@ -221,10 +221,10 @@ fn provider_prefix_interception_protects_canonical_model_state() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/protected", 10),
-        Some(true),
+        Some(false),
     )
     .expect("declare models");
     h.handle_extension_event(
@@ -261,10 +261,10 @@ fn provider_prefix_interception_protects_canonical_model_state() {
         ] if update.models[0].id == model
     ));
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/drop-protected", 20),
-        Some(true),
+        Some(false),
     )
     .expect("declare replacement models");
     h.handle_extension_event(
@@ -308,10 +308,10 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/disconnected", 10),
-        Some(true),
+        Some(false),
     )
     .expect("declare models");
     h.handle_extension_event(
@@ -377,10 +377,10 @@ fn parked_provider_declaration_cannot_mutate_replacement_generation() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/stale", 1),
-        Some(true),
+        Some(false),
     )
     .expect("park declaration");
 
@@ -440,10 +440,10 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/old-generation", 1),
-        Some(true),
+        Some(false),
     )
     .expect("park old declaration");
 
@@ -466,10 +466,10 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         "model-provider".into(),
         crate::harness::extensions::ExtensionActivationStage::default(),
     );
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "model-provider",
         provider_models_declaration("declared/new-generation", 2),
-        Some(true),
+        Some(false),
     )
     .expect("queue replacement declaration");
     h.handle_extension_message(
@@ -537,10 +537,10 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
     .expect("register interceptor");
     connect_ready_message_publisher(&mut h, "bridge-connection", "configured-bridge");
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "bridge-connection",
         extension_message_report("m1"),
-        Some(true),
+        Some(false),
     )
     .expect("message report intake");
 
@@ -625,10 +625,10 @@ fn dropping_message_report_produces_no_canonical_fact() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "bridge",
         extension_message_report("original"),
-        Some(true),
+        Some(false),
     )
     .expect("report");
     h.handle_extension_event(
@@ -665,10 +665,10 @@ fn replacing_message_report_canonicalizes_replacement() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "bridge",
         extension_message_report("original"),
-        Some(true),
+        Some(false),
     )
     .expect("report");
     h.handle_extension_event(
@@ -706,10 +706,10 @@ fn parked_message_report_survives_bridge_disconnect() {
         })),
     )
     .expect("register interceptor");
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "bridge",
         extension_message_report("m1"),
-        Some(true),
+        Some(false),
     )
     .expect("report");
     h.handle_disconnect("bridge");
@@ -766,10 +766,10 @@ fn message_report_preserves_deferred_publish_fifo() {
     h.publish_event(None, draft_event("held"));
     assert!(h.pending_intercept.is_some());
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "bridge-connection",
         extension_message_report("m1"),
-        Some(true),
+        Some(false),
     )
     .expect("queue message report");
     assert!(
@@ -2110,12 +2110,9 @@ fn interception_exact_selector_intercepts_before_log() {
 
     h.publish_event(None, draft_event("held"));
 
-    let (event, transient) = intercepted_payload(&interceptor);
+    let (event, persist) = intercepted_payload(&interceptor);
     assert_eq!(event, draft_event("held"));
-    assert!(
-        transient,
-        "UiPromptDraft default transient flag is preserved"
-    );
+    assert!(!persist, "UiPromptDraft defaults to `persist=false`");
     assert_eq!(h.event_log.next_seq(), after_registration_seq);
     assert!(after_registration_seq.get() < start_seq.get() + 2);
 }
@@ -3823,9 +3820,9 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
         inheritable: true,
     });
     h.publish_event(None, set.clone());
-    let (event, transient) = intercepted_payload(&interceptor);
+    let (event, persist) = intercepted_payload(&interceptor);
     assert_eq!(event, set);
-    assert!(!transient, "metadata set must be durable by default");
+    assert!(persist, "metadata set must be durable by default");
     h.handle_extension_event(
         "metadata-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -3875,9 +3872,9 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     interceptor.lock().expect("events").clear();
     let unset = Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset { agent_id, key });
     h.publish_event(None, unset.clone());
-    let (event, transient) = intercepted_payload(&interceptor);
+    let (event, persist) = intercepted_payload(&interceptor);
     assert_eq!(event, unset);
-    assert!(!transient, "metadata unset must be durable by default");
+    assert!(persist, "metadata unset must be durable by default");
 
     h.shutdown().expect("shutdown");
 }

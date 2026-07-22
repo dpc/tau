@@ -62,7 +62,7 @@ fn attached_socket_ui_can_publish_liveness_events() {
     let observer = connect_liveness_observer(&mut h, "observer");
 
     for event in [draft("typing"), focus(true)] {
-        h.handle_client_event_inner_with_transient("ui", event, Some(false))
+        h.handle_client_event_inner_with_persist("ui", event, Some(true))
             .expect("publish UI liveness event");
     }
 
@@ -204,7 +204,7 @@ fn interception_preserves_false_metadata_and_controls_publication() {
             .any(|routed| matches!(
                 &routed.frame,
                 HarnessOutputMessage::InterceptRequest(request)
-                    if !request.transient
+                    if request.persist
                         && matches!(request.event.as_ref(), Event::UiPromptDraft(_))
             ))
     );
@@ -230,7 +230,7 @@ fn interception_preserves_false_metadata_and_controls_publication() {
             .any(|routed| matches!(
                 &routed.frame,
                 HarnessOutputMessage::InterceptRequest(request)
-                    if !request.transient
+                    if request.persist
                         && matches!(request.event.as_ref(), Event::UiFocusChanged(_))
             ))
     );
@@ -269,10 +269,10 @@ fn interception_preserves_false_metadata_and_controls_publication() {
     assert_eq!(delivered[0].1.event.as_ref(), &focus(true));
 }
 
-/// Both caller transient values deliver live, while neither event family has
+/// Both caller persistence values deliver live, while neither event family has
 /// semantic historical catch-up.
 #[test]
-fn liveness_events_are_no_store_for_both_transient_values() {
+fn liveness_events_are_no_store_for_both_persistence_values() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_test_client_with_origin(
@@ -283,10 +283,10 @@ fn liveness_events_are_no_store_for_both_transient_values() {
     );
     let live = connect_liveness_observer(&mut h, "live");
 
-    h.handle_client_event_inner_with_transient("ui", draft("false"), Some(false))
-        .expect("publish false-bit draft");
-    h.handle_client_event_inner_with_transient("ui", focus(true), Some(true))
-        .expect("publish true-bit focus");
+    h.handle_client_event_inner_with_persist("ui", draft("false"), Some(true))
+        .expect("publish persist=true draft");
+    h.handle_client_event_inner_with_persist("ui", focus(true), Some(false))
+        .expect("publish persist=false focus");
     assert_eq!(
         live.lock()
             .expect("live observer")

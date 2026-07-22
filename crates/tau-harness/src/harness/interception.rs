@@ -55,9 +55,9 @@ pub(crate) struct PendingIntercept {
     /// Event sent in the [`InterceptRequest`]. Returned to the chain
     /// if the reply is `Pass(None)`, replaced if `Pass(Some(_))`.
     pub(crate) event: Event,
-    /// Whether the original publisher requested transient delivery.
+    /// Whether the original publisher requested semantic persistence.
     /// Carried so the eventual commit honours the call site's intent.
-    pub(crate) transient: bool,
+    pub(crate) persist: bool,
     /// Immutable source envelope captured when publication entered the generic
     /// queue.
     source: PublicationSource,
@@ -115,8 +115,8 @@ pub(crate) struct AuthenticatedExtensionPublication {
 pub(crate) struct ActivationReservation {
     /// Encoded input-envelope bytes charged before interception.
     pub(crate) encoded_bytes: usize,
-    /// Original delivery transience retained across same-name replacement.
-    pub(crate) transient: bool,
+    /// Original persistence metadata retained across same-name replacement.
+    pub(crate) persist: bool,
     /// Declaration family whose pre-activation pending count owns this charge.
     pub(crate) declaration_family: ActivationDeclarationFamily,
 }
@@ -157,8 +157,8 @@ pub(crate) struct DeferredPublish {
     source: PublicationSource,
     /// Event waiting behind the currently intercepted publish.
     event: Event,
-    /// Whether ordinary semantic persistence should be skipped.
-    transient: bool,
+    /// Whether ordinary eligible semantic persistence was requested.
+    persist: bool,
     /// Whether an interceptor drop must preserve the original event.
     must_pass: bool,
     /// Conversation cursor synchronized after an ordinary transcript fold.
@@ -698,7 +698,7 @@ impl Harness {
         self.checkpoint_or_send_prompt(cid, None);
     }
 
-    /// Commit an immutable inference watermark before transient dispatch.
+    /// Commit an immutable inference watermark before live inference dispatch.
     ///
     /// Standalone compact operations already have their own durable start and
     /// are sent directly. Ordinary inference first enters
@@ -827,11 +827,11 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: Event,
-        transient: bool,
+        persist: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
-        self.enqueue_publish_inner(source, event, transient, must_pass, sync_head_for, None);
+        self.enqueue_publish_inner(source, event, persist, must_pass, sync_head_for, None);
     }
 
     /// Enqueue a peer publication with its immutable frame-admission session.
@@ -839,7 +839,7 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: Event,
-        transient: bool,
+        persist: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
         admission: ExtensionFrameAdmission,
@@ -847,7 +847,7 @@ impl Harness {
         self.enqueue_publish_inner(
             source,
             event,
-            transient,
+            persist,
             must_pass,
             sync_head_for,
             Some(admission),
@@ -858,7 +858,7 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: Event,
-        transient: bool,
+        persist: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
         admission: Option<ExtensionFrameAdmission>,
@@ -891,8 +891,8 @@ impl Harness {
                     _ => return None,
                 };
                 Some(ActivationReservation {
-                    encoded_bytes: Self::encoded_emit_size(&event, transient),
-                    transient,
+                    encoded_bytes: Self::encoded_emit_size(&event, persist),
+                    persist,
                     declaration_family,
                 })
             });
@@ -918,20 +918,20 @@ impl Harness {
             self.deferred_publishes.push_back(DeferredPublish {
                 source,
                 event,
-                transient,
+                persist,
                 must_pass,
                 sync_head_for,
             });
             return;
         }
-        self.dispatch_publish_step(source, event, transient, must_pass, sync_head_for, None);
+        self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
     }
 
     /// Return the encoded input-envelope size charged for one emitted event.
-    pub(super) fn encoded_emit_size(event: &Event, transient: bool) -> usize {
+    pub(super) fn encoded_emit_size(event: &Event, persist: bool) -> usize {
         let mut encoded = Vec::new();
         ciborium::into_writer(
-            &tau_proto::HarnessInputMessage::emit_with_transient(event.clone(), transient),
+            &tau_proto::HarnessInputMessage::emit_with_persist(event.clone(), persist),
             &mut encoded,
         )
         .expect("an admitted event remains encodable");
@@ -953,7 +953,7 @@ impl Harness {
         &mut self,
         source: PublicationSource,
         event: Event,
-        transient: bool,
+        persist: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
         mut cursor: Option<InterceptorCursor>,
@@ -965,7 +965,7 @@ impl Harness {
                     source.connection_id.as_deref(),
                     &source.peer_context,
                     event,
-                    transient,
+                    persist,
                     sync_head_for,
                 );
                 return;
@@ -985,7 +985,7 @@ impl Harness {
                 None,
                 HarnessOutputMessage::InterceptRequest(InterceptRequest {
                     event: Box::new(event.clone()),
-                    transient,
+                    persist,
                 }),
             );
             let delivered = report
@@ -995,7 +995,7 @@ impl Harness {
                 self.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
                     event,
-                    transient,
+                    persist,
                     source,
                     must_pass,
                     sync_head_for,
@@ -1091,7 +1091,7 @@ impl Harness {
         let PendingIntercept {
             conn_id: _,
             event: original_event,
-            transient,
+            persist,
             source,
             must_pass,
             sync_head_for,
@@ -1219,7 +1219,7 @@ impl Harness {
         self.dispatch_publish_step(
             source,
             event,
-            transient,
+            persist,
             must_pass,
             sync_head_for,
             Some(cursor),
@@ -1236,11 +1236,11 @@ impl Harness {
             let DeferredPublish {
                 source,
                 event,
-                transient,
+                persist,
                 must_pass,
                 sync_head_for,
             } = deferred;
-            self.dispatch_publish_step(source, event, transient, must_pass, sync_head_for, None);
+            self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
         }
     }
 

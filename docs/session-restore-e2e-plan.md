@@ -431,7 +431,7 @@ Implemented by
 Add one exact no-side-effect test tool mode that can acknowledge start and hold
 before terminal output. Kill Boot A after the worker's canonical durable tool
 request/start facts and before any terminal result. Decode the session's
-execution-restore stream and require exactly one correlated non-transient
+execution-restore stream and require exactly one correlated `persist=true`
 `tool.request` followed by one canonical `tool.started` for the worker/call ID
 before killing. Before Boot B, prove the old process group, socket, and session
 lock are gone.

@@ -63,10 +63,10 @@ fn dropped_prompt_fragment_does_not_mutate_projection() {
     );
     connect_prompt_fragment_interceptor(&mut h);
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "fragment-owner",
         prompt_fragment("test.drop", "DROPPED"),
-        Some(false),
+        Some(true),
     )
     .expect("park declaration");
     assert_eq!(projected_template(&h, "fragment-owner", "test.drop"), None);
@@ -95,10 +95,10 @@ fn replacement_prompt_fragment_projects_only_after_commit() {
         tau_proto::ClientKind::Provider,
     );
     connect_prompt_fragment_interceptor(&mut h);
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "fragment-owner",
         prompt_fragment("test.replace", "ORIGINAL"),
-        Some(false),
+        Some(true),
     )
     .expect("park declaration");
 
@@ -148,7 +148,7 @@ fn every_configured_extension_kind_may_publish_prompt_fragments() {
     for (index, kind) in kinds.into_iter().enumerate() {
         let source = format!("configured-kind-{index}");
         connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner_with_transient(
+        h.handle_extension_event_inner_with_persist(
             &source,
             prompt_fragment(&format!("test.kind.{index}"), &source),
             None,
@@ -169,7 +169,7 @@ fn unconfigured_peer_cannot_publish_prompt_fragment() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_test_client(&mut h, "unconfigured-core", tau_proto::ClientKind::Core);
 
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "unconfigured-core",
         prompt_fragment("test.unauthorized", "UNAUTHORIZED"),
         None,
@@ -423,10 +423,10 @@ fn prompt_fragment_declaration_has_no_late_subscriber_replay() {
         "configured-fragment-owner",
         tau_proto::ClientKind::Tool,
     );
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "fragment-owner",
         prompt_fragment("test.no-replay", "LIVE ONLY"),
-        Some(false),
+        Some(true),
     )
     .expect("commit declaration");
 
@@ -465,7 +465,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     for (source, template) in [("shell-a", "WORKDIR A"), ("shell-b", "WORKDIR B")] {
         connect_ready_configured_extension(&mut h, source, source, tau_proto::ClientKind::Tool);
-        h.handle_extension_event_inner_with_transient(
+        h.handle_extension_event_inner_with_persist(
             source,
             prompt_fragment("shell.workdir", template),
             None,
@@ -492,7 +492,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     assert_eq!(visible[0].template.as_str(), "WORKDIR B");
 
     connect_ready_configured_extension(&mut h, "shell-0", "shell-a", tau_proto::ClientKind::Tool);
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "shell-0",
         prompt_fragment("shell.workdir", "WORKDIR RESPAWN"),
         None,
@@ -521,7 +521,7 @@ fn stale_prompt_fragment_generation_cannot_mutate_projection() {
         tau_proto::ClientKind::Tool,
     );
     connect_prompt_fragment_interceptor(&mut h);
-    h.handle_extension_event_inner_with_transient(
+    h.handle_extension_event_inner_with_persist(
         "old-generation",
         prompt_fragment("test.stale", "STALE"),
         None,

@@ -1510,7 +1510,7 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
         panic!("expected emit");
     };
-    assert!(emit.transient);
+    assert!(!emit.persist);
     let Event::ToolCancelledReported(cancelled) = *emit.event else {
         panic!("expected ToolCancelledReported");
     };
@@ -2834,7 +2834,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd metadata publish") else {
         panic!("expected cwd metadata publish");
     };
-    assert!(emit.transient, "metadata mutations are transient requests");
+    assert!(!emit.persist, "metadata mutations are transient requests");
     let Event::AgentMetadataSetRequest(metadata) = *emit.event else {
         panic!("expected cwd metadata publish");
     };
@@ -3355,7 +3355,7 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 }
 
 /// Ensures the deterministic skill, AGENTS.md, and readiness batch uses
-/// transient wire metadata for every session-discovery event.
+/// `persist=false` wire metadata for every session-discovery event.
 #[test]
 fn session_discovery_events_use_transient_wire_metadata() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -3394,16 +3394,16 @@ fn session_discovery_events_use_transient_wire_metadata() {
         };
         match emit.event.as_ref() {
             Event::ExtSkillAvailable(_) => {
-                assert!(emit.transient);
+                assert!(!emit.persist);
                 saw_skill = true;
             }
             Event::ExtAgentsMdAvailable(_) => {
-                assert!(emit.transient);
+                assert!(!emit.persist);
                 saw_agents = true;
             }
             Event::ExtensionSessionContextReady(ready) => {
                 assert_eq!(ready.session_id, "session-transient");
-                assert!(emit.transient);
+                assert!(!emit.persist);
                 saw_ready = true;
             }
             _ => {}

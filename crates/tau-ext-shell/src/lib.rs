@@ -134,9 +134,9 @@ impl Output {
         &self,
         progress: tau_proto::ToolProgress,
     ) -> tau_client::ClientResult<()> {
-        self.send(HarnessInputMessage::emit_with_transient(
+        self.send(HarnessInputMessage::emit_with_persist(
             Event::ToolProgressReported(progress),
-            true,
+            false,
         ))
     }
 
@@ -153,9 +153,9 @@ impl Output {
             OutputInner::Client(handle) => handle.report_tool_terminal_detached(outcome),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
-                .send(HarnessInputMessage::emit_with_transient(
+                .send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
-                    true,
+                    false,
                 ))
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         }
@@ -169,9 +169,9 @@ impl Output {
             OutputInner::Client(handle) => handle.register_local_tool(registration),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
-                .send(HarnessInputMessage::emit_with_transient(
+                .send(HarnessInputMessage::emit_with_persist(
                     Event::ToolRegistrationDeclared(registration),
-                    true,
+                    false,
                 ))
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         }

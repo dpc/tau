@@ -49,8 +49,8 @@ injection.
 
 ## Persistence and replay
 
-Reports default transient and never enter agent, session, or restore semantic
-stores for either caller-supplied transient value. Canonical progress and
+Reports default to `persist=false` and never enter agent, session, or restore semantic
+stores for either caller-supplied `persist` value. Canonical progress and
 completion retain their existing persistence classifications; this slice does
 not change UI replay or transcript history. Runtime event logs and ordinary
 debug JSONL show authorized non-ephemeral committed reports before their

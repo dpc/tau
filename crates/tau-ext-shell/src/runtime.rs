@@ -666,7 +666,7 @@ mod tests {
         let HarnessInputMessage::Emit(context) = rx.recv().expect("context publish") else {
             panic!("expected context publish");
         };
-        assert!(context.transient);
+        assert!(!context.persist);
         assert!(matches!(
             context.event.as_ref(),
             Event::ExtAgentContextPublish(publish)
@@ -675,7 +675,7 @@ mod tests {
         let HarnessInputMessage::Emit(ready) = rx.recv().expect("context ready") else {
             panic!("expected context ready");
         };
-        assert!(ready.transient);
+        assert!(!ready.persist);
         assert!(matches!(
             ready.event.as_ref(),
             Event::ExtensionContextReady(ready)
@@ -730,14 +730,14 @@ mod tests {
                 if matches!(emit.event.as_ref(), Event::ExtAgentContextPublish(publish)
                     if publish.key.as_ref() == "workdir"
                         && publish.value.0["status"] == "invalid")
-                    && emit.transient
+                    && !emit.persist
         ));
         let second = rx.recv().expect("ready");
         assert!(matches!(
             second,
             HarnessInputMessage::Emit(emit)
                 if matches!(emit.event.as_ref(), Event::ExtensionContextReady(_))
-                    && emit.transient
+                    && !emit.persist
         ));
         assert!(
             rx.try_recv().is_err(),
@@ -954,7 +954,7 @@ mod tests {
                 .filter(|message| matches!(
                     message,
                     HarnessInputMessage::Emit(emit)
-                        if emit.transient
+                        if !emit.persist
                             && matches!(emit.event.as_ref(), Event::ToolCancelledReported(cancelled)
                             if cancelled.call_id.as_str() == "cancel-setter")
                 ))

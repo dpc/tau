@@ -351,9 +351,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     });
     h.log_event(&crate::event::HarnessEvent::FromConnection {
         connection_id: progress_owner.into(),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
             progress_report.clone(),
-            true,
+            false,
         )),
     });
     h.handle_extension_event_inner(progress_owner, progress_report)
@@ -370,9 +370,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     });
     h.log_event(&crate::event::HarnessEvent::FromConnection {
         connection_id: progress_owner.into(),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
             terminal_report.clone(),
-            true,
+            false,
         )),
     });
     h.handle_extension_event_inner(progress_owner, terminal_report)
@@ -544,9 +544,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     });
     h.log_event(&crate::event::HarnessEvent::FromConnection {
         connection_id: progress_owner.into(),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_transient(
+        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
             duplicate_terminal_report.clone(),
-            true,
+            false,
         )),
     });
     h.handle_extension_event_inner(progress_owner, duplicate_terminal_report)

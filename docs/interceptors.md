@@ -85,14 +85,14 @@ Instead, the harness sends the selected interceptor a directed
 ```text
 intercept_request {
   event,
-  transient
+  persist
 }
 ```
 
 Fields:
 
 - `event`: the not-yet-emitted event
-- `transient`: the persistence flag that will apply when the event commits
+- `persist`: the persistence flag that will apply when the event commits
 
 This delivery bypasses normal subscriptions. A peer receives intercept requests
 because it registered as an interceptor, not because it subscribed to
@@ -126,7 +126,7 @@ mandatory warning/critical `harness.notice` diagnostics do.
 The interceptor can reply with `pass` and no replacement event.
 
 The harness resumes the interception chain after the current interceptor, still
-using the original event and transient metadata.
+using the original event and persistence metadata.
 
 ### Pass modified
 
@@ -143,7 +143,7 @@ projections, canonical external `message.*` facts, and
 `shell.command_finished`, the harness publishes the original event instead. For mutable
 prompt text events, replacements may edit text but cannot change routing identity
 fields such as agent id or prompt metadata. The original
-transient metadata is preserved.
+persistence metadata is preserved.
 
 Peer-authored `shell.command_progress_reported` and
 `shell.command_finished_reported` remain ordinary mutable, droppable
@@ -191,18 +191,19 @@ registration, and continues the chain instead of parking the publish.
 If scanning finds no remaining matching interceptor, the harness finally commits
 the event normally:
 
-1. apply session persistence rules, unless `transient` is set
+1. classify semantic persistence from `persist`, unconditional family exclusions,
+   and established `persist=false` exceptions
 2. append to the harness runtime event log
 3. deliver the event to subscribers inside `deliver`
 
 Only this final step makes the event visible as an emitted fact.
 
-## Transience
+## Persistence metadata
 
-The `transient` flag is carried through interception.
+The `persist` flag is carried through interception.
 
 An interceptor can inspect it in `intercept_request`, but replies cannot change
-it. The final event commits with the original transient metadata supplied by the
+it. The final event commits with the original persistence metadata supplied by the
 initial publish.
 
 Events that default to transient still get that default when initially emitted
@@ -228,12 +229,12 @@ intercept {
 }
 ```
 
-An attached UI requests emission using the CLI's current false transient bit:
+An attached UI requests emission using the CLI's current true `persist` bit:
 
 ```text
 emit {
   event: ui.prompt_draft { ... },
-  transient: false
+  persist: true
 }
 ```
 
@@ -242,7 +243,7 @@ The harness finds the interceptor and sends it:
 ```text
 intercept_request {
   event: ui.prompt_draft { ... },
-  transient: false
+  persist: true
 }
 ```
 

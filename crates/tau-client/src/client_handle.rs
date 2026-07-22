@@ -478,8 +478,8 @@ impl ClientHandle {
     ///
     /// Returns an error when sending the underlying protocol frame fails.
     pub fn emit_transient(&self, event: tau_proto::Event) -> ClientResult<()> {
-        self.send(tau_proto::HarnessInputMessage::emit_with_transient(
-            event, true,
+        self.send(tau_proto::HarnessInputMessage::emit_with_persist(
+            event, false,
         ))
     }
 
@@ -491,8 +491,8 @@ impl ClientHandle {
     /// Returns an error only when the writer thread has already stopped before
     /// the frame can be queued.
     pub fn emit_transient_detached(&self, event: tau_proto::Event) -> ClientResult<()> {
-        self.send_detached(tau_proto::HarnessInputMessage::emit_with_transient(
-            event, true,
+        self.send_detached(tau_proto::HarnessInputMessage::emit_with_persist(
+            event, false,
         ))
     }
 
@@ -552,7 +552,7 @@ impl ClientHandle {
     /// This is only a protocol convenience paired with
     /// [`crate::ExtensionBuilder::register_context_provider`]. Callers still
     /// own any state folding, context publication, and readiness policy. The
-    /// acknowledgement uses transient wire metadata.
+    /// acknowledgement uses `persist=false` wire metadata.
     ///
     /// # Errors
     ///
@@ -576,7 +576,7 @@ impl ClientHandle {
     /// This is only a protocol convenience paired with
     /// [`crate::ExtensionBuilder::register_session_context_provider`]. Callers
     /// still own session lifecycle handling, context publication, and readiness
-    /// policy. The acknowledgement uses transient wire metadata.
+    /// policy. The acknowledgement uses `persist=false` wire metadata.
     ///
     /// # Errors
     ///

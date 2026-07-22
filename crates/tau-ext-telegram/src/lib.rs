@@ -576,9 +576,9 @@ impl Output {
     }
 
     fn report_tool_progress(&self, progress: ToolProgress) {
-        self.send(HarnessInputMessage::emit_with_transient(
+        self.send(HarnessInputMessage::emit_with_persist(
             Event::ToolProgressReported(progress),
-            true,
+            false,
         ));
     }
 
@@ -597,9 +597,9 @@ impl Output {
                 let _ = handle.report_tool_terminal_detached(outcome);
             }
             Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_transient(
+                let _ = tx.send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
-                    true,
+                    false,
                 ));
             }
         }
@@ -609,7 +609,7 @@ impl Output {
     /// canonicalization.
     fn emit_message_report(&self, event: Event) {
         debug_assert!(event.is_message_report());
-        self.send(HarnessInputMessage::emit_with_transient(event, true));
+        self.send(HarnessInputMessage::emit_with_persist(event, false));
     }
 }
 
