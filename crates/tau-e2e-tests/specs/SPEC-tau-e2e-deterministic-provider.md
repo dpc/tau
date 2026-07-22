@@ -35,7 +35,10 @@ instead configures two distinct tool-free worker roles and keeps only
 `agent_start` on the main. S5 reuses S2's two-role tool surface for one
 synchronized interrupted-worker restore. S6 instead exposes only
 `restart_test_dummy` in exact `hold_no_side_effect` mode to the worker while the
-main retains only `agent_start`. The fake
+main retains only `agent_start`. S7 uses one main, two tool-free worker roles,
+and one repair-worker role exposing that same sole dummy. Its main consumes the
+existing two production-start pairs; one fixed durable UI creation supplies the
+repair worker without extending the fake grammar. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
@@ -158,6 +161,17 @@ complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.
 
+S7 uses four lanes and compact 2,445-byte scenario JSON: six main actions, one
+completed-worker action, one uncertain hold, and the two-action dummy repair
+pair. Boot A consumes eight main turns and one turn per worker, checkpointing
+exact cursors `[6, 1, 1, 1]`, four immutable lane bindings, and two contiguous
+production child ordinals before the combined crash cut. Boot B and the
+no-input portion of Boot C consume no provider action. Only the uncertain worker
+may own the exact per-generation warning, only the repair worker journal may
+gain Boot B's provider error, and Boot C's durable snapshot must equal Boot B.
+One explicit repair-worker continuation after that equality check advances only
+its cursor to `[6, 1, 1, 2]`; the uncertain dispatch remains unfinished.
+
 Daemon acceptance uses the normal local socket protocol and real supervised
 subprocess. Its `ServeOptions` explicitly bypass ambient startup override
 transports and checks the same exact extension allowlist before spawning as the
@@ -214,6 +228,13 @@ S6 uses two lanes and compact 1,259-byte scenario JSON: three main actions and t
 worker actions. Boot A consumes three main turns and one worker turn before four
 matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
 repair events, terminals, starts, provider prompts, or actions fail closed.
+S7 consumes nine of ten actions before its crash: eight main turns and one turn
+in each worker lane. Two no-input resumed generations consume no provider turns;
+the first owns the sole durable repair and both own one exact uncertain-worker
+warning. The second snapshot equals the first before one explicit repair-worker
+continuation consumes the tenth action. Exact checkpoint bindings, per-agent
+journals, and provider budgets reject warning-to-model delivery, lane rebinding,
+repair leakage, or automatic redispatch.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

@@ -32,6 +32,12 @@ tool for its main and configures two distinct tool-free worker roles. S5 reuses
 the S2 main/worker surface for one synchronized interrupted-worker restore. S6
 adds only the exact `restart_test_dummy` tool to its worker and fixes that
 extension to `hold_no_side_effect`; the main retains only `agent_start`.
+S7 keeps that dummy mode and one main exposing only `agent_start`. Its
+production starts are limited to the existing quiescent and uncertain child
+pairs. The test driver adds the repair-role durable child through one exact
+`UiCreateAgent` request with fixed parent, role, prompt, and `ctx_id`; only that
+role exposes `restart_test_dummy`. This does not add a fake action or raise the
+existing lane, per-lane action, production-start, or scenario-byte limits.
 
 Each S1/S2/S3 production-worker start sequence uses one adjacent
 `AgentStartCall`/`AgentStartResult` pair. It requires the exact production schema
@@ -76,6 +82,14 @@ request/start pair and canonical readiness, removes the dead generation's
 fixture-owned socket after proving the process group exited, and probes the
 session lock before resume. Its repair-aware provider grammar accepts only the
 fixed call ID, error status, and full restart/possible-side-effect diagnostic.
+S7 combines that cut with S5's independently synchronized provider hold. Its
+decoded checkpoint must contain exactly four immutable lane bindings and two
+contiguous main-owned production child associations. Boot B and the no-input
+portion of Boot C admit no provider prompt; only the uncertain worker is named
+by the per-generation restore warning, and only the repair worker may receive
+the sole durable repair suffix. Boot C must equal Boot B before a final explicit
+repair continuation.
+No retry, abandonment, or terminal outcome is requested for the uncertain worker.
 
 Mismatch, startup, or exact-consumption errors retain the private root and print
 its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.
@@ -85,7 +99,7 @@ wrapper owns daemon process cleanup on early test failure. Successful daemon
 finish requires the entire process group to disappear without a signal; forced
 TERM/KILL containment is reported as test failure. Daemon tests cover
 typed failure, cancellation/timeout, same-agent post-cancel liveness,
-concurrency, fatal disconnect, clean restore, and explicit S5/S6 `SIGKILL`
+concurrency, fatal disconnect, clean restore, and explicit S5/S6/S7 `SIGKILL`
 cuts. The direct ungraceful-kill path requires the complete private process
 group to disappear under a hard deadline but deliberately does not require
 graceful socket cleanup or a successful parent exit. The cancellation gate accepts

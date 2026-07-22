@@ -1,13 +1,10 @@
 //! Synchronized interrupted-worker restore acceptance.
 
-use std::time::{Duration, Instant};
-
 use serde::Deserialize;
 use tau_e2e_tests::AgentWatchResultExpectationV2;
 use tau_proto::{
-    AgentId, AgentInferenceDispatchStarted, AgentMessageKind, AgentPromptId, AgentRuntimeState,
-    AgentWatchProviderCategory, AgentWatchProviderState, AgentWatchUpdateCause, Event, NoticeLevel,
-    SessionAgentListScope, SessionId,
+    AgentId, AgentMessageKind, AgentPromptId, AgentRuntimeState, AgentWatchProviderCategory,
+    AgentWatchProviderState, AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
 };
 
 use super::super::daemon_support::{disconnect_ui, spawn_daemon};
@@ -16,7 +13,7 @@ use super::{
     ProviderTurnCounts, SESSION, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
     SessionRestoreObserver, WORKER_INITIAL, WORKER_PROMPT, assert_provider_turn_counts,
     assert_restored_roster, assert_resume_boundaries, initial_live_watch_subscription_id,
-    matched_action_count,
+    interruption_support as interruption, matched_action_count,
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
@@ -86,12 +83,16 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let identities = BootIdentities::from_events(&observer_a.events)?;
     let boot_a_subscription_id =
         initial_live_watch_subscription_id(&observer_a.events, &identities, &session_id)?;
-    let dispatch = wait_for_worker_dispatch(&mut observer_a, &identities.worker)?;
-    let durable_a =
-        wait_for_durable_dispatch(&fixture, &session_id, &identities.worker, &dispatch)?;
-    wait_for_hold_readiness(&fixture, &dispatch.agent_prompt_id)?;
+    let dispatch = interruption::wait_for_worker_dispatch(&mut observer_a, &identities.worker)?;
+    let durable_a = interruption::wait_for_durable_dispatch(
+        &fixture,
+        &session_id,
+        &identities.worker,
+        &dispatch,
+    )?;
+    interruption::wait_for_hold_readiness(&fixture, &dispatch.agent_prompt_id)?;
     assert_fake_checkpoint(&fixture, &scenario, &identities, [3, 1])?;
-    assert_unfinished_worker_dispatch(&durable_a, &identities.worker, &dispatch)?;
+    interruption::assert_unfinished_worker_dispatch(&durable_a, &identities.worker, &dispatch)?;
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
@@ -100,12 +101,12 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     if matched_action_count(&fixture)? != 4 {
         return Err("S5 Boot A did not stop at the exact four-action crash cut".into());
     }
-    assert_hold_ready_and_live(&fixture, &dispatch.agent_prompt_id)?;
+    interruption::assert_hold_ready_and_live(&fixture, &dispatch.agent_prompt_id)?;
     daemon_a.kill_ungracefully()?;
     drop(observer_a);
 
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    assert_unfinished_worker_dispatch(&snapshot_a, &identities.worker, &dispatch)?;
+    interruption::assert_unfinished_worker_dispatch(&snapshot_a, &identities.worker, &dispatch)?;
 
     let socket_b = fixture.socket_path("s5-boot-b");
     let daemon_b = spawn_daemon(
@@ -116,7 +117,8 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_b.events, &identities.all(), &session_id)?;
-    let notice_b = assert_dispatch_uncertain_notice(&observer_b.events, &identities.worker)?;
+    let notice_b =
+        interruption::assert_dispatch_uncertain_notice(&observer_b.events, &identities.worker)?;
     assert_no_restored_watch(&observer_b.events, &identities)?;
     assert_provider_turn_counts(
         &observer_b.events,
@@ -162,7 +164,7 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
 
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     snapshot_b.require_prefix(&snapshot_a)?;
-    assert_unfinished_worker_dispatch(&snapshot_b, &identities.worker, &dispatch)?;
+    interruption::assert_unfinished_worker_dispatch(&snapshot_b, &identities.worker, &dispatch)?;
     if snapshot_b.agent_events[&identities.worker] != snapshot_a.agent_events[&identities.worker] {
         return Err("S5 Boot B changed the dispatch-uncertain worker journal".into());
     }
@@ -176,7 +178,8 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_c = SessionRestoreObserver::connect(&socket_c)?;
     observer_c.wait_for_session_boundary(&session_id)?;
     assert_resume_boundaries(&observer_c.events, &identities.all(), &session_id)?;
-    let notice_c = assert_dispatch_uncertain_notice(&observer_c.events, &identities.worker)?;
+    let notice_c =
+        interruption::assert_dispatch_uncertain_notice(&observer_c.events, &identities.worker)?;
     if notice_c <= notice_b {
         return Err("S5 Boot C did not publish a fresh dispatch-uncertain warning".into());
     }
@@ -199,7 +202,7 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     if snapshot_c != snapshot_b {
         return Err("S5 Boot C changed durable state without agent input".into());
     }
-    assert_unfinished_worker_dispatch(&snapshot_c, &identities.worker, &dispatch)?;
+    interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.worker, &dispatch)?;
     fixture.assert_consumed()?;
     Ok(())
 }
@@ -272,120 +275,6 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Waits for the exact live durable-dispatch publication owned by the worker.
-fn wait_for_worker_dispatch(
-    observer: &mut SessionRestoreObserver,
-    worker: &AgentId,
-) -> Result<AgentInferenceDispatchStarted, Box<dyn std::error::Error>> {
-    let mut next = 0;
-    loop {
-        while let Some(observed) = observer.events.get(next) {
-            next += 1;
-            if let Event::AgentInferenceDispatchStarted(dispatch) = &observed.event
-                && &dispatch.agent_id == worker
-            {
-                if observed.replay || observed.recorded_at.is_none() {
-                    return Err("S5 Boot A worker dispatch was not a live publication".into());
-                }
-                return Ok(dispatch.clone());
-            }
-        }
-        observer.recv_one()?;
-    }
-}
-
-/// Waits until the worker checkpoint can be decoded from its authoritative
-/// durable journal while the daemon and held provider prompt are still live.
-fn wait_for_durable_dispatch(
-    fixture: &DeterministicFixture,
-    session_id: &SessionId,
-    worker: &AgentId,
-    expected: &AgentInferenceDispatchStarted,
-) -> Result<DurableSessionSnapshot, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_error = None;
-    loop {
-        match DurableSessionSnapshot::load(fixture.harness_state_dir(), session_id) {
-            Ok(snapshot)
-                if snapshot.agent_events.get(worker).is_some_and(|events| {
-                    events.iter().any(|record| {
-                        matches!(
-                            &record.event,
-                            Event::AgentInferenceDispatchStarted(dispatch)
-                                if dispatch == expected
-                        )
-                    })
-                }) =>
-            {
-                return Ok(snapshot);
-            }
-            Ok(_) => {}
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "durable worker dispatch did not become readable: {}",
-                last_error.as_deref().unwrap_or("checkpoint absent")
-            )
-            .into());
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Waits for the fake's exact prompt-correlated live hold readiness record.
-fn wait_for_hold_readiness(
-    fixture: &DeterministicFixture,
-    prompt_id: &AgentPromptId,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let expected = format!("prompt_id={prompt_id} hold_ready");
-    let timeout = format!("prompt_id={prompt_id} hold_timeout");
-    let canceled = format!("prompt_id={prompt_id} hold_canceled");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let trace = fixture.trace()?;
-        if trace.contains(&timeout) || trace.contains(&canceled) {
-            return Err(format!(
-                "held provider prompt reached an invalid readiness state: {trace}"
-            )
-            .into());
-        }
-        let ready = trace.lines().filter(|line| *line == expected).count();
-        if ready == 1 {
-            return Ok(());
-        }
-        if ready > 1 {
-            return Err(format!(
-                "held provider prompt reached an invalid readiness state: {trace}"
-            )
-            .into());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("provider hold readiness missing for {prompt_id}").into());
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Rechecks that the exact ready hold has not terminalized immediately before
-/// the process-group kill.
-fn assert_hold_ready_and_live(
-    fixture: &DeterministicFixture,
-    prompt_id: &AgentPromptId,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let trace = fixture.trace()?;
-    let ready = format!("prompt_id={prompt_id} hold_ready");
-    let timeout = format!("prompt_id={prompt_id} hold_timeout");
-    let canceled = format!("prompt_id={prompt_id} hold_canceled");
-    if trace.lines().filter(|line| *line == ready).count() != 1
-        || trace.contains(&timeout)
-        || trace.contains(&canceled)
-    {
-        return Err(format!("provider hold was not live at the crash cut: {trace}").into());
-    }
-    Ok(())
-}
-
 /// Decodes and validates the fake checkpoint's exact scenario, lane bindings,
 /// child identity, and next-action cursors.
 fn assert_fake_checkpoint(
@@ -431,78 +320,6 @@ fn assert_fake_checkpoint(
         return Err("fake checkpoint parent/child association changed".into());
     }
     Ok(())
-}
-
-/// Requires one exact worker dispatch checkpoint and no corresponding durable
-/// provider terminal.
-fn assert_unfinished_worker_dispatch(
-    snapshot: &DurableSessionSnapshot,
-    worker: &AgentId,
-    expected: &AgentInferenceDispatchStarted,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let records = snapshot
-        .agent_events
-        .get(worker)
-        .ok_or_else(|| format!("durable worker journal missing for {worker}"))?;
-    let dispatches = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentInferenceDispatchStarted(dispatch) if dispatch == expected
-            )
-        })
-        .count();
-    let terminals = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::ProviderResponseFinished(finished)
-                    if finished.agent_prompt_id == expected.agent_prompt_id
-            )
-        })
-        .count();
-    if dispatches != 1 || terminals != 0 {
-        return Err(format!(
-            "worker dispatch durability changed: dispatches={dispatches}, terminals={terminals}"
-        )
-        .into());
-    }
-    Ok(())
-}
-
-/// Requires the exact mandatory fail-closed restore warning.
-fn assert_dispatch_uncertain_notice(
-    events: &[Observed],
-    worker: &AgentId,
-) -> Result<tau_proto::UnixMicros, Box<dyn std::error::Error>> {
-    let expected =
-        format!("inference dispatch for restored agent `{worker}` is uncertain; retry explicitly");
-    let notices = events
-        .iter()
-        .filter(|observed| {
-            matches!(
-                &observed.event,
-                Event::HarnessNotice(notice)
-                    if notice.kind == tau_proto::notice_kind::HARNESS_INTERNAL_WARNING
-                        && notice.message == expected
-                        && notice.level == NoticeLevel::Warning
-                        && notice.always_show
-            )
-        })
-        .collect::<Vec<_>>();
-    let [notice] = notices.as_slice() else {
-        return Err(
-            format!("dispatch-uncertain restore warning delivery changed: {notices:?}").into(),
-        );
-    };
-    if !notice.replay {
-        return Err("dispatch-uncertain warning bypassed mandatory catch-up replay".into());
-    }
-    notice
-        .recorded_at
-        .ok_or_else(|| "dispatch-uncertain warning lacked its publication timestamp".into())
 }
 
 /// Rejects restoration of the daemon-lifetime automatic watch relation or any

@@ -93,6 +93,13 @@ redispatch. One explicit worker continuation validates the exact balanced error
 round. A second resume consumes no input or provider action and must preserve
 current/history membership, execution restore, and agent journals without a
 second repair pair.
+S7 combines a completed worker, a dispatch-uncertain worker, and an interrupted
+dummy-tool worker below one quiescent main. Boot B and Boot C receive no input
+between them and must spend zero provider turns, preserve exact lane ownership,
+keep the uncertain worker undispatched, and add only Boot B's repair-worker
+suffix. ID-keyed current/history rosters remain stable. A final explicit
+repair-worker continuation after the second-resume assertions consumes only its
+balanced error lane; it does not resolve the uncertain worker.
 Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption

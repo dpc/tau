@@ -21,8 +21,12 @@ use super::{DUMMY_TOOL, FAKE_PROVIDER};
 mod dispatch_uncertain;
 #[path = "session_restore/interrupted_tool.rs"]
 mod interrupted_tool;
+#[path = "session_restore/interruption_support.rs"]
+mod interruption_support;
 #[path = "session_restore/membership.rs"]
 mod membership;
+#[path = "session_restore/mixed_state.rs"]
+mod mixed_state;
 #[path = "session_restore/multiple_workers.rs"]
 mod multiple_workers;
 #[path = "session_restore/observer.rs"]

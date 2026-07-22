@@ -78,6 +78,13 @@ receives no further input and must preserve the exact Boot B membership,
 execution-restore, and agent streams without another repair pair. This is a
 conservative foreground-tool repair oracle, not evidence of exactly-once effects
 or a general recovery operation.
+A seventh fixture composes a quiescent main and completed worker with one held
+dispatch-uncertain worker and one interrupted-tool repair worker. The first
+resume emits only the uncertain worker's warning and the repair worker's sole
+durable error; the second receives no input, emits no provider work, and must
+preserve every durable stream and ID-keyed current/history roster. One explicit
+repair-worker continuation after those assertions consumes only its retained
+fake lane. The uncertain worker remains fail-closed and unterminated.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

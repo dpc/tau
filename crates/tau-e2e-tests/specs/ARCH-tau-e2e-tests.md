@@ -25,6 +25,12 @@ requires the worker's durable request/start pair plus canonical readiness. The
 strict fake observes the eager nonsemantic/durable repair order and validates the
 next explicit continuation's exact balanced error context without authorizing a
 tool redispatch.
+S7 composes both interruption classes with a completed production worker. The
+main retains the existing two-start surface for the quiescent and uncertain
+children; one fixed durable `UiCreateAgent` request creates the repair child so
+no fake grammar limit expands. Four checkpointed lane bindings, exact per-agent
+provider budgets, typed journals, and ID-keyed rosters enforce isolation across
+two no-input resumes.
 Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
@@ -69,6 +75,11 @@ restart/possible-side-effect repair pair and no second live start, then compares
 the next cold resume's membership, execution restore, and agent streams exactly
 against the repaired generation. It does not claim safe retries, exactly-once
 side effects, or recovery ownership for an interrupted start-agent request.
+S7 requires the first resume's warning and repair to remain owned by their
+distinct workers, then requires the second generation to add no provider work
+or durable suffix. A post-assertion repair continuation proves only the repair
+worker retained that fake lane; the uncertain worker remains fail-closed without
+a terminal outcome.
 It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal

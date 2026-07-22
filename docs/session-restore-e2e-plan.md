@@ -78,8 +78,10 @@ before a process-group kill, then proves two resumes remain dispatch-uncertain
 without automatic worker submission or old-watch restoration. S6 kills after a
 worker's exact durable foreground-tool request/start pair and closed dummy
 readiness, proves one conservative repair and balanced explicit continuation,
-then proves the next cold resume adds no duplicate. S7 and later scenarios remain
-planned.
+then proves the next cold resume adds no duplicate. S7 composes quiescent,
+dispatch-uncertain, and interrupted-tool state in one four-agent session and
+proves a second no-input resume adds no cross-agent work or durable suffix. S8
+remains planned.
 
 ## Test boundaries and oracles
 
@@ -218,6 +220,17 @@ Boot A spends three main turns and one worker turn before four actions have
 matched. Boot B spends one worker turn after the eager repair pair; Boot C spends
 zero provider turns. Roster queries, typed store reads, the crash cut, and repair
 observation consume no additional fake-provider action.
+
+S7 uses four lanes and compact 2,445-byte scenario JSON: six main actions, one
+quiescent-worker action, one dispatch-uncertain hold action, and two repair-worker
+actions. The main uses the existing two-start maximum for the quiescent and
+uncertain workers; the fixture creates the durable repair child through one exact
+`UiCreateAgent` request so the main lane remains below the existing eight-action
+limit. Boot A spends eight main turns and one turn per worker before nine actions
+have matched. Boot B and the no-input portion of Boot C spend zero provider turns;
+only an explicit post-Boot-C repair continuation spends the repair worker's final
+turn. Roster queries, replay, repair/warning observation, and typed store reads
+consume no fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -448,6 +461,9 @@ its focused closed-mode lifecycle tests.
 
 ### S7 — Mixed-state and repeated-resume isolation
 
+Implemented by
+`session_restore::mixed_state::cold_resume_mixed_state_is_agent_owned_and_idempotent`.
+
 Combine one quiescent main, one quiescent worker, one dispatch-uncertain worker,
 and one worker with a repaired interrupted tool. Resume twice, making no user
 input between the first and second resumes.
@@ -459,6 +475,16 @@ dispatch, and current/history roster results remain stable. Do not require a
 terminal outcome from the uncertain worker unless S5's separately gated
 recovery question has been answered. This is the broadest headless regression
 and should land only after S0-S6 localize failures well.
+
+The checked-in fixture keeps the existing fake bounds. The main production-starts
+the completed quiescent worker and held uncertain worker, while an exact durable
+UI creation adds the repair-role child with its fixed lane correlation. Boot A
+requires both synchronized crash cuts at once. Boot B owns the sole repair suffix
+and one uncertain-worker warning. Boot C receives no input, repeats only the
+worker-owned warning, and must equal Boot B in every typed durable stream and
+ID-keyed roster. An explicit repair-worker prompt after those assertions consumes
+the final closed continuation and proves the retained lane/error context still
+belongs to that worker; the uncertain worker remains unfinished and undispatched.
 
 ### S8 — Public terminal and manual tmux acceptance
 
