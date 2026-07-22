@@ -6,10 +6,15 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
-    SessionId, Subscribe, UnixMicros,
+    ClientKind, Event, EventName, EventSelector, GetSessionAgentList, HarnessInputMessage,
+    HarnessOutputMessage, Hello, SessionAgentListEntry, SessionAgentListResultPayload,
+    SessionAgentListScope, SessionId, Subscribe, UnixMicros,
 };
 use tau_socket::{SocketPeer, SocketReceive};
+
+const MAX_EVENTS: usize = 4_096;
+const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 256 * 1024;
 
 /// One delivered semantic event with replay and append-time metadata preserved.
 #[derive(Clone, Debug, Serialize)]
@@ -30,6 +35,8 @@ pub(super) struct SideObserver {
     pub events: Vec<ObservedEvent>,
     /// Continuously refreshed bounded observer artifact.
     artifact_path: PathBuf,
+    /// Sum of serialized retained event sizes for fail-closed memory bounds.
+    event_bytes: usize,
 }
 
 /// Minimal typed projection of one private daemon discovery record.
@@ -72,6 +79,7 @@ impl SideObserver {
                 peer,
                 events: Vec::new(),
                 artifact_path: artifact_path.clone(),
+                event_bytes: 0,
             };
             let attempt_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
             while Instant::now() < attempt_deadline {
@@ -82,7 +90,7 @@ impl SideObserver {
                             Event::SessionStarted(started)
                                 if &started.session_id == expected_session
                         );
-                        observer.record(observed);
+                        observer.record(observed)?;
                         if initialized {
                             return Ok(observer);
                         }
@@ -111,7 +119,7 @@ impl SideObserver {
                 format!("{error}; last observed events:\n{}", self.event_tail())
             })?;
             let matched = predicate(&observed);
-            self.record(observed.clone());
+            self.record(observed.clone())?;
             if matched {
                 return Ok(observed);
             }
@@ -130,12 +138,104 @@ impl SideObserver {
                         event,
                         replay,
                         recorded_at,
-                    });
+                    })?;
                 }
                 SocketReceive::Message { .. } => {}
                 SocketReceive::Timeout | SocketReceive::Closed => return Ok(()),
             }
         }
+    }
+
+    /// Creates S8's durable main with an exact initial lane correlation.
+    pub(super) fn create_main(
+        &mut self,
+        session_id: &SessionId,
+        ctx_id: &str,
+        prompt: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.peer
+            .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+                tau_proto::UiCreateAgent {
+                    session_id: session_id.clone(),
+                    role: "deterministic-main".to_owned(),
+                    model_override: None,
+                    metadata: Vec::new(),
+                    initial_prompt: Some(prompt.to_owned()),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: Some(ctx_id.to_owned()),
+                    parent_agent: None,
+                    ephemeral: false,
+                },
+            )))?;
+        Ok(())
+    }
+
+    /// Queries one authoritative requester-directed roster after replay.
+    pub(super) fn roster(
+        &mut self,
+        session_id: &SessionId,
+        scope: SessionAgentListScope,
+        deadline: Instant,
+    ) -> Result<Vec<SessionAgentListEntry>, Box<dyn std::error::Error>> {
+        let request_id = match scope {
+            SessionAgentListScope::Current => "core-resume-current",
+            SessionAgentListScope::History => "core-resume-history",
+        };
+        self.peer.send(&HarnessInputMessage::GetSessionAgentList(
+            GetSessionAgentList {
+                request_id: request_id.to_owned(),
+                session_id: session_id.clone(),
+                scope,
+            },
+        ))?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for directed roster".into());
+            }
+            match self.peer.recv_timeout(remaining)? {
+                SocketReceive::Message {
+                    message: HarnessOutputMessage::SessionAgentListResult(result),
+                } if result.request_id == request_id => {
+                    if &result.session_id != session_id {
+                        return Err("directed roster returned the wrong session".into());
+                    }
+                    return match result.result {
+                        SessionAgentListResultPayload::Ok { agents } => Ok(agents),
+                        SessionAgentListResultPayload::Error { error } => {
+                            Err(format!("directed roster failed: {}", error.message).into())
+                        }
+                    };
+                }
+                SocketReceive::Message {
+                    message: HarnessOutputMessage::Deliver(delivery),
+                } => {
+                    let (event, replay, recorded_at) = delivery.into_parts();
+                    self.record(ObservedEvent {
+                        event,
+                        replay,
+                        recorded_at,
+                    })?;
+                }
+                SocketReceive::Message { .. } => {}
+                SocketReceive::Timeout => {
+                    return Err("timed out waiting for directed roster".into());
+                }
+                SocketReceive::Closed => {
+                    return Err("observer closed while waiting for directed roster".into());
+                }
+            }
+        }
+    }
+
+    /// Ends the sole headless UI connection so Boot A can shut down cleanly.
+    pub(super) fn disconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.peer
+            .send(&HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some("S8 Boot A complete".to_owned()),
+            }))?;
+        Ok(())
     }
 
     fn recv_one(&mut self, deadline: Instant) -> Result<ObservedEvent, Box<dyn std::error::Error>> {
@@ -172,12 +272,28 @@ impl SideObserver {
         }
     }
 
-    fn record(&mut self, observed: ObservedEvent) {
-        self.events.push(observed);
-        let start = self.events.len().saturating_sub(256);
-        if let Ok(bytes) = serde_json::to_vec_pretty(&self.events[start..]) {
-            let _ = std::fs::write(&self.artifact_path, bytes);
+    fn record(&mut self, observed: ObservedEvent) -> Result<(), Box<dyn std::error::Error>> {
+        let event_bytes = serde_json::to_vec(&observed)?.len();
+        if self.events.len() >= MAX_EVENTS
+            || self.event_bytes.saturating_add(event_bytes) > MAX_EVENT_BYTES
+        {
+            return Err("side observer exceeded its event capture bound".into());
         }
+        self.event_bytes += event_bytes;
+        self.events.push(observed);
+        let mut start = self.events.len().saturating_sub(256);
+        let bytes = loop {
+            let bytes = serde_json::to_vec_pretty(&self.events[start..])?;
+            if bytes.len() <= MAX_ARTIFACT_BYTES || start + 1 >= self.events.len() {
+                break bytes;
+            }
+            start += 1;
+        };
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err("one side-observer event exceeded the artifact bound".into());
+        }
+        std::fs::write(&self.artifact_path, bytes)?;
+        Ok(())
     }
 
     fn event_tail(&self) -> String {
@@ -246,11 +362,17 @@ fn selectors() -> Vec<EventSelector> {
     [
         E::SESSION_STARTED,
         E::SESSION_AGENT_LOADED,
+        E::SESSION_AGENT_UNLOADED,
         E::AGENT_STARTED,
+        E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_WATCHES_UPDATED,
         E::AGENT_PROMPT_SUBMITTED,
+        E::AGENT_PROMPT_CREATED,
         E::AGENT_PROMPT_STARTED,
         E::AGENT_PROMPT_TERMINATED,
+        E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_STATS_UPDATED,
+        E::PROVIDER_PROMPT_SUBMITTED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::PROVIDER_TOOL_RESULT,
         E::PROVIDER_TOOL_ERROR,

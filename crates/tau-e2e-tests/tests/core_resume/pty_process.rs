@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::pty::{Winsize, openpty};
-use nix::sys::signal::{Signal, kill, killpg};
+use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
+
+use super::process_group;
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
@@ -69,6 +71,23 @@ pub(super) struct PtyProcess {
     reader_done: mpsc::Receiver<()>,
     /// Cooperative bounded stop for the poll-based PTY reader.
     reader_stop: Arc<AtomicBool>,
+    /// Bounded failure artifacts written only after the reader has stopped.
+    artifacts: Option<PtyArtifacts>,
+}
+
+/// Named bounded diagnostic destinations for one PTY process.
+pub(super) struct PtyArtifacts {
+    /// Bounded raw PTY byte suffix.
+    raw: PathBuf,
+    /// Latest normalized VT frame.
+    normalized: PathBuf,
+}
+
+impl PtyArtifacts {
+    /// Creates destinations for raw and normalized PTY diagnostics.
+    pub(super) fn new(raw: PathBuf, normalized: PathBuf) -> Self {
+        Self { raw, normalized }
+    }
 }
 
 impl PtyProcess {
@@ -76,7 +95,7 @@ impl PtyProcess {
     pub(super) fn spawn(
         mut command: Command,
         tool_latch_armed: bool,
-        artifacts: Option<(PathBuf, PathBuf)>,
+        artifacts: Option<PtyArtifacts>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let pty = openpty(
             Some(&Winsize {
@@ -125,7 +144,7 @@ impl PtyProcess {
         let reader_stop = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&reader_stop);
         let reader = thread::spawn(move || {
-            read_pty(master, &reader_capture, &stop, artifacts.as_ref(), None);
+            read_pty(master, &reader_capture, &stop, None, None);
             let _ = reader_finished.send(());
         });
         Ok(Self {
@@ -135,6 +154,7 @@ impl PtyProcess {
             reader: Some(reader),
             reader_done,
             reader_stop,
+            artifacts,
         })
     }
 
@@ -181,19 +201,39 @@ impl PtyProcess {
         &self,
         deadline: Instant,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        self.wait_for_prompt("editable terminal prompt", deadline, prompt_ready)
+    }
+
+    /// Waits for an empty editable prompt targeting one exact selected agent.
+    pub(super) fn wait_ready_for(
+        &self,
+        agent_id: &str,
+        deadline: Instant,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let needle = format!("Write a message to {agent_id}...");
+        self.wait_for_prompt(&format!("prompt `{needle}`"), deadline, |parser| {
+            prompt_ready_for(parser, &needle)
+        })
+    }
+
+    fn wait_for_prompt(
+        &self,
+        description: &str,
+        deadline: Instant,
+        is_ready: impl Fn(&vt100::Parser) -> bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let (lock, wake) = &*self.capture;
         let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
         loop {
             let frame = normalized_screen(&capture.parser);
-            if prompt_ready(&capture.parser) {
+            if is_ready(&capture.parser) {
                 return Ok(frame);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() || capture.closed {
-                return Err(format!(
-                    "timed out waiting for editable terminal prompt; last frame:\n{frame}"
-                )
-                .into());
+                return Err(
+                    format!("timed out waiting for {description}; last frame:\n{frame}").into(),
+                );
             }
             let (next, _) = wake
                 .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
@@ -202,9 +242,9 @@ impl PtyProcess {
         }
     }
 
-    /// Fails if any byte-wise VT state ever showed the completed dummy call as
-    /// pending or progress, even when later output replaced it in the same
-    /// read.
+    /// Fails if any byte-wise VT state showed a completed historical tool row
+    /// as pending or progress, even when later output replaced it in the
+    /// same read.
     pub(super) fn require_no_tool_violation(&self) -> Result<(), Box<dyn std::error::Error>> {
         let capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
         if let Some(row) = &capture.tool_violation {
@@ -257,48 +297,60 @@ impl PtyProcess {
         let mut status = None;
         while Instant::now() < first_deadline {
             status = status.or(child.try_wait()?);
-            if status.is_some() && !process_group_exists(pgid) {
+            if status.is_some() && !process_group::exists(pgid) {
                 break;
             }
             thread::yield_now();
         }
-        if process_group_exists(pgid) {
+        if process_group::exists(pgid) {
             let _ = killpg(pgid, Signal::SIGTERM);
             let term_deadline = Instant::now() + Duration::from_secs(1);
-            while Instant::now() < term_deadline && process_group_exists(pgid) {
+            while Instant::now() < term_deadline && process_group::exists(pgid) {
                 status = status.or(child.try_wait()?);
                 thread::yield_now();
             }
         }
-        if process_group_exists(pgid) {
+        if process_group::exists(pgid) {
             let _ = killpg(pgid, Signal::SIGKILL);
             let kill_deadline = Instant::now() + Duration::from_secs(1);
-            while Instant::now() < kill_deadline && process_group_exists(pgid) {
+            while Instant::now() < kill_deadline && process_group::exists(pgid) {
                 status = status.or(child.try_wait()?);
                 thread::yield_now();
             }
         }
-        if process_group_exists(pgid) {
+        if process_group::exists(pgid) {
             return Err("PTY process group survived SIGKILL deadline".into());
         }
-        let status = match status {
-            Some(status) => status,
-            None => child.wait()?,
-        };
-        self.child.take();
+        let parent_deadline = Instant::now() + Duration::from_secs(1);
+        while status.is_none() && Instant::now() < parent_deadline {
+            status = child.try_wait()?;
+            thread::yield_now();
+        }
+        let status = status.ok_or("PTY parent survived process-group cleanup")?;
         self.writer.take();
         if self
             .reader_done
             .recv_timeout(Duration::from_secs(1))
             .is_err()
         {
-            self.reader.take();
             return Err("PTY reader did not close within cleanup deadline".into());
         }
         if let Some(reader) = self.reader.take() {
             reader.join().map_err(|_| "PTY reader panicked")?;
         }
+        self.write_artifacts()?;
+        self.child.take();
         Ok(status)
+    }
+
+    fn write_artifacts(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(artifacts) = &self.artifacts else {
+            return Ok(());
+        };
+        let capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        std::fs::write(&artifacts.raw, &capture.raw)?;
+        std::fs::write(&artifacts.normalized, normalized_screen(&capture.parser))?;
+        Ok(())
     }
 }
 
@@ -308,6 +360,7 @@ impl Drop for PtyProcess {
             return;
         }
         let _ = self.reap(Duration::ZERO);
+        let _ = self.write_artifacts();
     }
 }
 
@@ -420,7 +473,7 @@ fn latch_tool_violation(capture: &mut Capture) {
         && capture.tool_violation.is_none()
         && let Some(row) = normalized_screen(&capture.parser)
             .lines()
-            .find(|line| line.contains("restart_test_dummy"))
+            .find(|line| line.contains("restart_test_dummy") || line.contains("agent_start"))
         && (row.contains("pending") || row.contains('…'))
     {
         capture.tool_violation = Some(row.to_owned());
@@ -439,6 +492,10 @@ fn normalized_screen(parser: &vt100::Parser) -> String {
 }
 
 fn prompt_ready(parser: &vt100::Parser) -> bool {
+    prompt_ready_for(parser, "Write a message to main...")
+}
+
+fn prompt_ready_for(parser: &vt100::Parser, needle: &str) -> bool {
     let (cursor_row, _) = parser.screen().cursor_position();
     parser
         .screen()
@@ -446,18 +503,8 @@ fn prompt_ready(parser: &vt100::Parser) -> bool {
         .lines()
         .enumerate()
         .any(|(row, line)| {
-            row as u16 == cursor_row
-                && line.contains("Write a message to main...")
-                && !line.contains("pending")
+            row as u16 == cursor_row && line.contains(needle) && !line.contains("pending")
         })
-}
-
-fn process_group_exists(pgid: Pid) -> bool {
-    match kill(Pid::from_raw(-pgid.as_raw()), None) {
-        Ok(()) | Err(nix::errno::Errno::EPERM) => true,
-        Err(nix::errno::Errno::ESRCH) => false,
-        Err(_) => true,
-    }
 }
 
 /// Ensures the sticky oracle catches a pending-to-ok repaint even when both
@@ -479,6 +526,27 @@ fn bytewise_capture_latches_pending_before_same_read_terminal_repaint() {
     );
     assert!(capture.tool_violation.is_some());
     assert!(normalized_screen(&capture.parser).contains("restart_test_dummy ok"));
+}
+
+/// Ensures S8 applies the same sticky historical-row oracle to the production
+/// `agent_start` call that created the restored worker.
+#[test]
+fn bytewise_capture_latches_agent_start_pending_repaint() {
+    let mut capture = Capture {
+        raw: Vec::new(),
+        frames: VecDeque::new(),
+        parser: vt100::Parser::new(ROWS, COLS, 10),
+        closed: false,
+        tool_violation: None,
+        tool_latch_armed: true,
+    };
+    process_capture_bytes(
+        &mut capture,
+        b"agent_start [worker] pending\r\x1b[2Kagent_start [worker] ok",
+        |_| false,
+    );
+    assert!(capture.tool_violation.is_some());
+    assert!(normalized_screen(&capture.parser).contains("agent_start [worker] ok"));
 }
 
 /// Ensures cursor-repositioning C0 controls cannot erase a pending state before

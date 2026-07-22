@@ -81,7 +81,8 @@ readiness, proves one conservative repair and balanced explicit continuation,
 then proves the next cold resume adds no duplicate. S7 composes quiescent,
 dispatch-uncertain, and interrupted-tool state in one four-agent session and
 proves a second no-input resume adds no cross-agent work or durable suffix. S8
-remains planned.
+is implemented by
+`core_resume::multi_agent::public_terminal_cold_resume_selects_main_and_worker`.
 
 ## Test boundaries and oracles
 
@@ -488,14 +489,14 @@ belongs to that worker; the uncertain worker remains unfinished and undispatched
 
 ### S8 — Public terminal and manual tmux acceptance
 
-Add one Unix-only spawned-PTY gate based on S1 after the headless behavior is
-stable. Create and complete the main/worker pair in headless Boot A, where exact
+The Unix-only spawned-PTY gate is based on S1. It creates and completes the
+main/worker pair in headless Boot A, where exact
 `ctx_id` lane bindings are available. Boot B runs the exact universal
 `tau -r <session-id>` against the same private config, stores, and checkpointed
 agent-to-lane bindings. This avoids asking the public terminal's initial
 no-`ctx_id` prompt to select among multiple unbound lanes.
 
-Use the VT model only to prove that both restored conversations can be selected,
+The VT model proves only that both restored conversations can be selected,
 their terminal rows do not become pending again, and a targeted worker prompt
 renders after its restored transcript. Drive selection with
 `/agent switch <stable-id>` using IDs from the side observer; do not add
@@ -507,6 +508,9 @@ Finally run an opt-in warm-process manual UI smoke:
 
 ```sh
 cargo build -p tau --bin tau
+scratch_parent=$(mktemp -d "${TMPDIR:-/tmp}/tau-s8-tmux.XXXXXX")
+scratch_root="$scratch_parent/root"
+tmux_session=tau-s8-smoke
 target/debug/tau dev tmux start \
   --tau-bin target/debug/tau \
   --scratch-root "$scratch_root" \
@@ -530,12 +534,18 @@ target/debug/tau dev tmux stop \
   --scratch-root "$scratch_root" \
   --session "$tmux_session" \
   --remove-scratch
+rmdir -- "$scratch_parent"
 ```
 
 The scratch may contain copied allowlisted authentication state; remove it
 rather than retaining it as a normal failure artifact. Record only IDs,
 lifecycle, selection, and completion observations. Do not assert provider
 wording or make this credentialed run a CI gate.
+If Tau already exited and tmux removed the session before `stop` can clean the
+root, verify `$scratch_root` against the exact path printed by `start`, require
+that the root and `.tau-dev-tmux-scratch` marker are non-symlinks, and compare the
+regular marker's exact bytes with `tau dev tmux scratch v1\n` before removing
+that exact directory manually.
 
 ## Per-scenario acceptance checklist
 

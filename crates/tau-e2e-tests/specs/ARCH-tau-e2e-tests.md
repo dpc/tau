@@ -95,6 +95,19 @@ terminal row, a replay-aware side UI peer is authoritative for delivery ordering
 and replay boundaries, and typed `SessionStore`/`AgentStore` reads are
 authoritative for membership and transcript prefix/suffix integrity.
 
+S8 adds a separate topology under that same target. A test-only headless daemon
+first completes the production `agent_start` main/worker flow with exact
+`ctx_id` lane bindings. After bounded process-group and socket cleanup, only
+Boot B runs the exact universal `tau -r <session-id>` under the PTY against the
+same private config, stores, and fake-provider checkpoint. Stable typed agent IDs
+drive explicit terminal switches. The VT model is authoritative only for
+transcript selection, the completed `agent_start` row remaining terminal, and
+the targeted worker continuation appearing after its restored transcript.
+Replay-aware socket delivery, directed rosters, typed multi-agent stores, and
+exact fake-provider consumption remain independent authorities. This does not
+extend terminal rendering, production-provider, crash-exact, watch-restoration,
+or recovery claims.
+
 The complementary core-shell resume gate is headless so failures localize to the
 production extension boundary already packaged by the same universal binary.
 It replaces both daemon and `component ext-shell`, resumes the same durable

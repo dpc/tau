@@ -52,6 +52,68 @@ This workflow complements automated tests; it is not a replacement for focused
 regression coverage. Reusable steps live in
 `.agents/skills/tau-e2e-testing-tmux/SKILL.md`.
 
+### Warm-process multi-agent smoke
+
+Use this opt-in smoke only with a trusted provider profile explicitly allowlisted
+in `~/.config/tau/testing.yaml`. It exercises the current process; it is not a
+cold-resume test and must not become a credentialed CI gate.
+
+```sh
+cargo build -p tau --bin tau
+scratch_parent=$(mktemp -d "${TMPDIR:-/tmp}/tau-s8-tmux.XXXXXX")
+scratch_root="$scratch_parent/root"
+tmux_session=tau-s8-smoke
+target/debug/tau dev tmux start \
+  --tau-bin target/debug/tau \
+  --scratch-root "$scratch_root" \
+  --session "$tmux_session"
+```
+
+Inside the isolated session, create a main and worker, inspect `/agent`, select
+each with `/agent switch <agent-id>`, and send one follow-up. From a separate
+shell using that scratch environment, verify the directed external roster with:
+
+```sh
+HOME="$scratch_root/home" \
+XDG_CONFIG_HOME="$scratch_root/config" \
+XDG_STATE_HOME="$scratch_root/state" \
+XDG_RUNTIME_DIR="$scratch_root/run" \
+target/debug/tau agent list <session-id>
+```
+
+Record only agent/session IDs and lifecycle, selection, and completion outcomes;
+do not retain provider wording or copied authentication state. The helper cannot
+pass `-r` to its child Tau, and its tmux session ends when Tau exits. It therefore
+does **not** test manual cold resume. The Unix spawned-PTY `core_resume` gate owns
+public-terminal cold-resume acceptance until the helper gains a tested resume
+argument boundary.
+
+Always remove the scratch root after the smoke:
+
+```sh
+target/debug/tau dev tmux stop \
+  --scratch-root "$scratch_root" \
+  --session "$tmux_session" \
+  --remove-scratch
+rmdir -- "$scratch_parent"
+```
+
+If Tau has already exited, tmux may have removed the session before `stop` can
+run its cleanup path. In that failure case, compare `$scratch_root` with the
+exact `scratch root:` printed by `start`, verify it is non-empty and not `/`,
+then require the helper's exact non-symlink marker before removing that exact
+directory manually:
+
+```sh
+marker="$scratch_root/.tau-dev-tmux-scratch"
+test -n "$scratch_root" && test "$scratch_root" != / &&
+  test -d "$scratch_root" && test ! -L "$scratch_root" &&
+  test -f "$marker" && test ! -L "$marker" &&
+  printf 'tau dev tmux scratch v1\n' | cmp -s - "$marker" &&
+  rm -rf -- "$scratch_root" &&
+  rmdir -- "$scratch_parent"
+```
+
 
 ## Provider response streaming tests
 
@@ -111,6 +173,14 @@ Tau binary under a fixed PTY for a fresh boot and explicit
 `tau -r <session-id>` boot. Its VT model checks the completed dummy row is always
 terminal throughout Boot B historical restoration and the fresh resumed turn;
 Boot A is allowed to show the ordinary live pending state before completion.
+A second gate creates and completes the production `agent_start` main/worker pair
+through a headless Boot A with exact lane correlations, then starts only Boot B
+under the public PTY. Stable IDs from typed protocol facts drive explicit
+`/agent switch` commands for both restored transcripts and one targeted worker
+follow-up. Replay boundaries, directed rosters, typed multi-agent store
+prefixes/suffixes, exact provider consumption, and process-group/socket cleanup
+remain independent oracles; the VT model proves only selection, terminal
+historical rows, and transcript ordering.
 A side UI observer preserves replay metadata and typed CBOR
 store reads prove identity and prefix/suffix durability. This is one narrow
 known-bug terminal projection gate, not broad rendering fidelity. The lane does

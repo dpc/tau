@@ -133,6 +133,17 @@ An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.
 
+S8's companion core-resume case adds a test-only headless Boot A process before
+the universal PTY resume. It enables only the synthetic fake provider, exposes
+only harness-owned `agent_start` to the fixed main role, and exposes no tools to
+the fixed worker role. Prompts, roles, provider output, and lane bindings are
+closed scenario data; private `env_clear` HOME/XDG roots provide the only config,
+state, runtime, and checkpoint inputs. The fixture owns the daemon/provider
+process group and generation socket through bounded TERM/KILL cleanup, retains
+only bounded stderr/observer/PTY diagnostics, and verifies the socket, lock, and
+process group disappear before reuse. This adds no network, credential, shell,
+arbitrary prompt, production-provider, or manual cold-resume authority.
+
 The headless core-shell resume gate is a controlled production-extension
 exception. It enables only the fake provider and exact universal
 `component ext-shell`, exposes only `workdir` and `edit`, keeps directory locking

@@ -38,7 +38,10 @@ synchronized interrupted-worker restore. S6 instead exposes only
 main retains only `agent_start`. S7 uses one main, two tool-free worker roles,
 and one repair-worker role exposing that same sole dummy. Its main consumes the
 existing two production-start pairs; one fixed durable UI creation supplies the
-repair worker without extending the fake grammar. The fake
+repair worker without extending the fake grammar. S8 reuses S1's fixed
+production-main and tool-free worker roles. Its headless Boot A enables only the
+fake-provider extension and exposes only harness-owned `agent_start` to the main;
+its universal PTY Boot B preserves that exact extension/tool surface. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
@@ -235,6 +238,18 @@ warning. The second snapshot equals the first before one explicit repair-worker
 continuation consumes the tenth action. Exact checkpoint bindings, per-agent
 journals, and provider budgets reject warning-to-model delivery, lane rebinding,
 repair leakage, or automatic redispatch.
+S8 uses two lanes and five scenario actions. Headless Boot A consumes three main
+actions across exactly five main provider turns and one worker action/turn.
+Universal PTY Boot B replay consumes nothing, then one explicit worker follow-up
+consumes the fifth action and exactly one worker provider turn; the main consumes
+zero Boot B turns. Stable IDs from typed creation facts drive worker-to-main-to-
+worker `/agent switch` transitions without a picker. The VT oracle covers only
+selected restored transcripts, the completed `agent_start` row never becoming
+pending, and fresh worker transcript ordering. Side replay boundaries, exact
+replayed `agent_start` lifecycle, post-boundary directed current/history rosters,
+typed two-agent store record counts/prefixes/suffixes, the fake checkpoint, and
+bounded process-group/socket cleanup reject replay work, lane rebinding,
+cross-agent routing, and partial cleanup.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

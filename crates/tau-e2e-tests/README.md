@@ -35,6 +35,12 @@ with explicit `tau -r <session-id>`, and checks the actual VT projection never
 repaints the completed row as pending. A replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.
+Its multi-agent case instead creates and completes the S1 production
+main/worker pair in a headless Boot A, then runs the universal resumed Boot B
+under the PTY. It selects both restored transcripts only by stable ID, submits
+one targeted worker follow-up, and combines the narrow VT evidence with directed
+rosters, replay metadata, exact fake-provider consumption, typed multi-agent
+store prefixes/suffixes, and bounded process/socket cleanup.
 The separate headless `core_shell_resume` gate runs that universal binary as the
 bundled `component ext-shell`, exposes only `workdir` and `edit`, and proves a
 canonical per-agent workdir plus a relative context-checked edit survive full

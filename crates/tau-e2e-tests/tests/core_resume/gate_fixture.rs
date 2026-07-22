@@ -31,6 +31,8 @@ pub(super) struct GateFixture {
     artifacts: PathBuf,
     /// Whether test completion was acknowledged.
     completed: Cell<bool>,
+    /// Exact extension names enabled at the universal CLI boundary.
+    enabled_extensions: &'static [&'static str],
 }
 
 impl GateFixture {
@@ -38,6 +40,22 @@ impl GateFixture {
     pub(super) fn new(
         scenario: &ScenarioV2,
         fake_provider_bin: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_mode(scenario, fake_provider_bin, FixtureMode::DummyTool)
+    }
+
+    /// Creates the closed S8 production-main/worker configuration.
+    pub(super) fn new_multi_agent(
+        scenario: &ScenarioV2,
+        fake_provider_bin: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_mode(scenario, fake_provider_bin, FixtureMode::MultiAgent)
+    }
+
+    fn new_with_mode(
+        scenario: &ScenarioV2,
+        fake_provider_bin: &Path,
+        mode: FixtureMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let tempdir = TempDir::new()?;
         std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -95,29 +113,50 @@ impl GateFixture {
                 "config": { "scenario": scenario },
             }),
         );
-        extensions.insert(
-            "test-dummy".to_owned(),
-            serde_json::json!({
-                "enable": true,
-                "require": true,
-                "command": [tau_bin],
-                "suffix": ["component", "ext-test-dummy"],
-                "role": "tool",
-                "config": { "restart_mode": "success" },
-            }),
-        );
+        if mode == FixtureMode::DummyTool {
+            extensions.insert(
+                "test-dummy".to_owned(),
+                serde_json::json!({
+                    "enable": true,
+                    "require": true,
+                    "command": [tau_bin],
+                    "suffix": ["component", "ext-test-dummy"],
+                    "role": "tool",
+                    "config": { "restart_mode": "success" },
+                }),
+            );
+        }
+        let (default_role, roles) = match mode {
+            FixtureMode::DummyTool => (
+                "deterministic-e2e",
+                serde_json::json!({
+                    "deterministic-e2e": {
+                        "model": "fake/test",
+                        "tools": ["restart_test_dummy"],
+                    }
+                }),
+            ),
+            FixtureMode::MultiAgent => (
+                "deterministic-main",
+                serde_json::json!({
+                    "deterministic-main": {
+                        "model": "fake/test",
+                        "tools": ["agent_start"],
+                    },
+                    "deterministic-worker": {
+                        "model": "fake/test",
+                        "tools": [],
+                    }
+                }),
+            ),
+        };
         let harness = serde_json::json!({
             "agents": {
-                "default_role": "deterministic-e2e",
+                "default_role": default_role,
                 "id_template": "main",
                 "role_groups": {
                     "e2e": {
-                        "roles": {
-                            "deterministic-e2e": {
-                                "model": "fake/test",
-                                "tools": ["restart_test_dummy"],
-                            }
-                        }
+                        "roles": roles
                     }
                 }
             },
@@ -157,6 +196,10 @@ impl GateFixture {
             cwd,
             artifacts,
             completed: Cell::new(false),
+            enabled_extensions: match mode {
+                FixtureMode::DummyTool => &["e2e-fake-provider", "test-dummy"],
+                FixtureMode::MultiAgent => &["e2e-fake-provider"],
+            },
         })
     }
 
@@ -173,15 +216,44 @@ impl GateFixture {
             .env("TERM", "xterm-256color")
             .env("LANG", "C.UTF-8")
             .arg("--disable-extensions-all")
-            .arg("--enable-extension")
-            .arg("e2e-fake-provider")
-            .arg("--enable-extension")
-            .arg("test-dummy")
             .current_dir(&self.cwd);
+        for extension in self.enabled_extensions {
+            command.arg("--enable-extension").arg(extension);
+        }
         if let Some(session_id) = resume {
             command.arg("-r").arg(session_id);
         }
         command
+    }
+
+    /// Builds the scrubbed S8 headless-daemon command over these same config,
+    /// state, runtime, checkpoint, and artifact roots.
+    pub(super) fn headless_command(&self, daemon_bin: &Path, socket: &Path) -> Command {
+        let mut command = Command::new(daemon_bin);
+        command
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env("XDG_STATE_HOME", &self.state_home)
+            .env("XDG_CACHE_HOME", &self.cache_home)
+            .env("XDG_RUNTIME_DIR", &self.runtime_home)
+            .env("LANG", "C.UTF-8")
+            .arg(socket)
+            .arg(self.tau_state())
+            .arg(self.config_home.join("tau"))
+            .arg(self.tau_state())
+            .arg("new")
+            .current_dir(&self.cwd);
+        command
+    }
+
+    /// Returns a short private socket path for headless Boot A.
+    pub(super) fn headless_socket(&self) -> PathBuf {
+        self.tempdir
+            .as_ref()
+            .expect("fixture root remains available")
+            .path()
+            .join("boot-a.sock")
     }
 
     /// Returns the private runtime root containing daemon discovery files.
@@ -240,10 +312,24 @@ impl GateFixture {
         self.artifacts.join(name)
     }
 
+    /// Reads the fake provider's bounded semantic trace.
+    pub(super) fn trace(&self) -> Result<String, std::io::Error> {
+        std::fs::read_to_string(self.artifacts.join("fake-provider.trace"))
+    }
+
     /// Marks all exact assertions and cleanup complete.
     pub(super) fn complete(&self) {
         self.completed.set(true);
     }
+}
+
+/// Closed role/extension surface selected for one core-resume scenario.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixtureMode {
+    /// Original single-agent gate with the restart dummy tool.
+    DummyTool,
+    /// S8 main/worker gate with only harness-owned `agent_start`.
+    MultiAgent,
 }
 
 impl Drop for GateFixture {

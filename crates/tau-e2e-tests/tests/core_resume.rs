@@ -11,14 +11,20 @@ use tau_proto::{
 
 #[path = "core_resume/gate_fixture.rs"]
 mod gate_fixture;
+#[path = "core_resume/headless_process.rs"]
+mod headless_process;
+#[path = "core_resume/multi_agent.rs"]
+mod multi_agent;
 #[path = "core_resume/observer.rs"]
 mod observer;
+#[path = "core_resume/process_group.rs"]
+mod process_group;
 #[path = "core_resume/pty_process.rs"]
 mod pty_process;
 
 use gate_fixture::GateFixture;
 use observer::{ObservedEvent, SideObserver, discover_daemon};
-use pty_process::PtyProcess;
+use pty_process::{PtyArtifacts, PtyProcess};
 
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -61,7 +67,7 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
     let mut boot_a = PtyProcess::spawn(
         fixture.command(None),
         false,
-        Some((
+        Some(PtyArtifacts::new(
             fixture.artifact_path("boot-a-pty.raw.bounded"),
             fixture.artifact_path("boot-a-pty.normalized.txt"),
         )),
@@ -106,7 +112,7 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
     let mut boot_b = PtyProcess::spawn(
         fixture.command(Some(session_id.as_str())),
         true,
-        Some((
+        Some(PtyArtifacts::new(
             fixture.artifact_path("boot-b-pty.raw.bounded"),
             fixture.artifact_path("boot-b-pty.normalized.txt"),
         )),
