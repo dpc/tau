@@ -521,6 +521,236 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     h.shutdown().expect("shutdown");
 }
 
+fn shell_workdir_prompt_fixture() -> (TempDir, Harness, tau_proto::AgentId) {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = crate::parse_agent_id(
+        h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent id"),
+    );
+    h.agent_context.clear();
+    (td, h, agent_id)
+}
+
+fn publish_shell_workdir_context(
+    h: &mut Harness,
+    agent_id: &tau_proto::AgentId,
+    workdir_tool_name: &str,
+    extension_name: &str,
+    label: &str,
+    path: &str,
+    status: &str,
+) {
+    let contributor = h
+        .registry
+        .all_tool_providers()
+        .into_iter()
+        .find(|provider| provider.tool.name.as_str() == workdir_tool_name)
+        .map(|provider| provider.connection_id.clone())
+        .expect("workdir tool provider");
+    h.agent_context.publish(
+        agent_id.clone(),
+        tau_proto::AgentContextKey::new("workdir"),
+        contributor,
+        extension_name.to_owned(),
+        tau_proto::AgentContextValue(serde_json::json!({
+            "label": label,
+            "path": path,
+            "status": status,
+        })),
+    );
+}
+
+fn render_shell_workdir_prompt(h: &Harness, agent_id: &tau_proto::AgentId) -> String {
+    let role_name = h.selected_role.as_str();
+    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, role_name);
+    let specs = h.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+    h.try_build_system_prompt_for_role_and_agent(
+        role_name,
+        Some(agent_id),
+        &specs,
+        model.as_ref(),
+        false,
+    )
+    .expect("render shell workdir prompt")
+}
+
+/// One visible default shell instance must get concise, actionable persistent
+/// workdir guidance and its current dynamic path.
+#[test]
+fn shell_workdir_prompt_guides_one_default_instance() {
+    let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "core-shell",
+        "default",
+        "/srv/project",
+        "available",
+    );
+
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert!(prompt.contains("### Shell workdirs"));
+    assert!(prompt.contains("default shell tools (`workdir`): `/srv/project` [available]"));
+    assert!(prompt.contains("there is no global shell cwd"));
+    assert!(prompt.contains("project root before project work"));
+    assert!(prompt.contains("configured directory-scoped wrappers"));
+    assert!(prompt.contains("notably `direnv exec .`"));
+    assert!(prompt.contains("in a later tool turn after success"));
+    assert!(prompt.contains("sibling calls have no workdir-first ordering"));
+}
+
+/// Prefix-associated shell families must render independent paths and matching
+/// workdir names without multiplying the shared guidance fragment.
+#[test]
+fn shell_workdir_prompt_renders_prefixed_instances_independently() {
+    let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
+    let fragment = h
+        .extension_prompt_fragments
+        .values()
+        .find_map(|fragments| fragments.get("shell.workdir"))
+        .cloned()
+        .expect("core shell workdir fragment");
+    h.extension_prompt_fragments.insert(
+        "shell-prod".into(),
+        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
+    );
+    let mut prod_workdir = shared_test_tool_spec("prod_workdir");
+    prod_workdir.tags = vec![tau_proto::ToolTag::new("shell:workdir")];
+    h.registry.register("shell-prod", prod_workdir);
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "core-shell",
+        "default",
+        "/srv/default-project",
+        "available",
+    );
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "prod_workdir",
+        "prod-shell",
+        "prod",
+        "/srv/prod-project",
+        "available",
+    );
+
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert_eq!(prompt.matches("### Shell workdirs").count(), 1);
+    assert_eq!(prompt.matches("there is no global shell cwd").count(), 1);
+    assert!(prompt.contains("default shell tools (`workdir`): `/srv/default-project` [available]"));
+    assert!(
+        prompt.contains("`prod_*` shell tools (`prod_workdir`): `/srv/prod-project` [available]")
+    );
+
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .disable_tools
+        .push(ToolName::new("prod_workdir"));
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert_eq!(prompt.matches("### Shell workdirs").count(), 1);
+    assert!(prompt.contains("/srv/default-project"));
+    assert!(!prompt.contains("/srv/prod-project"));
+}
+
+/// A role that hides the persistent setter must not retain guidance for a tool
+/// the model cannot call, even while other shell tools remain visible.
+#[test]
+fn shell_workdir_prompt_is_absent_when_workdir_is_hidden() {
+    let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "core-shell",
+        "default",
+        "/srv/hidden-workdir",
+        "available",
+    );
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .disable_tools
+        .push(ToolName::new("workdir"));
+
+    let role_name = h.selected_role.as_str();
+    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, role_name);
+    let specs = h.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+    assert!(!specs.iter().any(|spec| spec.name.as_str() == "workdir"));
+    assert!(specs.iter().any(|spec| {
+        spec.tags
+            .iter()
+            .any(|tag| tag.as_str().starts_with("shell:"))
+    }));
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert!(!prompt.contains("### Shell workdirs"));
+    assert!(!prompt.contains("/srv/hidden-workdir"));
+}
+
+/// An unavailable remembered directory remains visible as state that the model
+/// must repair; prompt rendering must not silently present it as usable.
+#[test]
+fn shell_workdir_prompt_marks_unavailable_state() {
+    let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "core-shell",
+        "default",
+        "/srv/missing-project",
+        "unavailable",
+    );
+
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert!(
+        prompt.contains("default shell tools (`workdir`): `/srv/missing-project` [unavailable]")
+    );
+}
+
+/// A stale extension fragment cannot advertise shell workdir behavior after
+/// every shell tool provider has disappeared.
+#[test]
+fn shell_workdir_prompt_is_absent_without_a_shell_instance() {
+    let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "stale-shell",
+        "default",
+        "/srv/stale-shell",
+        "available",
+    );
+    let shell_connections = h
+        .registry
+        .all_tool_providers()
+        .into_iter()
+        .filter(|provider| {
+            provider
+                .tool
+                .tags
+                .iter()
+                .any(|tag| tag.as_str().starts_with("shell:"))
+        })
+        .map(|provider| provider.connection_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for connection_id in shell_connections {
+        h.registry.unregister_connection(connection_id.as_str());
+    }
+
+    let prompt = render_shell_workdir_prompt(&h, &agent_id);
+    assert!(!prompt.contains("### Shell workdirs"));
+    assert!(!prompt.contains("/srv/stale-shell"));
+}
+
 /// Multiple shell instances publish one shared coalescing fragment rather than
 /// rendering every prefix-associated workdir once per instance.
 #[test]

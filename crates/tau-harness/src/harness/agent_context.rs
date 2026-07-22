@@ -65,9 +65,20 @@ impl AgentContextStore {
     }
 
     /// Return the Handlebars-visible `agent_context` object for one agent.
+    #[cfg(test)]
     pub(crate) fn template_value(
         &self,
         agent_id: Option<&tau_proto::AgentId>,
+    ) -> serde_json::Value {
+        self.template_value_filtered(agent_id, |_, _| true)
+    }
+
+    /// Return the Handlebars-visible context after applying one prompt-specific
+    /// contributor filter.
+    pub(crate) fn template_value_filtered(
+        &self,
+        agent_id: Option<&tau_proto::AgentId>,
+        mut include: impl FnMut(&tau_proto::AgentContextKey, &tau_proto::ConnectionId) -> bool,
     ) -> serde_json::Value {
         let mut object = serde_json::Map::new();
         let Some(agent_id) = agent_id else {
@@ -79,6 +90,7 @@ impl AgentContextStore {
         for (key, contributions) in keys {
             let mut wrappers: Vec<_> = contributions
                 .iter()
+                .filter(|(connection_id, _)| include(key, connection_id))
                 .map(|(connection_id, contribution)| {
                     (
                         contribution.extension_name.clone(),

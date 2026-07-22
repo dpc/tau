@@ -34,6 +34,16 @@ use an absolute `workdir` setter to repair them. Each configured ext-shell
 instance initializes only a missing metadata key from its frozen actual process
 startup cwd and remains independent of other instances.
 
+When `workdir` is visible, Tau's dynamic shell guidance normally directs the
+agent to set the matching instance's workdir to the project root before project
+work. That path becomes the cwd/base for later shell and filesystem calls from
+that instance only. It can select configured directory-scoped wrappers such as
+`direnv exec .` and affects other cwd-sensitive wrappers/tools; Tau does not
+assume such a wrapper is enabled. A dependent call must follow a successful
+setter in a later tool turn because sibling calls have no workdir-first
+ordering. Prefixed shell instances show their matching prefix and independent
+path/status, and hidden workdir capabilities do not emit this guidance.
+
 User `!`/`!!` commands are routed to exactly one generic shell instance. They
 fail without execution when none is available, when several are ambiguous, or
 when the target session/agent workdir is not ready.

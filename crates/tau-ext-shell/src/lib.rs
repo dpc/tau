@@ -2273,8 +2273,17 @@ fn shell_workdir_prompt_fragment() -> PromptFragment {
         "shell.workdir",
         PromptPriority::new(900),
         PromptContent::new(
-            "{{#if agent_context.workdir}}{{#each agent_context.workdir}}Workdir \
-             ({{value.label}}): {{value.path}} [{{value.status}}]\n{{/each}}{{/if}}",
+            "{{#if agent_context.workdir}}### Shell workdirs\n\nEach shell extension instance \
+             has its own persistent workdir; there is no global shell cwd.\n\
+             {{#each agent_context.workdir}}- {{#if (eq value.label \"default\")}}default shell \
+             tools (`workdir`){{else}}`{{value.label}}_*` shell tools \
+             (`{{value.label}}_workdir`){{/if}}: `{{value.path}}` \
+             [{{value.status}}]\n{{/each}}\nNormally set the matching workdir tool to the project \
+             root before project work. It sets the cwd/base for later shell and filesystem calls \
+             in that same instance. The cwd can select configured directory-scoped wrappers, \
+             notably `direnv exec .`, and affect other cwd-sensitive wrappers/tools. After \
+             changing it, make dependent calls only in a later tool turn after success; sibling \
+             calls have no workdir-first ordering.{{/if}}",
         ),
     )
 }

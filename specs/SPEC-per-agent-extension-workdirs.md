@@ -3,6 +3,13 @@
 The governing choice is
 [DECISION-per-agent-extension-workdirs](DECISION-per-agent-extension-workdirs.md).
 
+## Record justification
+
+Per-agent workdirs span ext-shell metadata folding and tool admission, harness
+context projection and inheritance, extension-instance configuration, and
+user-shell routing. No one local component can describe their shared
+namespace, ordering, visibility, and failure rules completely.
+
 Each shell extension instance owns an independent durable workdir for each agent:
 `(configured extension instance name, agent id) -> workdir`. The configured
 instance name selects the existing inheritable metadata key
@@ -49,8 +56,13 @@ call in a later turn.
 
 Dynamic prompt context reports only the current path/status associated with the
 visible default or configured tool prefix. It does not enumerate configured
-instance identities or repeat tool discovery. Instruction and skill discovery
-remain process/session startup behavior and is not rebased by workdir changes.
+instance identities or repeat tool discovery. When the effective role/model hides
+the workdir capability, its shell-workdir guidance is also absent. The guidance
+explains that each visible shell family has independent state, that a setter
+affects later calls from only that instance, and that dependent calls require a
+later turn; it may call out cwd-sensitive configured wrappers without claiming
+that any wrapper is enabled. Instruction and skill discovery remain
+process/session startup behavior and is not rebased by workdir changes.
 
 User `!` and `!!` commands execute through exactly one shell instance and from
 the target agent's admission-time workdir. With no instance they fail; with

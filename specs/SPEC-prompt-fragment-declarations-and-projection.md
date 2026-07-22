@@ -42,7 +42,10 @@ consumer-specific collision rule, only the lexicographically first
 `shell.workdir` contributor in `BTreeMap<ConnectionId, …>` iteration order is
 prompt-visible, selected before later priority/source/name sorting. Other
 committed slots remain valid runtime declarations and can become visible after
-disconnect or respawn changes the contributor set.
+disconnect or respawn changes the contributor set. The consumer omits this
+shared fragment entirely when the turn's effective tool snapshot contains no
+`shell:workdir` capability, so role/model/tool hiding cannot leave unusable
+guidance behind.
 
 This specification implements the prompt-fragment part of
 [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)

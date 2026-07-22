@@ -11,6 +11,26 @@ fn prompt_fragment(name: &str, template: &str) -> Event {
     })
 }
 
+/// Register the effective workdir capability required to consume the shared
+/// shell fragment from one test contributor.
+fn register_workdir_capability(h: &mut Harness, source: &str) {
+    h.registry.register(
+        source,
+        tau_proto::ToolSpec {
+            name: tau_proto::ToolName::new(format!("{}_workdir", source.replace('-', "_"))),
+            model_visible_name: None,
+            description: None,
+            tool_type: tau_proto::ToolType::Function,
+            parameters: None,
+            format: None,
+            tags: vec![tau_proto::ToolTag::new("shell:workdir")],
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+}
+
 /// Return the current template for one source/name projection slot.
 fn projected_template<'a>(h: &'a Harness, source: &str, name: &str) -> Option<&'a str> {
     h.extension_prompt_fragments
@@ -465,6 +485,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     for (source, template) in [("shell-a", "WORKDIR A"), ("shell-b", "WORKDIR B")] {
         connect_ready_configured_extension(&mut h, source, source, tau_proto::ClientKind::Tool);
+        register_workdir_capability(&mut h, source);
         h.handle_extension_event_inner_with_persist(
             source,
             prompt_fragment("shell.workdir", template),
@@ -492,6 +513,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     assert_eq!(visible[0].template.as_str(), "WORKDIR B");
 
     connect_ready_configured_extension(&mut h, "shell-0", "shell-a", tau_proto::ClientKind::Tool);
+    register_workdir_capability(&mut h, "shell-0");
     h.handle_extension_event_inner_with_persist(
         "shell-0",
         prompt_fragment("shell.workdir", "WORKDIR RESPAWN"),

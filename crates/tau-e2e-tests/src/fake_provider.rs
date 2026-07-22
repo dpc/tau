@@ -1855,7 +1855,7 @@ impl FakeState {
                     let workdirs = prompt
                         .system_prompt
                         .lines()
-                        .filter(|line| line.contains("Workdir "))
+                        .filter(|line| line.starts_with("- default shell tools (`workdir`):"))
                         .collect::<Vec<_>>();
                     if workdirs.len() != 1 || !workdirs[0].contains("/shell-base/project") {
                         return Err(self.mismatch(

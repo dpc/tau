@@ -1,5 +1,13 @@
 # SPEC-tau-harness-prompt-dispatch: Prompt Dispatch
 
+## Record justification
+
+Prompt dispatch combines model and role selection, effective tool policy,
+provider definitions, authorization snapshots, dynamic context, prompt
+fragments, and durable lifecycle events. These responsibilities cross harness
+modules and provider/extension boundaries, so local documentation cannot state
+the complete dispatch contract.
+
 Every accepted visible UI submission commits a content-free
 `agent.user_interaction_recorded` fact, including an accepted queued prompt that
 may later be recalled. Live untargeted shell output chooses among user agents by
@@ -73,6 +81,15 @@ Tool examples are registration metadata, not provider definitions. After a
 failed call, the harness may append one bounded relevant example on the owning
 agent branch and records that injection so retry loops do not receive repeated
 scaffolding.
+
+The extension-level `shell.workdir` fragment is prompt-visible only when the
+effective snapshot contains a tool tagged `shell:workdir`. This keeps persistent
+workdir guidance aligned with role, model, and global tool hiding. The existing
+cross-source collision rule still emits at most one copy when several shell
+instances publish the shared fragment. Workdir context contributions are also
+filtered to the connections that own an effective `shell:workdir` tool, so
+hiding one prefixed instance does not expose its path through another instance's
+shared fragment.
 
 Tools tagged `provider-content:image` survive effective-tool filtering only
 when the selected route publishes image in both `input_modalities` and

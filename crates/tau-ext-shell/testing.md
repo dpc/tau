@@ -25,6 +25,9 @@ setter admission/commit/cancellation, concurrent rejection, and call-local
 `cwd`/`workdir` behavior. Harness-boundary tests cover provider cardinality,
 stale-session rejection, targeted execution, multi-UI projection, delivery loss,
 bounded IDs, delayed events, and exactly one terminal result.
+Prompt coverage asserts the shell-owned declaration and prose, default/prefixed
+and unavailable rendering, effective-capability and contributor filtering,
+shared-fragment coalescing/lifecycle, and the cold-resume prompt oracle.
 Protocol tests assert that every user-shell producer emits the `_reported`
 progress/completion names; harness-boundary tests separately lock report commit,
 canonical mapping, exact generation/route authority, activation ordering, and

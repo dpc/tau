@@ -2759,10 +2759,12 @@ fn workdir_schema_keeps_path_optional() {
     assert_eq!(parameters["properties"]["path"]["minLength"], 1);
 }
 
+/// The shell-owned fragment must teach per-instance workdir use without
+/// claiming a process-global cwd or an always-enabled directory wrapper.
 #[test]
 fn startup_registers_shell_workdir_prompt_fragment() {
-    // The cwd prompt prose is owned by the shell extension, not an individual
-    // tool, so it remains available even when shell tools are disabled.
+    // The cwd prompt prose is owned by the shell extension rather than repeated
+    // on every prefixed tool registration.
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_context_provider = false;
@@ -2793,6 +2795,13 @@ fn startup_registers_shell_workdir_prompt_fragment() {
                         .as_str()
                         .contains("agent_context.workdir")
                 );
+                let template = publish.fragment.template.as_str();
+                assert!(template.contains("no global shell cwd"));
+                assert!(template.contains("project root"));
+                assert!(template.contains("direnv exec ."));
+                assert!(template.contains("later tool turn"));
+                assert!(template.contains("sibling calls have no workdir-first ordering"));
+                assert!(template.contains("{{value.label}}_workdir"));
                 found_fragment = true;
             }
             _ => {}

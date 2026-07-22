@@ -20033,6 +20033,22 @@ impl Harness {
         }
         let (prompt_fragments, tool_prompt_fragments) =
             self.gather_prompt_fragment_groups_for_role_specs(role_name, tool_specs);
+        let visible_workdir_contributors = self
+            .registry
+            .all_tool_providers()
+            .into_iter()
+            .filter(|provider| {
+                provider
+                    .tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str() == "shell:workdir")
+                    && tool_specs
+                        .iter()
+                        .any(|spec| spec.name == provider.tool.name)
+            })
+            .map(|provider| provider.connection_id.clone())
+            .collect::<HashSet<_>>();
         let system_template = self.system_template_for_role(role_name)?;
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
@@ -20046,7 +20062,10 @@ impl Harness {
             &self.discovered_skills,
             &prompt_fragments,
             &tool_prompt_fragments,
-            self.agent_context.template_value(agent_id),
+            self.agent_context
+                .template_value_filtered(agent_id, |key, contributor| {
+                    key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
+                }),
             template_context,
             crate::prompt::PromptCapabilities::new(
                 tool_specs
@@ -20130,6 +20149,30 @@ impl Harness {
         role_name: &str,
         effective_specs: Option<&[tau_proto::ToolSpec]>,
     ) -> (Vec<SourcedPromptFragment>, Vec<SourcedToolPromptFragment>) {
+        let providers = self.registry.all_tool_providers();
+        let provider_enabled = |provider: &tau_core::ToolProvider| {
+            effective_specs.map_or_else(
+                || self.is_tool_provider_enabled_for_role(provider, role_name),
+                |specs| specs.iter().any(|spec| spec.name == provider.tool.name),
+            )
+        };
+        let shell_workdir_visible = effective_specs.map_or_else(
+            || {
+                providers.iter().any(|provider| {
+                    provider_enabled(provider)
+                        && provider
+                            .tool
+                            .tags
+                            .iter()
+                            .any(|tag| tag.as_str() == "shell:workdir")
+                })
+            },
+            |specs| {
+                specs
+                    .iter()
+                    .any(|spec| spec.tags.iter().any(|tag| tag.as_str() == "shell:workdir"))
+            },
+        );
         let mut fragments: Vec<_> = self
             .extension_prompt_fragments
             .iter()
@@ -20151,6 +20194,9 @@ impl Harness {
             };
             if sourced.fragment.name != "shell.workdir" {
                 return true;
+            }
+            if !shell_workdir_visible {
+                return false;
             }
             if saw_shell_workdir_fragment {
                 false
@@ -20175,13 +20221,6 @@ impl Harness {
                     }),
             );
         }
-        let providers = self.registry.all_tool_providers();
-        let provider_enabled = |provider: &tau_core::ToolProvider| {
-            effective_specs.map_or_else(
-                || self.is_tool_provider_enabled_for_role(provider, role_name),
-                |specs| specs.iter().any(|spec| spec.name == provider.tool.name),
-            )
-        };
         let enabled_group_keys = providers
             .iter()
             .filter(|provider| provider_enabled(provider))

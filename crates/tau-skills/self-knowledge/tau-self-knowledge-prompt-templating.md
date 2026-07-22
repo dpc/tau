@@ -54,6 +54,12 @@ Prompt fragments can use:
 
 Full system prompt templates additionally receive rendered `prompt_fragments` and `tool_prompt_fragments` arrays. Each item has `name`, `priority`, `content`, and `early`. Tool prompt fragment `content` already includes Tau's automatic ``### `<tool>` instructions`` heading.
 
+Extension fragments can also be capability-gated by their consumer. In
+particular, Tau includes the shared `shell.workdir` fragment only when the
+effective role/model tool snapshot contains a `shell:workdir` capability, and
+coalesces declarations from multiple shell instances into one rendered
+fragment.
+
 ## Helpers
 
 Tau registers these helpers:
