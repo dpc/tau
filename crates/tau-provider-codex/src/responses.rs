@@ -115,6 +115,15 @@ struct CompactCompletion {
     result: Option<Result<String, LlmError>>,
     canceled: bool,
 }
+
+/// Test-only barrier that can hold a compact worker at its exit boundary.
+#[cfg(test)]
+struct CompactWorkerExitGate {
+    /// Announces that network ownership has ended.
+    reached: std::sync::mpsc::SyncSender<()>,
+    /// Releases the worker so its join may complete.
+    release: std::sync::mpsc::Receiver<()>,
+}
 /// Startup-selected ChatGPT Responses protocol contract.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ResponsesMode {
@@ -423,6 +432,28 @@ fn send_compact_request(
     body: serde_json::Value,
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 ) -> Result<Vec<ContextItem>, LlmError> {
+    send_compact_request_inner(
+        agent_prompt_id,
+        config,
+        request,
+        abort,
+        body,
+        network,
+        #[cfg(test)]
+        None,
+    )
+}
+
+/// Implements compact worker ownership with an optional test-only exit barrier.
+fn send_compact_request_inner(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
+    body: serde_json::Value,
+    network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
+    #[cfg(test)] worker_exit_gate: Option<CompactWorkerExitGate>,
+) -> Result<Vec<ContextItem>, LlmError> {
     maybe_debug_write_provider_request(
         agent_prompt_id,
         config,
@@ -454,6 +485,13 @@ fn send_compact_request(
                     "compact HTTP worker panicked".to_owned(),
                 ))
             });
+            #[cfg(test)]
+            if let Some(gate) = worker_exit_gate {
+                gate.reached.send(()).expect("compact exit observer");
+                gate.release
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("bounded compact exit release");
+            }
             let (result_slot, changed) = &*network_completion;
             if let Ok(mut slot) = result_slot.lock() {
                 slot.result = Some(result);

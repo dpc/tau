@@ -1,8 +1,11 @@
 //! OpenRouter profile and bounded discovery/cache behavior.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::ModelName;
@@ -128,6 +131,20 @@ pub fn fetch_openrouter_models(
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<Vec<ChatCompletionsModel>, Box<dyn std::error::Error>> {
     let url = "https://openrouter.ai/api/v1/models";
+    let cache_path = cache_file_path();
+    fetch_openrouter_models_from(api_key, network, url, cache_path.as_deref())
+}
+
+/// Runs discovery against one explicit endpoint and cache path.
+///
+/// The production wrapper supplies OpenRouter's fixed endpoint and standard
+/// cache path; the seam keeps deterministic acceptance off the public network.
+fn fetch_openrouter_models_from(
+    api_key: &str,
+    network: &tau_provider::OutboundNetworkPolicy,
+    url: &str,
+    cache_path: Option<&Path>,
+) -> Result<Vec<ChatCompletionsModel>, Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -154,27 +171,53 @@ pub fn fetch_openrouter_models(
     });
     match result {
         Ok(response) if response.status() == 200 => {
-            let models = runtime.block_on(read_openrouter_models(response, network, url))?;
-            cache_openrouter_models(&models);
-            Ok(models)
-        }
-        err => {
-            if let Some(cached) = cached_openrouter_models() {
-                eprintln!("Network offline/failed. Loaded cached OpenRouter models.");
-                return Ok(cached);
-            }
-
-            match err {
-                Ok(resp) => {
-                    if let Some(error) = network.proxy_response_error(url, resp.status().as_u16()) {
-                        Err(OpenRouterDiscoveryError::Outbound(error).into())
-                    } else {
-                        Err(OpenRouterDiscoveryError::Status(resp.status().as_u16()).into())
-                    }
+            match runtime.block_on(read_openrouter_models(response, network, url)) {
+                Ok(models) if !models.is_empty() => {
+                    cache_openrouter_models(&models, cache_path);
+                    Ok(models)
+                }
+                Ok(_) => Err(OpenRouterDiscoveryError::InvalidResponse.into()),
+                Err(error @ OpenRouterDiscoveryError::Outbound(_)) => {
+                    cached_or_error(cache_path, error)
                 }
                 Err(error) => Err(error.into()),
             }
         }
+        err => {
+            let error = match err {
+                Ok(resp) => {
+                    if let Some(error) = network.proxy_response_error(url, resp.status().as_u16()) {
+                        OpenRouterDiscoveryError::Outbound(error)
+                    } else {
+                        OpenRouterDiscoveryError::Status(resp.status().as_u16())
+                    }
+                }
+                Err(error) => error,
+            };
+            cached_or_error(cache_path, error)
+        }
+    }
+}
+
+/// Returns a non-empty valid cache for an eligible failure, or the failure.
+fn cached_or_error(
+    cache_path: Option<&Path>,
+    error: OpenRouterDiscoveryError,
+) -> Result<Vec<ChatCompletionsModel>, Box<dyn std::error::Error>> {
+    let eligible = match &error {
+        OpenRouterDiscoveryError::Outbound(error) => {
+            error.kind() != tau_provider::OutboundErrorKind::InvalidConfiguration
+        }
+        OpenRouterDiscoveryError::Status(_) => true,
+        OpenRouterDiscoveryError::Runtime
+        | OpenRouterDiscoveryError::BodyTooLarge
+        | OpenRouterDiscoveryError::InvalidResponse => false,
+    };
+    if eligible && let Some(cached) = cached_openrouter_models(cache_path) {
+        eprintln!("Network offline/failed. Loaded cached OpenRouter models.");
+        Ok(cached)
+    } else {
+        Err(error.into())
     }
 }
 
@@ -229,20 +272,20 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
     })
 }
 
-fn cache_openrouter_models(models: &[ChatCompletionsModel]) {
-    let Some(path) = cache_file_path() else {
+fn cache_openrouter_models(models: &[ChatCompletionsModel], path: Option<&Path>) {
+    let Some(path) = path else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(file) = fs::File::create(path) {
-        let _ = serde_json::to_writer(file, models);
+    if let Ok(bytes) = serde_json::to_vec(models) {
+        let _ = tau_config::atomic::atomic_write_following_symlink(path, &bytes, None);
     }
 }
 
-fn cached_openrouter_models() -> Option<Vec<ChatCompletionsModel>> {
-    let file = fs::File::open(cache_file_path()?).ok()?;
+fn cached_openrouter_models(path: Option<&Path>) -> Option<Vec<ChatCompletionsModel>> {
+    let file = fs::File::open(path?).ok()?;
     let cached: Vec<ChatCompletionsModel> = serde_json::from_reader(file).ok()?;
     (!cached.is_empty()).then_some(cached)
 }

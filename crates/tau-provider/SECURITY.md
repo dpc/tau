@@ -55,20 +55,25 @@ proven proxy authentication, and can therefore retry at transport cadence.
 Plain HTTP/WS proxy 407 responses are visible and specifically typed. Error-text
 inspection is prohibited.
 
-The current deterministic acceptance matrix covers these exact topologies:
-direct HTTP; HTTP through an HTTP proxy (absolute form and Basic auth); HTTP
-through an HTTPS proxy using an additive custom CA; direct HTTPS using an
-additive custom CA; WS through an HTTP proxy; and WSS through an HTTP proxy with
-CONNECT followed by custom-CA target TLS. It also covers lowercase precedence,
-ALL_PROXY fallback, syntactic NO_PROXY host/port/CIDR matching, plain-proxy 407
-classification, unsolicited WS extension/subprotocol rejection, compact
-cancellation cleanup, malformed configuration, and no direct fallback after a
-selected cleartext HTTP proxy connection fails.
+The deterministic acceptance matrix covers direct HTTP and HTTPS; HTTP through
+HTTP and HTTPS proxies; HTTPS through HTTP and HTTPS proxies; WS through an HTTP
+proxy; and WSS through HTTP and HTTPS proxies. Nested secure routes prove outer
+proxy TLS, exact authenticated CONNECT scope, inner target TLS, and origin
+request or WebSocket upgrade.
+Negative coverage proves untrusted proxy and target TLS, hidden CONNECT
+rejection, and upgrade rejection without direct fallback. Deterministic
+resolver injection additionally proves selected-proxy DNS failure cannot
+resolve or reach the direct target; an accepted early-close proxy covers socket
+failure.
 
-This phase does not claim deterministic acceptance coverage for nested
-HTTPS/WSS-through-HTTPS-proxy TLS, every DNS/refusal/stall/cancellation failure
-phase, or every negative platform-TLS and mixed-bundle case. Do not broaden the
-supported topology or failure-mode claims until those matrix cases exist.
+The same matrix covers lowercase precedence, ALL_PROXY fallback, syntactic
+NO_PROXY host/port/CIDR matching, every named non-UTF-8 proxy/bypass variable,
+immutable route and CA startup state, strict mixed/duplicate/malformed CA
+bundles, plain-proxy 407 classification, backend redaction canaries,
+unsolicited WS extension/subprotocol rejection, OpenRouter cache fallback
+boundaries, and joined compact cancellation. Stalled Chat Completions header
+and body reads and fresh WebSocket connection waits have separate deterministic
+cancellation coverage.
 
 Reqwest's preconfigured-rustls hook is version-coupled. Dependency upgrades,
 proxy/upgrade changes, new content decoding, or changes to cancellation

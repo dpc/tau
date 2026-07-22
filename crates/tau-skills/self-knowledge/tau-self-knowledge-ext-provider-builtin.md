@@ -85,10 +85,10 @@ optional percent-encoded Basic credentials. SOCKS, PAC/WPAD, desktop discovery,
 integrated authentication, and redirects are unsupported. Restart after changing
 network environment.
 
-Release acceptance covers HTTP through HTTP or HTTPS proxies, WS through an HTTP
-proxy, and WSS through an HTTP proxy followed by target TLS. Nested HTTPS/WSS
-through an HTTPS proxy is not yet acceptance-certified and should be validated
-locally before relying on that combination.
+Release acceptance covers HTTP and HTTPS through HTTP and HTTPS proxies, WS
+through an HTTP proxy, and WSS through HTTP and HTTPS proxies. Secure targets
+through HTTPS proxies cover proxy TLS, CONNECT, target TLS, and the target
+request or WebSocket upgrade as distinct wire layers.
 
 TLS always verifies with platform trust. `TAU_PROVIDER_CA_BUNDLE` can add one
 bounded certificate-only PEM bundle captured at startup; it cannot disable or

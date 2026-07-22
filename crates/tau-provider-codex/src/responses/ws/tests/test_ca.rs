@@ -1,0 +1,44 @@
+//! Generated certificate authority for scripted TLS layers.
+
+/// Generated test-only certificate authority for scripted TLS layers.
+pub(super) struct TestCa {
+    /// Self-signed CA certificate.
+    certificate: rcgen::Certificate,
+    /// CA signing key.
+    key: rcgen::KeyPair,
+}
+
+impl TestCa {
+    /// Generates one isolated certificate authority.
+    pub(super) fn new() -> Self {
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("test CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().expect("test CA key");
+        let certificate = params.self_signed(&key).expect("test CA certificate");
+        Self { certificate, key }
+    }
+
+    /// Returns the CA certificate in PEM form.
+    pub(super) fn pem(&self) -> String {
+        self.certificate.pem()
+    }
+
+    /// Issues a server certificate for one DNS name.
+    pub(super) fn server_config(&self, dns_name: &str) -> rustls::ServerConfig {
+        let leaf_key = rcgen::KeyPair::generate().expect("test leaf key");
+        let leaf = rcgen::CertificateParams::new(vec![dns_name.to_owned()])
+            .expect("test leaf params")
+            .signed_by(&leaf_key, &self.certificate, &self.key)
+            .expect("test leaf certificate");
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                ),
+            )
+            .expect("test TLS server")
+    }
+}

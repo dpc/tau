@@ -25,6 +25,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true
+tau-config.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
 tau-provider-chat-completions.workspace = true

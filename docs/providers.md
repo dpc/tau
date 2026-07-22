@@ -23,10 +23,11 @@ does not fall back to a direct connection. HTTP and HTTPS proxy URLs with
 percent-encoded Basic credentials are supported. SOCKS, PAC/WPAD, desktop proxy
 discovery, integrated authentication, and redirects are unsupported.
 
-The release acceptance suite proves HTTP through HTTP or HTTPS proxies, WS
-through an HTTP proxy, and WSS through an HTTP proxy followed by verified target
-TLS. Nested HTTPS/WSS through an HTTPS proxy is not yet an acceptance-certified
-topology; deployments requiring that combination should validate it locally.
+The release acceptance suite proves HTTP through HTTP and HTTPS proxies, HTTPS
+through HTTP and HTTPS proxies, WS through an HTTP proxy, and WSS through HTTP
+and HTTPS proxies. Secure targets through HTTPS proxies cover proxy TLS,
+authenticated `CONNECT`, target TLS, and the target request or WebSocket upgrade
+as distinct wire layers.
 
 For HTTPS/WSS, reqwest owns the proxy `CONNECT` exchange. Its public API does not
 expose a tunnel rejection's status. Tau therefore reports a hidden CONNECT 407

@@ -3765,6 +3765,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tau-client",
+ "tau-config",
  "tau-core",
  "tau-proto",
  "tau-provider",

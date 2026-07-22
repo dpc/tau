@@ -9,6 +9,51 @@ use tau_proto::{
 use super::*;
 use crate::common::LlmError;
 
+type AbortCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+type AbortCallbacks = std::sync::Arc<std::sync::Mutex<Vec<AbortCallback>>>;
+
+/// Abort source that retains every compact cancellation callback for a test.
+struct CompactCapturingAbort {
+    /// Shared cancellation flag returned by `is_aborted`.
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Registered callbacks invoked by the test driver.
+    wakers: AbortCallbacks,
+}
+
+impl crate::TurnAbort for CompactCapturingAbort {
+    fn is_aborted(&mut self) -> bool {
+        self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn register_waker(&mut self, waker: AbortCallback) -> Box<dyn crate::TurnAbortWaker> {
+        self.wakers.lock().expect("abort wakers").push(waker);
+        Box::new(TestAbortWaker)
+    }
+}
+
+/// Unwind-safe release ownership for the compact worker exit barrier.
+struct CompactExitRelease {
+    /// Sender retained until explicit release or unwind.
+    sender: Option<std::sync::mpsc::SyncSender<()>>,
+}
+
+impl CompactExitRelease {
+    /// Releases the held worker exactly once.
+    fn release(mut self) {
+        if let Some(sender) = self.sender.take() {
+            sender.send(()).expect("release compact worker");
+        }
+    }
+}
+
+impl Drop for CompactExitRelease {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
 /// Ensures successful extension-owned web-content XML remains byte-for-byte
 /// intact on the Codex/Responses native function-call-output path.
 #[test]
@@ -1430,6 +1475,110 @@ fn compact_http_request_cancellation_closes_active_socket() {
     closed_rx
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("canceled socket closed");
+    server.join().expect("compact server");
+}
+
+/// Ensures the public compact owner cannot return cancellation while its
+/// spawned HTTP worker is still inside the worker-exit boundary.
+#[test]
+fn compact_cancellation_joins_worker_before_returning() {
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
+    let address = listener.local_addr().expect("compact address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept compact request");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("bounded server read");
+        accepted_tx.send(()).expect("accepted receiver");
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stream.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("joined compact worker retained socket: {error}"),
+            }
+        }
+    });
+    let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
+        base_url: format!("http://{address}"),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_compact_request(&config, &request).expect("compact body");
+    let network = std::sync::Arc::new(tau_provider::OutboundNetworkPolicy::from_environment(
+        std::collections::BTreeMap::new(),
+        None,
+    ));
+    let aborted = std::sync::Arc::new(AtomicBool::new(false));
+    let wakers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut abort = CompactCapturingAbort {
+        aborted: std::sync::Arc::clone(&aborted),
+        wakers: std::sync::Arc::clone(&wakers),
+    };
+    let (exit_reached_tx, exit_reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (exit_release_tx, exit_release_rx) = std::sync::mpsc::sync_channel(1);
+    let exit_gate = CompactWorkerExitGate {
+        reached: exit_reached_tx,
+        release: exit_release_rx,
+    };
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+
+    std::thread::scope(|scope| {
+        let exit_release = CompactExitRelease {
+            sender: Some(exit_release_tx),
+        };
+        scope.spawn(|| {
+            let result = send_compact_request_inner(
+                "ap-compact-join",
+                &config,
+                &request,
+                &mut abort,
+                body,
+                network,
+                Some(exit_gate),
+            );
+            result_tx.send(result).expect("result receiver");
+        });
+        accepted_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("compact request reached server");
+        aborted.store(true, Ordering::SeqCst);
+        for waker in wakers.lock().expect("abort wakers").clone() {
+            waker();
+        }
+        exit_reached_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("compact worker reached exit gate");
+        assert!(
+            matches!(
+                result_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "compact cancellation returned before worker exit"
+        );
+        exit_release.release();
+        assert!(matches!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("joined cancellation result"),
+            Err(LlmError::Canceled)
+        ));
+    });
     server.join().expect("compact server");
 }
 

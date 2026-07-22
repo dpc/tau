@@ -239,6 +239,32 @@ impl OutboundNetworkPolicy {
     /// Returns a redacted configuration error when the startup snapshot, target
     /// URL, selected proxy, or client construction is invalid.
     pub fn client_for(&self, target: &str) -> Result<reqwest::Client, OutboundError> {
+        let (builder, route_kind) = self.client_builder_for(target)?;
+        Self::build_client(builder, route_kind)
+    }
+
+    /// Builds a client with an explicit resolver for deterministic
+    /// route-failure acceptance without changing the production resolver
+    /// boundary.
+    #[cfg(test)]
+    fn client_for_with_resolver<R>(
+        &self,
+        target: &str,
+        resolver: Arc<R>,
+    ) -> Result<reqwest::Client, OutboundError>
+    where
+        R: reqwest::dns::Resolve + 'static,
+    {
+        let (builder, route_kind) = self.client_builder_for(target)?;
+        Self::build_client(builder.dns_resolver(resolver), route_kind)
+    }
+
+    /// Prepares the route-fixed reqwest builder shared by production and
+    /// deterministic resolver-injection tests.
+    fn client_builder_for(
+        &self,
+        target: &str,
+    ) -> Result<(reqwest::ClientBuilder, OutboundRouteKind), OutboundError> {
         let prepared = self.snapshot.as_ref().map_err(Clone::clone)?;
         let target = Url::parse(target).map_err(|_| {
             OutboundError::new(
@@ -269,6 +295,14 @@ impl OutboundNetworkPolicy {
             }
             builder = builder.proxy(proxy);
         }
+        Ok((builder, route_kind))
+    }
+
+    /// Finalizes a route-fixed client without retaining reqwest diagnostics.
+    fn build_client(
+        builder: reqwest::ClientBuilder,
+        route_kind: OutboundRouteKind,
+    ) -> Result<reqwest::Client, OutboundError> {
         builder.build().map_err(|_| {
             OutboundError::new(
                 route_kind,

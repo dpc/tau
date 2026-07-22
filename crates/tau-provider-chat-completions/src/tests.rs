@@ -1,5 +1,9 @@
 use std::io::Write as _;
 
+mod scripted_tcp_server;
+
+use scripted_tcp_server::ScriptedTcpServer;
+
 use super::*;
 
 /// Ensures successful extension-owned web-content XML remains byte-for-byte
@@ -317,6 +321,53 @@ fn reqwest_awaiting_headers_is_prompt_cancelable() {
 #[test]
 fn reqwest_stalled_success_body_is_prompt_cancelable() {
     assert_reqwest_stall_is_canceled(true);
+}
+
+/// Ensures transport failures crossing the Chat Completions attempt facade
+/// expose only closed retry facts, never target/proxy credentials or endpoints.
+#[test]
+fn attempt_transport_failure_redacts_backend_canaries() {
+    let proxy = ScriptedTcpServer::spawn(|socket| {
+        drop(socket);
+    });
+    let address = proxy.address();
+    let mut configured = provider();
+    configured.base_url = "http://target-backend-canary.invalid/v1".to_owned();
+    configured.api_key = "bearer-backend-canary".to_owned();
+    let model = configured.models[0].clone();
+    let prompt = prompt();
+    let resolved = resolved_provider(&configured);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(
+        std::collections::BTreeMap::from([(
+            "http_proxy".to_owned(),
+            format!("http://proxy-user-canary:proxy-pass-canary@{address}"),
+        )]),
+        None,
+    );
+    let outcome = run_attempt(
+        &prompt,
+        &resolved,
+        &model,
+        false,
+        &mut |_| {},
+        &mut || false,
+        &network,
+    );
+    proxy.finish();
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    let projection = format!("{outcome:?}");
+    for canary in [
+        "target-backend-canary",
+        "bearer-backend-canary",
+        "proxy-user-canary",
+        "proxy-pass-canary",
+        &address.to_string(),
+    ] {
+        assert!(
+            !projection.contains(canary),
+            "leaked {canary}: {projection}"
+        );
+    }
 }
 
 /// Ensures a malicious provider cannot grow the pending SSE-line buffer

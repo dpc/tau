@@ -1,15 +1,21 @@
+mod direct_target_canary;
+mod scripted_tcp_server;
+mod test_ca;
+mod test_server;
+
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
+use direct_target_canary::DirectTargetCanary;
+use scripted_tcp_server::ScriptedTcpServer;
+use test_ca::TestCa;
+use test_server::{ServerScript, TestWsServer};
+
 use super::*;
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbortWaker};
-
-mod test_server;
-
-use test_server::{ServerScript, TestWsServer};
 
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
@@ -357,6 +363,265 @@ fn secure_websocket_proxy_connects_before_target_tls_and_upgrade() {
     );
     assert!(upgrade.contains("authorization: Bearer test-token"));
     proxy.join().expect("proxy thread");
+}
+
+/// Ensures WSS through an HTTPS proxy performs proxy TLS, one authenticated
+/// CONNECT, target TLS, and WebSocket upgrade without leaking either layer's
+/// credentials into the other.
+#[test]
+fn secure_websocket_through_https_proxy_uses_nested_tls_and_scoped_auth() {
+    use std::io::Write;
+
+    let proxy_ca = TestCa::new();
+    let target_ca = TestCa::new();
+    let proxy_tls = proxy_ca.server_config("localhost");
+    let target_tls = target_ca.server_config("localhost");
+    let proxy = ScriptedTcpServer::spawn(move |socket| {
+        let outer =
+            rustls::ServerConnection::new(Arc::new(proxy_tls)).expect("proxy TLS connection");
+        let mut outer = rustls::StreamOwned::new(outer, socket);
+        let connect = read_http_head(&mut outer);
+        outer
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .expect("CONNECT response");
+        let inner =
+            rustls::ServerConnection::new(Arc::new(target_tls)).expect("target TLS connection");
+        let mut inner = rustls::StreamOwned::new(inner, outer);
+        let upgrade = read_http_head(&mut inner);
+        let key = upgrade
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("sec-websocket-key")
+                        .then(|| value.trim())
+                })
+            })
+            .expect("WebSocket key");
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        write!(
+            inner,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .expect("upgrade response");
+        inner.flush().expect("flush upgrade");
+        (connect, upgrade)
+    });
+    let address = proxy.address();
+    let directory = tempfile::tempdir().expect("CA directory");
+    let ca_path = directory.path().join("nested-ca.pem");
+    std::fs::write(&ca_path, format!("{}\n{}", proxy_ca.pem(), target_ca.pem()))
+        .expect("write CA bundle");
+    let environment = std::collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("https://proxy-user:proxy-pass@localhost:{}", address.port()),
+    )]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
+    let mut config = test_responses_config();
+    config.base_url = "https://localhost:4444/backend-api".to_owned();
+    let mut abort = NeverAbort;
+    let connection = WsConn::connect(&config, "thread-nested", &network, &mut abort)
+        .expect("nested TLS WebSocket");
+    drop(connection);
+    let (connect, upgrade) = proxy.finish();
+    assert!(connect.starts_with("CONNECT localhost:4444 HTTP/1.1\r\n"));
+    assert_eq!(
+        connect
+            .lines()
+            .filter(|line| line
+                .to_ascii_lowercase()
+                .starts_with("proxy-authorization:"))
+            .collect::<Vec<_>>(),
+        ["Proxy-Authorization: Basic cHJveHktdXNlcjpwcm94eS1wYXNz"]
+    );
+    assert!(!connect.contains("test-token"));
+    assert!(upgrade.starts_with("GET /backend-api/codex/responses HTTP/1.1\r\n"));
+    assert!(upgrade.contains("authorization: Bearer test-token\r\n"));
+    assert!(
+        !upgrade
+            .to_ascii_lowercase()
+            .contains("proxy-authorization:")
+    );
+}
+
+/// Ensures an untrusted HTTPS proxy certificate fails before CONNECT and never
+/// reaches the otherwise available direct WSS target.
+#[test]
+fn wss_proxy_tls_failure_has_no_direct_fallback() {
+    let target = DirectTargetCanary::new();
+    let proxy_ca = TestCa::new();
+    let proxy_tls = proxy_ca.server_config("localhost");
+    let proxy = ScriptedTcpServer::spawn(move |socket| {
+        let connection =
+            rustls::ServerConnection::new(Arc::new(proxy_tls)).expect("proxy TLS connection");
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut byte = [0_u8; 1];
+        let _ = stream.read(&mut byte);
+    });
+    let address = proxy.address();
+    let environment = std::collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("https://proxy-user:proxy-pass@localhost:{}", address.port()),
+    )]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
+    let mut config = test_responses_config();
+    config.base_url = target.base_url();
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-proxy-tls", &network, &mut abort)
+    else {
+        panic!("expected typed HTTPS proxy TLS failure");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
+    let projection = format!("{error:?} {error}");
+    for canary in ["proxy-user", "proxy-pass", "localhost", "test-token"] {
+        assert!(
+            !projection.contains(canary),
+            "leaked {canary}: {projection}"
+        );
+    }
+    proxy.finish();
+    target.assert_untouched();
+}
+
+/// Ensures a hidden CONNECT rejection remains generic Proxy/Transport and does
+/// not trigger a direct WSS fallback, preserving the approved reqwest boundary.
+#[test]
+fn wss_connect_rejection_is_generic_and_has_no_direct_fallback() {
+    use std::io::Write;
+
+    let target = DirectTargetCanary::new();
+    let authority = target.authority();
+    let proxy = ScriptedTcpServer::spawn(move |mut stream| {
+        let connect = read_http_head(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("CONNECT rejection");
+        connect
+    });
+    let address = proxy.address();
+    let environment = std::collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("http://proxy-user:proxy-pass@{address}"),
+    )]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
+    let mut config = test_responses_config();
+    config.base_url = target.base_url();
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-connect-reject", &network, &mut abort)
+    else {
+        panic!("expected hidden CONNECT rejection");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
+    let connect = proxy.finish();
+    assert!(connect.starts_with(&format!("CONNECT {authority} HTTP/1.1\r\n")));
+    assert_eq!(
+        connect
+            .lines()
+            .filter(|line| line
+                .to_ascii_lowercase()
+                .starts_with("proxy-authorization:"))
+            .collect::<Vec<_>>(),
+        ["Proxy-Authorization: Basic cHJveHktdXNlcjpwcm94eS1wYXNz"]
+    );
+    assert!(!connect.contains("test-token"));
+    target.assert_untouched();
+}
+
+/// Ensures inner target TLS rejection after a successful CONNECT remains a
+/// redacted generic proxy transport failure and cannot fall back direct.
+#[test]
+fn wss_target_tls_failure_has_no_direct_fallback() {
+    use std::io::Write;
+
+    let target = DirectTargetCanary::new();
+    let authority = target.authority();
+    let target_ca = TestCa::new();
+    let target_tls = target_ca.server_config("localhost");
+    let proxy = ScriptedTcpServer::spawn(move |mut socket| {
+        let connect = read_http_head(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .expect("CONNECT response");
+        let connection =
+            rustls::ServerConnection::new(Arc::new(target_tls)).expect("target TLS connection");
+        let mut tunnel = rustls::StreamOwned::new(connection, socket);
+        let mut byte = [0_u8; 1];
+        let _ = tunnel.read(&mut byte);
+        connect
+    });
+    let address = proxy.address();
+    let environment =
+        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
+    let mut config = test_responses_config();
+    config.base_url = target.base_url();
+    let mut abort = NeverAbort;
+    let Err(LlmError::Outbound(error)) =
+        WsConn::connect(&config, "thread-target-tls", &network, &mut abort)
+    else {
+        panic!("expected tunneled target TLS failure");
+    };
+    assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
+    assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
+    assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
+    let projection = format!("{error:?} {error}");
+    assert!(!projection.contains("localhost"));
+    assert!(!projection.contains("test-token"));
+    let connect = proxy.finish();
+    assert!(connect.starts_with(&format!("CONNECT {authority} HTTP/1.1\r\n")));
+    target.assert_untouched();
+}
+
+/// Ensures a target-authored WebSocket upgrade failure after successful CONNECT
+/// never causes a direct transport fallback.
+#[test]
+fn wss_upgrade_failure_has_no_direct_fallback() {
+    use std::io::Write;
+
+    let target = DirectTargetCanary::new();
+    let target_ca = TestCa::new();
+    let target_tls = target_ca.server_config("localhost");
+    let proxy = ScriptedTcpServer::spawn(move |mut socket| {
+        let _connect = read_http_head(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .expect("CONNECT response");
+        let connection =
+            rustls::ServerConnection::new(Arc::new(target_tls)).expect("target TLS connection");
+        let mut tunnel = rustls::StreamOwned::new(connection, socket);
+        let upgrade = read_http_head(&mut tunnel);
+        tunnel
+            .write_all(
+                b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("upgrade rejection");
+        upgrade
+    });
+    let address = proxy.address();
+    let directory = tempfile::tempdir().expect("CA directory");
+    let ca_path = directory.path().join("target-ca.pem");
+    std::fs::write(&ca_path, target_ca.pem()).expect("write target CA");
+    let environment =
+        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
+    let mut config = test_responses_config();
+    config.base_url = target.base_url();
+    let mut abort = NeverAbort;
+    assert!(matches!(
+        WsConn::connect(&config, "thread-upgrade-fail", &network, &mut abort),
+        Err(LlmError::WsUpgradeRequired)
+    ));
+    let upgrade = proxy.finish();
+    assert!(upgrade.starts_with("GET /backend-api/codex/responses HTTP/1.1\r\n"));
+    assert!(upgrade.contains("authorization: Bearer test-token\r\n"));
+    target.assert_untouched();
 }
 
 fn read_http_head(stream: &mut impl Read) -> String {

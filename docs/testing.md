@@ -302,10 +302,14 @@ Final compatibility checks should combine those focused package suites with the
 network-denied curated VCR and deterministic fake-provider lanes, then run exact
 `selfci check --candidate <commit>`. The fake-provider lane proves the generic
 harness/extension lifecycle but does not replace either backend wire suite.
-Nested HTTPS/WSS through an HTTPS proxy and the expanded failure-phase/TLS matrix
-remain outside this acceptance claim and are tracked separately; reqwest's public
-API also cannot expose a hidden CONNECT rejection status, so tests must not claim
-exact authentication classification for that case.
+The shared outbound suite covers direct HTTP/HTTPS; HTTP and HTTPS through HTTP
+and HTTPS proxies; WS through an HTTP proxy; and WSS through HTTP and HTTPS
+proxies. It proves nested proxy TLS, CONNECT, target TLS, request/upgrade scope,
+strict custom-CA parsing, immutable startup inputs, redaction, and no direct
+fallback after proxy DNS, socket, TLS, CONNECT, target-TLS, or upgrade failure.
+Reqwest's public API cannot expose a hidden CONNECT rejection status, so that
+case remains redacted generic Proxy/Transport rather than exact authentication
+classification.
 
 ## OAuth response safety
 
