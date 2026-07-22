@@ -68,8 +68,9 @@ watch topology on restart.
 
 S1 creates a production worker, cold-restores main and worker together, and
 exercises both restored routes. S2 repeats that setup and explicitly recreates a
-non-persistent watch with a fresh subscription. Mixed loaded, unloaded, and
-ephemeral membership remains the S3 cross-process acceptance gap.
+non-persistent watch with a fresh subscription. S3 composes current durable,
+historically unloaded, and process-local ephemeral membership across a clean
+restart. Multiple-worker ordering independence remains the S4 acceptance gap.
 
 ## Test boundaries and oracles
 
@@ -178,6 +179,12 @@ five main and one worker provider turn; Boot B spends six main and one worker
 turn, totaling eleven main and two worker turns. Add a focused failure if either
 setup produces an unexpected extra provider prompt; do not silently add an
 unbounded action.
+
+S3 reuses S1's two lanes and compact 1,151-byte scenario JSON: four main actions
+and two worker actions, below the 16 KiB ceiling. Boot A spends five main and one
+worker provider turn; Boot B spends one main and one worker turn, totaling six
+main and two worker turns. Promptless ephemeral creation, typed store seeding,
+roster queries, and absent-route probes consume no fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -301,6 +308,12 @@ Do not fabricate a “loaded but never started” valid case. Membership without
 matching committed sequence-zero creation is corrupt input and belongs to the
 existing fail-closed restore tests, with an E2E startup-failure case only if that
 boundary later regresses.
+
+Implemented by
+`session_restore::membership::cold_resume_composes_loaded_unloaded_and_ephemeral_membership`
+using the S1 production path, promptless `UiCreateAgent` ephemeral creation,
+typed between-boot store seeding, exact current/history roster assertions, and
+negative route probes.
 
 ### S4 — Multiple workers and ordering independence
 

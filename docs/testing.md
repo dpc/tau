@@ -72,6 +72,11 @@ the daemon-lifetime watch is absent. Its S2 grammar adds one closed
 `AgentWatchCall`/`AgentWatchResult` pair, and the fresh fixture proves a new
 subscription produces exactly one non-model initial snapshot plus one
 prompt/running/response/idle set under only the two contract causal edges.
+S3 reuses the S1 grammar, creates one promptless ephemeral worker through the UI,
+and seeds a typed durable worker load/unload history between clean boots. Its
+current/history roster, route-rejection, replay, typed-store, and exact-lane
+oracles prove Boot B creates routes only for the current durable pair, preserves
+the unloaded worker only in history, and drops ephemeral membership.
 Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption

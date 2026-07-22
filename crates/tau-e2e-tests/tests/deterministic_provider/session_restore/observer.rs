@@ -1,4 +1,4 @@
-//! Replay-aware socket observer for the S1 and S2 session-restore scenarios.
+//! Replay-aware socket observer for the session-restore scenarios.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -32,7 +32,8 @@ pub(super) struct SessionRestoreObserver {
 }
 
 impl SessionRestoreObserver {
-    /// Connects and installs the exact S1/S2 historical/live selector set.
+    /// Connects and installs the exact session-restore historical/live selector
+    /// set.
     pub(super) fn connect(socket: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut peer = loop {
@@ -83,6 +84,77 @@ impl SessionRestoreObserver {
         Ok(())
     }
 
+    /// Creates one memory-only worker without dispatching an initial prompt and
+    /// returns its harness-minted identity after exact membership publication.
+    pub(super) fn create_ephemeral_worker(
+        &mut self,
+        parent_agent: &AgentId,
+    ) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let start = self.events.len();
+        self.peer
+            .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+                tau_proto::UiCreateAgent {
+                    session_id: SESSION.into(),
+                    role: "deterministic-worker".to_owned(),
+                    model_override: None,
+                    metadata: Vec::new(),
+                    initial_prompt: None,
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: None,
+                    parent_agent: Some(parent_agent.clone()),
+                    ephemeral: true,
+                },
+            )))?;
+        self.wait_for_ephemeral_worker(parent_agent, start)
+    }
+
+    /// Waits for one exact ephemeral worker creation and membership after
+    /// `start`, returning its harness-minted identity.
+    fn wait_for_ephemeral_worker(
+        &mut self,
+        parent_agent: &AgentId,
+        start: usize,
+    ) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let mut next = start;
+        let mut agent_id = None;
+        let mut loaded = false;
+        loop {
+            while let Some(observed) = self.events.get(next) {
+                next += 1;
+                match &observed.event {
+                    Event::AgentStarted(started)
+                        if started.ephemeral
+                            && started.role == "deterministic-worker"
+                            && started.parent_agent.as_ref() == Some(parent_agent) =>
+                    {
+                        if let Some(previous) = agent_id.replace(started.agent_id.clone()) {
+                            return Err(format!(
+                                "multiple ephemeral worker creation facts observed: \
+                                 {previous} then {} (replay={})",
+                                started.agent_id, observed.replay
+                            )
+                            .into());
+                        }
+                    }
+                    Event::SessionAgentLoaded(event)
+                        if event.ephemeral
+                            && agent_id
+                                .as_ref()
+                                .is_some_and(|agent_id| agent_id == &event.agent_id) =>
+                    {
+                        loaded = true;
+                    }
+                    _ => {}
+                }
+                if loaded {
+                    return agent_id.ok_or_else(|| "ephemeral worker identity missing".into());
+                }
+            }
+            self.recv_one()?;
+        }
+    }
+
     /// Submits one exact direct user prompt to a restored agent route.
     pub(super) fn submit(
         &mut self,
@@ -101,6 +173,33 @@ impl SessionRestoreObserver {
                     ctx_id: Some(ctx_id.to_owned()),
                 },
             )))?;
+        Ok(())
+    }
+
+    /// Submits a direct prompt and requires the exact unknown-agent rejection
+    /// without any accepted prompt fact for that identity.
+    pub(super) fn assert_absent_route(
+        &mut self,
+        agent_id: &AgentId,
+        ctx_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let start = self.events.len();
+        self.submit(agent_id, ctx_id, "this route must not exist")?;
+        let expected = format!("unknown agent `{agent_id}`");
+        self.recv_until(|observed| {
+            matches!(&observed.event, Event::HarnessNotice(notice) if notice.message == expected)
+        })?;
+        if self.events[start..].iter().any(|observed| {
+            matches!(
+                &observed.event,
+                Event::AgentPromptSubmitted(prompt) if &prompt.agent_id == agent_id
+            ) || matches!(
+                &observed.event,
+                Event::AgentPromptCreated(prompt) if &prompt.agent_id == agent_id
+            )
+        }) {
+            return Err(format!("absent agent route accepted a prompt for {agent_id}").into());
+        }
         Ok(())
     }
 
@@ -200,6 +299,17 @@ impl SessionRestoreObserver {
         &mut self,
         session_id: &SessionId,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.events.iter().any(|observed| {
+            !observed.replay
+                && observed.recorded_at.is_none()
+                && matches!(
+                    &observed.event,
+                    Event::SessionReplayComplete(done)
+                        if &done.session_id == session_id && done.error.is_none()
+                )
+        }) {
+            return Ok(());
+        }
         self.recv_until(|observed| {
             !observed.replay
                 && observed.recorded_at.is_none()
@@ -220,8 +330,8 @@ impl SessionRestoreObserver {
         scope: SessionAgentListScope,
     ) -> Result<Vec<SessionAgentListEntry>, Box<dyn std::error::Error>> {
         let request_id = match scope {
-            SessionAgentListScope::Current => "s1-current",
-            SessionAgentListScope::History => "s1-history",
+            SessionAgentListScope::Current => "session-restore-current",
+            SessionAgentListScope::History => "session-restore-history",
         };
         self.peer.send(&HarnessInputMessage::GetSessionAgentList(
             GetSessionAgentList {
@@ -235,6 +345,13 @@ impl SessionRestoreObserver {
                 HarnessOutputMessage::SessionAgentListResult(result)
                     if result.request_id == request_id =>
                 {
+                    if &result.session_id != session_id {
+                        return Err(format!(
+                            "roster response session mismatch: requested {session_id}, got {}",
+                            result.session_id
+                        )
+                        .into());
+                    }
                     return match result.result {
                         SessionAgentListResultPayload::Ok { agents } => Ok(agents),
                         SessionAgentListResultPayload::Error { error } => Err(format!(
@@ -307,8 +424,8 @@ impl SessionRestoreObserver {
     }
 }
 
-/// Returns the exact selector set needed for S1/S2 lifecycle and replay
-/// assertions.
+/// Returns the exact selector set needed for session-restore lifecycle and
+/// replay assertions.
 fn selectors() -> Vec<EventSelector> {
     use EventName as E;
     [

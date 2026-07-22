@@ -1,6 +1,8 @@
-//! Cold-resume acceptance for a production-started durable worker.
+//! Cold-resume acceptance for durable worker restoration, watch recreation,
+//! and loaded/unloaded/ephemeral membership composition.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use tau_e2e_tests::{
     DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
@@ -15,6 +17,8 @@ use tau_proto::{
 use super::FAKE_PROVIDER;
 use super::daemon_support::{disconnect_ui, spawn_daemon};
 
+#[path = "session_restore/membership.rs"]
+mod membership;
 #[path = "session_restore/observer.rs"]
 mod observer;
 use observer::{Observed, SessionRestoreObserver};
@@ -27,6 +31,64 @@ const WORKER_INITIAL: &str = concat!(
     "Complete the deterministic worker instruction."
 );
 
+/// Builds the shared S1/S3 production-worker grammar with scenario-local
+/// correlation identifiers.
+fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
+    ScenarioV2::new(
+        name,
+        vec![
+            ScenarioLaneV2 {
+                ctx_id: format!("{prefix}-main"),
+                actions: vec![
+                    ScenarioActionV2::AgentStartCall {
+                        user_text: "start the deterministic worker".to_owned(),
+                        call_id: format!("{prefix}-agent-start").into(),
+                        prompt: WORKER_PROMPT.to_owned(),
+                        role: Some("deterministic-worker".to_owned()),
+                        task_name: "deterministic worker".to_owned(),
+                    },
+                    ScenarioActionV2::AgentStartResult {
+                        user_text: "start the deterministic worker".to_owned(),
+                        call_id: format!("{prefix}-agent-start").into(),
+                        response: "worker start accepted".to_owned(),
+                    },
+                    ScenarioActionV2::WatchNotifications {
+                        notifications: vec![
+                            WatchNotificationV2::TurnState {
+                                state: AgentRuntimeState::Running,
+                            },
+                            WatchNotificationV2::Response {
+                                content: "worker boot-a complete".to_owned(),
+                            },
+                            WatchNotificationV2::TurnState {
+                                state: AgentRuntimeState::Idle,
+                            },
+                        ],
+                        response: "worker completion observed".to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: "fresh main work".to_owned(),
+                        response: "fresh main complete".to_owned(),
+                    },
+                ],
+            },
+            ScenarioLaneV2 {
+                ctx_id: format!("{prefix}-worker"),
+                actions: vec![
+                    ScenarioActionV2::Text {
+                        user_text: WORKER_INITIAL.to_owned(),
+                        response: "worker boot-a complete".to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: "fresh worker work".to_owned(),
+                        response: "fresh worker complete".to_owned(),
+                    },
+                ],
+            },
+        ],
+    )
+}
+
 /// Proves cold resume restores a production-started completed worker as a
 /// durable, independently addressable conversation without restoring its watch.
 #[test]
@@ -34,59 +96,7 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
     let session_id = SessionId::from(SESSION);
     let fixture = DeterministicFixture::new_session_restore(
         "cold_resume_restores_completed_production_worker",
-        &ScenarioV2::new(
-            "s1-quiescent-main-completed-worker",
-            vec![
-                ScenarioLaneV2 {
-                    ctx_id: "s1-main".to_owned(),
-                    actions: vec![
-                        ScenarioActionV2::AgentStartCall {
-                            user_text: "start the deterministic worker".to_owned(),
-                            call_id: "s1-agent-start".into(),
-                            prompt: WORKER_PROMPT.to_owned(),
-                            role: Some("deterministic-worker".to_owned()),
-                            task_name: "deterministic worker".to_owned(),
-                        },
-                        ScenarioActionV2::AgentStartResult {
-                            user_text: "start the deterministic worker".to_owned(),
-                            call_id: "s1-agent-start".into(),
-                            response: "worker start accepted".to_owned(),
-                        },
-                        ScenarioActionV2::WatchNotifications {
-                            notifications: vec![
-                                WatchNotificationV2::TurnState {
-                                    state: AgentRuntimeState::Running,
-                                },
-                                WatchNotificationV2::Response {
-                                    content: "worker boot-a complete".to_owned(),
-                                },
-                                WatchNotificationV2::TurnState {
-                                    state: AgentRuntimeState::Idle,
-                                },
-                            ],
-                            response: "worker completion observed".to_owned(),
-                        },
-                        ScenarioActionV2::Text {
-                            user_text: "fresh main work".to_owned(),
-                            response: "fresh main complete".to_owned(),
-                        },
-                    ],
-                },
-                ScenarioLaneV2 {
-                    ctx_id: "s1-worker".to_owned(),
-                    actions: vec![
-                        ScenarioActionV2::Text {
-                            user_text: WORKER_INITIAL.to_owned(),
-                            response: "worker boot-a complete".to_owned(),
-                        },
-                        ScenarioActionV2::Text {
-                            user_text: "fresh worker work".to_owned(),
-                            response: "fresh worker complete".to_owned(),
-                        },
-                    ],
-                },
-            ],
-        ),
+        &production_worker_scenario("s1-quiescent-main-completed-worker", "s1"),
         FAKE_PROVIDER,
     )?;
     fixture.assert_session_restore_roles()?;
@@ -377,6 +387,56 @@ impl BootIdentities {
             main: main.ok_or("main creation fact missing")?,
             worker: worker.ok_or("worker creation fact missing")?,
         })
+    }
+}
+
+/// Exact idle live-roster facts expected for one restored agent.
+struct IdleLiveRosterExpectation<'a> {
+    /// Transcript and membership persistence.
+    persistence: SessionAgentPersistence,
+    /// Harness-owned live navigation default.
+    navigation_mode: AgentNavigationMode,
+    /// Immutable creation role.
+    role: &'a str,
+    /// Immutable creation parent.
+    parent: Option<&'a AgentId>,
+    /// Current display name.
+    display_name: Option<&'a str>,
+}
+
+fn assert_idle_live_roster_row(
+    roster: &[SessionAgentListEntry],
+    agent_id: &AgentId,
+    expected: IdleLiveRosterExpectation<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let row = roster
+        .iter()
+        .find(|row| &row.agent_id == agent_id)
+        .ok_or_else(|| format!("live roster omitted {agent_id}"))?;
+    if row.persistence != expected.persistence
+        || row.lifecycle
+            != (SessionAgentLifecycle::Live {
+                runtime_state: AgentRuntimeState::Idle,
+                navigation_mode: expected.navigation_mode,
+            })
+    {
+        return Err(format!("live roster lifecycle changed for {agent_id}: {row:?}").into());
+    }
+    match &row.facts {
+        SessionAgentFacts::Available {
+            parent_agent,
+            role: actual_role,
+            display_name: actual_name,
+            ..
+        } if parent_agent.as_ref() == expected.parent
+            && actual_role == expected.role
+            && actual_name.as_deref() == expected.display_name =>
+        {
+            Ok(())
+        }
+        facts => {
+            Err(format!("live roster creation facts changed for {agent_id}: {facts:?}").into())
+        }
     }
 }
 
@@ -967,52 +1027,28 @@ fn assert_restored_roster(
     if roster.len() != 2 {
         return Err(format!("restored roster has {} rows", roster.len()).into());
     }
-    for (agent_id, expected_mode, role, parent, name) in [
-        (
-            &identities.main,
-            AgentNavigationMode::Active,
-            "deterministic-main",
-            None,
-            None,
-        ),
-        (
-            &identities.worker,
-            AgentNavigationMode::ActiveAuto,
-            "deterministic-worker",
-            Some(&identities.main),
-            Some("deterministic worker"),
-        ),
-    ] {
-        let row = roster
-            .iter()
-            .find(|row| &row.agent_id == agent_id)
-            .ok_or_else(|| format!("roster omitted {agent_id}"))?;
-        if row.persistence != SessionAgentPersistence::Durable
-            || row.lifecycle
-                != (SessionAgentLifecycle::Live {
-                    runtime_state: AgentRuntimeState::Idle,
-                    navigation_mode: expected_mode,
-                })
-        {
-            return Err(format!("restored lifecycle changed for {agent_id}: {row:?}").into());
-        }
-        match &row.facts {
-            SessionAgentFacts::Available {
-                parent_agent,
-                role: actual_role,
-                display_name,
-                ..
-            } if parent_agent.as_ref() == parent
-                && actual_role == role
-                && display_name.as_deref() == name => {}
-            facts => {
-                return Err(
-                    format!("restored creation facts changed for {agent_id}: {facts:?}").into(),
-                );
-            }
-        }
-    }
-    Ok(())
+    assert_idle_live_roster_row(
+        roster,
+        &identities.main,
+        IdleLiveRosterExpectation {
+            persistence: SessionAgentPersistence::Durable,
+            navigation_mode: AgentNavigationMode::Active,
+            role: "deterministic-main",
+            parent: None,
+            display_name: None,
+        },
+    )?;
+    assert_idle_live_roster_row(
+        roster,
+        &identities.worker,
+        IdleLiveRosterExpectation {
+            persistence: SessionAgentPersistence::Durable,
+            navigation_mode: AgentNavigationMode::ActiveAuto,
+            role: "deterministic-worker",
+            parent: Some(&identities.main),
+            display_name: Some("deterministic worker"),
+        },
+    )
 }
 
 fn assert_fresh_work_after_boundaries(

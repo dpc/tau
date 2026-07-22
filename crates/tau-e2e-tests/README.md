@@ -23,7 +23,8 @@ provider disconnect without restart,
 clean resume, concurrent lane isolation, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
 watch, explicit post-resume watch recreation with exact new-subscription
-notifications, and startup rejection of invalid
+notifications, loaded/unloaded/ephemeral membership composition, and startup
+rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
@@ -47,6 +48,11 @@ conversation, and proves the old automatic watch does not re-fan out fresh
 worker activity. A separate fresh fixture recreates the watch through production
 `agent_watch`, proves the initial snapshot is non-model, and correlates one
 direct worker turn's prompt/running/response/idle facts to the new subscription.
+A third fixture adds a promptless ephemeral worker through `UiCreateAgent`, then
+seeds a valid durable worker load/unload history while the stores are unowned.
+Cold resume restores only the two current durable routes, reports the seeded
+worker only in history, rejects both absent routes, and leaves no ephemeral
+journal or durable membership record.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

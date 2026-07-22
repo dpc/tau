@@ -21,13 +21,22 @@ does not read provider credentials or use environment values as control.
 
 The S1 session-restore fixture enables the production harness-owned `agent_start`
 built-in only for its closed main role; S2 adds only `agent_watch`. The worker
-role has no tools. Its one
-bounded start action requires the exact production schema and fixture-authored
-arguments, then records only the distinct self/child identities minted by the
-harness. Because a production-started worker has no initial `ctx_id`, its first
-prompt may bind only the unique unconsumed lane with identical configured text;
-zero or multiple candidates fail closed. That immutable binding and the
-parent/child association are checkpointed with the scenario cursors.
+role has no tools. S3 reuses the S1 tool surface. Its promptless ephemeral worker
+is created only through the normal `UiCreateAgent` protocol. The seeded unloaded
+worker uses fixed synthetic identity and metadata and is appended only after
+Boot A releases both typed stores; reopening `AgentStore` and `SessionStore`
+validates the sequence-zero creation and adjacent durable load/unload before
+Boot B starts. This seeding is fixture-owned persistence setup, not a fake-provider
+file-write or a public unload operation.
+
+Each S1/S2/S3 production-worker start sequence uses one adjacent
+`AgentStartCall`/`AgentStartResult` pair. It requires the exact production schema
+and fixture-authored arguments, then records only the distinct self/child
+identities minted by the harness. Because a production-started worker has no
+initial `ctx_id`, its first prompt may bind only the unique unconsumed lane with
+identical configured text; zero or multiple candidates fail closed. That
+immutable binding and the parent/child association are checkpointed with the
+scenario cursors.
 The closed S2 watch action derives its target only from that association, always
 enables, and requires an exact successful sanitized result without exposing
 subscription identity.

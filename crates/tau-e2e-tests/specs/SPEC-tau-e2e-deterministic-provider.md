@@ -29,7 +29,9 @@ exception: the exact universal `component ext-shell` may expose only `workdir`
 and `edit` to a closed scratch-only scenario. S1 is the other: its main role
 exposes only the production harness-owned `agent_start` built-in while its
 worker role exposes no tools. S2 adds only production `agent_watch` to that
-main role. The fake has no network,
+main role. S3 reuses S1's exact roles and grammar; its promptless ephemeral agent
+and typed unloaded-worker store records consume no fake-provider action. The fake
+has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
 
@@ -143,6 +145,11 @@ spends two main turns on the exact explicit watch pair, four main turns on the
 four model-visible watch notifications, and one worker turn on direct fresh
 input: six main and one worker turn exactly. Extra prompts fail scenario
 consumption.
+S3 repeats S1's five-main/one-worker Boot A setup, then creates one promptless
+ephemeral worker. Boot B spends exactly one fresh main and one fresh durable-worker
+turn, for six main and two worker turns across both boots and six lane actions
+total. Probes for the unloaded and vanished ephemeral identities must produce no
+provider prompt or action.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

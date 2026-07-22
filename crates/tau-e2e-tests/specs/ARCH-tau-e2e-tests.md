@@ -9,6 +9,8 @@ publishes and routes `fake/test`, and normally starts only the no-side-effect
 binary as bundled `component ext-shell`. The session-restore modes install the
 production harness-owned internal handlers. S1 exposes only `agent_start` to its
 exact main role; S2 adds only `agent_watch`; both expose no tools to the worker.
+S3 reuses the S1 surface: `UiCreateAgent`, directed roster queries, and typed
+store seeding remain test-driver boundaries rather than fake-provider actions.
 Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
@@ -35,7 +37,10 @@ also proves that one completed production-started durable worker remains
 addressable with its own transcript and route while the daemon-lifetime
 automatic watch is dropped. S2 explicitly recreates that watch after resume and
 proves one fresh subscription's exact initial, prompt, running, response, and
-idle facts without treating the initial snapshot as model work. It does not cover the
+idle facts without treating the initial snapshot as model work. S3 composes the
+same current durable pair with one valid unloaded durable history member while
+proving a same-daemon ephemeral agent leaves no cold-restored transcript,
+membership, route, or replay boundary. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
