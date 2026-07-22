@@ -386,6 +386,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::Ready(_) => "ready",
         HarnessInputMessage::Disconnect(_) => "disconnect",
         HarnessInputMessage::ConfigError(_) => "config_error",
+        HarnessInputMessage::ExtensionNoticeRequest(_) => "extension_notice_request",
         HarnessInputMessage::Emit(_) => "emit",
         HarnessInputMessage::InterceptReply(_) => "intercept_reply",
         HarnessInputMessage::GetAgentPromptCreated(_) => "get_agent_prompt_created",

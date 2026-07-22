@@ -342,7 +342,9 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
     }
 }
 
-fn run_intercept(prompt: AgentPromptSubmitted) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
+fn run_intercept(
+    prompt: AgentPromptSubmitted,
+) -> (Vec<tau_proto::ExtensionNoticeRequest>, Vec<InterceptReply>) {
     let mut input = Vec::new();
     let mut writer = HarnessOutputWriter::new(&mut input);
     writer
@@ -364,20 +366,18 @@ fn run_intercept(prompt: AgentPromptSubmitted) -> (Vec<tau_proto::Emit>, Vec<Int
     run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
 
     let mut reader = HarnessInputReader::new(Cursor::new(output));
-    let mut notice_emits = Vec::new();
+    let mut notice_requests = Vec::new();
     let mut replies = Vec::new();
     while let Some(frame) = reader.read_message().expect("read") {
         match frame {
-            HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::HarnessNotice(_)) =>
-            {
-                notice_emits.push(emit);
+            HarnessInputMessage::ExtensionNoticeRequest(request) => {
+                notice_requests.push(request);
             }
             HarnessInputMessage::InterceptReply(reply) => replies.push(reply),
             _ => {}
         }
     }
-    (notice_emits, replies)
+    (notice_requests, replies)
 }
 fn replaced_prompt_text(reply: &InterceptReply) -> Option<String> {
     match &reply.action {
@@ -389,17 +389,19 @@ fn replaced_prompt_text(reply: &InterceptReply) -> Option<String> {
     }
 }
 
-/// Verifies corrected prompts emit a user-facing transient harness notice.
+/// Verifies corrected prompts request a routine user-facing notice.
 #[test]
 fn prompt_with_tao_is_corrected_with_notice() {
-    let (emits, replies) = run_intercept(test_prompt("I love Tao"));
+    let (requests, replies) = run_intercept(test_prompt("I love Tao"));
 
-    assert_eq!(emits.len(), 1, "exactly one notice emit on correction");
-    assert!(emits[0].transient, "correction notice should be transient");
-    assert!(matches!(
-        emits[0].event.as_ref(),
-        Event::HarnessNotice(notice) if notice.message.contains("Tau") && notice.message.contains("corrected")
-    ));
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one notice request on correction"
+    );
+    assert_eq!(requests[0].level, tau_proto::NoticeLevel::Info);
+    assert!(requests[0].message.contains("Tau"));
+    assert!(requests[0].message.contains("corrected"));
 
     assert_eq!(replies.len(), 1);
     let replaced =

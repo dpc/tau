@@ -25,11 +25,11 @@ use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
-    MessageConversation, MessageDeleted, MessageDelivered, MessageEdited, MessageFactId,
-    MessageFactRef, MessageParty, MessagePublisherId, MessageReactionAdded, MessageReactionRemoved,
-    MessageSenderAuth, MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult,
-    ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
+    MessageDeleted, MessageDelivered, MessageEdited, MessageFactId, MessageFactRef, MessageParty,
+    MessagePublisherId, MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth,
+    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -1417,6 +1417,15 @@ impl Output {
         let _ = self.send(HarnessInputMessage::emit(event));
     }
 
+    fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
+        let _ = self.send(HarnessInputMessage::ExtensionNoticeRequest(
+            tau_proto::ExtensionNoticeRequest {
+                message: message.into(),
+                level,
+            },
+        ));
+    }
+
     /// Submit one transient tool progress observation.
     fn report_tool_progress(&self, progress: ToolProgress) {
         let _ = self.send(HarnessInputMessage::emit_with_transient(
@@ -2022,12 +2031,10 @@ impl Extension {
                 "Slack Socket Mode startup or reconnect failed; check std-slack tokens, Socket Mode settings, and network access: {}",
                 bounded_text(message, 128)
             );
-            self.output.emit(Event::HarnessNotice(HarnessNotice {
-                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                message: bounded_text(&message, MAX_DIAGNOSTIC_BYTES),
-                level: NoticeLevel::Warning,
-                always_show: false,
-            }));
+            self.output.request_notice(
+                bounded_text(&message, MAX_DIAGNOSTIC_BYTES),
+                NoticeLevel::Warning,
+            );
         }
     }
 
@@ -2041,12 +2048,10 @@ impl Extension {
                 && !std::mem::replace(&mut state.installation_restart_notice_reported, true)
         };
         if should_report {
-            self.output.emit(Event::HarnessNotice(HarnessNotice {
-                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                message: "Slack installation identity changed or became invalid; restart Tau before using std-slack again".to_owned(),
-                level: NoticeLevel::Warning,
-                always_show: true,
-            }));
+            self.output.request_notice(
+                "Slack installation identity changed or became invalid; restart Tau before using std-slack again",
+                NoticeLevel::Warning,
+            );
         }
     }
 
@@ -2144,18 +2149,16 @@ impl Extension {
                 };
                 if should_report {
                     tracing::warn!(target: LOG_TARGET, rejection = "identity_api_failure", error = %error, "Slack ingress occurrence rejected; users.info verification degraded");
-                    self.output.emit(Event::HarnessNotice(HarnessNotice {
-                        kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                        message: bounded_text(
+                    self.output.request_notice(
+                        bounded_text(
                             &format!(
                                 "Slack rejected one ingress occurrence because users.info verification failed (check users:read scope and app reinstall): {}",
                                 error
                             ),
                             MAX_DIAGNOSTIC_BYTES,
                         ),
-                        level: NoticeLevel::Warning,
-                        always_show: false,
-                    }));
+                        NoticeLevel::Warning,
+                    );
                 }
                 None
             }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, InterceptionPriority, SessionId, ToolDefinition, ToolNamePrefix,
+    ExtensionName, InterceptionPriority, NoticeLevel, SessionId, ToolDefinition, ToolNamePrefix,
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +148,19 @@ impl fmt::Debug for SecretValue {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConfigError {
     pub message: String,
+}
+
+/// Request from a configured extension to show one routine user-facing notice.
+///
+/// The harness owns the resulting [`crate::HarnessNotice`] kind, visibility,
+/// publication source, and live-only delivery policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionNoticeRequest {
+    /// Human-readable notice text.
+    pub message: String,
+    /// Requested severity. The harness caps [`NoticeLevel::Critical`] to
+    /// [`NoticeLevel::Warning`].
+    pub level: NoticeLevel,
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1043,7 @@ pub enum HarnessInputMessage {
     Ready(Ready),
     Disconnect(Disconnect),
     ConfigError(ConfigError),
+    ExtensionNoticeRequest(ExtensionNoticeRequest),
     Emit(Emit),
     InterceptReply(InterceptReply),
     GetAgentPromptCreated(GetAgentPromptCreated),

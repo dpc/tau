@@ -33,10 +33,10 @@ use stream_owner::{
 };
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, HarnessNotice, MessageAgentTarget,
-    MessageConversation, MessageDelivered, MessageFactId, MessageParty, MessagePublisherId,
-    MessageSenderAuth, MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult,
-    ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
+    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSenderAuth,
+    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -566,8 +566,13 @@ impl Output {
         }
     }
 
-    fn emit(&self, event: Event) {
-        self.send(HarnessInputMessage::emit(event));
+    fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
+        self.send(HarnessInputMessage::ExtensionNoticeRequest(
+            tau_proto::ExtensionNoticeRequest {
+                message: message.into(),
+                level,
+            },
+        ));
     }
 
     fn report_tool_progress(&self, progress: ToolProgress) {
@@ -758,12 +763,7 @@ impl Extension {
                     Ok(response) => emit_gateway_deliveries(&state, &output, response.deliveries),
                     Err(message) => {
                         if fail_gateway_client_if_current(&gateway_cell, &state, &gateway) {
-                            output.emit(Event::HarnessNotice(HarnessNotice {
-                                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                                message,
-                                level: NoticeLevel::Warning,
-                                always_show: false,
-                            }));
+                            output.request_notice(message, NoticeLevel::Warning);
                         }
                         break;
                     }
@@ -1042,12 +1042,7 @@ impl Extension {
     }
 
     fn report_telegram_polling_notice(&self, message: &str) {
-        self.output.emit(Event::HarnessNotice(HarnessNotice {
-            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-            message: message.to_owned(),
-            level: NoticeLevel::Warning,
-            always_show: false,
-        }));
+        self.output.request_notice(message, NoticeLevel::Warning);
     }
 
     fn ensure_poller_started_locked(&self, state: &mut State) {

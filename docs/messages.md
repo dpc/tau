@@ -92,7 +92,18 @@ is done.
 - **`config_error`** *(extension → harness)* — An extension reports back that the
   `configure` payload it received was malformed or unusable; the harness
   surfaces the message just like a `harness.yaml` parse error so the user can
-  see why their per-extension config was rejected.
+   see why their per-extension config was rejected.
+- **`extension_notice_request`** *(configured extension → harness)* — Requests a
+  user-visible diagnostic using only `message` and `level`. Every configured
+  extension kind may send it; unconfigured or disconnected origins are silently
+  denied. The harness caps `critical` to `warning`, creates a live-only
+  `harness.notice` of kind `extension.notice` with `always_show: false`, and sends
+  that event through ordinary interception and broadcast. The request is metered
+  as `message.extension_notice_request` and appears separately from the published
+  event in debug JSONL. It is operational traffic before `ready`, so normal
+  activation ordering and quotas apply. Extensions cannot use generic `emit` to
+  author `harness.notice`; `config_error` remains the separate mandatory,
+  replayable diagnostic path.
 
 ## UI point-to-point requests (UI → harness)
 

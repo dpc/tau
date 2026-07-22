@@ -5,8 +5,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, Event, EventSelector,
-    HarnessInputMessage, HarnessInputReader, HarnessNotice, HarnessOutputMessage,
+    ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, CustomEvent, Event,
+    EventSelector, HarnessInputMessage, HarnessInputReader, HarnessNotice, HarnessOutputMessage,
     HarnessOutputWriter, InterceptAction, InterceptRequest, InterceptionPriority, NoticeLevel,
     PromptFragment, PromptMessageClass, PromptOriginator, PromptPriority, ToolName, ToolSpec,
     ToolStarted, ToolType, UnixMicros,
@@ -75,16 +75,8 @@ impl TauExtension for StartupExtension {
                 |_| Ok(InterceptDecision::Pass),
             )
             .tool(tool_spec("demo_tool"), |_| Ok(()))
-            .startup_event(Event::HarnessNotice(HarnessNotice::new(
-                "startup",
-                "durable startup event",
-                NoticeLevel::Info,
-            )))
-            .startup_transient_event(Event::HarnessNotice(HarnessNotice::new(
-                "startup",
-                "transient startup event",
-                NoticeLevel::Info,
-            )))
+            .startup_event(outbound_event("durable startup event"))
+            .startup_transient_event(outbound_event("transient startup event"))
             .ready_message("ready");
     }
 }
@@ -156,7 +148,7 @@ impl TauExtension for ConfigErrorHookExtension {
             |cx| {
                 *cx.state += 1;
                 cx.handle
-                    .emit_transient(notice("parse-error-hook"))
+                    .emit_transient(outbound_event("parse-error-hook"))
                     .expect("emit parse error hook notice");
             },
         );
@@ -178,7 +170,7 @@ impl TauExtension for ConfigApplyErrorHookExtension {
             |cx| {
                 *cx.state += 1;
                 cx.handle
-                    .emit_transient(notice("apply-error-hook"))
+                    .emit_transient(outbound_event("apply-error-hook"))
                     .expect("emit apply error hook notice");
             },
         );
@@ -489,18 +481,19 @@ impl TauExtension for ContextReadyEmitExtension {
     }
 }
 
-struct DetachedEmitExtension;
+struct DetachedNoticeExtension;
 
-impl TauExtension for DetachedEmitExtension {
+impl TauExtension for DetachedNoticeExtension {
     type State = Counts;
 
     fn name(&self) -> &'static str {
-        "detached-emit"
+        "detached-notice"
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder.tool(tool_spec("detached_tool"), |cx| {
-            cx.handle().emit_detached(notice("detached"))?;
+            cx.handle()
+                .request_notice_detached("detached", NoticeLevel::Info)?;
             Ok(())
         });
     }
@@ -568,7 +561,8 @@ impl TauExtension for BlockingDetachedExtension {
         builder.tool(tool_spec("blocking_detached_tool"), |cx| {
             let (lock, _condvar) = &*cx.state.blocked;
             *lock.lock().expect("lock block flag") = true;
-            cx.handle().emit_detached(notice("queued detached"))?;
+            cx.handle()
+                .emit_detached(outbound_event("queued detached"))?;
             Ok(())
         });
     }
@@ -637,7 +631,9 @@ impl TauExtension for FactoryHandleExtension {
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder.tool(tool_spec("factory_handle_tool"), |cx| {
-            cx.state.handle.emit_detached(notice("factory handle"))?;
+            cx.state
+                .handle
+                .emit_detached(outbound_event("factory handle"))?;
             Ok(())
         });
     }
@@ -954,17 +950,33 @@ fn notice(text: &str) -> Event {
     Event::HarnessNotice(HarnessNotice::new("test", text, NoticeLevel::Info))
 }
 
-fn notice_frame_index(frames: &[HarnessInputMessage], message: &str) -> usize {
+fn outbound_event(text: &str) -> Event {
+    Event::ExtensionEvent(
+        CustomEvent::try_new(
+            "test.client_output".parse().expect("custom event name"),
+            None,
+            CborValue::Text(text.to_owned()),
+        )
+        .expect("valid custom event"),
+    )
+}
+
+fn is_outbound_event(event: &Event, text: &str) -> bool {
+    matches!(
+        event,
+        Event::ExtensionEvent(event)
+            if matches!(event.payload(), CborValue::Text(value) if value == text)
+    )
+}
+
+fn outbound_event_frame_index(frames: &[HarnessInputMessage], text: &str) -> usize {
     frames
         .iter()
         .position(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::HarnessNotice(notice) => notice.message == message,
-                _ => false,
-            },
+            HarnessInputMessage::Emit(emit) => is_outbound_event(emit.event.as_ref(), text),
             _ => false,
         })
-        .expect("notice frame")
+        .expect("outbound event frame")
 }
 
 fn config_error_frame_index(frames: &[HarnessInputMessage]) -> usize {
@@ -1188,8 +1200,7 @@ fn startup_frame_order_is_stable() {
             if !emit.transient
                 && matches!(
                     emit.event.as_ref(),
-                    Event::HarnessNotice(notice)
-                        if notice.message == "durable startup event"
+                    event if is_outbound_event(event, "durable startup event")
                 )
     ));
     assert!(matches!(
@@ -1198,8 +1209,7 @@ fn startup_frame_order_is_stable() {
             if emit.transient
                 && matches!(
                     emit.event.as_ref(),
-                    Event::HarnessNotice(notice)
-                        if notice.message == "transient startup event"
+                    event if is_outbound_event(event, "transient startup event")
                 )
     ));
     assert!(matches!(frames[6], HarnessInputMessage::Ready(_)));
@@ -1277,7 +1287,9 @@ fn configure_parse_failure_runs_error_hook() {
     let (state, frames) = run_messages(ConfigErrorHookExtension, 0, &[config_with_unknown_field()]);
 
     assert_eq!(state, 1);
-    assert!(notice_frame_index(&frames, "parse-error-hook") < config_error_frame_index(&frames));
+    assert!(
+        outbound_event_frame_index(&frames, "parse-error-hook") < config_error_frame_index(&frames)
+    );
 }
 
 /// Ensures configuration application failures run the error hook before the
@@ -1297,7 +1309,9 @@ fn configure_application_failure_runs_error_hook() {
     );
 
     assert_eq!(state, 1);
-    assert!(notice_frame_index(&frames, "apply-error-hook") < config_error_frame_index(&frames));
+    assert!(
+        outbound_event_frame_index(&frames, "apply-error-hook") < config_error_frame_index(&frames)
+    );
     let error = frames
         .iter()
         .find_map(|frame| match frame {
@@ -1603,21 +1617,21 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
     ) && *transient));
 }
 
-/// Ensures detached sends still flow through the writer before runner
+/// Ensures detached notice requests still flow through the writer before runner
 /// shutdown, covering background-worker style output that must not wait for
 /// flush before the handler returns.
 #[test]
-fn detached_emit_is_written_before_shutdown() {
+fn detached_notice_request_is_written_before_shutdown() {
     let (_, frames) = run_messages(
-        DetachedEmitExtension,
+        DetachedNoticeExtension,
         Counts::default(),
         &[tool_started("detached_tool")],
     );
 
     assert!(frames.iter().any(|frame| matches!(
         frame,
-        HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "detached")
+        HarnessInputMessage::ExtensionNoticeRequest(request)
+            if request.message == "detached" && request.level == NoticeLevel::Info
     )));
 }
 
@@ -1646,7 +1660,7 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
     });
 
     handle
-        .emit_detached(notice("blocked before shutdown"))
+        .emit_detached(outbound_event("blocked before shutdown"))
         .expect("queue blocked write");
     entered_rx
         .recv_timeout(Duration::from_secs(1))
@@ -1655,7 +1669,7 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
     let shutdown_thread = std::thread::spawn(move || handle.shutdown());
     let start = std::time::Instant::now();
     loop {
-        match cloned.emit_detached(notice("probe after shutdown")) {
+        match cloned.emit_detached(outbound_event("probe after shutdown")) {
             Ok(()) if start.elapsed() < Duration::from_secs(1) => {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -1665,7 +1679,7 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
         }
     }
     assert!(matches!(
-        cloned.emit(notice("sync after shutdown")),
+        cloned.emit(outbound_event("sync after shutdown")),
         Err(ClientError::WriterClosed)
     ));
 
@@ -1759,7 +1773,7 @@ fn detached_writer_state_factory_can_store_client_handle() {
     TauExtensionRunner::new(FactoryHandleExtension)
         .run_detached_writer_with_state(Cursor::new(input), writer, |handle| {
             handle
-                .emit_detached(notice("factory initialized"))
+                .emit_detached(outbound_event("factory initialized"))
                 .expect("factory emit");
             FactoryHandleState { handle }
         })
@@ -1785,17 +1799,19 @@ fn detached_writer_state_factory_can_store_client_handle() {
         .expect("ready frame");
     let factory_emit_index = frames
         .iter()
-        .position(|frame| matches!(
-            frame,
-            HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "factory initialized")
-        ))
+        .position(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if is_outbound_event(emit.event.as_ref(), "factory initialized")
+            )
+        })
         .expect("factory emit");
     assert!(ready_index < factory_emit_index);
     assert!(frames.iter().any(|frame| matches!(
         frame,
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "factory handle")
+            if is_outbound_event(emit.event.as_ref(), "factory handle")
     )));
 }
 
@@ -1839,7 +1855,7 @@ fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
     let runtime = TauExtensionRunner::new(FactoryHandleExtension)
         .start_manual_loop_with_state(Cursor::new(encode_output_messages(&[])), writer, |handle| {
             handle
-                .emit_detached(notice("manual factory initialized"))
+                .emit_detached(outbound_event("manual factory initialized"))
                 .expect("factory emit");
             FactoryHandleState { handle }
         })
@@ -1852,7 +1868,7 @@ fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("ready frame");
-    let factory_emit_index = notice_frame_index(&frames, "manual factory initialized");
+    let factory_emit_index = outbound_event_frame_index(&frames, "manual factory initialized");
     assert!(ready_index < factory_emit_index);
 }
 
@@ -1916,10 +1932,10 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
         )
         .expect("dynamic intercept");
     runtime
-        .startup_event(notice("dynamic startup event"))
+        .startup_event(outbound_event("dynamic startup event"))
         .expect("dynamic startup event");
     runtime
-        .startup_transient_event(notice("dynamic transient startup event"))
+        .startup_transient_event(outbound_event("dynamic transient startup event"))
         .expect("dynamic transient startup event");
     runtime
         .startup_ready(Some("dynamic ready".to_owned()))
@@ -1934,13 +1950,13 @@ fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
         &frames[3],
         HarnessInputMessage::Emit(emit)
             if !emit.transient
-                && matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic startup event")
+                && is_outbound_event(emit.event.as_ref(), "dynamic startup event")
     ));
     assert!(matches!(
         &frames[4],
         HarnessInputMessage::Emit(emit)
             if emit.transient
-                && matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic transient startup event")
+                && is_outbound_event(emit.event.as_ref(), "dynamic transient startup event")
     ));
     assert!(matches!(
         &frames[5],
@@ -2097,7 +2113,7 @@ fn manual_loop_deferred_startup_rejects_duplicate_ready() {
         .startup_ready(None)
         .expect_err("duplicate ready rejected");
     let late_event = runtime
-        .startup_event(notice("too late"))
+        .startup_event(outbound_event("too late"))
         .expect_err("late startup event rejected");
     runtime.finish().expect("finish");
 
@@ -2384,12 +2400,12 @@ fn manual_loop_allows_post_eof_output_before_finish() {
     assert_eq!(runtime.state().live_only, 5);
     runtime
         .handle()
-        .emit(notice("post-eof"))
+        .emit(outbound_event("post-eof"))
         .expect("post EOF emit");
     runtime.finish().expect("finish");
 
     let frames = frames_from_writer(&written);
-    assert!(notice_frame_index(&frames, "post-eof") > ready_frame_index(&frames));
+    assert!(outbound_event_frame_index(&frames, "post-eof") > ready_frame_index(&frames));
 }
 
 /// Ensures extension-data RPC uses tau-client's reader pump for demux:

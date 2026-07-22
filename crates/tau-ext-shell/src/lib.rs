@@ -2067,25 +2067,17 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
 
 fn dispatch_session_started(started: SessionStarted, tx: &Output) {
     let session_id = started.session_id.clone();
-    dispatch_session_discovery_events(session_id, build_session_started_events(started), tx);
+    dispatch_session_discovery_messages(session_id, build_session_started_messages(started), tx);
 }
 
 /// Publish one ordered session-discovery batch followed by its readiness
 /// acknowledgement.
-fn dispatch_session_discovery_events(
+fn dispatch_session_discovery_messages(
     session_id: tau_proto::SessionId,
-    events: Vec<Event>,
+    messages: Vec<HarnessInputMessage>,
     tx: &Output,
 ) {
-    for event in events {
-        let message = if matches!(
-            &event,
-            Event::ExtSkillAvailable(_) | Event::ExtAgentsMdAvailable(_)
-        ) {
-            HarnessInputMessage::emit_transient(event)
-        } else {
-            HarnessInputMessage::emit(event)
-        };
+    for message in messages {
         let _ = tx.send(message);
     }
     let _ = tx.send(HarnessInputMessage::emit_transient(
@@ -2242,36 +2234,38 @@ fn is_echo_tool(_name: &str) -> bool {
     false
 }
 
-fn build_session_started_events(_started: SessionStarted) -> Vec<Event> {
-    let mut events = Vec::new();
+fn build_session_started_messages(_started: SessionStarted) -> Vec<HarnessInputMessage> {
+    let mut messages = Vec::new();
 
     let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
 
     let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
-    push_skill_diagnostic_events(&mut events, result.diagnostics);
+    push_skill_diagnostic_requests(&mut messages, result.diagnostics);
     for skill in result.skills {
         let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
-        events.push(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: skill.name.into(),
-            description: skill.description,
-            file_path,
-            add_to_prompt: skill.add_to_prompt,
-            user_invocable: skill.user_invocable,
-            disable_model_invocation: skill.disable_model_invocation,
-            argument_hint: skill.argument_hint,
-        }));
-    }
-
-    for agents_file in discover_session_agents_files() {
-        events.push(Event::ExtAgentsMdAvailable(
-            tau_proto::ExtAgentsMdAvailable {
-                file_path: agents_file.file_path,
-                content: agents_file.content,
-            },
+        messages.push(HarnessInputMessage::emit_transient(
+            Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+                name: skill.name.into(),
+                description: skill.description,
+                file_path,
+                add_to_prompt: skill.add_to_prompt,
+                user_invocable: skill.user_invocable,
+                disable_model_invocation: skill.disable_model_invocation,
+                argument_hint: skill.argument_hint,
+            }),
         ));
     }
 
-    events
+    for agents_file in discover_session_agents_files() {
+        messages.push(HarnessInputMessage::emit_transient(
+            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
+                file_path: agents_file.file_path,
+                content: agents_file.content,
+            }),
+        ));
+    }
+
+    messages
 }
 
 fn shell_workdir_prompt_fragment() -> PromptFragment {
@@ -2285,8 +2279,8 @@ fn shell_workdir_prompt_fragment() -> PromptFragment {
     )
 }
 
-fn push_skill_diagnostic_events(
-    events: &mut Vec<Event>,
+fn push_skill_diagnostic_requests(
+    messages: &mut Vec<HarnessInputMessage>,
     diagnostics: Vec<tau_skills::SkillDiagnostic>,
 ) {
     for diagnostic in diagnostics {
@@ -2295,19 +2289,16 @@ fn push_skill_diagnostic_events(
             tau_skills::DiagnosticKind::Collision => ("collision", tau_proto::NoticeLevel::Trace),
             tau_skills::DiagnosticKind::Skipped => ("skipped", tau_proto::NoticeLevel::Warning),
         };
-        events.push(Event::HarnessNotice(tau_proto::HarnessNotice {
-            kind: format!("skill.{kind}"),
-            message: format!(
-                "skill {kind}: {}\n{}",
-                diagnostic.path.display(),
-                diagnostic.message
-            ),
-            level,
-            always_show: matches!(
+        messages.push(HarnessInputMessage::ExtensionNoticeRequest(
+            tau_proto::ExtensionNoticeRequest {
+                message: format!(
+                    "skill {kind}: {}\n{}",
+                    diagnostic.path.display(),
+                    diagnostic.message
+                ),
                 level,
-                tau_proto::NoticeLevel::Warning | tau_proto::NoticeLevel::Critical
-            ),
-        }));
+            },
+        ));
     }
 }
 

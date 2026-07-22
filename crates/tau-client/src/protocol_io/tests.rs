@@ -25,6 +25,34 @@ fn protocol_io_input_message_key_uses_emitted_event_name() {
     assert_eq!(input_message_key(&message), "term.bell");
 }
 
+/// Dedicated extension notice requests use their flat message name for
+/// metering.
+#[test]
+fn protocol_io_input_message_key_uses_extension_notice_request_name() {
+    let message = HarnessInputMessage::ExtensionNoticeRequest(tau_proto::ExtensionNoticeRequest {
+        message: "reconnecting".to_owned(),
+        level: tau_proto::NoticeLevel::Warning,
+    });
+
+    assert_eq!(
+        input_message_key(&message),
+        "message.extension_notice_request"
+    );
+}
+
+/// The separate harness-authored output remains metered as its event name.
+#[test]
+fn protocol_io_output_message_key_uses_harness_notice_name() {
+    let message =
+        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice::new(
+            tau_proto::notice_kind::EXTENSION_NOTICE,
+            "reconnecting",
+            tau_proto::NoticeLevel::Warning,
+        )));
+
+    assert_eq!(output_message_key(&message), "harness.notice");
+}
+
 /// Dedicated UI debug requests use a flat message key rather than the removed
 /// dotted event name.
 #[test]

@@ -89,6 +89,20 @@ Their complete pre-Ready frames remain deferred until activation, and disconnect
 drops unreleased frames. See
 [SPEC-custom-extension-events](../../../specs/SPEC-custom-extension-events.md).
 
+Configured extensions of every configured kind request user-visible diagnostics
+with `extension_notice_request(message, level)`. The request is operational
+traffic: pre-Ready requests consume the existing activation message and encoded
+byte quotas, retain global input order, release after Ready and the global
+barrier, and disappear on disconnect before release. Unconfigured or disconnected
+origins are silently denied; an illegal-phase request follows the normal protocol
+failure path. The handler caps `critical` to `warning` and creates a harness-sourced,
+live-only `extension.notice` with `always_show = false`. The result then crosses
+ordinary interception and broadcasts to every current matching subscriber. A
+publisher disconnect after inline handling does not cancel a parked
+harness-authored output. Generic extension `Emit(harness.notice)` remains denied,
+and `ConfigError` retains its separate mandatory replayable diagnostic path. See
+[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
 `&<session-id>` plus the exact-agent forms `&<session-id>/@<agent-id>` and

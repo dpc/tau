@@ -30,10 +30,10 @@ use tau_client::{
     ManualRuntimeWaker, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
-    CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessNotice,
-    HarnessOutputMessage, InterceptAction, InterceptionPriority, NoticeLevel, PromptOriginator,
-    ToolError, ToolGroup, ToolGroupName, ToolName, ToolRegistrationDeclared, ToolResult,
-    ToolResultKind, ToolSpec, ToolStarted, ToolType, UnixMicros,
+    CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessOutputMessage,
+    InterceptAction, InterceptionPriority, NoticeLevel, PromptOriginator, ToolError, ToolGroup,
+    ToolGroupName, ToolName, ToolRegistrationDeclared, ToolResult, ToolResultKind, ToolSpec,
+    ToolStarted, ToolType, UnixMicros,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -273,6 +273,11 @@ impl Output {
     /// Enqueues one durable or transient event frame.
     fn emit(&self, event: Event, transient: bool) {
         self.send(HarnessInputMessage::emit_with_transient(event, transient));
+    }
+
+    /// Enqueues one routine notice request.
+    fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
+        let _ = self.handle.request_notice_detached(message, level);
     }
 
     /// Enqueue one successful terminal tool report.
@@ -759,7 +764,7 @@ fn register_host_functions(
         "tau_info",
         move |message: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(&info_output, message.as_str(), NoticeLevel::Info, true);
+            info_output.request_notice(message.as_str(), NoticeLevel::Info);
             Ok(())
         },
     );
@@ -770,12 +775,7 @@ fn register_host_functions(
         "tau_info",
         move |message: ImmutableString, level: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(
-                &info_output,
-                message.as_str(),
-                parse_info_level(level.as_str()),
-                true,
-            );
+            info_output.request_notice(message.as_str(), parse_info_level(level.as_str()));
             Ok(())
         },
     );
@@ -1019,26 +1019,12 @@ fn enqueue_event(output: &Output, event: Dynamic, transient: bool) {
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "script emitted invalid event");
-            enqueue_info(
-                output,
-                &format!("rhai invalid event: {message}"),
+            output.request_notice(
+                format!("rhai invalid event: {message}"),
                 NoticeLevel::Warning,
-                true,
             );
         }
     }
-}
-
-fn enqueue_info(output: &Output, message: &str, level: NoticeLevel, transient: bool) {
-    output.emit(
-        Event::HarnessNotice(HarnessNotice {
-            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-            message: message.to_owned(),
-            level,
-            always_show: false,
-        }),
-        transient,
-    );
 }
 
 fn parse_info_level(level: &str) -> NoticeLevel {
@@ -1455,7 +1441,7 @@ fn join_shell_worker_bounded(job: PendingShellJob) {
 
 fn report_callback_error(output: &Output, message: String) {
     tracing::warn!(target: LOG_TARGET, error = %message, "rhai callback failed");
-    enqueue_info(output, &message, NoticeLevel::Warning, true);
+    output.request_notice(message, NoticeLevel::Warning);
 }
 
 fn meta_json(replay: bool, recorded_at: Option<UnixMicros>) -> serde_json::Value {

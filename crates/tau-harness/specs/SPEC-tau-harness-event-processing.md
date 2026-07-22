@@ -48,6 +48,15 @@ the downstream consumer revalidates captured generation/session and private
 route identity. Reports remain outside semantic history; only the harness
 publishes canonical progress/completion. See
 [SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
+Dedicated configured-extension notice requests are handled inline and converted
+to harness-authored `extension.notice` events. The request carries only message
+and level; the harness caps critical to warning and fixes source, kind,
+`always_show = false`, and transience. The resulting event uses ordinary
+interception, commit, and live broadcast but never semantic persistence or
+replay. Debug JSONL and protocol metering retain the raw
+`message.extension_notice_request` input separately from the later published
+event. See
+[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as

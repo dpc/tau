@@ -1457,6 +1457,10 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         HarnessInputMessage::ConfigError(ConfigError {
             message: "bad config".to_owned(),
         }),
+        HarnessInputMessage::ExtensionNoticeRequest(ExtensionNoticeRequest {
+            message: "provider connected".to_owned(),
+            level: NoticeLevel::Info,
+        }),
         HarnessInputMessage::Emit(Emit {
             event: Box::new(Event::ExtensionEvent(
                 CustomEvent::try_new(
@@ -2436,6 +2440,35 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
 
     let output_bytes = encode_harness_output_to_vec(&output).expect("encode output");
     assert!(decode_harness_input_from_slice(&output_bytes).is_err());
+}
+
+/// Routine extension notices use a flat dedicated request with no peer-owned
+/// event metadata.
+#[test]
+fn extension_notice_request_uses_dedicated_input_message() {
+    let input = HarnessInputMessage::ExtensionNoticeRequest(ExtensionNoticeRequest {
+        message: "bridge reconnecting".to_owned(),
+        level: NoticeLevel::Warning,
+    });
+    let json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "message": "extension_notice_request",
+            "payload": {
+                "message": "bridge reconnecting",
+                "level": "warning"
+            }
+        })
+    );
+
+    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert_eq!(
+        decode_harness_input_from_slice(&bytes).expect("decode input"),
+        input
+    );
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
+    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
 /// UI debug stats use a flat dedicated input message and cannot decode as an

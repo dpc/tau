@@ -17,8 +17,8 @@ use tau_client::{
     ClientResult, ExtensionBuilder, InterceptDecision, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
-    AgentPromptSubmitted, Event, EventSelector, HarnessNotice, InterceptionPriority, NoticeLevel,
-    ToolError, ToolResult, ToolResultKind, ToolSpec,
+    AgentPromptSubmitted, Event, EventSelector, InterceptionPriority, NoticeLevel, ToolError,
+    ToolResult, ToolResultKind, ToolSpec,
 };
 
 /// Tool name registered by this fixture extension for restart-supervision
@@ -89,7 +89,10 @@ where
                     let replacement = intercepted_prompt_replacement(cx.event());
                     match replacement {
                         Some(event) => {
-                            cx.emit_transient(correction_notice())?;
+                            cx.handle().request_notice(
+                                "did you mean \"Tau\"? — corrected for you",
+                                NoticeLevel::Info,
+                            )?;
                             Ok(InterceptDecision::replace(event))
                         }
                         None => Ok(InterceptDecision::Pass),
@@ -221,14 +224,6 @@ fn intercepted_prompt_replacement(event: &Event) -> Option<Event> {
         }),
         _ => None,
     }
-}
-
-fn correction_notice() -> Event {
-    Event::HarnessNotice(HarnessNotice::new(
-        tau_proto::notice_kind::EXTENSION_NOTICE,
-        "did you mean \"Tau\"? — corrected for you",
-        NoticeLevel::Info,
-    ))
 }
 
 fn handle_restart_invocation<T>(

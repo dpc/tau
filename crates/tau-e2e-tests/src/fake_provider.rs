@@ -1068,9 +1068,8 @@ impl FakeState {
                 "hold woke for a different cancellation identity",
             ));
         }
-        handle.emit(Event::HarnessNotice(tau_proto::HarnessNotice {
-            kind: "e2e_fake_provider.cancel_completed".to_owned(),
-            message: format!(
+        handle.request_notice(
+            format!(
                 "e2e_fake_provider.cancel_completed {}",
                 serde_json::to_string(&serde_json::json!({
                     "selected": prompt_id.to_string(),
@@ -1079,9 +1078,8 @@ impl FakeState {
                 }))
                 .map_err(|error| ClientError::handler(error.to_string()))?
             ),
-            level: tau_proto::NoticeLevel::Trace,
-            always_show: false,
-        }))?;
+            tau_proto::NoticeLevel::Trace,
+        )?;
         Ok(())
     }
 

@@ -18,6 +18,9 @@ failures produce no canonical successor, so this row is not yet fully complete.
 The dedicated UI-request row is migrated:
 `ui_debug_event_stats_request`, `ui_detach_request`, and `ui_tree_request` are
 flat point-to-point input messages rather than events.
+The extension-notice row is also migrated: configured extensions use
+`extension_notice_request`, and the harness publishes the sanitized
+`harness.notice`.
 
 This decision applies to `Emit` from every peer kind, including extensions,
 providers, UI clients, external peers, and harness-connected core components.
@@ -145,6 +148,7 @@ The following exact authority and wire-name mapping governs the migration:
 | State-changing `ui.*` commands | Existing request names remain | Attached local UI | Harness performs the request downstream and publishes canonical state/outcome events |
 | `ui.prompt_draft`, `ui.focus_changed` | unchanged | Attached local UI | Live-only consumers react after commit |
 | `ui.debug_event_stats_request`, `ui.tree_request`, `ui.detach_request` | Dedicated request messages, not events | Attached local UI | Directed result or connection-control behavior |
+| Extension-authored `harness.notice` | Dedicated `extension_notice_request` message, not an event | Every authenticated configured extension entry kind, including configured Core; no capability bit | Harness caps the level, supplies kind/source/visibility/persistence metadata, and publishes a live-only `harness.notice` through ordinary interception |
 | `term.osc1337_set_user_var`, `term.bell` | unchanged | Configured extension, attached UI, or core component | Live-only consumers react after commit |
 | Custom `extension.event` | unchanged extension-owned name | Configured extension, attached UI, or core component | Ordinary subscribers consume the committed event directly |
 | Harness lifecycle, membership, transcript, status, and all other harness-owned facts | No peer event name | None | Only the harness publishes the canonical fact |
@@ -254,5 +258,7 @@ The attached-UI prompt-draft and focus row is implemented by
 [SPEC-ui-prompt-draft-and-focus-events](SPEC-ui-prompt-draft-and-focus-events.md).
 The dedicated attached-UI request row is implemented by
 [SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
+The dedicated configured-extension notice-request row is governed by
+[DECISION-extension-notice-requests](DECISION-extension-notice-requests.md).
 The user-shell report-to-canonical-fact row is implemented by
 [SPEC-shell-command-reports-and-canonical-facts](SPEC-shell-command-reports-and-canonical-facts.md).

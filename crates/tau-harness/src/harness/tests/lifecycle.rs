@@ -1784,39 +1784,6 @@ fn extension_rejects_pre_hello_protocol_messages() {
     assert!(ready_error.to_string().contains("out-of-order"));
 }
 
-#[test]
-fn extension_authored_notice_kind_is_stable_and_sanitized() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let conn_id = "ext-conn-unstable";
-    let _extension_sink = connect_test_tool(&mut h, conn_id);
-
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::HarnessNotice(tau_proto::HarnessNotice {
-            kind: "spoofed.kind".to_owned(),
-            message: "extension authored".to_owned(),
-            level: tau_proto::NoticeLevel::Critical,
-            always_show: true,
-        })),
-    )
-    .expect("extension notice handled");
-
-    assert!(event_log_contains_source_event(
-        &h,
-        conn_id,
-        |event| matches!(
-            event,
-            Event::HarnessNotice(info)
-                if info.kind == tau_proto::notice_kind::EXTENSION_NOTICE
-                    && info.message == "extension authored"
-                    && info.level == tau_proto::NoticeLevel::Warning
-                    && !info.always_show
-        )
-    ));
-}
-
 /// Covers optional-startup availability and replay required by
 /// `SPEC-tau-harness-extension-lifecycle`.
 #[test]

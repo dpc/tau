@@ -2,6 +2,7 @@ mod agent_context;
 mod custom_event;
 mod internal_prompt;
 mod metadata_request;
+mod notice_request;
 mod prompt_fragment;
 mod session_discovery;
 mod shell_report;

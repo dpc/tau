@@ -16,10 +16,12 @@ extensions:
 
 `script` is required. Relative paths are resolved by the extension process current working directory; absolute paths are preferred. `vars` is passed to `init(config)` and `start(config)` as JSON-compatible data, along with `state_dir` when the harness provides one.
 
-Scripts see Tau events as JSON-shaped maps matching Serde's JSON form:
+Scripts see Tau events as JSON-shaped maps matching Serde's JSON form. Use
+`tau_info("hi")`, not a fabricated `harness.notice` event, for a user-visible
+diagnostic:
 
 ```rhai
-#{ event: "harness.notice", payload: #{ kind: "extension.notice", message: "hi", level: "info" } }
+#{ event: "term.bell", payload: #{} }
 ```
 
 ## Callbacks
@@ -54,7 +56,7 @@ fn on_intercept(event, transient) {
 
 `init(config)` is optional. A missing `init` or a no-op/unit return means no subscriptions, no intercepts, and the default ready message. `subscribe` accepts selector maps shaped as `#{ kind: "exact", value: "agent.prompt_submitted" }` or `#{ kind: "prefix", value: "tool." }`. Prefer exact subscription selectors that list the events the script actually handles; prefix subscriptions are only for scripts intentionally observing a whole event category and can increase replay catch-up, traffic, and data exposure. Multiple `intercept` entries are merged only when they use the same `priority`; different priorities are rejected because the harness has one interceptor registration per connection.
 
-`start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as warning `harness.notice` diagnostics without disabling the extension.
+`start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors request warning diagnostics without disabling the extension.
 
 `on_event(event, meta)` is optional. `meta.replay` is `true` when the delivery is subscribe-time catch-up history rather than a live occurrence; `meta.recorded_at` carries the original commit timestamp when Tau supplies it. Scripts with user-visible side effects should skip replayed events.
 
@@ -71,7 +73,7 @@ fn on_intercept(event, transient) {
 - `shell_spawn(command, opts)` — start a trusted host shell command asynchronously and return a `ShellJob`. `opts` supports `timeout`, `cwd`, `on_complete`, and `tag`. The completion callback is called as `on_complete(result, job)`.
 - `tau_emit(event)` — emit a durable Tau event map.
 - `tau_emit_transient(event)` — emit a transient Tau event map.
-- `tau_info(message)` / `tau_info(message, level)` — emit transient `harness.notice`; `level` is `"info"`, `"warning"`, `"debug"`, or `"trace"` (`"important"` is accepted as legacy `"warning"`).
+- `tau_info(message)` / `tau_info(message, level)` — request a live user notice; the harness owns and sanitizes the resulting `harness.notice`. `level` is `"info"`, `"warning"`, `"debug"`, or `"trace"` (`"important"` is accepted as legacy `"warning"`).
 - `tau_log(level, message)` — write to extension logs only.
 
 `register_tool*` are available only during `init`. Other side-effecting host functions are available to `start`, raw event/intercept callbacks, tool handlers, and shell completion callbacks, but not during `init`. This keeps broken init scripts inert.

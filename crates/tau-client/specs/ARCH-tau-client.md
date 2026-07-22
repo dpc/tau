@@ -44,6 +44,12 @@ wire-mechanical and does not rewrite canonical names. Local flush or queue
 admission does not acknowledge report commit, routed-call validation, or
 canonical completion. See
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+`ClientHandle::request_notice` and `request_notice_detached` send the dedicated
+`extension_notice_request` message. They expose only message and level; the
+harness owns the resulting notice kind, source, visibility, transience, and
+publication. Generic `emit` does not authorize an extension-authored
+`harness.notice`. See
+[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
 Configure-derived declarations are buffered while handlers run so they override
 same-name static defaults without becoming visible before configuration is
 accepted. Rejection emits `ConfigError`, discards buffered declarations, and

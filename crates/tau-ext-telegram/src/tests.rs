@@ -316,13 +316,10 @@ fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     error.message
 }
 
-fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> HarnessNotice {
+fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> tau_proto::ExtensionNoticeRequest {
     let msg = rx.recv().expect("notice");
-    let HarnessInputMessage::Emit(emit) = msg else {
-        panic!("emit")
-    };
-    let Event::HarnessNotice(notice) = *emit.event else {
-        panic!("notice")
+    let HarnessInputMessage::ExtensionNoticeRequest(notice) = msg else {
+        panic!("extension notice request")
     };
     notice
 }
@@ -1274,9 +1271,7 @@ fn get_updates_409_conflict_emits_notice_and_unregisters_agents() {
     );
 
     let notice = expect_notice(&rx);
-    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
     assert_eq!(notice.level, tau_proto::NoticeLevel::Warning);
-    assert!(!notice.always_show);
     assert!(
         notice.message.contains("another long-poll consumer"),
         "{}",

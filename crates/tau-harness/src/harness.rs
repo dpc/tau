@@ -8325,8 +8325,12 @@ impl Harness {
         source_id: &str,
         message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
+        let message = message.into();
+        if let Some(entry) = self.extensions.entries.get(source_id) {
+            entry.protocol_io.record_uplink_frame(&message);
+        }
         let admission = self.current_extension_frame_admission();
-        self.handle_extension_message_with_admission(source_id, message.into(), admission)
+        self.handle_extension_message_with_admission(source_id, message, admission)
     }
 
     fn current_extension_frame_admission(&self) -> ExtensionFrameAdmission {
@@ -8343,7 +8347,14 @@ impl Harness {
         admission: ExtensionFrameAdmission,
     ) -> Result<(), HarnessError> {
         if let Some(entry) = self.extensions.entries.get(source_id) {
-            entry.protocol_io.record_uplink_frame(&message);
+            if entry.state == ExtensionState::Disconnected
+                && matches!(message, HarnessInputMessage::ExtensionNoticeRequest(_))
+            {
+                // A stale/disconnected origin has no notice authority and no
+                // remaining protocol connection to isolate. Preserve metering,
+                // then deny without manufacturing a protocol diagnostic.
+                return Ok(());
+            }
             let ready_received = self.extensions.ready_received.contains(source_id);
             let legal = if ready_received {
                 matches!(
@@ -8353,6 +8364,7 @@ impl Harness {
                         | HarnessInputMessage::Intercept(_)
                         | HarnessInputMessage::Emit(_)
                         | HarnessInputMessage::ConfigError(_)
+                        | HarnessInputMessage::ExtensionNoticeRequest(_)
                         | HarnessInputMessage::InterceptReply(_)
                         | HarnessInputMessage::GetAgentPromptCreated(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
@@ -8371,6 +8383,7 @@ impl Harness {
                                 | HarnessInputMessage::Intercept(_)
                                 | HarnessInputMessage::Emit(_)
                                 | HarnessInputMessage::ConfigError(_)
+                                | HarnessInputMessage::ExtensionNoticeRequest(_)
                                 | HarnessInputMessage::InterceptReply(_)
                                 | HarnessInputMessage::GetAgentPromptCreated(_)
                                 | HarnessInputMessage::ExtensionDataRequest(_)
@@ -8529,6 +8542,9 @@ impl Harness {
                 } else {
                     self.handle_disconnect(source_id);
                 }
+            }
+            HarnessInputMessage::ExtensionNoticeRequest(request) => {
+                self.handle_extension_notice_request(source_id, request);
             }
             HarnessInputMessage::Subscribe(subscribe) => {
                 // Extensions get the same subscribe-time catch-up as UI
@@ -10835,14 +10851,6 @@ impl Harness {
         if !Self::is_extension_fallback_emit_allowed(&event) {
             return;
         }
-        let mut event = event;
-        if let Event::HarnessNotice(notice) = &mut event {
-            notice.kind = tau_proto::notice_kind::EXTENSION_NOTICE.to_owned();
-            notice.always_show = false;
-            if notice.level == tau_proto::NoticeLevel::Critical {
-                notice.level = tau_proto::NoticeLevel::Warning;
-            }
-        }
         let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
         if self.should_stage_extension_capabilities(source_id) {
             self.stage_extension_publish(source_id, event, transient);
@@ -10858,6 +10866,40 @@ impl Harness {
         } else {
             self.enqueue_publish(Some(source_id), event, transient, false, None);
         }
+    }
+
+    /// Convert one authorized routine extension notice request into a separate
+    /// harness-authored live publication.
+    fn handle_extension_notice_request(
+        &mut self,
+        source_id: &str,
+        request: tau_proto::ExtensionNoticeRequest,
+    ) {
+        let authorized = self
+            .extensions
+            .entries
+            .get(source_id)
+            .is_some_and(|entry| entry.state != ExtensionState::Disconnected);
+        if !authorized {
+            return;
+        }
+        let level = if request.level == tau_proto::NoticeLevel::Critical {
+            tau_proto::NoticeLevel::Warning
+        } else {
+            request.level
+        };
+        self.enqueue_publish(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+                message: request.message,
+                level,
+                always_show: false,
+            }),
+            true,
+            false,
+            None,
+        );
     }
 
     fn is_ui_client(&self, client_id: &str) -> bool {
@@ -11045,6 +11087,7 @@ impl Harness {
             }
             // Other input messages from clients are ignored.
             HarnessInputMessage::ConfigError(_)
+            | HarnessInputMessage::ExtensionNoticeRequest(_)
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
@@ -13726,8 +13769,7 @@ impl Harness {
     fn is_extension_fallback_emit_allowed(event: &Event) -> bool {
         matches!(
             event,
-            Event::HarnessNotice(_)
-                | Event::MessageDeliveredReported(_)
+            Event::MessageDeliveredReported(_)
                 | Event::MessageEditedReported(_)
                 | Event::MessageDeletedReported(_)
                 | Event::MessageReactionAddedReported(_)

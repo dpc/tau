@@ -3208,7 +3208,7 @@ fn project_scoped_skills_are_advertised_by_default() {
 }
 
 #[test]
-fn skill_diagnostics_are_emitted_as_harness_notice() {
+fn skill_diagnostics_use_extension_notice_requests() {
     let temp = TempDir::new().expect("tempdir");
     let skills_dir = temp.path().join(".agents").join("skills");
     let skill_dir = skills_dir.join("bad-skill");
@@ -3222,19 +3222,27 @@ fn skill_diagnostics_are_emitted_as_harness_notice() {
     let result = tau_skills::load_skills_from_dirs(&[skills_dir]);
     assert!(result.skills.is_empty());
 
-    let mut events = Vec::new();
-    push_skill_diagnostic_events(&mut events, result.diagnostics);
+    let mut messages = Vec::new();
+    push_skill_diagnostic_requests(&mut messages, result.diagnostics);
 
-    let skipped = events.iter().find_map(|event| match event {
-        Event::HarnessNotice(info) if info.message.contains("skill skipped:") => Some(info),
+    let skipped = messages.iter().find_map(|message| match message {
+        HarnessInputMessage::ExtensionNoticeRequest(request)
+            if request.message.contains("skill skipped:") =>
+        {
+            Some(request)
+        }
         _ => None,
     });
-    let Some(info) = skipped else {
-        panic!("expected skipped skill harness notice event, got {events:?}");
+    let Some(skipped_request) = skipped else {
+        panic!("expected skipped skill notice request, got {messages:?}");
     };
-    assert_eq!(info.level, tau_proto::NoticeLevel::Warning);
-    assert!(info.message.contains("bad-skill/SKILL.md"));
-    assert!(info.message.contains("name contains invalid characters"));
+    assert_eq!(skipped_request.level, tau_proto::NoticeLevel::Warning);
+    assert!(skipped_request.message.contains("bad-skill/SKILL.md"));
+    assert!(
+        skipped_request
+            .message
+            .contains("name contains invalid characters")
+    );
 }
 
 /// Ensures ext-shell keeps the expected notice severity for each skill-loader
@@ -3242,9 +3250,9 @@ fn skill_diagnostics_are_emitted_as_harness_notice() {
 /// trace-only, and skipped skills stay visible warnings.
 #[test]
 fn skill_diagnostics_map_expected_notice_levels() {
-    let mut events = Vec::new();
-    push_skill_diagnostic_events(
-        &mut events,
+    let mut messages = Vec::new();
+    push_skill_diagnostic_requests(
+        &mut messages,
         vec![
             tau_skills::SkillDiagnostic {
                 path: PathBuf::from("warn/SKILL.md"),
@@ -3264,34 +3272,30 @@ fn skill_diagnostics_map_expected_notice_levels() {
         ],
     );
 
-    let notices = events
+    let notices = messages
         .iter()
-        .map(|event| match event {
-            Event::HarnessNotice(info) => info,
-            other => panic!("expected harness notice event, got {other:?}"),
+        .map(|message| match message {
+            HarnessInputMessage::ExtensionNoticeRequest(request) => request,
+            other => panic!("expected extension notice request, got {other:?}"),
         })
         .collect::<Vec<_>>();
-    let warning = notices
+    let warning_request = notices
         .iter()
-        .find(|info| info.message.contains("skill warning:"))
+        .find(|request| request.message.contains("skill warning:"))
         .expect("warning diagnostic");
-    assert_eq!(warning.level, tau_proto::NoticeLevel::Info);
-    assert!(!warning.always_show);
+    assert_eq!(warning_request.level, tau_proto::NoticeLevel::Info);
 
-    let collision = notices
+    let collision_request = notices
         .iter()
-        .find(|info| info.message.contains("skill collision:"))
+        .find(|request| request.message.contains("skill collision:"))
         .expect("collision diagnostic");
-    assert_eq!(collision.kind, tau_proto::notice_kind::SKILL_COLLISION);
-    assert_eq!(collision.level, tau_proto::NoticeLevel::Trace);
-    assert!(!collision.always_show);
+    assert_eq!(collision_request.level, tau_proto::NoticeLevel::Trace);
 
-    let skipped = notices
+    let skipped_request = notices
         .iter()
-        .find(|info| info.message.contains("skill skipped:"))
+        .find(|request| request.message.contains("skill skipped:"))
         .expect("skipped diagnostic");
-    assert_eq!(skipped.level, tau_proto::NoticeLevel::Warning);
-    assert!(skipped.always_show);
+    assert_eq!(skipped_request.level, tau_proto::NoticeLevel::Warning);
 }
 
 #[test]
@@ -3356,22 +3360,26 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 fn session_discovery_events_use_transient_wire_metadata() {
     let (tx, rx) = std::sync::mpsc::channel();
     let output = Output::channel(tx);
-    dispatch_session_discovery_events(
+    dispatch_session_discovery_messages(
         "session-transient".into(),
         vec![
-            Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-                name: "transient-skill".into(),
-                description: "transient skill".to_owned(),
-                file_path: "/tmp/transient-skill.md".into(),
-                add_to_prompt: true,
-                user_invocable: true,
-                disable_model_invocation: false,
-                argument_hint: None,
-            }),
-            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-                file_path: "/tmp/AGENTS.md".into(),
-                content: "transient instructions".to_owned(),
-            }),
+            HarnessInputMessage::emit_transient(Event::ExtSkillAvailable(
+                tau_proto::ExtSkillAvailable {
+                    name: "transient-skill".into(),
+                    description: "transient skill".to_owned(),
+                    file_path: "/tmp/transient-skill.md".into(),
+                    add_to_prompt: true,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: None,
+                },
+            )),
+            HarnessInputMessage::emit_transient(Event::ExtAgentsMdAvailable(
+                tau_proto::ExtAgentsMdAvailable {
+                    file_path: "/tmp/AGENTS.md".into(),
+                    content: "transient instructions".to_owned(),
+                },
+            )),
         ],
         &output,
     );

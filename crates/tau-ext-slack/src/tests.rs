@@ -1993,18 +1993,13 @@ fn worker_connection_failure_notice_is_bounded_and_one_shot() {
     let notices = rx
         .try_iter()
         .filter_map(|message| match message {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::HarnessNotice(notice) => Some(notice),
-                _ => None,
-            },
+            HarnessInputMessage::ExtensionNoticeRequest(request) => Some(request),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
-    assert!(!notice.always_show);
     assert_eq!(notice.level, NoticeLevel::Warning);
-    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
     assert!(notice.message.contains(SOCKET_HEARTBEAT_TIMEOUT_ERROR));
     assert!(!notice.message.contains("xapp-test"));
     assert!(!notice.message.contains("xoxb-test"));
@@ -5264,18 +5259,13 @@ fn identity_failure_notice_is_bounded_redacted_and_resets_after_recovery() {
     let notices = rx
         .try_iter()
         .filter_map(|message| match message {
-            HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::HarnessNotice(notice) => Some(notice),
-                _ => None,
-            },
+            HarnessInputMessage::ExtensionNoticeRequest(request) => Some(request),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(notices.len(), 2);
     for notice in notices {
-        assert!(!notice.always_show);
         assert_eq!(notice.level, NoticeLevel::Warning);
-        assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
         assert!(!notice.message.contains("xoxb-test"));
         assert!(notice.message.len() <= MAX_DIAGNOSTIC_BYTES + 3);
     }

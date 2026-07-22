@@ -11,6 +11,12 @@ delivery envelope and the remaining exact event-family mappings required by
 [DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
 remain to be implemented.
 
+Configured extensions request user-visible diagnostics with the dedicated
+`extension_notice_request` input message carrying only `message` and `level`.
+The request is not an event and cannot set publication metadata; the harness
+creates the resulting live-only `harness.notice`. See
+[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+
 Tool lifecycle uses distinct transient peer declarations
 (`tool.registration_declared`, `tool.unregistration_declared`) and protected
 harness-authored canonical state (`tool.register`, `tool.unregister`). Canonical

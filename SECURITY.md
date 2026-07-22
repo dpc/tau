@@ -103,6 +103,16 @@ non-UI sockets, and embedded/non-socket UIs receive only a content-free
 authorization error. The request is omitted from debug JSONL and its result is a
 requester-directed, non-published notice. Configured extensions are silently denied
 without a response, warning, or disconnection.
+Every authenticated configured extension kind may send
+`extension_notice_request`, but the request carries no kind, target, transience,
+visibility, publisher, correlation, or provenance authority. The harness caps
+critical to warning and publishes a harness-sourced, live-only
+`extension.notice` through ordinary interception. Unconfigured and disconnected
+origins are silently denied, and generic extension `Emit(harness.notice)` remains
+forbidden. Pre-Ready requests retain normal activation ordering and bounded
+admission. `ConfigError` remains a separate mandatory replayable path. Security
+review must preserve those distinctions and the non-persistence guarantee. See
+[`DECISION-extension-notice-requests`](specs/DECISION-extension-notice-requests.md).
 Only an attached socket UI may send the payload-free `ui_detach_request` that
 keeps the daemon alive after that UI disconnects. Other socket peers,
 embedded/non-socket UIs, dedicated external-message peers, and configured

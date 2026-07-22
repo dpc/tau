@@ -496,6 +496,56 @@ impl ClientHandle {
         ))
     }
 
+    /// Requests one routine user-visible notice from the harness.
+    ///
+    /// The harness owns the resulting notice kind, visibility, publication
+    /// source, and live-only delivery policy. It caps
+    /// [`tau_proto::NoticeLevel::Critical`] to
+    /// [`tau_proto::NoticeLevel::Warning`]. The resulting event is live-only
+    /// and is never replayed.
+    ///
+    /// Success confirms only that the request reached the local protocol writer
+    /// and was flushed. It does not acknowledge harness commit or UI delivery;
+    /// an interceptor may rewrite the message or drop the resulting notice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn request_notice(
+        &self,
+        message: impl Into<String>,
+        level: tau_proto::NoticeLevel,
+    ) -> ClientResult<()> {
+        self.send(tau_proto::HarnessInputMessage::ExtensionNoticeRequest(
+            tau_proto::ExtensionNoticeRequest {
+                message: message.into(),
+                level,
+            },
+        ))
+    }
+
+    /// Enqueues a routine notice request without waiting for writer flush.
+    ///
+    /// This has the same notice semantics as [`Self::request_notice`], but
+    /// success confirms only local writer-queue admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn request_notice_detached(
+        &self,
+        message: impl Into<String>,
+        level: tau_proto::NoticeLevel,
+    ) -> ClientResult<()> {
+        self.send_detached(tau_proto::HarnessInputMessage::ExtensionNoticeRequest(
+            tau_proto::ExtensionNoticeRequest {
+                message: message.into(),
+                level,
+            },
+        ))
+    }
+
     /// Emits `extension.context_ready` for one agent after extension-owned
     /// per-agent context work is complete.
     ///

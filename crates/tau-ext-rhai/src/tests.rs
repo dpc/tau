@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{
     CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessInputReader,
-    HarnessOutputMessage, HarnessOutputWriter, InterceptAction, InterceptRequest,
+    HarnessNotice, HarnessOutputMessage, HarnessOutputWriter, InterceptAction, InterceptRequest,
     InterceptionPriority, UnixMicros,
 };
 
@@ -152,6 +152,13 @@ fn emitted_transient(message: &HarnessInputMessage) -> Option<bool> {
     }
 }
 
+fn requested_notice(message: &HarnessInputMessage) -> Option<&tau_proto::ExtensionNoticeRequest> {
+    match message {
+        HarnessInputMessage::ExtensionNoticeRequest(request) => Some(request),
+        _ => None,
+    }
+}
+
 fn tool_result_output(frames: &[HarnessInputMessage]) -> &str {
     for frame in frames {
         let Some(Event::ToolResultReported(result)) = emitted_event(frame) else {
@@ -283,8 +290,8 @@ fn init_host_emit_failure_is_inert() {
             .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
     );
     assert!(frames.iter().all(|frame| !matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("should not leak")
+        requested_notice(frame),
+        Some(request) if request.message.contains("should not leak")
     )));
 }
 
@@ -366,8 +373,8 @@ fn start_runs_after_ready_with_host_functions() {
         .iter()
         .position(|frame| {
             matches!(
-                emitted_event(frame),
-                Some(Event::HarnessNotice(info)) if info.message == "started with honk"
+                requested_notice(frame),
+                Some(request) if request.message == "started with honk"
             )
         })
         .expect("start info");
@@ -402,8 +409,8 @@ fn start_error_reports_but_keeps_extension_ready() {
             .all(|frame| !matches!(frame, HarnessInputMessage::ConfigError(_)))
     );
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("rhai start failed")
+        requested_notice(frame),
+        Some(request) if request.message.contains("rhai start failed")
     )));
 }
 
@@ -417,15 +424,7 @@ fn tau_emit_respects_transient_flag_and_reports_invalid_events() {
         &dir,
         r#"
             fn start(config) {
-                let event = #{
-                    event: "harness.notice",
-                    payload: #{
-                        kind: "extension.notice",
-                        message: "from rhai",
-                        level: "info",
-                        always_show: false,
-                    },
-                };
+                let event = #{ event: "term.bell", payload: #{} };
                 tau_emit(event);
                 tau_emit_transient(event);
                 tau_emit(#{ event: "not.a.real.event", payload: #{} });
@@ -435,21 +434,16 @@ fn tau_emit_respects_transient_flag_and_reports_invalid_events() {
 
     let frames = run_frames(&[configure_with_script(&script)]);
 
-    let notice_emits: Vec<_> = frames
+    let bell_emits: Vec<_> = frames
         .iter()
-        .filter(|frame| {
-            matches!(
-                emitted_event(frame),
-                Some(Event::HarnessNotice(info)) if info.message == "from rhai"
-            )
-        })
+        .filter(|frame| matches!(emitted_event(frame), Some(Event::TermBell(_))))
         .collect();
-    assert_eq!(notice_emits.len(), 2);
-    assert_eq!(emitted_transient(notice_emits[0]), Some(false));
-    assert_eq!(emitted_transient(notice_emits[1]), Some(true));
+    assert_eq!(bell_emits.len(), 2);
+    assert_eq!(emitted_transient(bell_emits[0]), Some(false));
+    assert_eq!(emitted_transient(bell_emits[1]), Some(true));
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("rhai invalid event")
+        requested_notice(frame),
+        Some(request) if request.message.contains("rhai invalid event")
     )));
 }
 
@@ -514,8 +508,8 @@ fn max_operations_limit_aborts_runaway_callback() {
     let frames = run_frames(&[configure, delivered]);
 
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("on_event failed")
+        requested_notice(frame),
+        Some(request) if request.message.contains("on_event failed")
     )));
 }
 
@@ -542,12 +536,12 @@ fn delivered_event_invokes_script_with_replay_meta() {
     let frames = run_frames(&[configure_with_script(&script), live, replayed]);
 
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("saw false/11: hello")
+        requested_notice(frame),
+        Some(request) if request.message.contains("saw false/11: hello")
     )));
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("saw true/7: old")
+        requested_notice(frame),
+        Some(request) if request.message.contains("saw true/7: old")
     )));
 }
 
@@ -576,12 +570,12 @@ fn script_error_during_on_event_reports_and_keeps_running() {
     let frames = run_frames(&[configure_with_script(&script), failing, following]);
 
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("on_event failed")
+        requested_notice(frame),
+        Some(request) if request.message.contains("on_event failed")
     )));
     assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("handled after")
+        requested_notice(frame),
+        Some(request) if request.message.contains("handled after")
     )));
 }
 
@@ -889,8 +883,8 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     );
     assert_eq!(results[0].tool_name.as_str(), "work_echo_args");
     assert!(frames.iter().all(|frame| !matches!(
-        emitted_event(frame),
-        Some(Event::HarnessNotice(info)) if info.message.contains("raw should not see")
+        requested_notice(frame),
+        Some(request) if request.message.contains("raw should not see")
     )));
 }
 
@@ -1088,8 +1082,8 @@ fn shell_completions_are_not_starved_by_ready_harness_input() {
         .iter()
         .rposition(|frame| {
             matches!(
-                emitted_event(frame),
-                Some(Event::HarnessNotice(notice)) if notice.message.starts_with("flood-")
+                requested_notice(frame),
+                Some(request) if request.message.starts_with("flood-")
             )
         })
         .expect("flood notice");

@@ -18,7 +18,12 @@ directed, non-published notice result. UI detach now uses the dedicated
 `ui_detach_request` message with the same authority and direct
 connection-control behavior. UI tree inspection uses `ui_tree_request` and
 returns one requester-directed, non-published multiline notice. The
-dedicated-request row is complete.
+dedicated attached-UI request row is complete.
+Configured extensions now use the dedicated `extension_notice_request`; the
+harness creates a sanitized live-only `extension.notice` through ordinary
+interception and broadcast. Extension-authored generic
+`Emit(harness.notice)` remains denied. See
+[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 
