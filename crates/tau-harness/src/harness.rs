@@ -15357,7 +15357,14 @@ impl Harness {
                 };
                 target_generation <= previous.target_generation
             });
-        if repeated_generation {
+        let may_bypass_repeat_guard = repeated_generation
+            && !self_request
+            && self.has_matching_blocked_recovery(
+                target_public_id.as_str(),
+                &target.activation_dispatch,
+                target_head,
+            );
+        if repeated_generation && !may_bypass_repeat_guard {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
                 call.id.clone(),
@@ -15687,6 +15694,35 @@ impl Harness {
         (tree.contains_head_ancestry(normalized, current_head)
             && resume_through.is_none_or(|owed| tree.contains_head_ancestry(owed, current_head)))
         .then_some(normalized)
+    }
+
+    /// Returns whether runtime Blocked state matches the latest durable
+    /// failure's transaction id, cut, and resume watermark, and the current
+    /// head must permit the existing safe cut and owed-branch
+    /// normalization.
+    fn has_matching_blocked_recovery(
+        &self,
+        agent_id: &str,
+        dispatch: &crate::agent::ActivationDispatchState,
+        current_head: tau_proto::AgentHead,
+    ) -> bool {
+        let Some((failed_id, failed_cut, resume_through)) = dispatch.blocked_recovery() else {
+            return false;
+        };
+        let Some(tree) = self.agent_store.agent(agent_id) else {
+            return false;
+        };
+        let Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. }) =
+            tree.standalone_compaction_recovery()
+        else {
+            return false;
+        };
+        failed.transaction_id == *failed_id
+            && failed.cut == failed_cut
+            && failed.resume_through == resume_through
+            && self
+                .normalized_blocked_recovery_cut(agent_id, failed_cut, resume_through, current_head)
+                .is_some()
     }
 
     /// Inserts one automatic standalone compaction boundary before inference

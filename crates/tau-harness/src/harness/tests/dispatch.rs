@@ -13507,15 +13507,20 @@ fn setup_manual_cross_compaction_test() -> (
         }),
     );
     h.ensure_loaded_agent_for_agent(&target_cid, "unrelated-target");
-    seed_assistant_tool_round(
-        &mut h,
-        &caller_cid,
-        &[("call-cross-compact", "agent_compact")],
-    );
-    h.tool_agents
-        .insert("call-cross-compact".into(), caller_cid.clone());
+    let call = register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact");
+    let target_id = tau_proto::AgentId::parse("unrelated-target").expect("target id");
+    (td, h, caller_cid, target_cid, call, target_id)
+}
+
+fn register_manual_cross_compaction_call(
+    h: &mut Harness,
+    caller_cid: &AgentId,
+    call_id: &str,
+) -> AgentToolCall {
+    seed_assistant_tool_round(h, caller_cid, &[(call_id, "agent_compact")]);
+    h.tool_agents.insert(call_id.into(), caller_cid.clone());
     h.pending_tools.insert(
-        "call-cross-compact".into(),
+        call_id.into(),
         PendingTool {
             name: ToolName::new("agent_compact"),
             internal_name: ToolName::new("agent_compact"),
@@ -13524,17 +13529,538 @@ fn setup_manual_cross_compaction_test() -> (
         },
     );
     h.tool_turn
-        .record_unqueued_in_flight(caller_cid.clone(), "call-cross-compact".into());
+        .record_unqueued_in_flight(caller_cid.clone(), call_id.into());
     h.prompt_tool_call_prompts
-        .insert("call-cross-compact".into(), "sp-seeded-tools".into());
-    let call = AgentToolCall {
-        id: "call-cross-compact".into(),
+        .insert(call_id.into(), "sp-seeded-tools".into());
+    AgentToolCall {
+        id: call_id.into(),
         name: ToolName::new("agent_compact"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(Vec::new()),
+    }
+}
+
+fn durable_compaction_counts(
+    h: &Harness,
+    target_id: &tau_proto::AgentId,
+) -> (usize, usize, usize, usize) {
+    let events = h
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target events");
+    (
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentManualCompactionRequested(_)))
+            .count(),
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionFailed(_)))
+            .count(),
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentCompacted(_)))
+            .count(),
+    )
+}
+
+fn durable_background_outcome_counts(
+    h: &Harness,
+    caller_id: &tau_proto::AgentId,
+    call_id: &str,
+) -> (usize, usize) {
+    let events = h
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("caller events");
+    (
+        events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolBackgroundResult(result) if result.call_id.as_str() == call_id
+                )
+            })
+            .count(),
+        events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolBackgroundError(error) if error.call_id.as_str() == call_id
+                )
+            })
+            .count(),
+    )
+}
+
+fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
+    let (td, mut h, caller_cid, target_cid, first_call, target_id) =
+        setup_manual_cross_compaction_test();
+    let state = td.path().join("state");
+    let caller_id = durable_agent_id_for_conversation(&h, &caller_cid);
+    let (closed_prefix, _, owed_resume) =
+        seed_historical_open_prefix_failure(&mut h, &target_cid, "echo/model");
+    let generation = h
+        .agent_store
+        .agent(target_id.as_str())
+        .expect("target tree")
+        .ordinary_inference_generation();
+
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &first_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    let first_started = h
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target events")
+        .into_iter()
+        .filter_map(|record| match record.event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                ) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .next()
+        .expect("first manual transaction");
+    let first_prompt = h
+        .read_agent_prompt_created(&h.current_session_id, &first_started.compact_prompt_id)
+        .expect("first compact prompt");
+    h.handle_provider_response_finished(context_overflow_response(&first_prompt))
+        .expect("fail first manual transaction");
+
+    assert_eq!(durable_compaction_counts(&h, &target_id), (1, 2, 2, 0));
+    assert_eq!(
+        durable_background_outcome_counts(&h, &caller_id, first_call.id.as_str()),
+        (0, 1)
+    );
+    assert_eq!(
+        h.agent_store
+            .agent(target_id.as_str())
+            .expect("target tree")
+            .ordinary_inference_generation(),
+        generation,
+        "standalone failure must not advance the ordinary generation"
+    );
+    assert!(matches!(
+        h.agents[&target_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    assert_eq!(
+        h.agent_store
+            .agent_events(target_id.as_str())
+            .expect("target events")
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::AgentPromptCreated(ref prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            ))
+            .count(),
+        2,
+        "the terminal failure must not retry provider work"
+    );
+
+    let before_reopen = durable_compaction_counts(&h, &target_id);
+    let (mut h, caller_cid, target_cid) = if cold_reopen {
+        h.shutdown().expect("shutdown before cold reopen");
+        drop(h);
+        assert!(
+            !tau_core::session_is_locked(&tau_config::settings::sessions_dir_of(&state), "s1")
+                .expect("session lock probe"),
+            "joined shutdown must release the session lock"
+        );
+        let mut resumed =
+            echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+                .expect("cold reopen");
+        resumed
+            .provider_model_info
+            .get_mut(&"echo/model".into())
+            .expect("echo model")
+            .supports_standalone_compaction = true;
+        let resumed_caller = resumed
+            .agent_routes
+            .get(caller_id.as_str())
+            .cloned()
+            .expect("restored caller");
+        let resumed_target = resumed
+            .agent_routes
+            .get(target_id.as_str())
+            .cloned()
+            .expect("restored target");
+        assert_eq!(
+            durable_compaction_counts(&resumed, &target_id),
+            before_reopen,
+            "cold replay must reconstruct the same durable lifecycle"
+        );
+        assert_eq!(
+            durable_background_outcome_counts(&resumed, &caller_id, first_call.id.as_str()),
+            (0, 1),
+            "cold repair must not duplicate the first background error"
+        );
+        assert!(
+            !event_log_events(&resumed)
+                .iter()
+                .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+            "cold replay must not automatically retry the failed transaction"
+        );
+        (resumed, resumed_caller, resumed_target)
+    } else {
+        (h, caller_cid, target_cid)
     };
-    let target_id = tau_proto::AgentId::parse("unrelated-target").expect("target id");
-    (td, h, caller_cid, target_cid, call, target_id)
+
+    let second_call =
+        register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact-recovery");
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &second_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_eq!(
+        h.agent_store
+            .agent(target_id.as_str())
+            .expect("target tree")
+            .ordinary_inference_generation(),
+        generation,
+        "explicit recovery must remain in the failed request's generation"
+    );
+    let starts = h
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target events")
+        .into_iter()
+        .filter_map(|record| match record.event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 3);
+    let successor = starts.last().expect("successor");
+    assert_eq!(
+        successor.supersedes.as_ref(),
+        Some(&first_started.transaction_id)
+    );
+    assert_eq!(successor.cut, closed_prefix);
+    let tree = h
+        .agent_store
+        .agent(target_id.as_str())
+        .expect("target tree");
+    assert!(tree.contains_head_ancestry(successor.cut, owed_resume));
+    assert!(tree.contains_head_ancestry(
+        owed_resume,
+        successor.resume_through.expect("successor owed resume")
+    ));
+    assert!(tree.contains_head_ancestry(
+        first_started.resume_through.expect("first owed resume"),
+        successor.resume_through.expect("successor owed resume")
+    ));
+    assert_eq!(durable_compaction_counts(&h, &target_id), (2, 3, 2, 0));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id == second_call.id && error.message == "not_needed"
+    )));
+
+    let successor_prompt = h
+        .read_agent_prompt_created(&h.current_session_id, &successor.compact_prompt_id)
+        .expect("successor compact prompt");
+    h.handle_provider_response_finished(provider_text_response(
+        &successor_prompt.agent_prompt_id,
+        successor_prompt.agent_id,
+        "recovered summary",
+    ))
+    .expect("complete explicit recovery");
+    assert_eq!(durable_compaction_counts(&h, &target_id), (2, 3, 2, 1));
+    assert_eq!(
+        durable_background_outcome_counts(&h, &caller_id, first_call.id.as_str()),
+        (0, 1)
+    );
+    assert_eq!(
+        durable_background_outcome_counts(&h, &caller_id, second_call.id.as_str()),
+        (1, 0)
+    );
+    let successor_outcomes = h
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target events")
+        .iter()
+        .filter(|record| match &record.event {
+            Event::AgentCompacted(compacted) => {
+                compacted.transaction_id.as_ref() == Some(&successor.transaction_id)
+            }
+            Event::AgentStandaloneCompactionFailed(failed) => {
+                failed.transaction_id == successor.transaction_id
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(successor_outcomes, 1);
+    assert!(!matches!(
+        h.agents[&target_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// A failed cross-agent manual transaction remains explicitly recoverable in
+/// the same ordinary generation without an intervening automatic retry.
+#[test]
+fn manual_cross_compaction_recovers_failed_tool_at_same_generation() {
+    assert_failed_manual_tool_recovery(false);
+}
+
+/// Cold replay preserves a failed cross-agent manual transaction and its first
+/// background error, then permits exactly one same-generation successor.
+#[test]
+fn manual_cross_compaction_cold_replay_recovers_failed_tool_at_same_generation() {
+    assert_failed_manual_tool_recovery(true);
+}
+
+/// The blocked-repeat exception requires exact runtime/durable transaction
+/// ownership and safe current-head ancestry for every correlated boundary.
+#[test]
+fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
+    let (_td, mut h, _caller, target, _call, target_id) = setup_manual_cross_compaction_test();
+    let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &target, "echo/model");
+    let current_head = h.agents[&target]
+        .head
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    let valid = h.agents[&target].activation_dispatch.clone();
+    assert!(h.has_matching_blocked_recovery(target_id.as_str(), &valid, current_head));
+
+    let crate::agent::ActivationDispatchState::Blocked {
+        failed_id,
+        cut,
+        resume_through,
+    } = valid.clone()
+    else {
+        panic!("historical failure must block");
+    };
+    let mismatches = [
+        crate::agent::ActivationDispatchState::Blocked {
+            failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned")
+                .expect("transaction id"),
+            cut,
+            resume_through,
+        },
+        crate::agent::ActivationDispatchState::Blocked {
+            failed_id: failed_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through,
+        },
+        crate::agent::ActivationDispatchState::Blocked {
+            failed_id,
+            cut,
+            resume_through: None,
+        },
+    ];
+    for mismatch in &mismatches {
+        assert!(!h.has_matching_blocked_recovery(target_id.as_str(), mismatch, current_head));
+    }
+    assert!(
+        !h.has_matching_blocked_recovery(target_id.as_str(), &valid, prefix),
+        "a sibling or retreated current head must not satisfy the owed resume branch"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Model self-`compact` cannot use the cross-agent blocked-repeat exception,
+/// even when runtime and durable recovery ownership otherwise match exactly.
+#[test]
+fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    seed_historical_open_prefix_failure(&mut h, &cid, "echo/model");
+    let blocked = h.agents[&cid].activation_dispatch.clone();
+    let current_head = h.agents[&cid]
+        .head
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    assert!(h.has_matching_blocked_recovery(agent_id.as_str(), &blocked, current_head));
+
+    let historical = tau_proto::AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse("cr-self-historical")
+            .expect("request id"),
+        caller_agent_id: agent_id.clone(),
+        target_agent_id: agent_id.clone(),
+        initiating_agent_prompt_id: "ap-self-historical".into(),
+        initiating_tool_call_id: "call-self-historical".into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+        visible_tool_name: ToolName::new("compact"),
+        requested_target_head: current_head,
+        target_generation: 0,
+        model: "echo/model".into(),
+        resume_inference: true,
+    };
+    h.publish_for_agent(
+        &cid,
+        Event::AgentManualCompactionRequested(historical.clone()),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentManualCompactionRequestFailed(tau_proto::AgentManualCompactionRequestFailed {
+            request_id: historical.request_id,
+            target_agent_id: agent_id.clone(),
+            reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+        }),
+    );
+
+    seed_assistant_tool_round(&mut h, &cid, &[("call-self-blocked", "compact")]);
+    h.tool_agents
+        .insert("call-self-blocked".into(), cid.clone());
+    h.pending_tools.insert(
+        "call-self-blocked".into(),
+        PendingTool {
+            name: ToolName::new("compact"),
+            internal_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.tool_turn
+        .record_unqueued_in_flight(cid.clone(), "call-self-blocked".into());
+    h.prompt_tool_call_prompts
+        .insert("call-self-blocked".into(), "sp-seeded-tools".into());
+    let call = AgentToolCall {
+        id: "call-self-blocked".into(),
+        name: ToolName::new("compact"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.request_agent_tool_compaction(&cid, &call, ToolName::new("compact"), None);
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id == call.id && error.message == "not_needed"
+    )));
+    assert_eq!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .manual_compaction_recoveries()
+            .len(),
+        1
+    );
+    assert_eq!(durable_compaction_counts(&h, &agent_id), (1, 1, 1, 0));
+    assert!(!h.tool_turn.is_backgrounded(&call.id));
+    assert_eq!(
+        h.agents[&cid].activation_dispatch.blocked_recovery(),
+        blocked.blocked_recovery()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Successful cross-agent manual compaction still consumes its ordinary
+/// generation and rejects another request before any ordinary inference.
+#[test]
+fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() {
+    let (_td, mut h, caller, target, first_call, target_id) = setup_manual_cross_compaction_test();
+    h.publish_for_agent(
+        &target,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: target_id.clone(),
+            text: "content to compact".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    h.request_agent_tool_compaction(
+        &caller,
+        &first_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("first transaction");
+    let suffix_end = h
+        .agent_store
+        .agent(target_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    h.publish_for_agent(
+        &target,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id: target_id.clone(),
+            transaction_id: Some(started.transaction_id),
+            cut: Some(started.cut),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(started.compact_prompt_id),
+            model: Some(started.model),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    );
+    assert_eq!(
+        durable_compaction_counts(&h, &target_id),
+        (1, 1, 0, 1),
+        "{:?}",
+        h.agents
+            .values()
+            .find(|agent| agent.agent_id.as_deref() == Some(target_id.as_str()))
+            .map(|agent| (&agent.turn_state, &agent.activation_dispatch))
+    );
+
+    let repeated_call =
+        register_manual_cross_compaction_call(&mut h, &caller, "call-successful-repeat");
+    h.request_agent_tool_compaction(
+        &caller,
+        &repeated_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ToolError(error)
+                if error.call_id == repeated_call.id && error.message == "not_needed"
+        )),
+        "{:?}",
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolError(error) if error.call_id == repeated_call.id
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(durable_compaction_counts(&h, &target_id), (1, 1, 0, 1));
+    h.shutdown().expect("shutdown");
 }
 
 /// Regression: an ordinary provider prompt published through the generic event
@@ -13946,8 +14472,8 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
 }
 
 /// Cross-agent requests fail with bounded non-enumerating state categories and
-/// never persist acceptance for busy, uncertain, unsupported, or unavailable
-/// targets.
+/// never persist acceptance for busy, uncertain, unsupported, unavailable, or
+/// repeat-guarded targets.
 #[test]
 fn manual_cross_compaction_rejects_ineligible_target_matrix() {
     let assert_error = |h: &Harness, call: &AgentToolCall, expected: &str| {
@@ -14086,6 +14612,24 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         Some(&target_id),
     );
     assert_error(&h, &call, "not_needed");
+
+    let mismatched_call =
+        register_manual_cross_compaction_call(&mut h, &caller, "call-mismatched-block");
+    h.agents
+        .get_mut(&target)
+        .expect("target")
+        .activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
+        failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned").expect("transaction"),
+        cut: tau_proto::AgentHead::Root,
+        resume_through: None,
+    };
+    h.request_agent_tool_compaction(
+        &caller,
+        &mismatched_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert_error(&h, &mismatched_call, "not_needed");
 }
 
 fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
