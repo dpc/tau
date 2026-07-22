@@ -1,4 +1,4 @@
-//! Replay-aware socket observer for the S1 session-restore scenario.
+//! Replay-aware socket observer for the S1 and S2 session-restore scenarios.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use tau_socket::{SocketPeer, SocketReceive};
 
 use super::{SESSION, provider_response_contains};
 
-/// Ordered replay-aware delivery retained by the S1 observer.
+/// Ordered replay-aware delivery retained by the session-restore observer.
 #[derive(Clone, Debug)]
 pub(super) struct Observed {
     /// Typed event payload.
@@ -32,7 +32,7 @@ pub(super) struct SessionRestoreObserver {
 }
 
 impl SessionRestoreObserver {
-    /// Connects and installs the exact S1 historical/live selector set.
+    /// Connects and installs the exact S1/S2 historical/live selector set.
     pub(super) fn connect(socket: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut peer = loop {
@@ -307,7 +307,7 @@ impl SessionRestoreObserver {
     }
 }
 
-/// Returns the exact selector set needed for S1 lifecycle and replay
+/// Returns the exact selector set needed for S1/S2 lifecycle and replay
 /// assertions.
 fn selectors() -> Vec<EventSelector> {
     use EventName as E;

@@ -22,7 +22,8 @@ exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
 provider disconnect without restart,
 clean resume, concurrent lane isolation, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
-watch, and startup rejection of invalid
+watch, explicit post-resume watch recreation with exact new-subscription
+notifications, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
@@ -43,7 +44,9 @@ The `session_restore` case uses the production harness-owned `agent_start`
 built-in under exact two-role policy. It cleanly replaces the daemon, restores
 the completed durable worker as an idle independently addressable
 conversation, and proves the old automatic watch does not re-fan out fresh
-worker activity.
+worker activity. A separate fresh fixture recreates the watch through production
+`agent_watch`, proves the initial snapshot is non-model, and correlates one
+direct worker turn's prompt/running/response/idle facts to the new subscription.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

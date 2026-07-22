@@ -28,7 +28,8 @@ no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
 exception: the exact universal `component ext-shell` may expose only `workdir`
 and `edit` to a closed scratch-only scenario. S1 is the other: its main role
 exposes only the production harness-owned `agent_start` built-in while its
-worker role exposes no tools. The fake has no network,
+worker role exposes no tools. S2 adds only production `agent_watch` to that
+main role. The fake has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
 
@@ -53,7 +54,12 @@ exact bounded instruction, optional role, task name, call id, production tool
 name/type/schema, one sole successful result with an exact two-field payload,
 and harness-minted distinct
 self/child identities. It retains that parent/child association for later
-watch matching. No other harness-owned tool enters the grammar.
+watch matching. S2 adds one adjacent `AgentWatchCall`/`AgentWatchResult` pair.
+It derives the exact watched ID only from that retained association, permits
+only `enable: true`, requires the production name/type/schema, and accepts one
+correlated successful result whose exact sanitized text names the child and
+contains no subscription identity. No other harness-owned tool enters the
+grammar.
 
 S1 also adds one bounded `WatchNotifications` action containing one to four
 typed `Response`, `Prompt`, or non-initial `TurnState` records. Each provider
@@ -65,6 +71,15 @@ records. It also checks the exact escaped model-visible prompt projection.
 Only records for the current closed action enter the queue; unrelated and excess
 live traffic fails before admission. Replayed deliveries cannot populate this
 live queue.
+
+S2's closed `WatchNotificationChains` action requires the explicit watch to
+create exactly one non-model initial idle
+snapshot with a new nonempty subscription ID distinct from Boot A. Its one
+fresh direct worker turn then yields exactly one prompt notification, running
+edge, final-response notification, and idle edge. Only prompt-before-response
+and running-before-idle are ordered across those streams. The later turn-state
+edges retain the new subscription and generation; the initial snapshot consumes
+no provider action.
 
 A barrier is the lane's sole action, appears once per distinct
 participant lane, and has one consistent bounded participant count, preventing
@@ -123,6 +138,11 @@ main-lane actions and two worker-lane actions, producing exactly six main
 provider turns and two worker provider turns, to prove that a completed,
 production-started durable worker cold-restores as an independently addressable
 idle conversation; its daemon-lifetime automatic watch does not restore.
+S2 repeats the five-main/one-worker Boot A budget in a fresh fixture. Boot B
+spends two main turns on the exact explicit watch pair, four main turns on the
+four model-visible watch notifications, and one worker turn on direct fresh
+input: six main and one worker turn exactly. Extra prompts fail scenario
+consumption.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

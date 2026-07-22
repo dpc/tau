@@ -44,6 +44,7 @@ enum FixtureMode {
     Standard,
     CoreShell,
     SessionRestore,
+    SessionRestoreWatch,
 }
 
 impl DeterministicFixture {
@@ -116,6 +117,30 @@ impl DeterministicFixture {
             fake_provider_bin,
             None,
             FixtureMode::SessionRestore,
+        )
+    }
+
+    /// Creates the two-role cold-resume fixture with production `agent_start`
+    /// and `agent_watch` enabled only for the main role.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_session_restore_watch(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            None,
+            FixtureMode::SessionRestoreWatch,
         )
     }
 
@@ -245,7 +270,15 @@ impl DeterministicFixture {
         } else {
             tools
         };
-        let role_config = if mode == FixtureMode::SessionRestore {
+        let role_config = if matches!(
+            mode,
+            FixtureMode::SessionRestore | FixtureMode::SessionRestoreWatch
+        ) {
+            let main_tools = if mode == FixtureMode::SessionRestoreWatch {
+                serde_json::json!(["agent_start", "agent_watch"])
+            } else {
+                serde_json::json!(["agent_start"])
+            };
             serde_json::json!({
                 "default_role": "deterministic-main",
                 "id_template": "main",
@@ -254,7 +287,7 @@ impl DeterministicFixture {
                         "roles": {
                             "deterministic-main": {
                                 "model": "fake/test",
-                                "tools": ["agent_start"],
+                                "tools": main_tools,
                             },
                             "deterministic-worker": {
                                 "model": "fake/test",
@@ -415,6 +448,24 @@ impl DeterministicFixture {
     /// Returns an error when the generated configuration differs from the
     /// closed production-`agent_start` fixture surface.
     pub fn assert_session_restore_roles(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.assert_session_restore_role_tools(&["agent_start"])
+    }
+
+    /// Verifies the generated S2 role projection adds only `agent_watch` to the
+    /// S1 main role.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated role surface differs from the closed
+    /// explicit-watch fixture.
+    pub fn assert_session_restore_watch_roles(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.assert_session_restore_role_tools(&["agent_start", "agent_watch"])
+    }
+
+    fn assert_session_restore_role_tools(
+        &self,
+        main_tools: &[&str],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
             self.root().join("artifacts/harness-config.json"),
         )?)?;
@@ -424,7 +475,7 @@ impl DeterministicFixture {
             || agents["id_template"] != "main"
             || roles.as_object().is_none_or(|roles| roles.len() != 2)
             || roles["deterministic-main"]["model"] != "fake/test"
-            || roles["deterministic-main"]["tools"] != serde_json::json!(["agent_start"])
+            || roles["deterministic-main"]["tools"] != serde_json::json!(main_tools)
             || roles["deterministic-worker"]["model"] != "fake/test"
             || roles["deterministic-worker"]["tools"] != serde_json::json!([])
         {

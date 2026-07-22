@@ -7,9 +7,9 @@ use tau_e2e_tests::{
     WatchNotificationV2,
 };
 use tau_proto::{
-    AgentId, AgentMessageKind, AgentNavigationMode, AgentRuntimeState, Event, SessionAgentFacts,
-    SessionAgentLifecycle, SessionAgentListEntry, SessionAgentListScope, SessionAgentPersistence,
-    SessionId,
+    AgentId, AgentMessageKind, AgentNavigationMode, AgentRuntimeState, AgentWatchUpdateCause,
+    Event, SessionAgentFacts, SessionAgentLifecycle, SessionAgentListEntry, SessionAgentListScope,
+    SessionAgentPersistence, SessionId,
 };
 
 use super::FAKE_PROVIDER;
@@ -169,6 +169,178 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// Proves a cold resume restores no automatic watch edge, while an explicit
+/// production `agent_watch` call establishes one fresh correlated subscription
+/// without turning its initial snapshot or replay into provider work.
+#[test]
+fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::error::Error>> {
+    let session_id = SessionId::from(SESSION);
+    let fixture = DeterministicFixture::new_session_restore_watch(
+        "cold_resume_recreates_explicit_worker_watch",
+        &ScenarioV2::new(
+            "s2-explicit-watch-recreation",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "s2-main".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::AgentStartCall {
+                            user_text: "start the deterministic worker".to_owned(),
+                            call_id: "s2-agent-start".into(),
+                            prompt: WORKER_PROMPT.to_owned(),
+                            role: Some("deterministic-worker".to_owned()),
+                            task_name: "deterministic worker".to_owned(),
+                        },
+                        ScenarioActionV2::AgentStartResult {
+                            user_text: "start the deterministic worker".to_owned(),
+                            call_id: "s2-agent-start".into(),
+                            response: "worker start accepted".to_owned(),
+                        },
+                        ScenarioActionV2::WatchNotifications {
+                            notifications: vec![
+                                WatchNotificationV2::TurnState {
+                                    state: AgentRuntimeState::Running,
+                                },
+                                WatchNotificationV2::Response {
+                                    content: "worker boot-a complete".to_owned(),
+                                },
+                                WatchNotificationV2::TurnState {
+                                    state: AgentRuntimeState::Idle,
+                                },
+                            ],
+                            response: "worker completion observed".to_owned(),
+                        },
+                        ScenarioActionV2::AgentWatchCall {
+                            user_text: "recreate worker watch".to_owned(),
+                            call_id: "s2-agent-watch".into(),
+                        },
+                        ScenarioActionV2::AgentWatchResult {
+                            user_text: "recreate worker watch".to_owned(),
+                            call_id: "s2-agent-watch".into(),
+                            response: "worker watch recreated".to_owned(),
+                        },
+                        ScenarioActionV2::WatchNotificationChains {
+                            prompt: "fresh watched worker work".to_owned(),
+                            response: "fresh watched worker complete".to_owned(),
+                            completion: "fresh watched worker observed".to_owned(),
+                        },
+                    ],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "s2-worker".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::Text {
+                            user_text: WORKER_INITIAL.to_owned(),
+                            response: "worker boot-a complete".to_owned(),
+                        },
+                        ScenarioActionV2::Text {
+                            user_text: "fresh watched worker work".to_owned(),
+                            response: "fresh watched worker complete".to_owned(),
+                        },
+                    ],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    fixture.assert_session_restore_watch_roles()?;
+
+    let socket_a = fixture.socket_path("s2-boot-a");
+    let daemon_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
+    observer_a.create_main("s2-main", "start the deterministic worker")?;
+    observer_a.wait_for_marker("worker completion observed")?;
+    observer_a.wait_for_two_idle_agents()?;
+    let identities = BootIdentities::from_events(&observer_a.events)?;
+    assert_boot_a_lifecycle(&observer_a.events, &identities, &session_id)?;
+    let boot_a_subscription_id =
+        initial_live_watch_subscription_id(&observer_a.events, &identities, &session_id)?;
+    assert_provider_turn_counts(
+        &observer_a.events,
+        &identities,
+        ProviderTurnCounts { main: 5, worker: 1 },
+    )?;
+    let boot_a_action_matches = matched_action_count(&fixture)?;
+    disconnect_ui(&mut observer_a.peer)?;
+    daemon_a.finish()?;
+
+    let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    assert_durable_boot_a(&snapshot_a, &identities)?;
+
+    let socket_b = fixture.socket_path("s2-boot-b");
+    let daemon_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
+    observer_b.wait_for_session_boundary(&session_id)?;
+    assert_resume_boundaries(&observer_b.events, &identities, &session_id)?;
+    assert_replay_is_observational(&observer_b.events, &identities)?;
+    if matched_action_count(&fixture)? != boot_a_action_matches {
+        return Err("S2 cold replay consumed a fake-provider action".into());
+    }
+
+    let watch_start = observer_b.events.len();
+    observer_b.submit(&identities.main, "s2-watch", "recreate worker watch")?;
+    observer_b.wait_for_agent_marker(&identities.main, "worker watch recreated", watch_start)?;
+    observer_b.wait_for_agent_idle_after(&identities.main, watch_start)?;
+    let new_subscription_id = assert_explicit_watch_initial(
+        &observer_b.events[watch_start..],
+        &identities,
+        &session_id,
+        &boot_a_subscription_id,
+    )?;
+    if matched_action_count(&fixture)? != boot_a_action_matches + 2 {
+        return Err("initial watch snapshot became provider input".into());
+    }
+    assert_provider_turn_counts(
+        &observer_b.events,
+        &identities,
+        ProviderTurnCounts { main: 2, worker: 0 },
+    )?;
+
+    let worker_start = observer_b.events.len();
+    observer_b.submit(
+        &identities.worker,
+        "s2-worker-fresh",
+        "fresh watched worker work",
+    )?;
+    observer_b.wait_for_agent_marker(
+        &identities.worker,
+        "fresh watched worker complete",
+        worker_start,
+    )?;
+    observer_b.wait_for_agent_idle_after(&identities.worker, worker_start)?;
+    observer_b.wait_for_agent_marker(
+        &identities.main,
+        "fresh watched worker observed",
+        worker_start,
+    )?;
+    observer_b.wait_for_agent_idle_after(&identities.main, worker_start)?;
+    assert_explicit_watch_notifications(
+        &observer_b.events[watch_start..],
+        &identities,
+        &session_id,
+        &new_subscription_id,
+    )?;
+    assert_provider_turn_counts(
+        &observer_b.events,
+        &identities,
+        ProviderTurnCounts { main: 6, worker: 1 },
+    )?;
+    disconnect_ui(&mut observer_b.peer)?;
+    daemon_b.finish()?;
+
+    let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    snapshot_b.require_prefix(&snapshot_a)?;
+    assert_durable_boot_a(&snapshot_b, &identities)?;
+    if snapshot_b.session_events != snapshot_a.session_events {
+        return Err("S2 resume appended a durable membership fact".into());
+    }
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// Exact main and worker identities discovered from immutable creation facts.
 struct BootIdentities {
     /// Stable main agent id.
@@ -177,7 +349,8 @@ struct BootIdentities {
     worker: AgentId,
 }
 
-/// Exact accepted provider prompts owned by each S1 role in one boot.
+/// Exact accepted provider prompts owned by each session-restore role in one
+/// observed boot.
 #[derive(Clone, Copy)]
 struct ProviderTurnCounts {
     /// Main-agent provider turns.
@@ -205,6 +378,234 @@ impl BootIdentities {
             worker: worker.ok_or("worker creation fact missing")?,
         })
     }
+}
+
+fn matched_action_count(
+    fixture: &DeterministicFixture,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(fixture
+        .trace()?
+        .lines()
+        .filter(|line| line.contains(" matched "))
+        .count())
+}
+
+fn initial_live_watch_subscription_id(
+    events: &[Observed],
+    identities: &BootIdentities,
+    session_id: &SessionId,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let subscription_ids = events
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            Event::AgentMessageReceived(message)
+                if !observed.replay
+                    && message.sender_id == identities.worker
+                    && message.recipient_id == identities.main
+                    && message.kind == AgentMessageKind::WatchTurnState
+                    && message
+                        .watch_turn_state
+                        .as_ref()
+                        .is_some_and(|state| state.initial && &state.session_id == session_id) =>
+            {
+                message
+                    .watch_turn_state
+                    .as_ref()
+                    .map(|state| state.subscription_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [subscription_id] = subscription_ids.as_slice() else {
+        return Err(
+            format!("expected one initial watch subscription, got {subscription_ids:?}").into(),
+        );
+    };
+    if subscription_id.is_empty() {
+        return Err("initial watch subscription id was empty".into());
+    }
+    Ok(subscription_id.clone())
+}
+
+fn assert_explicit_watch_initial(
+    events: &[Observed],
+    identities: &BootIdentities,
+    session_id: &SessionId,
+    boot_a_subscription_id: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let updates = events
+        .iter()
+        .filter(|observed| {
+            !observed.replay
+                && matches!(
+                    &observed.event,
+                    Event::AgentWatchesUpdated(update)
+                        if &update.session_id == session_id
+                            && update.watcher_id == identities.main
+                            && update.watched_agent_ids == [identities.worker.clone()]
+                            && update.changed_agent_id.as_ref() == Some(&identities.worker)
+                            && update.cause == AgentWatchUpdateCause::AgentWatchEnable
+                )
+        })
+        .count();
+    if updates != 1 {
+        return Err(format!("explicit watch published {updates} exact enable snapshots").into());
+    }
+    let subscription_id = initial_live_watch_subscription_id(events, identities, session_id)?;
+    if subscription_id == boot_a_subscription_id {
+        return Err("explicit watch reused Boot A subscription identity".into());
+    }
+    let initial = events.iter().filter(|observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::AgentMessageReceived(message)
+                    if message.sender_id == identities.worker
+                        && message.recipient_id == identities.main
+                        && message.kind == AgentMessageKind::WatchTurnState
+                        && message.watch_provider_status.is_none()
+                        && message.watch_turn_state.as_ref().is_some_and(|state| {
+                            state.initial
+                                && &state.session_id == session_id
+                                && state.subscription_id == subscription_id
+                                && state.state == AgentRuntimeState::Idle
+                        })
+            )
+    });
+    if initial.count() != 1 {
+        return Err("explicit watch lacked one exact idle initial snapshot".into());
+    }
+    if events.iter().any(|observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::AgentMessageReceived(message)
+                    if message.sender_id == identities.worker
+                        && message.recipient_id == identities.main
+                        && matches!(
+                            message.kind,
+                            AgentMessageKind::WatchPrompt
+                                | AgentMessageKind::WatchResponse
+                                | AgentMessageKind::WatchProviderStatus
+                        )
+            )
+    }) {
+        return Err("explicit watch emitted a non-initial notification before worker input".into());
+    }
+    Ok(subscription_id)
+}
+
+fn assert_explicit_watch_notifications(
+    events: &[Observed],
+    identities: &BootIdentities,
+    session_id: &SessionId,
+    subscription_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relevant = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, observed)| match &observed.event {
+            Event::AgentMessageReceived(message)
+                if !observed.replay
+                    && message.sender_id == identities.worker
+                    && message.recipient_id == identities.main =>
+            {
+                Some((index, message))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if relevant.len() != 5 {
+        return Err(format!(
+            "explicit watch emitted {} worker-to-main notifications instead of five",
+            relevant.len()
+        )
+        .into());
+    }
+    if relevant
+        .iter()
+        .any(|(_, message)| message.watch_provider_status.is_some())
+    {
+        return Err("S2 watch facts carried an unexpected provider-status payload".into());
+    }
+    assert_watch_prompt_response(&relevant)?;
+    assert_watch_turn_states(&relevant, session_id, subscription_id)
+}
+
+fn assert_watch_prompt_response(
+    messages: &[(usize, &tau_proto::AgentMessageReceived)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (prompt_index, prompt_message) =
+        sole_watch_message(messages, AgentMessageKind::WatchPrompt)?;
+    let (response_index, response_message) =
+        sole_watch_message(messages, AgentMessageKind::WatchResponse)?;
+    if prompt_message.message != "fresh watched worker work"
+        || response_message.message != "fresh watched worker complete"
+        || prompt_index >= response_index
+    {
+        return Err("watched prompt/response content or causal order changed".into());
+    }
+    Ok(())
+}
+
+fn assert_watch_turn_states(
+    messages: &[(usize, &tau_proto::AgentMessageReceived)],
+    session_id: &SessionId,
+    subscription_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut turn_states = messages.iter().filter_map(|(index, message)| {
+        (message.kind == AgentMessageKind::WatchTurnState)
+            .then_some((index, message.watch_turn_state.as_ref()))
+    });
+    let mut initial = None;
+    let mut running = None;
+    let mut idle = None;
+    for _ in 0..3 {
+        let Some((index, Some(state))) = turn_states.next() else {
+            return Err("watch turn-state notification count or payload changed".into());
+        };
+        if state.subscription_id != subscription_id {
+            return Err("watch turn-state subscription identity changed".into());
+        }
+        if &state.session_id != session_id {
+            return Err("watch turn-state session identity changed".into());
+        }
+        match (state.initial, state.state) {
+            (true, AgentRuntimeState::Idle) => initial = Some(*index),
+            (false, AgentRuntimeState::Running) => running = Some((*index, state.turn_generation)),
+            (false, AgentRuntimeState::Idle) => idle = Some((*index, state.turn_generation)),
+            pair => return Err(format!("unexpected watch turn-state edge: {pair:?}").into()),
+        }
+    }
+    if turn_states.next().is_some() {
+        return Err("watch emitted more than three turn-state facts".into());
+    }
+    let (Some(_initial), Some((running, running_generation)), Some((idle, idle_generation))) =
+        (initial, running, idle)
+    else {
+        return Err("watch initial/running/idle edges were incomplete".into());
+    };
+    if running >= idle || running_generation != idle_generation {
+        return Err("watch running/idle causal correlation changed".into());
+    }
+    Ok(())
+}
+
+fn sole_watch_message<'a>(
+    messages: &[(usize, &'a tau_proto::AgentMessageReceived)],
+    kind: AgentMessageKind,
+) -> Result<(usize, &'a tau_proto::AgentMessageReceived), Box<dyn std::error::Error>> {
+    let mut matching = messages
+        .iter()
+        .filter(|(_, message)| message.kind == kind)
+        .map(|(index, message)| (*index, *message));
+    let Some(message) = matching.next() else {
+        return Err(format!("expected one {kind:?} notification, got none").into());
+    };
+    if matching.next().is_some() {
+        return Err(format!("expected one {kind:?} notification, got multiple").into());
+    }
+    Ok(message)
 }
 
 fn assert_boot_a_lifecycle(
@@ -546,7 +947,10 @@ fn assert_provider_turn_counts(
     }
     let main = counts.get(&identities.main).copied().unwrap_or_default();
     let worker = counts.get(&identities.worker).copied().unwrap_or_default();
-    if main != expected.main || worker != expected.worker || counts.len() != 2 {
+    let unexpected = counts
+        .keys()
+        .any(|agent_id| agent_id != &identities.main && agent_id != &identities.worker);
+    if main != expected.main || worker != expected.worker || unexpected {
         return Err(format!(
             "provider-turn budget changed: main={main}/{}, worker={}/{}, all={counts:?}",
             expected.main, worker, expected.worker

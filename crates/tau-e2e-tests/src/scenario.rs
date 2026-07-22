@@ -94,12 +94,40 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after the tool result.
         response: String,
     },
+    /// Enable the production harness-owned `agent_watch` tool for the child
+    /// learned from the validated `agent_start` result.
+    AgentWatchCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+    },
+    /// Accept the correlated successful `agent_watch` result and finish with
+    /// text.
+    AgentWatchResult {
+        /// Exact latest user text retained in the provider continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant response after the tool result.
+        response: String,
+    },
     /// Match one complete model-visible batch of automatic watch notifications.
     WatchNotifications {
         /// Ordered logical batch consumed one notification per provider prompt.
         notifications: Vec<WatchNotificationV2>,
         /// Complete assistant response after consuming the batch.
         response: String,
+    },
+    /// Match the two independent prompt/response and running/idle watch chains
+    /// without imposing a cross-stream total order.
+    WatchNotificationChains {
+        /// Exact direct user prompt reported for the watched child.
+        prompt: String,
+        /// Exact final response reported for the watched child.
+        response: String,
+        /// Complete assistant response after all four notifications.
+        completion: String,
     },
     /// Request the closed Gate 2 relative `workdir("project")` operation.
     CoreShellWorkdirCall {

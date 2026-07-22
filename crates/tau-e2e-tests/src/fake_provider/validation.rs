@@ -77,6 +77,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     let mut dummy_call_ids = std::collections::HashSet::new();
     let mut core_call_ids = std::collections::HashSet::new();
     let mut agent_start_call_ids = std::collections::HashSet::new();
+    let mut agent_watch_call_ids = std::collections::HashSet::new();
     for lane in &scenario.lanes {
         if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
             return Err(ClientError::handler(
@@ -164,6 +165,38 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         "agent_start result must have a bounded matching prior call",
                     ));
                 }
+                ScenarioActionV2::AgentWatchCall { call_id, .. }
+                    if call_id.is_empty()
+                        || call_id.len() > 256
+                        || !agent_watch_call_ids.insert(call_id.as_str())
+                        || agent_watch_call_ids.len() > 1
+                        || !matches!(
+                            lane.actions.get(action_index + 1),
+                            Some(ScenarioActionV2::AgentWatchResult {
+                                call_id: result_id,
+                                ..
+                            }) if result_id == call_id
+                        ) =>
+                {
+                    return Err(ClientError::handler(
+                        "scenario requires exactly one unique bounded adjacent agent_watch call/result pair",
+                    ));
+                }
+                ScenarioActionV2::AgentWatchResult { call_id, .. }
+                    if call_id.is_empty()
+                        || call_id.len() > 256
+                        || !matches!(
+                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                            Some(ScenarioActionV2::AgentWatchCall {
+                                call_id: request_id,
+                                ..
+                            }) if request_id == call_id
+                        ) =>
+                {
+                    return Err(ClientError::handler(
+                        "agent_watch result must have a bounded matching prior call",
+                    ));
+                }
                 ScenarioActionV2::WatchNotifications { notifications, .. }
                     if notifications.is_empty()
                         || notifications.len() > 4
@@ -177,6 +210,17 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 {
                     return Err(ClientError::handler(
                         "watch notification batches require 1..=4 bounded notifications",
+                    ));
+                }
+                ScenarioActionV2::WatchNotificationChains {
+                    prompt, response, ..
+                } if prompt.is_empty()
+                    || prompt.len() > 4 * 1024
+                    || response.is_empty()
+                    || response.len() > 4 * 1024 =>
+                {
+                    return Err(ClientError::handler(
+                        "watch notification chains require bounded prompt and response text",
                     ));
                 }
                 ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }

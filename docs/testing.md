@@ -68,7 +68,11 @@ barriers, fatal disconnect, quiescent same-agent restore, and one closed
 exact production `agent_start` pair, a harness-minted child binding, and bounded
 typed automatic-watch matching. The corresponding two-agent gate proves a
 completed durable worker cold-restores with its own route and transcript while
-the daemon-lifetime watch is absent. Embedded and
+the daemon-lifetime watch is absent. Its S2 grammar adds one closed
+`AgentWatchCall`/`AgentWatchResult` pair, and the fresh fixture proves a new
+subscription produces exactly one non-model initial snapshot plus one
+prompt/running/response/idle set under only the two contract causal edges.
+Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption
 acknowledgement retain the private generated configuration, scenario, durable

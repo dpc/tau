@@ -66,10 +66,10 @@ reconstruction, missing creation journals, non-default-agent tool repair,
 agent-owned background notices, unloaded-recipient classification, and dropping
 watch topology on restart.
 
-No current E2E gate creates a production worker, cold-restores main and worker
-together, and then exercises both restored routes. The worker lifecycle,
-creation-versus-membership distinction, and mixed membership set therefore lack
-one cross-process acceptance proof.
+S1 creates a production worker, cold-restores main and worker together, and
+exercises both restored routes. S2 repeats that setup and explicitly recreates a
+non-persistent watch with a fresh subscription. Mixed loaded, unloaded, and
+ephemeral membership remains the S3 cross-process acceptance gap.
 
 ## Test boundaries and oracles
 
@@ -171,12 +171,13 @@ post-completion watch action, and Boot B's fresh prompt) and two worker lane
 actions. The three ordered Running/response/Idle records in the watch action
 each cause a real provider turn, so the typed execution oracle requires exactly
 six main provider turns and two worker provider turns across both boots. S2
-omits S1's fresh main prompt and budgets at most seven main actions:
-the Boot A start pair/watch-driven turn, Boot B watch call/result, and the two
-fresh watch-driven turns whose prompt/running and response/idle facts are
-steered together by serialized harness ordering. It uses two worker actions. Add
-a focused failure if either setup produces an unexpected extra provider prompt;
-do not silently add an unbounded action.
+omits S1's fresh main prompt and uses exactly six main lane actions: the Boot A
+start pair and watch action, then the Boot B watch call/result and four-fact
+partial-order watch action. It uses exactly two worker actions. Boot A spends
+five main and one worker provider turn; Boot B spends six main and one worker
+turn, totaling eleven main and two worker turns. Add a focused failure if either
+setup produces an unexpected extra provider prompt; do not silently add an
+unbounded action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -269,6 +270,10 @@ and the running edge before the idle edge; do not impose any stronger
 cross-stream order than the watch contract. Assert that neither the initial
 snapshot nor any Boot A notification becomes fresh provider input. This keeps
 watch restoration policy separate from transcript restoration.
+
+Implemented by
+`session_restore::cold_resume_recreates_explicit_worker_watch` using a fresh S2
+fixture and the closed `AgentWatchCall`/`AgentWatchResult` grammar.
 
 ### S3 — Loaded, unloaded, and ephemeral membership
 

@@ -247,6 +247,197 @@ fn v2_agent_start_actions_require_one_bounded_adjacent_pair() {
     }
 }
 
+/// Ensures explicit watch recreation is one exact adjacent call/result pair,
+/// rather than a generic dynamic tool grammar.
+#[test]
+fn v2_agent_watch_actions_require_one_bounded_adjacent_pair() {
+    let pair = agent_watch_scenario();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(pair.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let mut mismatched = pair.clone();
+    let ScenarioActionV2::AgentWatchResult { call_id, .. } = &mut mismatched.lanes[0].actions[1]
+    else {
+        unreachable!()
+    };
+    *call_id = "other".into();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(mismatched)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut unpaired = pair.clone();
+    unpaired.lanes[0].actions.pop();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(unpaired)
+        }
+        .validate()
+        .is_err()
+    );
+
+    let mut repeated = pair.clone();
+    repeated.lanes[0]
+        .actions
+        .extend(pair.lanes[0].actions.clone());
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(repeated)
+        }
+        .validate()
+        .is_err()
+    );
+
+    for call_id in [String::new(), "x".repeat(257)] {
+        let mut bounded = pair.clone();
+        let ScenarioActionV2::AgentWatchCall {
+            call_id: request_id,
+            ..
+        } = &mut bounded.lanes[0].actions[0]
+        else {
+            unreachable!()
+        };
+        *request_id = call_id.clone().into();
+        let ScenarioActionV2::AgentWatchResult {
+            call_id: result_id, ..
+        } = &mut bounded.lanes[0].actions[1]
+        else {
+            unreachable!()
+        };
+        *result_id = call_id.into();
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(bounded)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+/// Rejects a watch schema or result text that is not exactly correlated to the
+/// child learned from `agent_start`, without consuming either action.
+#[test]
+fn v2_agent_watch_runtime_mismatches_leave_state_unconsumed() {
+    let scenario = agent_watch_scenario();
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let call = scenario.lanes[0].actions[0].clone();
+    let result = scenario.lanes[0].actions[1].clone();
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![0];
+    state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+
+    let mut call_prompt = prompt_for(&parent, "watch", Some("lane"));
+    call_prompt.tools = vec![
+        tau_proto::ToolDefinition {
+            name: ToolName::new("agent_start"),
+            model_visible_name: None,
+            description: None,
+            tool_type: ToolType::Function,
+            parameters: Some(agent_start_parameters()),
+            format: None,
+        },
+        tau_proto::ToolDefinition {
+            name: ToolName::new("agent_watch"),
+            model_visible_name: None,
+            description: None,
+            tool_type: ToolType::Function,
+            parameters: None,
+            format: None,
+        },
+    ];
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 0, &call_prompt, &call)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [0]);
+
+    call_prompt.tools[1].parameters = Some(agent_watch_parameters());
+    call_prompt.tools[0].parameters = None;
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 0, &call_prompt, &call)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [0]);
+
+    call_prompt.tools[0].parameters = Some(agent_start_parameters());
+    state
+        .validate_and_commit_v2_action(0, 0, &call_prompt, &call)
+        .expect("exact watch tool snapshot commits");
+    assert_eq!(state.lane_cursors, [1]);
+
+    let mut result_prompt = prompt_for(&parent, "watch", None);
+    result_prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tool_result(
+                    "watch-call",
+                    "Watching agent `child`; subscription_id=forbidden",
+                )],
+            },
+        ));
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [1]);
+
+    latest_tool_results_mut(&mut result_prompt).items[0] =
+        tool_result("wrong-call", "Watching agent `child`");
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [1]);
+
+    latest_tool_results_mut(&mut result_prompt).items[0] =
+        tool_result("watch-call", "Watching agent `child`");
+    latest_tool_results_mut(&mut result_prompt).items[0].status =
+        tau_proto::ToolResultStatus::Error {
+            message: "failed".to_owned(),
+        };
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [1]);
+
+    latest_tool_results_mut(&mut result_prompt).items[0].status =
+        tau_proto::ToolResultStatus::Success;
+    latest_tool_results_mut(&mut result_prompt)
+        .items
+        .push(tool_result("extra", "unexpected current result"));
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [1]);
+
+    latest_tool_results_mut(&mut result_prompt).items.pop();
+    state
+        .validate_and_commit_v2_action(0, 1, &result_prompt, &result)
+        .expect("exact sanitized watch result commits");
+    assert_eq!(state.lane_cursors, [2]);
+}
+
 /// Ensures automatic-watch batches reject empty, oversized, or unbounded
 /// content before the provider can subscribe to live traffic.
 #[test]
@@ -295,6 +486,92 @@ fn v2_watch_notification_actions_are_closed_and_bounded() {
             .is_err()
         );
     }
+
+    let chains = |prompt, response| {
+        v2_action(ScenarioActionV2::WatchNotificationChains {
+            prompt,
+            response,
+            completion: "complete".to_owned(),
+        })
+    };
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(chains("prompt".to_owned(), "response".to_owned()))
+        }
+        .validate()
+        .is_ok()
+    );
+    for scenario in [
+        chains(String::new(), "response".to_owned()),
+        chains("x".repeat(4 * 1024 + 1), "response".to_owned()),
+        chains("prompt".to_owned(), String::new()),
+        chains("prompt".to_owned(), "x".repeat(4 * 1024 + 1)),
+    ] {
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(scenario)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+/// Accepts either cross-stream interleaving of the prompt/response and
+/// running/idle chains while rejecting each causal inversion before admission.
+#[test]
+fn v2_watch_notification_chains_enforce_only_their_two_predecessors() {
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let scenario = || {
+        v2_action(ScenarioActionV2::WatchNotificationChains {
+            prompt: "work".to_owned(),
+            response: "done".to_owned(),
+            completion: "complete".to_owned(),
+        })
+    };
+    let state = || {
+        let mut state = FakeState::default();
+        state.scenario = Some(ScenarioConfig::V2(scenario()));
+        state.lane_cursors = vec![0];
+        state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
+        state.child_agents = HashMap::from([(parent.clone(), child.clone())]);
+        state
+    };
+
+    let mut alternate = state();
+    for message in [
+        watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Running, 7),
+        watch_prompt(&parent, &child, "work"),
+        watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 7),
+        watch_response(&parent, &child, "done"),
+    ] {
+        alternate
+            .record_watch_notification(&message)
+            .expect("valid partial-order interleaving");
+    }
+    assert_eq!(alternate.watch_notifications[&parent].len(), 4);
+
+    let mut response_first = state();
+    assert!(
+        response_first
+            .record_watch_notification(&watch_response(&parent, &child, "done"))
+            .is_err()
+    );
+    assert!(response_first.watch_notifications.is_empty());
+
+    let mut idle_first = state();
+    assert!(
+        idle_first
+            .record_watch_notification(&watch_turn(
+                &parent,
+                &child,
+                tau_proto::AgentRuntimeState::Idle,
+                7,
+            ))
+            .is_err()
+    );
+    assert!(idle_first.watch_notifications.is_empty());
 }
 
 /// Rejects unrelated, malformed, re-correlated, and excess live watch records
@@ -710,6 +987,26 @@ fn agent_start_scenario() -> ScenarioV2 {
     )
 }
 
+fn agent_watch_scenario() -> ScenarioV2 {
+    ScenarioV2::new(
+        "agent-watch-validation",
+        vec![ScenarioLaneV2 {
+            ctx_id: "lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::AgentWatchCall {
+                    user_text: "watch".to_owned(),
+                    call_id: "watch-call".into(),
+                },
+                ScenarioActionV2::AgentWatchResult {
+                    user_text: "watch".to_owned(),
+                    call_id: "watch-call".into(),
+                    response: "watching".to_owned(),
+                },
+            ],
+        }],
+    )
+}
+
 fn watch_response(
     parent: &tau_proto::AgentId,
     child: &tau_proto::AgentId,
@@ -721,6 +1018,23 @@ fn watch_response(
         sender_session_id: None,
         recipient_id: parent.clone(),
         kind: tau_proto::AgentMessageKind::WatchResponse,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        message: content.to_owned(),
+    }
+}
+
+fn watch_prompt(
+    parent: &tau_proto::AgentId,
+    child: &tau_proto::AgentId,
+    content: &str,
+) -> AgentMessageReceived {
+    AgentMessageReceived {
+        message_id: "watch-prompt".into(),
+        sender_id: child.clone(),
+        sender_session_id: None,
+        recipient_id: parent.clone(),
+        kind: tau_proto::AgentMessageKind::WatchPrompt,
         watch_turn_state: None,
         watch_provider_status: None,
         message: content.to_owned(),
@@ -810,6 +1124,27 @@ fn start_result(
         output: tau_proto::ToolResponse::from_cbor(&raw),
         provider_content: Vec::new(),
     }
+}
+
+fn tool_result(call_id: &str, text: &str) -> tau_proto::ToolResultItem {
+    tau_proto::ToolResultItem {
+        call_id: call_id.into(),
+        tool_type: ToolType::Function,
+        status: tau_proto::ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(text.to_owned())),
+        provider_content: Vec::new(),
+    }
+}
+
+fn latest_tool_results_mut(
+    prompt: &mut tau_proto::AgentPromptCreated,
+) -> &mut tau_proto::ToolResultsBlock {
+    let tau_proto::ContextBlock::ToolResults(results) =
+        prompt.context.blocks.last_mut().expect("result block")
+    else {
+        panic!("latest context block must contain tool results")
+    };
+    results
 }
 
 /// Rejects out-of-range hold deadlines and ambiguous lane correlation ids.

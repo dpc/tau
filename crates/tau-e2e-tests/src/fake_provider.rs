@@ -90,6 +90,8 @@ struct FakeState {
     /// Subscription/generation correlation retained across staged watch
     /// prompts.
     watch_turn_correlations: HashMap<tau_proto::AgentId, WatchTurnCorrelation>,
+    /// Admitted facts for the current two-chain watch action.
+    watch_chain_progress: HashMap<tau_proto::AgentId, WatchChainProgress>,
 }
 
 /// Stable correlation shared by one action's non-initial turn notifications.
@@ -98,6 +100,103 @@ struct WatchTurnCorrelation {
     subscription_id: String,
     /// Harness-minted watched-agent outer-turn generation.
     turn_generation: u64,
+}
+
+/// Progress through one two-fact causal chain.
+#[derive(Clone, Copy, Default)]
+enum WatchCausalChain {
+    /// Neither fact has arrived.
+    #[default]
+    Pending,
+    /// The predecessor arrived and the successor is now admissible.
+    PredecessorSeen,
+    /// Both facts arrived in causal order.
+    Complete,
+}
+
+/// One semantic fact in the two independent watch chains.
+enum WatchChainFact {
+    /// Direct user prompt.
+    Prompt,
+    /// Final child response.
+    Response,
+    /// Outer turn entered running.
+    Running,
+    /// Outer turn returned idle.
+    Idle,
+}
+
+/// Admission state for two independent causal watch-notification chains.
+#[derive(Clone, Copy, Default)]
+struct WatchChainProgress {
+    /// Prompt-before-response chain.
+    prompt_response: WatchCausalChain,
+    /// Running-before-idle chain.
+    running_idle: WatchCausalChain,
+}
+
+impl WatchChainProgress {
+    /// Admits one fact only when its own chain predecessor permits it.
+    fn admit(&mut self, message: &AgentMessageReceived) -> Result<WatchChainFact, &'static str> {
+        match message.kind {
+            tau_proto::AgentMessageKind::WatchPrompt
+                if matches!(self.prompt_response, WatchCausalChain::Pending) =>
+            {
+                self.prompt_response = WatchCausalChain::PredecessorSeen;
+                Ok(WatchChainFact::Prompt)
+            }
+            tau_proto::AgentMessageKind::WatchResponse
+                if matches!(self.prompt_response, WatchCausalChain::PredecessorSeen) =>
+            {
+                self.prompt_response = WatchCausalChain::Complete;
+                Ok(WatchChainFact::Response)
+            }
+            tau_proto::AgentMessageKind::WatchTurnState => {
+                match (
+                    message.watch_turn_state.as_ref().map(|state| state.state),
+                    self.running_idle,
+                ) {
+                    (Some(tau_proto::AgentRuntimeState::Running), WatchCausalChain::Pending) => {
+                        self.running_idle = WatchCausalChain::PredecessorSeen;
+                        Ok(WatchChainFact::Running)
+                    }
+                    (
+                        Some(tau_proto::AgentRuntimeState::Idle),
+                        WatchCausalChain::PredecessorSeen,
+                    ) => {
+                        self.running_idle = WatchCausalChain::Complete;
+                        Ok(WatchChainFact::Idle)
+                    }
+                    _ => Err("watch turn-state chain duplicated or inverted"),
+                }
+            }
+            _ => Err("watch prompt/response chain duplicated or inverted"),
+        }
+    }
+
+    /// Returns whether both independent chains admitted both facts.
+    fn is_complete(self) -> bool {
+        matches!(self.prompt_response, WatchCausalChain::Complete)
+            && matches!(self.running_idle, WatchCausalChain::Complete)
+    }
+}
+
+/// Configured text for one closed two-chain watch action.
+struct WatchChainContents {
+    /// Expected direct user prompt.
+    prompt: String,
+    /// Expected final child response.
+    response: String,
+    /// Main-agent response after all four facts.
+    completion: String,
+}
+
+/// Narrow current watch action needed during live notification admission.
+enum WatchExpectation {
+    /// One exact next fact in an ordered S1 batch.
+    Ordered(WatchNotificationV2),
+    /// The S2 independent causal-chain grammar.
+    Chains,
 }
 
 struct PendingHold {
@@ -320,24 +419,88 @@ impl FakeState {
             .map(VecDeque::len)
             .unwrap_or_default();
         let next = progress + queued;
-        let expected_notification = self
-            .v2()?
-            .lanes
-            .get(lane_index)
-            .and_then(|lane| lane.actions.get(cursor))
-            .and_then(|action| match action {
+        let expectation = {
+            let action = self
+                .v2()?
+                .lanes
+                .get(lane_index)
+                .and_then(|lane| lane.actions.get(cursor))
+                .ok_or_else(|| {
+                    ClientError::handler("watch delivery has no current closed action")
+                })?;
+            match action {
                 ScenarioActionV2::WatchNotifications { notifications, .. } => {
-                    notifications.get(next).cloned()
+                    WatchExpectation::Ordered(notifications.get(next).cloned().ok_or_else(
+                        || {
+                            ClientError::handler(
+                                "watch delivery exceeded the ordered closed action",
+                            )
+                        },
+                    )?)
                 }
-                _ => None,
-            })
-            .ok_or_else(|| ClientError::handler("watch delivery has no current closed action"))?;
+                ScenarioActionV2::WatchNotificationChains { .. } => WatchExpectation::Chains,
+                _ => {
+                    return Err(ClientError::handler(
+                        "watch delivery has no current closed action",
+                    ));
+                }
+            }
+        };
+        let (expected_notification, chain_progress) = match expectation {
+            WatchExpectation::Ordered(expected) => (expected, None),
+            WatchExpectation::Chains => {
+                let mut progress = self
+                    .watch_chain_progress
+                    .get(&message.recipient_id)
+                    .copied()
+                    .unwrap_or_default();
+                let fact = progress
+                    .admit(message)
+                    .map_err(|detail| self.mismatch(cursor, detail))?;
+                let configured_content = match fact {
+                    WatchChainFact::Prompt | WatchChainFact::Response => {
+                        let action = &self.v2()?.lanes[lane_index].actions[cursor];
+                        let ScenarioActionV2::WatchNotificationChains {
+                            prompt, response, ..
+                        } = action
+                        else {
+                            unreachable!("validated current action changed")
+                        };
+                        Some(match fact {
+                            WatchChainFact::Prompt => prompt.clone(),
+                            WatchChainFact::Response => response.clone(),
+                            _ => unreachable!("content-bearing fact changed"),
+                        })
+                    }
+                    WatchChainFact::Running | WatchChainFact::Idle => None,
+                };
+                let expected = match fact {
+                    WatchChainFact::Prompt => WatchNotificationV2::Prompt {
+                        content: configured_content.expect("prompt content selected"),
+                    },
+                    WatchChainFact::Response => WatchNotificationV2::Response {
+                        content: configured_content.expect("response content selected"),
+                    },
+                    WatchChainFact::Running => WatchNotificationV2::TurnState {
+                        state: tau_proto::AgentRuntimeState::Running,
+                    },
+                    WatchChainFact::Idle => WatchNotificationV2::TurnState {
+                        state: tau_proto::AgentRuntimeState::Idle,
+                    },
+                };
+                (expected, Some(progress))
+            }
+        };
         self.validate_watch_notification_payload(
             cursor,
             &message.recipient_id,
             message,
             &expected_notification,
         )?;
+        if let Some(progress) = chain_progress {
+            self.watch_chain_progress
+                .insert(message.recipient_id.clone(), progress);
+        }
         self.watch_notifications
             .entry(message.recipient_id.clone())
             .or_default()
@@ -466,6 +629,88 @@ impl FakeState {
         )))
     }
 
+    fn handle_watch_chain_prompt(
+        &mut self,
+        lane_index: usize,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        contents: WatchChainContents,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
+        let progress = self
+            .watch_progress
+            .get(&prompt.agent_id)
+            .copied()
+            .unwrap_or_default();
+        let actual = self
+            .watch_notifications
+            .get(&prompt.agent_id)
+            .and_then(|queued| queued.front())
+            .cloned()
+            .ok_or_else(|| self.mismatch(cursor, "watch chain stage is empty"))?;
+        if progress >= 4 {
+            return Err(self.mismatch(cursor, "watch chain is over-consumed"));
+        }
+        let expected = match actual.kind {
+            tau_proto::AgentMessageKind::WatchPrompt => WatchNotificationV2::Prompt {
+                content: contents.prompt,
+            },
+            tau_proto::AgentMessageKind::WatchResponse => WatchNotificationV2::Response {
+                content: contents.response,
+            },
+            tau_proto::AgentMessageKind::WatchTurnState => WatchNotificationV2::TurnState {
+                state: actual
+                    .watch_turn_state
+                    .as_ref()
+                    .ok_or_else(|| self.mismatch(cursor, "watch chain turn state lacks payload"))?
+                    .state,
+            },
+            _ => return Err(self.mismatch(cursor, "watch chain contains an invalid kind")),
+        };
+        self.validate_watch_notification_messages(cursor, prompt, &[expected])?;
+        self.agent_lanes
+            .entry(prompt.agent_id.clone())
+            .or_insert(lane_index);
+        let queued = self
+            .watch_notifications
+            .get_mut(&prompt.agent_id)
+            .expect("validated watch queue exists");
+        queued.pop_front();
+        if queued.is_empty() {
+            self.watch_notifications.remove(&prompt.agent_id);
+        }
+        handle.emit_transient(Event::ProviderPromptSubmittedReported(
+            ProviderPromptSubmitted {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                originator: prompt.originator.clone(),
+            },
+        ))?;
+        let next_progress = progress + 1;
+        let terminal_response = if next_progress == 4 {
+            let admitted = self
+                .watch_chain_progress
+                .remove(&prompt.agent_id)
+                .unwrap_or_default();
+            if !admitted.is_complete() {
+                return Err(self.mismatch(cursor, "watch chains completed without all four facts"));
+            }
+            self.watch_progress.remove(&prompt.agent_id);
+            self.watch_turn_correlations.remove(&prompt.agent_id);
+            self.lane_cursors[lane_index] += 1;
+            self.persist_cursors()?;
+            contents.completion
+        } else {
+            self.watch_progress
+                .insert(prompt.agent_id.clone(), next_progress);
+            "watch notification accepted".to_owned()
+        };
+        handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![assistant_message(terminal_response)],
+            ProviderStopReason::EndTurn,
+        )))
+    }
+
     fn validate_watch_notification_messages(
         &mut self,
         cursor: usize,
@@ -547,6 +792,31 @@ impl FakeState {
             return Err(self.mismatch(cursor, "watch notification prompt markup mismatch"));
         }
         Ok(())
+    }
+
+    fn trace_watch_action_stage(
+        &mut self,
+        lane_id: &str,
+        cursor: usize,
+        action_count: usize,
+        lane_index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        before: usize,
+    ) -> ClientResult<()> {
+        if self.lane_cursors[lane_index] != before {
+            self.trace(&format!(
+                "lane={lane_id} action={cursor} matched remaining={}",
+                action_count - self.lane_cursors[lane_index]
+            ))
+        } else {
+            self.trace(&format!(
+                "lane={lane_id} action={cursor} staged watch_progress={}",
+                self.watch_progress
+                    .get(&prompt.agent_id)
+                    .copied()
+                    .unwrap_or_default()
+            ))
+        }
     }
 
     fn handle_prompt(
@@ -712,40 +982,67 @@ impl FakeState {
                 "scenario first mismatch: lane {lane_id} already consumed"
             )));
         };
-        if let ScenarioActionV2::WatchNotifications {
-            notifications,
-            response,
-        } = action
-        {
-            self.trace(&format!(
-                "lane={lane_id} action={cursor} prompt_id={}",
-                prompt.agent_prompt_id
-            ))?;
-            let before = self.lane_cursors[lane_index];
-            self.handle_watch_batch_prompt(
-                lane_index,
-                cursor,
-                prompt,
+        let action = match action {
+            ScenarioActionV2::WatchNotifications {
                 notifications,
                 response,
-                handle,
-            )?;
-            if self.lane_cursors[lane_index] != before {
+            } => {
+                let before = self.lane_cursors[lane_index];
                 self.trace(&format!(
-                    "lane={lane_id} action={cursor} matched remaining={}",
-                    action_count - self.lane_cursors[lane_index]
+                    "lane={lane_id} action={cursor} prompt_id={}",
+                    prompt.agent_prompt_id
                 ))?;
-            } else {
-                self.trace(&format!(
-                    "lane={lane_id} action={cursor} staged watch_progress={}",
-                    self.watch_progress
-                        .get(&prompt.agent_id)
-                        .copied()
-                        .unwrap_or_default()
-                ))?;
+                self.handle_watch_batch_prompt(
+                    lane_index,
+                    cursor,
+                    prompt,
+                    notifications,
+                    response,
+                    handle,
+                )?;
+                self.trace_watch_action_stage(
+                    &lane_id,
+                    cursor,
+                    action_count,
+                    lane_index,
+                    prompt,
+                    before,
+                )?;
+                return Ok(());
             }
-            return Ok(());
-        }
+            ScenarioActionV2::WatchNotificationChains {
+                prompt: prompt_content,
+                response,
+                completion,
+            } => {
+                let before = self.lane_cursors[lane_index];
+                self.trace(&format!(
+                    "lane={lane_id} action={cursor} prompt_id={}",
+                    prompt.agent_prompt_id
+                ))?;
+                self.handle_watch_chain_prompt(
+                    lane_index,
+                    cursor,
+                    prompt,
+                    WatchChainContents {
+                        prompt: prompt_content,
+                        response,
+                        completion,
+                    },
+                    handle,
+                )?;
+                self.trace_watch_action_stage(
+                    &lane_id,
+                    cursor,
+                    action_count,
+                    lane_index,
+                    prompt,
+                    before,
+                )?;
+                return Ok(());
+            }
+            action => action,
+        };
         self.validate_and_commit_v2_action(lane_index, cursor, prompt, &action)?;
         self.trace(&format!(
             "lane={lane_id} action={cursor} prompt_id={}",
@@ -872,30 +1169,21 @@ impl FakeState {
                     ProviderStopReason::EndTurn,
                 )))
             }
-            ScenarioActionV2::AgentStartCall {
-                call_id,
-                prompt: child_prompt,
-                role,
-                task_name,
-                ..
-            } => {
-                let mut fields = vec![
-                    ("task_name", CborValue::Text(task_name)),
-                    ("prompt", CborValue::Text(child_prompt)),
-                ];
-                if let Some(role) = role {
-                    fields.push(("role", CborValue::Text(role)));
-                }
-                emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
+            action @ (ScenarioActionV2::AgentStartCall { .. }
+            | ScenarioActionV2::AgentWatchCall { .. }) => {
+                self.emit_agent_tool_call(prompt, handle, action)
             }
             ScenarioActionV2::AgentStartResult { response, .. }
-            | ScenarioActionV2::WatchNotifications { response, .. } => {
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                )))
-            }
+            | ScenarioActionV2::AgentWatchResult { response, .. }
+            | ScenarioActionV2::WatchNotifications { response, .. }
+            | ScenarioActionV2::WatchNotificationChains {
+                completion: response,
+                ..
+            } => handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                prompt,
+                vec![assistant_message(response)],
+                ProviderStopReason::EndTurn,
+            ))),
             ScenarioActionV2::CoreShellWorkdirCall { call_id, .. } => emit_tool_call(
                 handle,
                 prompt,
@@ -1035,6 +1323,52 @@ impl FakeState {
         }
     }
 
+    fn emit_agent_tool_call(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+        action: ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
+            ScenarioActionV2::AgentStartCall {
+                call_id,
+                prompt: child_prompt,
+                role,
+                task_name,
+                ..
+            } => {
+                let mut fields = vec![
+                    ("task_name", CborValue::Text(task_name)),
+                    ("prompt", CborValue::Text(child_prompt)),
+                ];
+                if let Some(role) = role {
+                    fields.push(("role", CborValue::Text(role)));
+                }
+                emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
+            }
+            ScenarioActionV2::AgentWatchCall { call_id, .. } => {
+                let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id) else {
+                    return Err(self.mismatch(
+                        0,
+                        "agent_watch call has no validated agent_start child identity",
+                    ));
+                };
+                let child_agent_id = child_agent_id.to_string();
+                emit_tool_call(
+                    handle,
+                    prompt,
+                    call_id,
+                    "agent_watch",
+                    cbor_map(vec![
+                        ("agent_id", CborValue::Text(child_agent_id)),
+                        ("enable", CborValue::Bool(true)),
+                    ]),
+                )
+            }
+            _ => unreachable!("agent tool-call helper received another action"),
+        }
+    }
+
     fn handle_cancel(
         &mut self,
         cancel: &tau_proto::UiCancelPrompt,
@@ -1163,29 +1497,30 @@ impl FakeState {
                 }
             }
             ScenarioActionV2::AgentStartCall { .. } => {
-                let expected_schema = serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "task_name": {
-                            "type": "string",
-                            "description": "Short user-visible label for the sub-task (a few words)."
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Self-contained task for the sub-agent."
-                        },
-                        "role": {
-                            "type": "string",
-                            "description": "Optional sub-agent role to use."
-                        }
-                    },
-                    "required": ["task_name", "prompt"],
-                    "additionalProperties": false
+                let expects_agent_watch = self.v2()?.lanes.iter().any(|lane| {
+                    lane.actions
+                        .iter()
+                        .any(|action| matches!(action, ScenarioActionV2::AgentWatchCall { .. }))
                 });
-                if prompt.tools.len() != 1
-                    || prompt.tools[0].name.as_str() != "agent_start"
-                    || prompt.tools[0].tool_type != ToolType::Function
-                    || prompt.tools[0].parameters.as_ref() != Some(&expected_schema)
+                let expected_schema = agent_start_parameters();
+                let start = prompt
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_str() == "agent_start");
+                let watch = prompt
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_str() == "agent_watch");
+                if prompt.tools.len() != usize::from(expects_agent_watch) + 1
+                    || start.is_none_or(|tool| {
+                        tool.tool_type != ToolType::Function
+                            || tool.parameters.as_ref() != Some(&expected_schema)
+                    })
+                    || expects_agent_watch
+                        != watch.is_some_and(|tool| {
+                            tool.tool_type == ToolType::Function
+                                && tool.parameters.as_ref() == Some(&agent_watch_parameters())
+                        })
                 {
                     self.trace(&format!(
                         "agent_start tools={}",
@@ -1243,7 +1578,67 @@ impl FakeState {
                 }
                 self.child_agents.insert(self_agent_id, child_agent_id);
             }
-            ScenarioActionV2::WatchNotifications { .. } => {
+            ScenarioActionV2::AgentWatchCall { .. } => {
+                let watch = prompt
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_str() == "agent_watch");
+                let start = prompt
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_str() == "agent_start");
+                if !self.child_agents.contains_key(&prompt.agent_id)
+                    || prompt.tools.len() != 2
+                    || watch.is_none_or(|tool| {
+                        tool.tool_type != ToolType::Function
+                            || tool.parameters.as_ref() != Some(&agent_watch_parameters())
+                    })
+                    || start.is_none_or(|tool| {
+                        tool.tool_type != ToolType::Function
+                            || tool.parameters.as_ref() != Some(&agent_start_parameters())
+                    })
+                {
+                    return Err(self.mismatch(cursor, "agent_watch tool snapshot mismatch"));
+                }
+            }
+            ScenarioActionV2::AgentWatchResult { call_id, .. } => {
+                let Some(child_agent_id) = self.child_agents.get(&prompt.agent_id) else {
+                    return Err(self.mismatch(
+                        cursor,
+                        "agent_watch result has no validated agent_start child identity",
+                    ));
+                };
+                let expected = format!("Watching agent `{child_agent_id}`");
+                let latest_results = prompt
+                    .context
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find_map(|block| match block {
+                        tau_proto::ContextBlock::ToolResults(results) => Some(&results.items),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        self.mismatch(cursor, "agent_watch result lacks a tool-results block")
+                    })?;
+                if latest_results.len() != 1
+                    || latest_results[0].call_id != *call_id
+                    || latest_results[0].tool_type != ToolType::Function
+                    || latest_results[0].status != tau_proto::ToolResultStatus::Success
+                    || !matches!(
+                        &latest_results[0].output.raw,
+                        CborValue::Text(text) if text == &expected
+                    )
+                    || latest_results[0].output.body != expected
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "agent_watch result continuity or sanitized text mismatch",
+                    ));
+                }
+            }
+            ScenarioActionV2::WatchNotifications { .. }
+            | ScenarioActionV2::WatchNotificationChains { .. } => {
                 return Err(self.mismatch(cursor, "watch batch bypassed bounded release"));
             }
             ScenarioActionV2::CoreShellWorkdirCall { .. }
@@ -1432,6 +1827,8 @@ impl ScenarioActionV2 {
             | Self::DummyToolResult { user_text, .. }
             | Self::AgentStartCall { user_text, .. }
             | Self::AgentStartResult { user_text, .. }
+            | Self::AgentWatchCall { user_text, .. }
+            | Self::AgentWatchResult { user_text, .. }
             | Self::CoreShellWorkdirCall { user_text, .. }
             | Self::CoreShellWorkdirResult { user_text, .. }
             | Self::CoreShellCreateResult { user_text, .. }
@@ -1441,7 +1838,7 @@ impl ScenarioActionV2 {
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
             | Self::BarrierText { user_text, .. } => Some(user_text),
-            Self::WatchNotifications { .. } => None,
+            Self::WatchNotifications { .. } | Self::WatchNotificationChains { .. } => None,
         }
     }
 }
@@ -1477,6 +1874,50 @@ fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str>
     entries.iter().find_map(|(key, value)| match (key, value) {
         (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
         _ => None,
+    })
+}
+
+/// Returns the exact production `agent_watch` input schema.
+fn agent_watch_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "maxLength": tau_proto::AGENT_ID_MAX_LEN,
+                "pattern": "^[A-Za-z0-9_-]{1,64}$",
+                "description": "Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."
+            },
+            "enable": {
+                "type": "boolean",
+                "description": "True to enable watching, false to disable it."
+            }
+        },
+        "required": ["agent_id", "enable"],
+        "additionalProperties": false
+    })
+}
+
+/// Returns the exact production `agent_start` input schema.
+fn agent_start_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task_name": {
+                "type": "string",
+                "description": "Short user-visible label for the sub-task (a few words)."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "Self-contained task for the sub-agent."
+            },
+            "role": {
+                "type": "string",
+                "description": "Optional sub-agent role to use."
+            }
+        },
+        "required": ["task_name", "prompt"],
+        "additionalProperties": false
     })
 }
 
