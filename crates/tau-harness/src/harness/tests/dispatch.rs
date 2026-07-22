@@ -13307,6 +13307,127 @@ fn setup_manual_cross_compaction_test() -> (
     (td, h, caller_cid, target_cid, call, target_id)
 }
 
+/// Regression: an ordinary provider prompt published through the generic event
+/// path must enter the owning agent store and advance its inference generation.
+#[test]
+fn ordinary_prompt_created_advances_persisted_inference_generation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    assert_eq!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .ordinary_inference_generation(),
+        0
+    );
+
+    let prompt_id = h
+        .send_prompt_to_agent_for(&cid)
+        .expect("ordinary provider prompt");
+
+    let prompt_record = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent events")
+        .into_iter()
+        .find_map(|record| match record.event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == prompt_id => {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("prompt-created fact persisted");
+    assert_eq!(
+        prompt_record.operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert_eq!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("agent tree")
+            .ordinary_inference_generation(),
+        1
+    );
+
+    h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "done"))
+        .expect("finish ordinary provider prompt");
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: a completed manual request at generation zero must not reject a
+/// later request after the target completes another ordinary inference.
+#[test]
+fn manual_compaction_accepts_later_inference_generation() {
+    let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
+    let historical = tau_proto::AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
+        caller_agent_id: durable_agent_id_for_conversation(&h, &caller),
+        target_agent_id: target_id.clone(),
+        initiating_agent_prompt_id: "ap-older-caller-turn".into(),
+        initiating_tool_call_id: "call-historical".into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+        visible_tool_name: ToolName::new("agent_compact"),
+        requested_target_head: tau_proto::AgentHead::Root,
+        target_generation: 0,
+        model: "echo/model".into(),
+        resume_inference: false,
+    };
+    h.publish_for_agent(
+        &target,
+        Event::AgentManualCompactionRequested(historical.clone()),
+    );
+    h.publish_for_agent(
+        &target,
+        Event::AgentManualCompactionRequestFailed(tau_proto::AgentManualCompactionRequestFailed {
+            request_id: historical.request_id,
+            target_agent_id: historical.target_agent_id,
+            reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+        }),
+    );
+
+    let prompt_id = h
+        .send_prompt_to_agent_for(&target)
+        .expect("later ordinary provider prompt");
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        target_id.clone(),
+        "new target work",
+    ))
+    .expect("finish later ordinary inference");
+    assert_eq!(
+        h.agent_store
+            .agent(target_id.as_str())
+            .expect("target tree")
+            .ordinary_inference_generation(),
+        1
+    );
+
+    h.request_agent_tool_compaction(
+        &caller,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentManualCompactionRequested(request)
+            if request.initiating_tool_call_id == call.id && request.target_generation == 1
+    )));
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.agent_id == target_id
+    )));
+    assert!(!event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id == call.id && error.message == "not_needed"
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Successful manual-compaction acceptance and start are ordinary informational
 /// notices, while a later transaction failure still completes through the
 /// canonical background-error path.

@@ -781,8 +781,8 @@ impl AgentStore {
         Ok(())
     }
 
-    /// Appends one non-transient protocol event to the per-agent event stream
-    /// and applies it to the in-memory tree.
+    /// Appends one validated semantic event to the per-agent event stream and
+    /// applies it to the in-memory tree.
     ///
     /// Durable agents write the record to disk; ephemeral agents keep the same
     /// record in memory. In both cases the derived [`AgentTree`] is populated

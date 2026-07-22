@@ -1630,6 +1630,7 @@ impl AgentTree {
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
             Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
@@ -2111,6 +2112,7 @@ impl AgentTree {
                 | Event::AgentUserInteractionRecorded(_)
                 | Event::AgentDisplayNameSet(_)
                 | Event::AgentPromptSubmitted(_)
+                | Event::AgentPromptCreated(_)
                 | Event::AgentUserMessageInjected(_)
                 | Event::AgentPromptSteered(_)
                 | Event::AgentCompactionTriggered(_)

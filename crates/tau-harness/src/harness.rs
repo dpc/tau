@@ -6223,6 +6223,7 @@ impl Harness {
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
+            Event::AgentPromptCreated(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
             Event::AgentCompacted(compacted) => Some(compacted.agent_id.clone()),
             Event::AgentStandaloneCompactionStarted(started) => Some(started.agent_id.clone()),
@@ -19658,8 +19659,8 @@ impl Harness {
 
     /// Builds one prompt request and records the live in-flight bookkeeping
     /// needed to route the corresponding provider response. The prompt payload
-    /// is returned to the caller instead of cached; it is a transient delivery
-    /// object, not durable harness state.
+    /// is returned to the caller instead of cached in runtime state; ordinary
+    /// publication persists it as an agent-store semantic fact.
     fn prepare_agent_prompt_for_dispatch(&mut self, cid: &AgentId) -> Option<AgentPromptCreated> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self

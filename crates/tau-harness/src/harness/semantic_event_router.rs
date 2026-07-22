@@ -4,9 +4,10 @@ use tau_proto::{Event, SessionId};
 
 /// Return whether an event should enter durable semantic stores.
 ///
-/// Transient events normally exist only for live observers. Terminal tool
-/// events are the exception: they must still be persisted so resumed agents can
-/// see tool completions that happened after a transient dispatch path.
+/// Transient events normally exist only for live observers.
+/// `AgentPromptCreated` and canonical terminal tool completions are exceptions
+/// because `AgentTree` folds them into prompt-generation and terminal-tool
+/// state.
 pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
     if event.is_message_report()
         || matches!(
@@ -55,7 +56,7 @@ pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
     {
         return false;
     }
-    !transient || is_transient_tool_terminal_event(event)
+    !transient || is_transient_persistence_exception(event)
 }
 
 /// Return the session log target for session membership events.
@@ -67,10 +68,11 @@ pub(crate) fn session_membership_id_for_event(event: &Event) -> Option<SessionId
     }
 }
 
-fn is_transient_tool_terminal_event(event: &Event) -> bool {
+fn is_transient_persistence_exception(event: &Event) -> bool {
     matches!(
         event,
-        Event::ProviderToolResult(_)
+        Event::AgentPromptCreated(_)
+            | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::ToolCancelled(_)
             | Event::ToolBackgroundResult(_)

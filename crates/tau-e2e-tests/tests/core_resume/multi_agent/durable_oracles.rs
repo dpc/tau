@@ -26,8 +26,8 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 21
-        || snapshot.agent_events[&identities.worker].len() != 5
+        || snapshot.agent_events[&identities.main].len() != 26
+        || snapshot.agent_events[&identities.worker].len() != 6
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -109,22 +109,27 @@ fn assert_exact_event_names(
         E::AGENT_USER_INTERACTION_RECORDED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_TOOL_RESULT,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::PROVIDER_RESPONSE_FINISHED,
     ];
     let worker_expected = [
@@ -132,6 +137,7 @@ fn assert_exact_event_names(
         E::AGENT_DISPLAY_NAME_SET,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_PROMPT_CREATED,
         E::PROVIDER_RESPONSE_FINISHED,
     ];
     for (agent_id, expected) in [
@@ -251,7 +257,7 @@ fn assert_boot_a_agent_payloads(
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[4].event,
+            &worker[5].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -360,7 +366,7 @@ fn assert_boot_a_agent_payloads(
     {
         return Err("S8 exact durable main terminal payloads changed".into());
     }
-    assert_dispatch_response_pairs(
+    assert_inference_rounds(
         main,
         &identities.main,
         &[0, 3, 6, 10, 12],
@@ -372,7 +378,7 @@ fn assert_boot_a_agent_payloads(
             tau_proto::AgentHead::Node(tau_proto::NodeId::new(11)),
         ],
     )?;
-    assert_dispatch_response_pairs(
+    assert_inference_rounds(
         worker,
         &identities.worker,
         &[0],
@@ -381,7 +387,7 @@ fn assert_boot_a_agent_payloads(
     Ok(())
 }
 
-fn assert_dispatch_response_pairs(
+fn assert_inference_rounds(
     records: &[tau_core::PersistedAgentEvent],
     agent_id: &tau_proto::AgentId,
     through_nodes: &[u64],
@@ -391,34 +397,44 @@ fn assert_dispatch_response_pairs(
         Event::AgentInferenceDispatchStarted(dispatch) => Some(dispatch),
         _ => None,
     });
+    let prompts = records.iter().filter_map(|record| match &record.event {
+        Event::AgentPromptCreated(prompt) => Some(prompt),
+        _ => None,
+    });
     let responses = records.iter().filter_map(|record| match &record.event {
         Event::ProviderResponseFinished(response) => Some(response),
         _ => None,
     });
-    let pairs = dispatches.zip(responses).collect::<Vec<_>>();
-    if pairs.len() != through_nodes.len()
-        || pairs.len() != activation_cuts.len()
-        || pairs
+    let rounds = dispatches.zip(prompts).zip(responses).collect::<Vec<_>>();
+    if rounds.len() != through_nodes.len()
+        || rounds.len() != activation_cuts.len()
+        || rounds
             .iter()
             .zip(through_nodes.iter().zip(activation_cuts))
             .enumerate()
-            .any(|(index, ((dispatch, response), (through, cut)))| {
-                &dispatch.agent_id != agent_id
-                    || &response.agent_id != agent_id
-                    || dispatch.agent_prompt_id != response.agent_prompt_id
-                    || dispatch.agent_prompt_id.as_str()
-                        != format!("ap-{}-{index}", agent_id.as_str())
-                    || dispatch.transaction_id.is_some()
-                    || dispatch.through
-                        != tau_proto::AgentHead::Node(tau_proto::NodeId::new(*through))
-                    || dispatch.model.as_ref().map(ToString::to_string).as_deref()
-                        != Some("fake/test")
-                    || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
-                    || dispatch.activation_cut.as_ref() != Some(cut)
-                    || !terminal_defaults(response)
-            })
+            .any(
+                |(index, (((dispatch, prompt), response), (through, cut)))| {
+                    &dispatch.agent_id != agent_id
+                        || &prompt.agent_id != agent_id
+                        || &response.agent_id != agent_id
+                        || dispatch.agent_prompt_id != prompt.agent_prompt_id
+                        || dispatch.agent_prompt_id != response.agent_prompt_id
+                        || dispatch.agent_prompt_id.as_str()
+                            != format!("ap-{}-{index}", agent_id.as_str())
+                        || dispatch.transaction_id.is_some()
+                        || dispatch.through
+                            != tau_proto::AgentHead::Node(tau_proto::NodeId::new(*through))
+                        || dispatch.model.as_ref().map(ToString::to_string).as_deref()
+                            != Some("fake/test")
+                        || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
+                        || dispatch.activation_cut.as_ref() != Some(cut)
+                        || prompt.model.to_string() != "fake/test"
+                        || prompt.operation != tau_proto::PromptOperation::Inference
+                        || !terminal_defaults(response)
+                },
+            )
     {
-        return Err(format!("S8 dispatch/response projection changed for {agent_id}").into());
+        return Err(format!("S8 inference round projection changed for {agent_id}").into());
     }
     Ok(())
 }
@@ -548,9 +564,17 @@ pub(super) fn assert_snapshot_suffix(
     let worker_before = &before.agent_events[&identities.worker];
     let worker_after = &after.agent_events[&identities.worker];
     let suffix = &worker_after[worker_before.len()..];
-    let [interaction, notice, prompt, dispatch, response_record] = suffix else {
+    let [
+        interaction,
+        notice,
+        prompt,
+        dispatch,
+        created,
+        response_record,
+    ] = suffix
+    else {
         return Err(format!(
-            "S8 worker durable suffix has {} records instead of five",
+            "S8 worker durable suffix has {} records instead of six",
             suffix.len()
         )
         .into());
@@ -588,17 +612,24 @@ pub(super) fn assert_snapshot_suffix(
     let Event::AgentInferenceDispatchStarted(dispatch) = &dispatch.event else {
         return Err("S8 worker durable suffix omitted its dispatch checkpoint".into());
     };
+    let Event::AgentPromptCreated(created) = &created.event else {
+        return Err("S8 worker durable suffix omitted its provider prompt".into());
+    };
     let Event::ProviderResponseFinished(response) = &response_record.event else {
         return Err("S8 worker durable suffix omitted its terminal response".into());
     };
     if dispatch.agent_id != identities.worker
+        || created.agent_id != identities.worker
         || dispatch.agent_prompt_id != response.agent_prompt_id
+        || dispatch.agent_prompt_id != created.agent_prompt_id
         || dispatch.agent_prompt_id.as_str() != format!("ap-{}-1", identities.worker.as_str())
         || dispatch.transaction_id.is_some()
         || dispatch.through != tau_proto::AgentHead::Node(tau_proto::NodeId::new(3))
         || dispatch.model.as_ref().map(ToString::to_string).as_deref() != Some("fake/test")
         || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
         || dispatch.activation_cut != Some(tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)))
+        || created.model.to_string() != "fake/test"
+        || created.operation != tau_proto::PromptOperation::Inference
         || response.agent_id != identities.worker
         || !exact_text_response(
             &response_record.event,
@@ -607,7 +638,7 @@ pub(super) fn assert_snapshot_suffix(
             true,
         )
     {
-        return Err("S8 worker durable dispatch/terminal correlation changed".into());
+        return Err("S8 worker durable dispatch/prompt/terminal correlation changed".into());
     }
     let prompt_count = suffix
         .iter()

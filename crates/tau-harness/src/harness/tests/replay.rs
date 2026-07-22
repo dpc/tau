@@ -1762,8 +1762,10 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         "final agent response should be in a durable loaded-agent event log"
     );
     assert!(
-        events.iter().all(|event| !event.defaults_to_transient()),
-        "transient events must not be persisted"
+        events.iter().all(|event| {
+            !event.defaults_to_transient() || matches!(event, Event::AgentPromptCreated(_))
+        }),
+        "only prompt-created transient facts may enter this semantic log"
     );
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
