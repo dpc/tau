@@ -24,8 +24,9 @@ clean resume, concurrent lane isolation, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
 watch, explicit post-resume watch recreation with exact new-subscription
 notifications, loaded/unloaded/ephemeral membership composition, two-worker
-restore with reverse-creation activation and ID-keyed ordering/isolation, and startup
-rejection of invalid
+restore with reverse-creation activation and ID-keyed ordering/isolation, a
+synchronized held-worker crash followed by two dispatch-uncertain fail-closed
+resumes, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
@@ -59,6 +60,15 @@ A fourth fixture configures one main with only `agent_start` plus two distinct
 tool-free worker roles. It cold-restores all three durable routes, compares
 roster rows as an ID-keyed set, activates workers in reverse creation order, and
 proves retained lane ownership and per-worker transcript isolation.
+A fifth fixture reuses the exact two-role `agent_start`/`agent_watch` surface. It
+correlates one held worker prompt across the durable dispatch checkpoint, decoded
+fake cursor, and live `hold_ready` trace before killing the private process
+group. Boot B and Boot C require both routes, the mandatory dispatch-uncertain
+warning, and zero automatic worker submission; only Boot B creates a fresh watch
+whose initial typed provider status identifies the checkpointed prompt. This
+proves a conservative harness response at the synchronized cut, not backend
+acknowledgement, exactly-once work, transactional cursor/journal persistence, or
+retry, abandonment, or recovery behavior.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

@@ -77,6 +77,15 @@ and seeds a typed durable worker load/unload history between clean boots. Its
 current/history roster, route-rejection, replay, typed-store, and exact-lane
 oracles prove Boot B creates routes only for the current durable pair, preserves
 the unloaded worker only in history, and drops ephemeral membership.
+S4 uses two production starts and distinct worker lanes to prove a three-member
+resume remains correct under reverse-creation activation and ID-keyed roster
+comparison. S5 correlates one held worker prompt across its durable dispatch
+checkpoint, decoded fake cursor, and live readiness trace before process-group
+`SIGKILL`. Two resumed boots require dispatch-uncertain warnings and zero
+automatic worker provider turns; Boot B alone creates a fresh watch whose initial
+typed status names the checkpointed prompt. This is a conservative recovery
+oracle, not backend acknowledgement, exactly-once work, transactional checkpoint
+coordination, or retry/abandon/recovery coverage.
 Embedded and
 test-only daemon paths require no credentials, network, shell, sleeps, or VCR
 gate. Panics, `run_turn` failures, and daemon exits before exact-consumption

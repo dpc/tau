@@ -109,6 +109,8 @@ pub enum ScenarioActionV2 {
         user_text: String,
         /// Exact provider-authored call identity.
         call_id: ToolCallId,
+        /// Exact sanitized successful-result shape.
+        expectation: AgentWatchResultExpectationV2,
         /// Complete assistant response after the tool result.
         response: String,
     },
@@ -184,6 +186,10 @@ pub enum ScenarioActionV2 {
         error: String,
     },
     /// Remain pending until an exact prompt cancellation, with a hard timeout.
+    ///
+    /// After its wait worker starts, the fake emits exactly one
+    /// prompt-correlated `hold_ready` semantic trace record. This is live
+    /// fixture readiness, not provider acknowledgement.
     HoldUntilCancel {
         /// Exact latest user text.
         user_text: String,
@@ -208,6 +214,17 @@ pub enum ScenarioActionV2 {
         /// Lane-local assistant response.
         response: String,
     },
+}
+
+/// One closed sanitized result expected from `agent_watch`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWatchResultExpectationV2 {
+    /// The watch was enabled without a current provider-work status.
+    Enabled,
+    /// The watch was enabled while the target had uncertain unknown-category
+    /// provider dispatch.
+    DispatchUncertainUnknown,
 }
 
 /// One closed automatic watch notification expected by a V2 action.

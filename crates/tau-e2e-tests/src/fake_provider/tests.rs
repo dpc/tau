@@ -470,6 +470,51 @@ fn v2_agent_watch_runtime_mismatches_leave_state_unconsumed() {
     assert_eq!(state.lane_cursors, [2]);
 }
 
+/// Requires the S5 watch-result switch to match only the exact sanitized
+/// dispatch-uncertain/unknown status text.
+#[test]
+fn v2_agent_watch_dispatch_uncertain_result_is_exact() {
+    let mut scenario = agent_watch_scenario();
+    let ScenarioActionV2::AgentWatchResult { expectation, .. } = &mut scenario.lanes[0].actions[1]
+    else {
+        unreachable!()
+    };
+    *expectation = AgentWatchResultExpectationV2::DispatchUncertainUnknown;
+    let result = scenario.lanes[0].actions[1].clone();
+    let parent = tau_proto::AgentId::parse("parent").expect("parent id");
+    let child = tau_proto::AgentId::parse("child").expect("child id");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![1];
+    state.child_agents = HashMap::from([(parent.clone(), vec![child])]);
+    state.agent_lanes.insert(parent.clone(), 0);
+
+    let mut prompt = prompt_for(&parent, "watch", None);
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tool_result("watch-call", "Watching agent `child`")],
+            },
+        ));
+    assert!(
+        state
+            .validate_and_commit_v2_action(0, 1, &prompt, &result)
+            .is_err()
+    );
+    assert_eq!(state.lane_cursors, [1]);
+
+    latest_tool_results_mut(&mut prompt).items[0] = tool_result(
+        "watch-call",
+        "Watching agent `child`; current status: dispatch uncertain (unknown)",
+    );
+    state
+        .validate_and_commit_v2_action(0, 1, &prompt, &result)
+        .expect("exact dispatch-uncertain watch result commits");
+    assert_eq!(state.lane_cursors, [2]);
+}
+
 /// Ensures automatic-watch batches reject empty, oversized, or unbounded
 /// content before the provider can subscribe to live traffic.
 #[test]
@@ -1053,6 +1098,7 @@ fn agent_watch_scenario() -> ScenarioV2 {
                 ScenarioActionV2::AgentWatchResult {
                     user_text: "watch".to_owned(),
                     call_id: "watch-call".into(),
+                    expectation: AgentWatchResultExpectationV2::Enabled,
                     response: "watching".to_owned(),
                 },
             ],

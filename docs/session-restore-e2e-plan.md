@@ -72,8 +72,11 @@ non-persistent watch with a fresh subscription. S3 composes current durable,
 historically unloaded, and process-local ephemeral membership across a clean
 restart. S4 restores two distinct durable workers, activates them in reverse
 creation order, and proves that lane ownership, transcript suffixes, and ID-keyed
-rosters do not depend on completion or RPC row order. S5 and later interruption
-and repair scenarios remain planned.
+rosters do not depend on completion or RPC row order. S5 synchronizes a held
+worker's durable dispatch checkpoint, decoded fake cursor, and live readiness
+before a process-group kill, then proves two resumes remain dispatch-uncertain
+without automatic worker submission or old-watch restoration. S6 and later
+interruption and repair scenarios remain planned.
 
 ## Test boundaries and oracles
 
@@ -196,6 +199,14 @@ Boot A spends ten main and one provider turn per worker. Boot B activates only
 the workers, in reverse creation order, and spends one provider turn per worker,
 totaling ten main and two turns per worker. Roster queries and replay consume no
 fake-provider action.
+
+S5 uses two lanes and compact 1,192-byte scenario JSON: exactly five main
+actions (the Boot A start pair and one-record running watch action, then Boot B's
+explicit watch call/result pair) and one worker hold action, below the 16 KiB
+ceiling. Boot A spends three main and one worker provider turn. Boot B spends
+two main turns and zero worker turns; Boot C spends zero provider turns. The
+initial dispatch-uncertain watch snapshot, roster queries, replay, and the
+synchronized crash cut consume no additional fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -370,6 +381,10 @@ provider consumption.
 This proves conservative harness behavior after a synchronized cut. It does not
 prove whether an external backend performed work exactly once, and it must not
 be used to claim crash-transactional fake-provider cursor recovery.
+
+Implemented by
+`session_restore::dispatch_uncertain::cold_resume_fails_closed_for_dispatch_uncertain_worker`
+using the prompt-correlated three-way crash cut and two fail-closed cold resumes.
 
 Recovery is a separately gated follow-on. The exact authority question is:
 

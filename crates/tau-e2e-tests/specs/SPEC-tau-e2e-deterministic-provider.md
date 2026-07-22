@@ -32,7 +32,8 @@ worker role exposes no tools. S2 adds only production `agent_watch` to that
 main role. S3 reuses S1's exact roles and grammar; its promptless ephemeral agent
 and typed unloaded-worker store records consume no fake-provider action. S4
 instead configures two distinct tool-free worker roles and keeps only
-`agent_start` on the main. The fake
+`agent_start` on the main. S5 reuses S2's two-role tool surface for one
+synchronized interrupted-worker restore. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
@@ -119,6 +120,27 @@ harness journal are not transactionally committed together, so this fixture
 makes no crash-exact action-replay claim; such a claim requires a provider
 acknowledgement protocol design.
 
+S5 deliberately uses one existing `HoldUntilCancel` action without issuing a
+cancellation. After the fake commits the worker lane cursor and starts the
+bounded hold worker, it appends one exact prompt-correlated `hold_ready` semantic
+trace record. The test separately observes the same prompt in the durable
+harness `agent.inference_dispatch_started` journal and decodes the fake
+checkpoint's exact scenario, worker lane binding, and next-action cursor before
+sending `SIGKILL` to the private daemon process group. The readiness record is
+only synchronized live fixture observation: it is not a durable backend
+acknowledgement and does not make the two independent stores transactional.
+
+On each of two cold resumes, S5 requires both durable routes, the mandatory
+dispatch-uncertain warning, and zero automatic provider submissions. Boot B
+recreates a fresh main-to-worker watch through the closed S2 action pair and
+requires its initial structured provider snapshot to carry the original prompt
+id and `dispatch_uncertain/unknown`; the old automatic watch remains absent and
+the initial snapshot consumes no provider action. A closed result-expectation
+variant makes the fake require the corresponding exact sanitized tool result,
+while S2 still requires its status-free result. Boot C supplies no agent input and must
+reproduce the warning and zero-provider fail-closed state. S5 does not retry,
+abandon, cancel, or otherwise recover the uncertain work.
+
 Daemon acceptance uses the normal local socket protocol and real supervised
 subprocess. Its `ServeOptions` explicitly bypass ambient startup override
 transports and checks the same exact extension allowlist before spawning as the
@@ -164,6 +186,13 @@ Boot B consumes one fresh turn per worker in reverse creation order, with no
 main turn. Exact lane-local continuations and per-agent durable suffixes reject
 lane rebinding and cross-agent transcript leakage; roster rows are compared as
 an ID-keyed set rather than by RPC order.
+S5 consumes three main turns and one held worker turn before the synchronized
+crash. Boot B consumes exactly two main turns for explicit watch recreation and
+no worker turn; Boot C consumes no provider turn. The decoded fake cursor
+remains at one consumed worker action throughout, while the durable worker
+journal retains the one unfinished dispatch checkpoint. This proves
+conservative harness recovery at the established cut, not exactly-once external
+work or crash-transactional fake cursor recovery.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,

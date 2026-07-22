@@ -15,6 +15,10 @@ S4 configures one main exposing only `agent_start` and two distinct tool-free
 worker roles. Its closed grammar permits at most two adjacent production starts,
 retains their ordered child identities, and matches each sequential automatic
 watch batch against the latest successful start.
+S5 reuses S2's exact two-role tool surface and one bounded hold. Its crash oracle
+correlates the same worker prompt across the durable dispatch checkpoint, decoded
+fake cursor, and live `hold_ready` observation before process-group `SIGKILL`;
+neither independently persisted store acknowledges the other.
 Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
@@ -48,7 +52,12 @@ membership, route, or replay boundary. S4 restores a three-member durable
 session, validates roster and replay facts by identity, activates the two
 workers in reverse creation order, and rejects lane rebinding or cross-agent
 transcript suffixes. Its bounded two-start checkpoint semantics remain
-fixture-local and make no crash-exact coordination claim. It does not cover the
+fixture-local and make no crash-exact coordination claim. S5 cold-restores the
+interrupted worker twice, requires the mandatory dispatch-uncertain warning and
+zero automatic worker submission on each boot, rejects the old watch, and allows
+only a fresh Boot B watch whose initial typed status names the checkpointed
+prompt. Its synchronized cut does not establish transactional checkpointing,
+exactly-once external work, retry, abandonment, or recovery behavior. It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's

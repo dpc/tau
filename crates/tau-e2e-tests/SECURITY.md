@@ -28,7 +28,8 @@ Boot A releases both typed stores; reopening `AgentStore` and `SessionStore`
 validates the sequence-zero creation and adjacent durable load/unload before
 Boot B starts. This seeding is fixture-owned persistence setup, not a fake-provider
 file-write or a public unload operation. S4 enables the same sole `agent_start`
-tool for its main and configures two distinct tool-free worker roles.
+tool for its main and configures two distinct tool-free worker roles. S5 reuses
+the S2 main/worker surface for one synchronized interrupted-worker restore.
 
 Each S1/S2/S3 production-worker start sequence uses one adjacent
 `AgentStartCall`/`AgentStartResult` pair. It requires the exact production schema
@@ -57,8 +58,10 @@ daemon-lifetime watch. S4 proves the bounded counterpart for two sequentially
 started workers, including retained lane and journal ownership under
 reverse-creation activation. S2 proves explicit recreation creates one new subscription
 and admits only its exact bounded live notifications; the initial snapshot
-cannot activate the provider. It does not prove interrupted-request recovery,
-watch persistence, or crash-exact provider/harness checkpoint coordination.
+cannot activate the provider. S5 proves only fail-closed dispatch-uncertain
+restoration after a synchronized interrupted worker dispatch. It does not prove
+watch persistence, exactly-once external work, crash-exact provider/harness
+checkpoint coordination, or any retry, abandonment, or recovery operation.
 
 Mismatch, startup, or exact-consumption errors retain the private root and print
 its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.
@@ -68,7 +71,10 @@ wrapper owns daemon process cleanup on early test failure. Successful daemon
 finish requires the entire process group to disappear without a signal; forced
 TERM/KILL containment is reported as test failure. Daemon tests cover
 typed failure, cancellation/timeout, same-agent post-cancel liveness,
-concurrency, fatal disconnect, and clean restore. The cancellation gate accepts
+concurrency, fatal disconnect, clean restore, and one explicit S5 `SIGKILL`
+cut. S5's direct ungraceful-kill path requires the complete private process
+group to disappear under a hard deadline but deliberately does not require
+graceful socket cleanup or a successful parent exit. The cancellation gate accepts
 only harness-minted prompt ids already held by its two bounded lanes; it cannot
 cancel arbitrary sessions or agents. Its same-agent continuation proves
 warm-process ordinary-inference liveness and late-terminal rejection, not
@@ -76,6 +82,14 @@ crash-exact cancellation persistence or abandonment of standalone-compaction
 ownership. Provider cursor and harness journal writes are not transactional, so
 crash-exact replay is explicitly outside this boundary. The fixture does not
 claim broad terminal rendering or universal packaging.
+
+S5 observes the existing bounded hold's prompt-correlated `hold_ready` trace
+only after its wait worker starts. The test correlates that live record with the
+same durable harness dispatch prompt and a separately decoded fake lane cursor,
+then kills the process group before the hold deadline. This three-way
+synchronization narrows the interruption cut; the readiness trace is not a
+provider acknowledgement, and the independently persisted cursor and harness
+journal remain non-transactional.
 
 The Unix-only core-resume gate is narrower and stronger at the public UI
 boundary. It launches the exact built universal Tau executable with `env_clear`,

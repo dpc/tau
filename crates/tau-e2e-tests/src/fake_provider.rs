@@ -24,7 +24,8 @@ use tau_proto::{
 use validation::{validate_v1, validate_v2};
 
 use crate::scenario::{
-    FAKE_MODEL_ID, ScenarioActionV2, ScenarioTurnV1, ScenarioV1, ScenarioV2, WatchNotificationV2,
+    AgentWatchResultExpectationV2, FAKE_MODEL_ID, ScenarioActionV2, ScenarioTurnV1, ScenarioV1,
+    ScenarioV2, WatchNotificationV2,
 };
 
 const MAX_TURNS: usize = 8;
@@ -1253,59 +1254,7 @@ impl FakeState {
                 )))
             }
             ScenarioActionV2::HoldUntilCancel { timeout_ms, .. } => {
-                let (cancel, wait) = mpsc::channel();
-                let (completion, completed) = mpsc::channel();
-                let trace = self
-                    .trace
-                    .clone()
-                    .ok_or_else(|| ClientError::handler("trace not configured"))?;
-                let handle = handle.clone();
-                let held_prompt = prompt.clone();
-                let prompt_id = prompt.agent_prompt_id.clone();
-                let join = thread::spawn(move || {
-                    match wait.recv_timeout(Duration::from_millis(timeout_ms)) {
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let mut terminal =
-                                finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
-                            terminal.error = Some("deterministic hold timed out".to_owned());
-                            terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
-                            let _ = write_shared_trace(
-                                &trace,
-                                &format!("prompt_id={prompt_id} hold_timeout"),
-                            );
-                            let _ = completion.send(());
-                            let _ = handle
-                                .emit_transient(Event::ProviderResponseFinishedReported(terminal));
-                            HoldOutcome::TimedOut
-                        }
-                        Ok(canceled_by) => {
-                            let _ = write_shared_trace(
-                                &trace,
-                                &format!(
-                                    "prompt_id={prompt_id} hold_canceled canceled_by={canceled_by}"
-                                ),
-                            );
-                            let mut terminal =
-                                finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
-                            terminal.error = Some("(cancelled by harness)".to_owned());
-                            terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
-                            let _ = completion.send(());
-                            let _ = handle
-                                .emit_transient(Event::ProviderResponseFinishedReported(terminal));
-                            HoldOutcome::Canceled(canceled_by)
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => HoldOutcome::Shutdown,
-                    }
-                });
-                self.holds.insert(
-                    prompt.agent_prompt_id.clone(),
-                    PendingHold {
-                        cancel,
-                        join,
-                        completed,
-                    },
-                );
-                Ok(())
+                self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
             ScenarioActionV2::BarrierText {
                 barrier,
@@ -1336,6 +1285,82 @@ impl FakeState {
                 Ok(())
             }
         }
+    }
+
+    /// Starts one bounded cancellation hold and publishes its semantic
+    /// readiness.
+    fn emit_hold_until_cancel(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+        timeout_ms: u64,
+    ) -> ClientResult<()> {
+        let (cancel, wait) = mpsc::channel();
+        let (ready, readiness) = mpsc::sync_channel(0);
+        let (completion, completed) = mpsc::channel();
+        let trace = self
+            .trace
+            .clone()
+            .ok_or_else(|| ClientError::handler("trace not configured"))?;
+        let handle = handle.clone();
+        let held_prompt = prompt.clone();
+        let prompt_id = prompt.agent_prompt_id.clone();
+        let worker_prompt_id = prompt_id.clone();
+        let join = thread::spawn(move || {
+            if ready.send(()).is_err() {
+                return HoldOutcome::Shutdown;
+            }
+            match wait.recv_timeout(Duration::from_millis(timeout_ms)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let mut terminal =
+                        finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
+                    terminal.error = Some("deterministic hold timed out".to_owned());
+                    terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+                    let _ = write_shared_trace(
+                        &trace,
+                        &format!("prompt_id={worker_prompt_id} hold_timeout"),
+                    );
+                    let _ = completion.send(());
+                    let _ =
+                        handle.emit_transient(Event::ProviderResponseFinishedReported(terminal));
+                    HoldOutcome::TimedOut
+                }
+                Ok(canceled_by) => {
+                    let _ = write_shared_trace(
+                        &trace,
+                        &format!(
+                            "prompt_id={worker_prompt_id} hold_canceled \
+                             canceled_by={canceled_by}"
+                        ),
+                    );
+                    let mut terminal =
+                        finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
+                    terminal.error = Some("(cancelled by harness)".to_owned());
+                    terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+                    let _ = completion.send(());
+                    let _ =
+                        handle.emit_transient(Event::ProviderResponseFinishedReported(terminal));
+                    HoldOutcome::Canceled(canceled_by)
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => HoldOutcome::Shutdown,
+            }
+        });
+        if let Err(error) = readiness.recv_timeout(Duration::from_secs(1)) {
+            drop(cancel);
+            let _ = join.join();
+            return Err(ClientError::handler(format!(
+                "hold readiness failed: {error}"
+            )));
+        }
+        self.holds.insert(
+            prompt.agent_prompt_id.clone(),
+            PendingHold {
+                cancel,
+                join,
+                completed,
+            },
+        );
+        self.trace(&format!("prompt_id={prompt_id} hold_ready"))
     }
 
     fn emit_agent_tool_call(
@@ -1630,14 +1655,28 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "agent_watch tool snapshot mismatch"));
                 }
             }
-            ScenarioActionV2::AgentWatchResult { call_id, .. } => {
+            ScenarioActionV2::AgentWatchResult {
+                call_id,
+                expectation,
+                ..
+            } => {
                 let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id) else {
                     return Err(self.mismatch(
                         cursor,
                         "agent_watch result has no validated agent_start child identity",
                     ));
                 };
-                let expected = format!("Watching agent `{child_agent_id}`");
+                let expected = match expectation {
+                    AgentWatchResultExpectationV2::Enabled => {
+                        format!("Watching agent `{child_agent_id}`")
+                    }
+                    AgentWatchResultExpectationV2::DispatchUncertainUnknown => {
+                        format!(
+                            "Watching agent `{child_agent_id}`; current status: \
+                             dispatch uncertain (unknown)"
+                        )
+                    }
+                };
                 let latest_results = prompt
                     .context
                     .blocks

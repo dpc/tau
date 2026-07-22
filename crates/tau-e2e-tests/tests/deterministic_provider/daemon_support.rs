@@ -20,7 +20,7 @@ use super::*;
 pub(super) struct DaemonGuard {
     /// Killable test-only daemon process.
     child: Option<Child>,
-    /// Whether [`Self::finish`] already reaped the daemon.
+    /// Whether a consuming shutdown method already reaped the daemon.
     completed: bool,
     /// Captured synthetic daemon diagnostic.
     stderr_path: std::path::PathBuf,
@@ -31,6 +31,38 @@ pub(super) struct DaemonGuard {
 }
 
 impl DaemonGuard {
+    /// Sends uncatchable termination to the complete private daemon process
+    /// group and requires every member to disappear under a bounded deadline.
+    ///
+    /// Unlike [`Self::finish`], this deliberately does not require graceful
+    /// socket cleanup or a successful parent exit.
+    pub(super) fn kill_ungracefully(mut self) -> Result<(), String> {
+        use std::os::unix::process::ExitStatusExt;
+
+        nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL)
+            .map_err(|error| format!("kill deterministic daemon process group: {error}"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child = self.child.as_mut().expect("daemon guard owns child");
+        let status = loop {
+            match child.try_wait().map_err(|error| error.to_string())? {
+                Some(status) => break status,
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                None => return Err("crashed daemon parent exceeded reap deadline".to_owned()),
+            }
+        };
+        if status.signal() != Some(nix::libc::SIGKILL) {
+            return Err(format!(
+                "crashed daemon parent did not exit from SIGKILL: {status}"
+            ));
+        }
+        if !wait_for_process_group_exit(self.pgid, Duration::from_secs(2)) {
+            return Err("crashed daemon process group survived SIGKILL deadline".to_owned());
+        }
+        self.child.take();
+        self.completed = true;
+        Ok(())
+    }
+
     /// Waits within the cleanup deadline, reaps the daemon, and returns its
     /// terminal result.
     pub(super) fn finish(mut self) -> Result<(), String> {

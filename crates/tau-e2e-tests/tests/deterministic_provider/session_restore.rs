@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tau_e2e_tests::{
-    DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
-    WatchNotificationV2,
+    AgentWatchResultExpectationV2, DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2,
+    ScenarioLaneV2, ScenarioV2, WatchNotificationV2,
 };
 use tau_proto::{
     AgentId, AgentMessageKind, AgentNavigationMode, AgentRuntimeState, AgentWatchUpdateCause,
@@ -17,6 +17,8 @@ use tau_proto::{
 use super::FAKE_PROVIDER;
 use super::daemon_support::{disconnect_ui, spawn_daemon};
 
+#[path = "session_restore/dispatch_uncertain.rs"]
+mod dispatch_uncertain;
 #[path = "session_restore/membership.rs"]
 mod membership;
 #[path = "session_restore/multiple_workers.rs"]
@@ -228,6 +230,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
                         ScenarioActionV2::AgentWatchResult {
                             user_text: "recreate worker watch".to_owned(),
                             call_id: "s2-agent-watch".into(),
+                            expectation: AgentWatchResultExpectationV2::Enabled,
                             response: "worker watch recreated".to_owned(),
                         },
                         ScenarioActionV2::WatchNotificationChains {
