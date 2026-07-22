@@ -19,6 +19,12 @@ S5 reuses S2's exact two-role tool surface and one bounded hold. Its crash oracl
 correlates the same worker prompt across the durable dispatch checkpoint, decoded
 fake cursor, and live `hold_ready` observation before process-group `SIGKILL`;
 neither independently persisted store acknowledges the other.
+S6 separately gives only the worker the supervised test dummy in exact
+`hold_no_side_effect` mode; main retains only `agent_start`. Its crash oracle
+requires the worker's durable request/start pair plus canonical readiness. The
+strict fake observes the eager nonsemantic/durable repair order and validates the
+next explicit continuation's exact balanced error context without authorizing a
+tool redispatch.
 Generated configuration, durable session state,
 scenario data, provider trace, and extension stderr stay below a fresh private
 root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
@@ -57,7 +63,13 @@ interrupted worker twice, requires the mandatory dispatch-uncertain warning and
 zero automatic worker submission on each boot, rejects the old watch, and allows
 only a fresh Boot B watch whose initial typed status names the checkpointed
 prompt. Its synchronized cut does not establish transactional checkpointing,
-exactly-once external work, retry, abandonment, or recovery behavior. It does not cover the
+exactly-once external work, retry, abandonment, or recovery behavior. S6
+cold-restores an acknowledged foreground dummy call, requires one
+restart/possible-side-effect repair pair and no second live start, then compares
+the next cold resume's membership, execution restore, and agent streams exactly
+against the repaired generation. It does not claim safe retries, exactly-once
+side effects, or recovery ownership for an interrupted start-agent request.
+It does not cover the
 provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's

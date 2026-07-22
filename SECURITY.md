@@ -5,6 +5,9 @@ Tau is early-stage software, but security issues are important. Please report su
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
 The distinct deterministic and live/VCR test-fixture boundaries are documented
 in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
+The disabled-by-default test-dummy extension's capability and worker-lifecycle
+boundary is documented in
+[`tau-ext-test-dummy/SECURITY.md`](crates/tau-ext-test-dummy/SECURITY.md).
 Authenticated ChatGPT quota acquisition and its credential-free lifecycle are
 documented in
 [`tau-provider-codex/SECURITY.md`](crates/tau-provider-codex/SECURITY.md)

@@ -95,6 +95,25 @@ struct FakeState {
     watch_turn_correlations: HashMap<tau_proto::AgentId, WatchTurnCorrelation>,
     /// Admitted facts for the current two-chain watch action.
     watch_chain_progress: HashMap<tau_proto::AgentId, WatchChainProgress>,
+    /// Live S6 repair-pair progress for the sole closed dummy call; `None`
+    /// means the exact `tool.error` has not arrived.
+    repair_progress: Option<DummyRepairProgress>,
+}
+
+/// Correlation and phase for the sole live S6 repair pair.
+struct DummyRepairProgress {
+    /// Provider-authored call identity declared by the closed repair action.
+    call_id: tau_proto::ToolCallId,
+    /// Next exact live repair event accepted by the fake.
+    phase: DummyRepairPhase,
+}
+
+/// Closed live-event ordering for one S6 repair pair.
+enum DummyRepairPhase {
+    /// The non-semantic error arrived; the durable provider error is next.
+    AwaitingProviderToolError,
+    /// Both events arrived in exact order.
+    Complete,
 }
 
 /// Stable correlation shared by one action's non-initial turn notifications.
@@ -347,6 +366,14 @@ impl TauExtension for FakeProvider {
                     cx.state.handle_cancel(cancel, &cx.handle)
                 },
             )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::TOOL_ERROR),
+                |cx| cx.state.record_dummy_repair_event(cx.delivery.event()),
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::PROVIDER_TOOL_ERROR),
+                |cx| cx.state.record_dummy_repair_event(cx.delivery.event()),
+            )
             .ready_message("deterministic fake provider ready");
     }
 }
@@ -392,6 +419,88 @@ impl FakeState {
         self.child_agents
             .get(parent_agent_id)
             .and_then(|children| children.last())
+    }
+
+    /// Validates and traces the exact live S6 non-semantic/durable repair pair
+    /// without turning either observation into provider work.
+    fn record_dummy_repair_event(&mut self, event: &Event) -> ClientResult<()> {
+        let (error, label) = match event {
+            Event::ToolError(error) => (error, "repair_tool_error"),
+            Event::ProviderToolError(error) => (error, "repair_provider_tool_error"),
+            _ => return Ok(()),
+        };
+        let Some(ScenarioConfig::V2(scenario)) = self.scenario.as_ref() else {
+            return Ok(());
+        };
+        let declared = scenario.lanes.iter().find_map(|lane| {
+            lane.actions.iter().find_map(|action| match action {
+                ScenarioActionV2::DummyToolRepair {
+                    call_id,
+                    diagnostic,
+                    ..
+                } if call_id == &error.call_id => Some((call_id, diagnostic.as_str())),
+                _ => None,
+            })
+        });
+        let current = scenario.lanes.iter().enumerate().find_map(|(index, lane)| {
+            lane.actions
+                .get(*self.lane_cursors.get(index)?)
+                .and_then(|action| match action {
+                    ScenarioActionV2::DummyToolRepair {
+                        call_id,
+                        diagnostic,
+                        ..
+                    } => Some((call_id, diagnostic.as_str())),
+                    _ => None,
+                })
+        });
+        let Some((current_call_id, current_diagnostic)) = current else {
+            return if declared.is_some() {
+                Err(ClientError::handler(
+                    "dummy repair live event arrived outside its closed current action",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if &error.call_id != current_call_id {
+            return Err(ClientError::handler(
+                "dummy repair live event targeted the wrong call",
+            ));
+        }
+        if error.tool_name.as_str() != tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME
+            || error.tool_type != ToolType::Function
+            || error.message != current_diagnostic
+        {
+            return Err(ClientError::handler(
+                "dummy repair live event did not match the closed call diagnostic",
+            ));
+        }
+        match (&mut self.repair_progress, event) {
+            (None, Event::ToolError(_)) => {
+                self.repair_progress = Some(DummyRepairProgress {
+                    call_id: error.call_id.clone(),
+                    phase: DummyRepairPhase::AwaitingProviderToolError,
+                });
+            }
+            (Some(progress), Event::ProviderToolError(_))
+                if progress.call_id == error.call_id
+                    && matches!(progress.phase, DummyRepairPhase::AwaitingProviderToolError) =>
+            {
+                progress.phase = DummyRepairPhase::Complete;
+            }
+            (Some(progress), _) if progress.call_id != error.call_id => {
+                return Err(ClientError::handler(
+                    "dummy repair live event targeted a second call",
+                ));
+            }
+            _ => {
+                return Err(ClientError::handler(
+                    "dummy repair live events were duplicated or out of order",
+                ));
+            }
+        }
+        self.trace(&format!("call_id={} {label}", error.call_id))
     }
 
     fn record_watch_notification(&mut self, message: &AgentMessageReceived) -> ClientResult<()> {
@@ -1185,6 +1294,13 @@ impl FakeState {
                     ProviderStopReason::EndTurn,
                 )))
             }
+            ScenarioActionV2::DummyToolRepair { response, .. } => {
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
             action @ (ScenarioActionV2::AgentStartCall { .. }
             | ScenarioActionV2::AgentWatchCall { .. }) => {
                 self.emit_agent_tool_call(prompt, handle, action)
@@ -1535,6 +1651,14 @@ impl FakeState {
                 {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
+            }
+            ScenarioActionV2::DummyToolRepair {
+                call_id,
+                diagnostic,
+                ..
+            } => {
+                require_repaired_dummy_result(prompt, call_id, diagnostic)
+                    .map_err(|detail| self.mismatch(cursor, detail))?;
             }
             ScenarioActionV2::AgentStartCall { .. } => {
                 let expects_agent_watch = self.v2()?.lanes.iter().any(|lane| {
@@ -1899,6 +2023,7 @@ impl ScenarioActionV2 {
             Self::Text { user_text, .. }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
+            | Self::DummyToolRepair { user_text, .. }
             | Self::AgentStartCall { user_text, .. }
             | Self::AgentStartResult { user_text, .. }
             | Self::AgentWatchCall { user_text, .. }
@@ -1915,6 +2040,33 @@ impl ScenarioActionV2 {
             Self::WatchNotifications { .. } | Self::WatchNotificationChains { .. } => None,
         }
     }
+}
+
+/// Requires one exact synthetic interrupted-tool result in provider context.
+fn require_repaired_dummy_result(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &tau_proto::ToolCallId,
+    diagnostic: &str,
+) -> Result<(), &'static str> {
+    let results = prompt
+        .context
+        .flatten_iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if results.len() != 1
+        || &results[0].call_id != call_id
+        || results[0].tool_type != ToolType::Function
+        || results[0].status
+            != (tau_proto::ToolResultStatus::Error {
+                message: diagnostic.to_owned(),
+            })
+    {
+        return Err("dummy tool repair continuity mismatch");
+    }
+    Ok(())
 }
 
 fn latest_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {

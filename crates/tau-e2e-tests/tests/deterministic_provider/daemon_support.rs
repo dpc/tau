@@ -30,13 +30,45 @@ pub(super) struct DaemonGuard {
     socket_path: std::path::PathBuf,
 }
 
+/// Proof handle for one forcibly terminated daemon generation.
+pub(super) struct TerminatedDaemon {
+    /// Former private process group.
+    pgid: nix::unistd::Pid,
+    /// Former generation-specific socket.
+    socket_path: std::path::PathBuf,
+}
+
+impl TerminatedDaemon {
+    /// Requires the old process group, socket, and durable session lock to be
+    /// absent before another daemon generation starts.
+    pub(super) fn require_gone(
+        &self,
+        harness_state_dir: &Path,
+        session_id: &str,
+    ) -> Result<(), String> {
+        if process_group_exists(self.pgid) {
+            return Err("crashed daemon process group still exists".to_owned());
+        }
+        if self.socket_path.exists() {
+            return Err("crashed daemon socket still exists".to_owned());
+        }
+        let sessions = harness_state_dir.join("sessions");
+        if tau_harness::session_is_locked(&sessions, session_id)
+            .map_err(|error| format!("probe crashed daemon session lock: {error}"))?
+        {
+            return Err("crashed daemon session lock is still held".to_owned());
+        }
+        Ok(())
+    }
+}
+
 impl DaemonGuard {
     /// Sends uncatchable termination to the complete private daemon process
     /// group and requires every member to disappear under a bounded deadline.
     ///
     /// Unlike [`Self::finish`], this deliberately does not require graceful
     /// socket cleanup or a successful parent exit.
-    pub(super) fn kill_ungracefully(mut self) -> Result<(), String> {
+    pub(super) fn kill_ungracefully(mut self) -> Result<TerminatedDaemon, String> {
         use std::os::unix::process::ExitStatusExt;
 
         nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL)
@@ -58,9 +90,17 @@ impl DaemonGuard {
         if !wait_for_process_group_exit(self.pgid, Duration::from_secs(2)) {
             return Err("crashed daemon process group survived SIGKILL deadline".to_owned());
         }
+        if self.socket_path.exists() {
+            std::fs::remove_file(&self.socket_path)
+                .map_err(|error| format!("remove dead daemon socket: {error}"))?;
+        }
+        let terminated = TerminatedDaemon {
+            pgid: self.pgid,
+            socket_path: self.socket_path.clone(),
+        };
         self.child.take();
         self.completed = true;
-        Ok(())
+        Ok(terminated)
     }
 
     /// Waits within the cleanup deadline, reaps the daemon, and returns its
@@ -158,6 +198,9 @@ pub(super) fn spawn_daemon(
         .arg(status_label(status));
     if fixture.core_shell_enabled() {
         command.arg(fixture.shell_base());
+    }
+    if fixture.dummy_enabled() {
+        command.arg("--test-dummy");
     }
     let child = command
         .stdin(Stdio::null())

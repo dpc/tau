@@ -12,7 +12,12 @@ advertise: false
 ## Features
 
 - Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random.
-- Can be configured with deterministic `restart_mode` for tests: `random`, `success`, `error`, or `exit`.
+- Can be configured with deterministic `restart_mode` for tests: `random`,
+  `success`, `error`, `exit`, or `hold_no_side_effect`.
+- `hold_no_side_effect` accepts one no-argument invocation, emits correlated
+  readiness progress after its bounded worker starts, and performs no
+  filesystem, network, environment, or child-process operation. It joins on
+  cancellation/disconnect and has a fixed ten-second terminal deadline.
 - Ignores replay-marked `tool.started` deliveries so historical restart events do not emit tool replies or exit the extension again; malformed config is surfaced as `ConfigError`.
 - Intercepts `agent.prompt_submitted` and rewrites whole-word `tao` to `tau`, preserving letter case. When it changes text it emits a transient harness notice message: `did you mean "Tau"? — corrected for you`.
 
@@ -28,7 +33,7 @@ extensions: {
   "test-dummy": {
     enable: true,
     config: {
-      restart_mode: "success", // random | success | error | exit
+      restart_mode: "success", // random | success | error | exit | hold_no_side_effect
     },
   },
 }

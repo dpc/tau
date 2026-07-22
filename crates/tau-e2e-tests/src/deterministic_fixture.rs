@@ -46,6 +46,7 @@ enum FixtureMode {
     SessionRestore,
     SessionRestoreWatch,
     SessionRestoreMultipleWorkers,
+    SessionRestoreInterruptedTool,
 }
 
 impl DeterministicFixture {
@@ -169,6 +170,30 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the closed S6 worker-tool interruption fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact provider/tool binaries,
+    /// generated role configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_session_restore_interrupted_tool(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            Some(dummy_tool_bin.as_ref().to_path_buf()),
+            FixtureMode::SessionRestoreInterruptedTool,
+        )
+    }
+
     /// Creates the closed production core-shell cold-resume fixture.
     pub fn new_core_shell(
         name: &str,
@@ -267,7 +292,13 @@ impl DeterministicFixture {
                     "command": [exact_binary(&dummy_tool_bin)?],
                     "role": "tool",
                     "require": true,
-                    "config": { "restart_mode": "success" },
+                    "config": {
+                        "restart_mode": if mode == FixtureMode::SessionRestoreInterruptedTool {
+                            "hold_no_side_effect"
+                        } else {
+                            "success"
+                        }
+                    },
                 }),
             );
             serde_json::json!(["restart_test_dummy"])
@@ -300,6 +331,7 @@ impl DeterministicFixture {
             FixtureMode::SessionRestore
                 | FixtureMode::SessionRestoreWatch
                 | FixtureMode::SessionRestoreMultipleWorkers
+                | FixtureMode::SessionRestoreInterruptedTool
         ) {
             let main_tools = if mode == FixtureMode::SessionRestoreWatch {
                 serde_json::json!(["agent_start", "agent_watch"])
@@ -313,7 +345,11 @@ impl DeterministicFixture {
                 },
                 "deterministic-worker": {
                     "model": "fake/test",
-                    "tools": [],
+                    "tools": if mode == FixtureMode::SessionRestoreInterruptedTool {
+                        serde_json::json!(["restart_test_dummy"])
+                    } else {
+                        serde_json::json!([])
+                    },
                 }
             });
             if mode == FixtureMode::SessionRestoreMultipleWorkers {
@@ -469,6 +505,11 @@ impl DeterministicFixture {
         self.core_shell_enabled
     }
 
+    /// Returns whether this fixture explicitly enables the dummy extension.
+    pub fn dummy_enabled(&self) -> bool {
+        self.dummy_enabled
+    }
+
     /// Returns the generated harness configuration directory.
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
@@ -532,6 +573,38 @@ impl DeterministicFixture {
                 })
         {
             return Err("generated S4 role configuration changed".into());
+        }
+        Ok(())
+    }
+
+    /// Verifies the S6 projection exposes the sole closed hold-mode dummy tool
+    /// only to the worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated role or extension configuration
+    /// differs from the interrupted-worker-tool fixture surface.
+    pub fn assert_session_restore_interrupted_tool_roles(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            self.root().join("artifacts/harness-config.json"),
+        )?)?;
+        let agents = &config["agents"];
+        let roles = &agents["role_groups"]["e2e"]["roles"];
+        let extensions = &config["extensions"];
+        if agents["default_role"] != "deterministic-main"
+            || agents["id_template"] != "main"
+            || roles.as_object().is_none_or(|roles| roles.len() != 2)
+            || roles["deterministic-main"]["model"] != "fake/test"
+            || roles["deterministic-main"]["tools"] != serde_json::json!(["agent_start"])
+            || roles["deterministic-worker"]["model"] != "fake/test"
+            || roles["deterministic-worker"]["tools"] != serde_json::json!(["restart_test_dummy"])
+            || extensions["e2e-test-dummy"]["role"] != "tool"
+            || extensions["e2e-test-dummy"]["require"] != true
+            || extensions["e2e-test-dummy"]["config"]["restart_mode"] != "hold_no_side_effect"
+        {
+            return Err("generated S6 role/extension configuration changed".into());
         }
         Ok(())
     }

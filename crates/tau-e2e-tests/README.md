@@ -26,7 +26,8 @@ watch, explicit post-resume watch recreation with exact new-subscription
 notifications, loaded/unloaded/ephemeral membership composition, two-worker
 restore with reverse-creation activation and ID-keyed ordering/isolation, a
 synchronized held-worker crash followed by two dispatch-uncertain fail-closed
-resumes, and startup rejection of invalid
+resumes, an acknowledged interrupted worker foreground tool repaired exactly
+once across two cold resumes, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
@@ -69,6 +70,14 @@ whose initial typed provider status identifies the checkpointed prompt. This
 proves a conservative harness response at the synchronized cut, not backend
 acknowledgement, exactly-once work, transactional cursor/journal persistence, or
 retry, abandonment, or recovery behavior.
+A sixth fixture gives only the worker the closed no-side-effect dummy tool. It
+kills after one durable request/start pair and canonical hold readiness, then
+requires the eager restart repair pair, no live tool redispatch, and one explicit
+repair-aware worker continuation with an exactly balanced error result. Boot C
+receives no further input and must preserve the exact Boot B membership,
+execution-restore, and agent streams without another repair pair. This is a
+conservative foreground-tool repair oracle, not evidence of exactly-once effects
+or a general recovery operation.
 The fixture retains its private artifact root on panic, `run_turn` failure, or
 any daemon path that exits before exact consumption succeeds. Retained artifacts
 include generated config/scenario, durable events, extension/daemon stderr, and

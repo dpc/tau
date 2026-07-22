@@ -19,6 +19,11 @@ and only change `text`.
 The `restart_mode` config exists to make harness tests deterministic:
 `random` preserves the historical random exit-or-error behavior, while
 `success`, `error`, and `exit` force the corresponding outcome.
+`hold_no_side_effect` is a closed lifecycle mode: it acknowledges one live
+invocation with correlated transient progress only after a worker reaches its
+wait point, then waits for exact cancellation or a fixed terminal deadline.
+Cancellation joins the worker and reports cancellation; disconnect and teardown
+join it without terminal output.
 
 Restart replies (`success` `tool.result_reported` and error
 `tool.error_reported`) must echo the
@@ -35,9 +40,16 @@ Security-relevant boundaries:
 - The crate does not read or write files, persist state, access secrets, open
   network connections, or spawn subprocesses.
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
+- Hold mode accepts no tool arguments or external control, permits one active
+  worker, bounds readiness at one second and terminal waiting at ten seconds,
+  and joins that worker on cancellation or shutdown.
 - Replayed `tool.started` deliveries are ignored so historical events cannot
   retrigger tool replies or extension exits.
 
 Prompt interception is deliberately narrow. It changes only prompt text and
 must preserve routing and identity fields so hidden/internal or extension
 originated prompts do not become user-visible prompts by accident.
+
+The cross-crate interrupted-tool acceptance that consumes the hold mode is
+specified by
+[SPEC-tau-e2e-deterministic-provider](../../tau-e2e-tests/specs/SPEC-tau-e2e-deterministic-provider.md).

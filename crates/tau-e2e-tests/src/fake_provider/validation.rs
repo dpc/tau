@@ -99,6 +99,9 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                             Some(ScenarioActionV2::DummyToolResult {
                                 call_id: result_id,
                                 ..
+                            }) | Some(ScenarioActionV2::DummyToolRepair {
+                                call_id: result_id,
+                                ..
                             }) if result_id == call_id
                         ) =>
                 {
@@ -119,6 +122,26 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 {
                     return Err(ClientError::handler(
                         "dummy tool result must have a 1..=256 byte id and matching prior call",
+                    ));
+                }
+                ScenarioActionV2::DummyToolRepair {
+                    call_id,
+                    diagnostic,
+                    ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || diagnostic.is_empty()
+                    || diagnostic.len() > 512
+                    || !matches!(
+                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                        Some(ScenarioActionV2::DummyToolCall {
+                            call_id: request_id,
+                            ..
+                        }) if request_id == call_id
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "dummy tool repair must be bounded and follow its matching call",
                     ));
                 }
                 ScenarioActionV2::AgentStartCall {

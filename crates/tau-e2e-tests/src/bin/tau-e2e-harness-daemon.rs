@@ -11,7 +11,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let test_dummy = args
+        .last()
+        .is_some_and(|arg| arg == std::ffi::OsStr::new("--test-dummy"));
+    if test_dummy {
+        args.pop();
+    }
     let (socket, harness_state, config_dir, state_dir, status, core_shell_cwd) =
         match args.as_slice() {
             [socket, harness_state, config_dir, state_dir, status] => {
@@ -25,10 +31,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 status,
                 Some(cwd),
             ),
-            _ => return Err(
-                "expected SOCKET HARNESS_STATE CONFIG_DIR STATE_DIR {new|resumed} [CORE_SHELL_CWD]"
-                    .into(),
-            ),
+            _ => {
+                return Err(
+                    "expected SOCKET HARNESS_STATE CONFIG_DIR STATE_DIR {new|resumed} \
+                 [CORE_SHELL_CWD] [--test-dummy]"
+                        .into(),
+                );
+            }
         };
     let status = match status.to_str() {
         Some("new") => tau_harness::SessionLaunchStatus::New,
@@ -36,6 +45,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("status must be new or resumed".into()),
     };
     let mut allowed_extensions = BTreeSet::from(["e2e-fake-provider".into()]);
+    if test_dummy {
+        allowed_extensions.insert("e2e-test-dummy".into());
+    }
     if let Some(cwd) = core_shell_cwd {
         std::env::set_current_dir(cwd)?;
         allowed_extensions.insert("core-shell".into());

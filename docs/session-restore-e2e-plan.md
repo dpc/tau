@@ -75,8 +75,11 @@ creation order, and proves that lane ownership, transcript suffixes, and ID-keye
 rosters do not depend on completion or RPC row order. S5 synchronizes a held
 worker's durable dispatch checkpoint, decoded fake cursor, and live readiness
 before a process-group kill, then proves two resumes remain dispatch-uncertain
-without automatic worker submission or old-watch restoration. S6 and later
-interruption and repair scenarios remain planned.
+without automatic worker submission or old-watch restoration. S6 kills after a
+worker's exact durable foreground-tool request/start pair and closed dummy
+readiness, proves one conservative repair and balanced explicit continuation,
+then proves the next cold resume adds no duplicate. S7 and later scenarios remain
+planned.
 
 ## Test boundaries and oracles
 
@@ -207,6 +210,14 @@ ceiling. Boot A spends three main and one worker provider turn. Boot B spends
 two main turns and zero worker turns; Boot C spends zero provider turns. The
 initial dispatch-uncertain watch snapshot, roster queries, replay, and the
 synchronized crash cut consume no additional fake-provider action.
+
+S6 uses two lanes and compact 1,259-byte scenario JSON: exactly three main
+actions (Boot A's start pair and one-record running watch action) and two worker
+actions (the foreground dummy call and Boot B's repair-aware continuation).
+Boot A spends three main turns and one worker turn before four actions have
+matched. Boot B spends one worker turn after the eager repair pair; Boot C spends
+zero provider turns. Roster queries, typed store reads, the crash cut, and repair
+observation consume no additional fake-provider action.
 
 Every new fake action, binding, or release primitive updates
 `SPEC-tau-e2e-deterministic-provider.md`, `crates/tau-e2e-tests/SECURITY.md`,
@@ -399,6 +410,9 @@ follow-on until a separately reviewed decision answers the question; do not
 change recovery behavior to make the E2E terminate.
 
 ### S6 — Interrupted worker foreground tool
+
+Implemented by
+`session_restore::interrupted_tool::cold_resume_repairs_interrupted_worker_tool_once`.
 
 Add one exact no-side-effect test tool mode that can acknowledge start and hold
 before terminal output. Kill Boot A after the worker's canonical durable tool

@@ -181,6 +181,145 @@ fn v2_dummy_tool_actions_require_an_adjacent_matching_pair() {
     );
 }
 
+/// Ensures the closed repair grammar requires one adjacent matching call,
+/// bounded nonempty diagnostic, and no unrelated placement.
+#[test]
+fn v2_dummy_repair_grammar_is_adjacent_and_bounded() {
+    let scenario = dummy_repair_scenario("repair");
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(scenario.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+    for diagnostic in [String::new(), "x".repeat(513)] {
+        let mut invalid = scenario.clone();
+        let ScenarioActionV2::DummyToolRepair {
+            diagnostic: value, ..
+        } = &mut invalid.lanes[0].actions[1]
+        else {
+            unreachable!()
+        };
+        *value = diagnostic;
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(invalid)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    let mut mismatch = scenario.clone();
+    let ScenarioActionV2::DummyToolRepair { call_id, .. } = &mut mismatch.lanes[0].actions[1]
+    else {
+        unreachable!()
+    };
+    *call_id = "wrong".into();
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(mismatch)
+        }
+        .validate()
+        .is_err()
+    );
+    let mut nonadjacent = scenario;
+    nonadjacent.lanes[0].actions.insert(
+        1,
+        ScenarioActionV2::Text {
+            user_text: "between".to_owned(),
+            response: "between".to_owned(),
+        },
+    );
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(nonadjacent)
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+/// Ensures live repair observations fail closed on wrong calls, duplicates,
+/// inversion, and delivery outside the current repair action.
+#[test]
+fn v2_dummy_repair_live_pair_is_exact_and_ordered() {
+    let scenario = dummy_repair_scenario("repair");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![1];
+    assert!(
+        state
+            .record_dummy_repair_event(&provider_tool_error("call", "repair"))
+            .is_err()
+    );
+    assert!(state.repair_progress.is_none());
+    assert!(
+        state
+            .record_dummy_repair_event(&tool_error("wrong", "repair"))
+            .is_err()
+    );
+    assert!(state.repair_progress.is_none());
+    state
+        .record_dummy_repair_event(&tool_error("call", "repair"))
+        .expect("exact tool error");
+    assert!(
+        state
+            .record_dummy_repair_event(&tool_error("call", "repair"))
+            .is_err()
+    );
+    state
+        .record_dummy_repair_event(&provider_tool_error("call", "repair"))
+        .expect("exact provider error");
+    state.lane_cursors[0] = 2;
+    assert!(
+        state
+            .record_dummy_repair_event(&tool_error("call", "repair"))
+            .is_err()
+    );
+}
+
+/// Ensures the repair continuation accepts exactly one matching error result
+/// and rejects wrong status, diagnostic, call identity, or an extra result.
+#[test]
+fn v2_dummy_repair_continuation_requires_one_exact_error() {
+    let scenario = dummy_repair_scenario("repair");
+    let action = scenario.lanes[0].actions[1].clone();
+    let agent = tau_proto::AgentId::parse("agent").expect("agent id");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![1];
+    state.agent_lanes = HashMap::from([(agent.clone(), 0)]);
+    let mut prompt = prompt_for(&agent, "continue", None);
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![error_tool_result("call", "repair")],
+            },
+        ));
+    let exact = prompt.clone();
+
+    latest_tool_results_mut(&mut prompt).items[0].status = tau_proto::ToolResultStatus::Success;
+    assert!(state.validate_v2_action(1, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt).items[0] = error_tool_result("call", "wrong");
+    assert!(state.validate_v2_action(1, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt).items[0] = error_tool_result("wrong", "repair");
+    assert!(state.validate_v2_action(1, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt)
+        .items
+        .push(error_tool_result("extra", "repair"));
+    assert!(state.validate_v2_action(1, &prompt, &action).is_err());
+    state
+        .validate_and_commit_v2_action(0, 1, &exact, &action)
+        .expect("exact repaired result commits");
+    assert_eq!(state.lane_cursors, [2]);
+}
+
 /// Ensures production `agent_start` remains at most two exact, bounded,
 /// adjacent call/result pairs rather than a generic harness-tool grammar.
 #[test]
@@ -1233,6 +1372,54 @@ fn tool_result(call_id: &str, text: &str) -> tau_proto::ToolResultItem {
         output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(text.to_owned())),
         provider_content: Vec::new(),
     }
+}
+
+fn error_tool_result(call_id: &str, diagnostic: &str) -> tau_proto::ToolResultItem {
+    let mut result = tool_result(call_id, diagnostic);
+    result.status = tau_proto::ToolResultStatus::Error {
+        message: diagnostic.to_owned(),
+    };
+    result
+}
+
+fn tool_error(call_id: &str, diagnostic: &str) -> Event {
+    Event::ToolError(tau_proto::ToolError {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
+        tool_type: ToolType::Function,
+        message: diagnostic.to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    })
+}
+
+fn provider_tool_error(call_id: &str, diagnostic: &str) -> Event {
+    let Event::ToolError(error) = tool_error(call_id, diagnostic) else {
+        unreachable!()
+    };
+    Event::ProviderToolError(error)
+}
+
+fn dummy_repair_scenario(diagnostic: &str) -> ScenarioV2 {
+    ScenarioV2::new(
+        "dummy-repair",
+        vec![ScenarioLaneV2 {
+            ctx_id: "lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "before".to_owned(),
+                    call_id: "call".into(),
+                },
+                ScenarioActionV2::DummyToolRepair {
+                    user_text: "continue".to_owned(),
+                    call_id: "call".into(),
+                    diagnostic: diagnostic.to_owned(),
+                    response: "complete".to_owned(),
+                },
+            ],
+        }],
+    )
 }
 
 fn latest_tool_results_mut(

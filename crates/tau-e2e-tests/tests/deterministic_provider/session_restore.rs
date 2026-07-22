@@ -14,11 +14,13 @@ use tau_proto::{
     SessionAgentPersistence, SessionId,
 };
 
-use super::FAKE_PROVIDER;
 use super::daemon_support::{disconnect_ui, spawn_daemon};
+use super::{DUMMY_TOOL, FAKE_PROVIDER};
 
 #[path = "session_restore/dispatch_uncertain.rs"]
 mod dispatch_uncertain;
+#[path = "session_restore/interrupted_tool.rs"]
+mod interrupted_tool;
 #[path = "session_restore/membership.rs"]
 mod membership;
 #[path = "session_restore/multiple_workers.rs"]

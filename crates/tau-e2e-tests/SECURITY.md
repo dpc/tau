@@ -29,7 +29,9 @@ validates the sequence-zero creation and adjacent durable load/unload before
 Boot B starts. This seeding is fixture-owned persistence setup, not a fake-provider
 file-write or a public unload operation. S4 enables the same sole `agent_start`
 tool for its main and configures two distinct tool-free worker roles. S5 reuses
-the S2 main/worker surface for one synchronized interrupted-worker restore.
+the S2 main/worker surface for one synchronized interrupted-worker restore. S6
+adds only the exact `restart_test_dummy` tool to its worker and fixes that
+extension to `hold_no_side_effect`; the main retains only `agent_start`.
 
 Each S1/S2/S3 production-worker start sequence uses one adjacent
 `AgentStartCall`/`AgentStartResult` pair. It requires the exact production schema
@@ -63,6 +65,18 @@ restoration after a synchronized interrupted worker dispatch. It does not prove
 watch persistence, exactly-once external work, crash-exact provider/harness
 checkpoint coordination, or any retry, abandonment, or recovery operation.
 
+The S6 dummy hold is closed no-side-effect fixture code. It accepts no arguments
+or runtime control, performs no filesystem, network, environment, or
+child-process operation, and allows only one active invocation. A one-second
+worker-start bound gates one exact correlated `tool.progress` readiness fact; a
+ten-second deadline terminalizes a surviving invocation. Exact cancellation
+wakes and joins the worker, while protocol disconnect and extension teardown join
+it without fabricating a tool terminal. S6 kills only after the worker's durable
+request/start pair and canonical readiness, removes the dead generation's
+fixture-owned socket after proving the process group exited, and probes the
+session lock before resume. Its repair-aware provider grammar accepts only the
+fixed call ID, error status, and full restart/possible-side-effect diagnostic.
+
 Mismatch, startup, or exact-consumption errors retain the private root and print
 its path. Successful roots are deleted unless `TAU_E2E_KEEP_ARTIFACTS=1`.
 Artifacts contain only synthetic fixture data but remain private by default.
@@ -71,8 +85,8 @@ wrapper owns daemon process cleanup on early test failure. Successful daemon
 finish requires the entire process group to disappear without a signal; forced
 TERM/KILL containment is reported as test failure. Daemon tests cover
 typed failure, cancellation/timeout, same-agent post-cancel liveness,
-concurrency, fatal disconnect, clean restore, and one explicit S5 `SIGKILL`
-cut. S5's direct ungraceful-kill path requires the complete private process
+concurrency, fatal disconnect, clean restore, and explicit S5/S6 `SIGKILL`
+cuts. The direct ungraceful-kill path requires the complete private process
 group to disappear under a hard deadline but deliberately does not require
 graceful socket cleanup or a successful parent exit. The cancellation gate accepts
 only harness-minted prompt ids already held by its two bounded lanes; it cannot

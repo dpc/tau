@@ -1,4 +1,5 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read};
+use std::time::Duration;
 
 use tau_proto::{
     AgentPromptSubmitted, CborValue, Configure, Event, HarnessInputMessage, HarnessInputReader,
@@ -9,8 +10,12 @@ use tau_proto::{
 use super::*;
 
 fn invoke_restart() -> HarnessOutputMessage {
+    invoke_restart_with_id("call-1")
+}
+
+fn invoke_restart_with_id(call_id: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
-        call_id: "call-1".into(),
+        call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -57,10 +62,30 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
     })
 }
 
+fn cancel_restart(call_id: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
+        target_call_id: call_id.into(),
+    }))
+}
+
+fn disconnect() -> HarnessOutputMessage {
+    HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+        reason: Some("fixture complete".to_owned()),
+    })
+}
+
 fn run_restart_frames(
     input_frames: &[HarnessOutputMessage],
     seed: u64,
 ) -> Vec<HarnessInputMessage> {
+    let input = restart_input(input_frames);
+    let mut output = Vec::new();
+    let mut rng = StdRng::seed_from_u64(seed);
+    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
+    decode_output(output)
+}
+
+fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut input = Vec::new();
     let mut writer = HarnessOutputWriter::new(&mut input);
     if !matches!(
@@ -81,17 +106,40 @@ fn run_restart_frames(
         writer.write_message(frame).expect("write input frame");
     }
     writer.flush().expect("flush input");
+    input
+}
 
-    let mut output = Vec::new();
-    let mut rng = StdRng::seed_from_u64(seed);
-    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
-
+fn decode_output(output: Vec<u8>) -> Vec<HarnessInputMessage> {
     let mut reader = HarnessInputReader::new(Cursor::new(output));
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_message().expect("read") {
         frames.push(frame);
     }
     frames
+}
+
+/// Reader that keeps protocol input open beyond one injected hold deadline.
+struct DelayedReader {
+    /// Complete prefix available immediately.
+    prefix: Cursor<Vec<u8>>,
+    /// Terminal protocol suffix released after the delay.
+    suffix: Cursor<Vec<u8>>,
+    /// Whether the one delay has elapsed.
+    delayed: bool,
+}
+
+impl Read for DelayedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.prefix.read(buffer)?;
+        if count != 0 {
+            return Ok(count);
+        }
+        if !self.delayed {
+            std::thread::sleep(Duration::from_millis(100));
+            self.delayed = true;
+        }
+        self.suffix.read(buffer)
+    }
 }
 
 fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
@@ -244,6 +292,135 @@ fn invalid_restart_mode_emits_config_error() {
         error.message.contains("bogus") && error.message.contains("expected one of"),
         "error should describe invalid restart mode: {}",
         error.message
+    );
+}
+
+/// Verifies the closed hold mode acknowledges readiness before a correlated
+/// cancellation and joins its worker before protocol disconnect completes.
+#[test]
+fn hold_no_side_effect_reports_ready_then_cancels() {
+    let frames = run_restart_frames(
+        &[
+            restart_config("hold_no_side_effect"),
+            invoke_restart(),
+            cancel_restart("call-1"),
+            disconnect(),
+        ],
+        1,
+    );
+
+    let events = frames.iter().filter_map(emitted_event).collect::<Vec<_>>();
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::ToolRegistrationDeclared(_),
+            Event::ToolProgressReported(progress),
+            Event::ToolCancelledReported(cancelled),
+        ] if progress.call_id.as_str() == "call-1"
+            && progress.tool_name.as_str() == RESTART_TEST_DUMMY_TOOL_NAME
+            && progress.message.as_deref() == Some("hold_no_side_effect ready")
+            && cancelled.call_id.as_str() == "call-1"
+            && cancelled.tool_name.as_str() == RESTART_TEST_DUMMY_TOOL_NAME
+    ));
+}
+
+/// Verifies disconnect wakes and joins the closed hold without fabricating a
+/// tool terminal.
+#[test]
+fn hold_no_side_effect_disconnect_has_no_terminal_output() {
+    let frames = run_restart_frames(
+        &[
+            restart_config("hold_no_side_effect"),
+            invoke_restart(),
+            disconnect(),
+        ],
+        1,
+    );
+
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            emitted_event(frame),
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "call-1"
+                    && progress.message.as_deref() == Some("hold_no_side_effect ready")
+        )
+    }));
+    assert!(frames.iter().all(|frame| !matches!(
+        emitted_event(frame),
+        Some(Event::ToolResultReported(_))
+            | Some(Event::ToolErrorReported(_))
+            | Some(Event::ToolCancelledReported(_))
+    )));
+}
+
+/// Verifies a wrong-id cancellation cannot wake the sole hold and a concurrent
+/// invocation is rejected before exact cancellation joins the original.
+#[test]
+fn hold_no_side_effect_rejects_wrong_cancel_and_concurrent_call() {
+    let frames = run_restart_frames(
+        &[
+            restart_config("hold_no_side_effect"),
+            invoke_restart(),
+            cancel_restart("wrong-call"),
+            invoke_restart_with_id("call-2"),
+            cancel_restart("call-1"),
+            disconnect(),
+        ],
+        1,
+    );
+
+    let errors = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolErrorReported(error)) => Some(error),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let cancellations = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolCancelledReported(cancelled)) => Some(cancelled),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].call_id.as_str(), "call-2");
+    assert_eq!(
+        errors[0].message,
+        "hold_no_side_effect already has an active invocation"
+    );
+    assert_eq!(cancellations.len(), 1);
+    assert_eq!(cancellations[0].call_id.as_str(), "call-1");
+}
+
+/// Verifies the bounded hold deadline emits one exact terminal error before
+/// later disconnect joins the already completed worker.
+#[test]
+fn hold_no_side_effect_deadline_is_terminal() {
+    let prefix = restart_input(&[restart_config("hold_no_side_effect"), invoke_restart()]);
+    let suffix = restart_input(&[disconnect()]);
+    let reader = DelayedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        delayed: false,
+    };
+    let mut output = Vec::new();
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng_and_hold_timeout(reader, &mut output, &mut rng, Duration::from_millis(20))
+        .expect("run");
+    let frames = decode_output(output);
+    let errors = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolErrorReported(error)) => Some(error),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].call_id.as_str(), "call-1");
+    assert_eq!(
+        errors[0].message,
+        "hold_no_side_effect reached its 10 second deadline"
     );
 }
 

@@ -71,6 +71,18 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after the tool result.
         response: String,
     },
+    /// Accept the harness's exact synthetic interrupted-tool error and
+    /// terminalize the resumed provider continuation.
+    DummyToolRepair {
+        /// Exact latest user text retained in the provider continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact harness-generated restart/possible-side-effect diagnostic.
+        diagnostic: String,
+        /// Complete assistant response after accepting the repair.
+        response: String,
+    },
     /// Request the production harness-owned `agent_start` tool.
     AgentStartCall {
         /// Exact latest user text.

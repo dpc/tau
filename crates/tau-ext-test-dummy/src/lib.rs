@@ -9,6 +9,9 @@
 use std::error::Error;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use rand::Rng;
 #[cfg(test)]
@@ -25,6 +28,14 @@ use tau_proto::{
 /// tests.
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
 
+/// Maximum time allowed for the closed hold worker to acknowledge that it
+/// reached its wait point.
+const HOLD_READY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Hard deadline for the closed hold mode before it returns a terminal error.
+const HOLD_TERMINAL_TIMEOUT_SECS: u64 = 10;
+/// Hard deadline duration derived from [`HOLD_TERMINAL_TIMEOUT_SECS`].
+const HOLD_TERMINAL_TIMEOUT: Duration = Duration::from_secs(HOLD_TERMINAL_TIMEOUT_SECS);
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RestartMode {
@@ -37,6 +48,8 @@ enum RestartMode {
     Error,
     /// Exit without replying to the tool invocation.
     Exit,
+    /// Acknowledge the invocation and wait without performing side effects.
+    HoldNoSideEffect,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -52,6 +65,81 @@ struct DummyState<T> {
     rng: T,
     /// Active deterministic restart behavior selected by config.
     restart_mode: RestartMode,
+    /// Sole bounded invocation owned by the closed hold mode.
+    pending_hold: Option<PendingHold>,
+    /// Terminal deadline for the closed hold worker.
+    hold_timeout: Duration,
+}
+
+/// One bounded no-side-effect tool worker.
+struct PendingHold {
+    /// Correlation identity accepted by the worker.
+    call_id: tau_proto::ToolCallId,
+    /// Cancellation/shutdown signal owned by the reader loop.
+    signal: mpsc::Sender<HoldSignal>,
+    /// Worker joined on cancellation, disconnect, or state teardown.
+    join: thread::JoinHandle<()>,
+}
+
+/// Closed wake reasons accepted by a hold worker.
+enum HoldSignal {
+    /// Emit one correlated cancellation terminal.
+    Cancel,
+    /// Exit without terminal output because the extension is shutting down.
+    Shutdown,
+}
+
+impl<T> Drop for DummyState<T> {
+    fn drop(&mut self) {
+        self.shutdown_pending_hold();
+    }
+}
+
+impl<T> DummyState<T> {
+    /// Reaps a naturally completed timeout worker before another invocation.
+    fn reap_finished_hold(&mut self) -> ClientResult<()> {
+        if self
+            .pending_hold
+            .as_ref()
+            .is_some_and(|hold| hold.join.is_finished())
+        {
+            let hold = self
+                .pending_hold
+                .take()
+                .expect("finished hold remains present");
+            hold.join.join().map_err(|_| {
+                tau_client::ClientError::handler("hold_no_side_effect worker panicked")
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Cancels and joins only the exactly correlated active hold.
+    fn cancel_pending_hold(&mut self, target_call_id: &tau_proto::ToolCallId) -> ClientResult<()> {
+        if self
+            .pending_hold
+            .as_ref()
+            .is_none_or(|hold| &hold.call_id != target_call_id)
+        {
+            return Ok(());
+        }
+        let hold = self
+            .pending_hold
+            .take()
+            .expect("correlated hold remains present");
+        let _ = hold.signal.send(HoldSignal::Cancel);
+        hold.join
+            .join()
+            .map_err(|_| tau_client::ClientError::handler("hold_no_side_effect worker panicked"))
+    }
+
+    /// Stops and joins the active hold without emitting terminal tool output.
+    fn shutdown_pending_hold(&mut self) {
+        if let Some(hold) = self.pending_hold.take() {
+            let _ = hold.signal.send(HoldSignal::Shutdown);
+            let _ = hold.join.join();
+        }
+    }
 }
 
 /// Tau-client declaration for the dummy extension.
@@ -82,6 +170,21 @@ where
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
                 Ok(())
             })
+            .on_output_message(|message, state, _| {
+                if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
+                    state.shutdown_pending_hold();
+                }
+                Ok(())
+            })
+            .on_raw_routed_live(
+                EventSelector::Exact(tau_proto::EventName::TOOL_CANCEL_REQUEST),
+                |cx| {
+                    let Event::ToolCancelRequest(cancel) = cx.delivery.event() else {
+                        return Ok(());
+                    };
+                    cx.state.cancel_pending_hold(&cancel.target_call_id)
+                },
+            )
             .intercept(
                 EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
                 InterceptionPriority::new(0),
@@ -183,9 +286,25 @@ where
     W: Write + Send,
     T: Rng,
 {
+    run_with_rng_and_hold_timeout(reader, writer, rng, HOLD_TERMINAL_TIMEOUT)
+}
+
+fn run_with_rng_and_hold_timeout<R, W, T>(
+    reader: R,
+    writer: W,
+    rng: &mut T,
+    hold_timeout: Duration,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read,
+    W: Write + Send,
+    T: Rng,
+{
     let state = DummyState {
         rng,
         restart_mode: RestartMode::Random,
+        pending_hold: None,
+        hold_timeout,
     };
     TauExtensionRunner::new(DummyExtension::<&mut T>::default()).run(reader, writer, state)?;
     Ok(())
@@ -244,7 +363,89 @@ where
         }
         RestartMode::Random | RestartMode::Error => cx.report_error(restart_error(invoke)),
         RestartMode::Success => cx.report_result(restart_success(invoke)),
+        RestartMode::HoldNoSideEffect => start_no_side_effect_hold(cx, invoke),
     }
+}
+
+/// Starts the sole closed hold worker and publishes its correlated readiness
+/// only after the worker reaches the bounded wait point.
+fn start_no_side_effect_hold<T>(
+    cx: &mut tau_client::ToolContext<'_, DummyState<T>>,
+    invoke: tau_proto::ToolStarted,
+) -> ClientResult<()>
+where
+    T: Rng,
+{
+    cx.state.reap_finished_hold()?;
+    if cx.state.pending_hold.is_some() {
+        return cx.report_error(ToolError {
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
+            message: "hold_no_side_effect already has an active invocation".to_owned(),
+            details: None,
+            originator: invoke.originator,
+            display: None,
+        });
+    }
+
+    let call_id = invoke.call_id.clone();
+    let tool_name = invoke.tool_name.clone();
+    let hold_timeout = cx.state.hold_timeout;
+    let (signal, signals) = mpsc::channel();
+    let (ready, readiness) = mpsc::channel();
+    let handle = cx.handle();
+    let join = thread::spawn(move || {
+        if ready.send(()).is_err() {
+            return;
+        }
+        match signals.recv_timeout(hold_timeout) {
+            Ok(HoldSignal::Cancel) => {
+                let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
+                    call_id: invoke.call_id,
+                    tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                });
+            }
+            Ok(HoldSignal::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = handle.report_tool_error_detached(ToolError {
+                    call_id: invoke.call_id,
+                    tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                    message: format!(
+                        "hold_no_side_effect reached its {HOLD_TERMINAL_TIMEOUT_SECS} second deadline"
+                    ),
+                    details: None,
+                    originator: invoke.originator,
+                    display: None,
+                });
+            }
+        }
+    });
+    if let Err(error) = readiness.recv_timeout(HOLD_READY_TIMEOUT) {
+        let _ = signal.send(HoldSignal::Shutdown);
+        let _ = join.join();
+        return Err(tau_client::ClientError::handler(format!(
+            "hold_no_side_effect worker did not become ready: {error}"
+        )));
+    }
+    cx.state.pending_hold = Some(PendingHold {
+        call_id: call_id.clone(),
+        signal,
+        join,
+    });
+    if let Err(error) = cx.handle().report_tool_progress(tau_proto::ToolProgress {
+        call_id,
+        tool_name,
+        message: Some("hold_no_side_effect ready".to_owned()),
+        progress: None,
+        display: None,
+    }) {
+        cx.state.shutdown_pending_hold();
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {

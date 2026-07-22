@@ -33,7 +33,9 @@ main role. S3 reuses S1's exact roles and grammar; its promptless ephemeral agen
 and typed unloaded-worker store records consume no fake-provider action. S4
 instead configures two distinct tool-free worker roles and keeps only
 `agent_start` on the main. S5 reuses S2's two-role tool surface for one
-synchronized interrupted-worker restore. The fake
+synchronized interrupted-worker restore. S6 instead exposes only
+`restart_test_dummy` in exact `hold_no_side_effect` mode to the worker while the
+main retains only `agent_start`. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
@@ -53,7 +55,11 @@ terminal errors, exact cancellation holds with hard timeouts, deliberate
 disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
-tool names, arguments, and results remain outside the grammar. S1 adds one
+tool names, arguments, and results remain outside the grammar. S6's separate
+closed repair sequence accepts the same sole dummy call only when followed by
+the exact synthetic interrupted error status and diagnostic, terminalizes that
+next explicit worker continuation only while the balanced call/error pair
+remains in context. S1 adds one
 distinct adjacent `AgentStartCall`/`AgentStartResult` pair; S4 raises that
 closed bound to two unique adjacent pairs. The fake requires
 exact bounded instruction, optional role, task name, call id, production tool
@@ -141,6 +147,17 @@ while S2 still requires its status-free result. Boot C supplies no agent input a
 reproduce the warning and zero-provider fail-closed state. S5 does not retry,
 abandon, cancel, or otherwise recover the uncertain work.
 
+S6 uses the closed hold boundary from
+[ARCH-tau-ext-test-dummy](../../tau-ext-test-dummy/specs/ARCH-tau-ext-test-dummy.md).
+Boot A requires exactly one correlated worker `tool.request` followed by canonical
+`tool.started` in the typed execution-restore stream and one live readiness fact
+before the process-group kill. Boot B requires one live nonsemantic `tool.error`
+then one durable `provider.tool_error` with the full restart/possible-side-effect
+diagnostic, no live dummy redispatch, and one explicit worker continuation whose
+complete tool-result context is exactly that balanced error. Boot C receives no
+input and must add no repair; its current/history membership, execution restore,
+current-agent journals, and separately loaded worker journal equal Boot B.
+
 Daemon acceptance uses the normal local socket protocol and real supervised
 subprocess. Its `ServeOptions` explicitly bypass ambient startup override
 transports and checks the same exact extension allowlist before spawning as the
@@ -193,6 +210,10 @@ remains at one consumed worker action throughout, while the durable worker
 journal retains the one unfinished dispatch checkpoint. This proves
 conservative harness recovery at the established cut, not exactly-once external
 work or crash-transactional fake cursor recovery.
+S6 uses two lanes and compact 1,259-byte scenario JSON: three main actions and two
+worker actions. Boot A consumes three main turns and one worker turn before four
+matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
+repair events, terminals, starts, provider prompts, or actions fail closed.
 Sequential error then success is two
 explicit user turns, not provider retry evidence. It is not evidence for
 provider-builtin, upstream request/parsing, ChatGPT/WebSocket fidelity,
