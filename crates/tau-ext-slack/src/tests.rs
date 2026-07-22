@@ -705,7 +705,7 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
         trace: LatencyTrace {
             connection_generation: 1,
             trace_seq: 1,
-            event_class: "delete",
+            event_class: EventClass::Delete,
         },
         received_at: Instant::now(),
         ingress_epoch: state.ingress_epoch,
@@ -717,7 +717,7 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
             .expect("installation identity"),
         queue_wait_us: 0,
         identity_us: Cell::new(0),
-        outcome: Cell::new("rejected_route"),
+        outcome: Cell::new(AdmissionOutcome::RejectedRoute),
     }
 }
 
@@ -5361,7 +5361,7 @@ fn latency_markers_are_payload_free() {
         let timing = LatencyTrace {
             connection_generation: 7,
             trace_seq: 11,
-            event_class: "create",
+            event_class: EventClass::Create,
         };
         let (ingress_epoch, config_generation, agent_generation) = {
             let mut state = ext.state.lock().expect("state");
@@ -5381,7 +5381,7 @@ fn latency_markers_are_payload_free() {
             installation_team_id: "T123".to_owned(),
             queue_wait_us: 0,
             identity_us: Cell::new(0),
-            outcome: Cell::new("rejected_policy"),
+            outcome: Cell::new(AdmissionOutcome::RejectedPolicy),
         };
         assert!(
             ext.verified_human_traced(&cfg(), sentinel_user, Some(&context))
@@ -5394,5 +5394,35 @@ fn latency_markers_are_payload_free() {
     assert!(output.contains("slack.api.post_message_finished"));
     for sentinel in [sentinel_user, sentinel_channel, sentinel_text, "xoxb-test"] {
         assert!(!output.contains(sentinel));
+    }
+}
+
+/// Private latency trace class mappings retain every approved exact spelling.
+#[test]
+fn latency_trace_classes_have_stable_spellings() {
+    let event_classes = [
+        (EventClass::Malformed, "malformed"),
+        (EventClass::Unsupported, "unsupported"),
+        (EventClass::LocalCommand, "local_command"),
+        (EventClass::Create, "create"),
+        (EventClass::Reaction, "reaction"),
+        (EventClass::Edit, "edit"),
+        (EventClass::Delete, "delete"),
+    ];
+    for (class, expected) in event_classes {
+        assert_eq!(class.as_str(), expected);
+    }
+
+    let admission_outcomes = [
+        (AdmissionOutcome::StaleEpoch, "stale_epoch"),
+        (AdmissionOutcome::RejectedIdentity, "rejected_identity"),
+        (AdmissionOutcome::DuplicateIngress, "duplicate_ingress"),
+        (AdmissionOutcome::RejectedRoute, "rejected_route"),
+        (AdmissionOutcome::RejectedPolicy, "rejected_policy"),
+        (AdmissionOutcome::LocalEffect, "local_effect"),
+        (AdmissionOutcome::Submitted, "submitted"),
+    ];
+    for (outcome, expected) in admission_outcomes {
+        assert_eq!(outcome.as_str(), expected);
     }
 }

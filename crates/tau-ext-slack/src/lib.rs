@@ -35,12 +35,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 mod admission;
+mod admission_trace;
 mod posted_message_cache;
 mod reactions;
 mod send_delivery;
 mod transport_mentions;
 
 use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
+use admission_trace::{AdmissionOutcome, EventClass, LatencyTrace};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
 use reactions::{
     ReactionAuthority, ReactionClient, ReactionState, ReactionTarget, UnavailableReactionClient,
@@ -176,7 +178,7 @@ struct AdmissionContext {
     /// Time spent in live identity verification.
     identity_us: Cell<u64>,
     /// Explicit terminal class selected by the operation that owns the outcome.
-    outcome: Cell<&'static str>,
+    outcome: Cell<AdmissionOutcome>,
 }
 
 /// Exact retained ownership captured while admitting one Slack deletion.
@@ -211,17 +213,6 @@ impl DeleteOwner {
     }
 }
 
-/// Payload-free fields shared by one occurrence's latency markers.
-#[derive(Clone, Copy)]
-struct LatencyTrace {
-    /// Socket generation local to this extension process.
-    connection_generation: u64,
-    /// Occurrence ordinal local to this extension process.
-    trace_seq: u64,
-    /// Stable low-cardinality decoded event class.
-    event_class: &'static str,
-}
-
 impl AdmissionContext {
     /// Check lifecycle authority while the caller already owns the state lock.
     fn matches_state(&self, state: &State) -> bool {
@@ -236,7 +227,7 @@ impl AdmissionContext {
     }
 
     /// Set the bounded terminal outcome owned by the current operation.
-    fn mark(&self, outcome: &'static str) {
+    fn mark(&self, outcome: AdmissionOutcome) {
         self.outcome.set(outcome);
     }
 
@@ -1002,13 +993,13 @@ impl EnvelopeClass {
 
 impl DecodedSlackEvent {
     /// Return the bounded event class used by payload-free latency traces.
-    fn event_class(&self) -> &'static str {
+    fn event_class(&self) -> EventClass {
         match self {
-            Self::Message(message) if message_is_local_command(message) => "local_command",
-            Self::Message(_) => "create",
-            Self::Reaction(_) => "reaction",
-            Self::Edit(_) => "edit",
-            Self::Delete(_) => "delete",
+            Self::Message(message) if message_is_local_command(message) => EventClass::LocalCommand,
+            Self::Message(_) => EventClass::Create,
+            Self::Reaction(_) => EventClass::Reaction,
+            Self::Edit(_) => EventClass::Edit,
+            Self::Delete(_) => EventClass::Delete,
         }
     }
 }
@@ -2075,7 +2066,7 @@ impl Extension {
                 schema = LATENCY_SCHEMA,
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
-                event_class = trace.event_class,
+                event_class = trace.event_class.as_str(),
                 policy_class = if cfg.allowed_user_ids.contains(user_id) { "allowlisted" } else { "lax_permitted" },
                 cache_state = "disabled",
                 rate_circuit = "closed",
@@ -2111,7 +2102,7 @@ impl Extension {
                 schema = LATENCY_SCHEMA,
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
-                event_class = trace.event_class,
+                event_class = trace.event_class.as_str(),
                 source = "api",
                 duration_us = elapsed_us(started_at),
                 outcome,
@@ -2120,7 +2111,7 @@ impl Extension {
         }
         if !self.admission_authority_is_current(admission) {
             if let Some(admission) = admission {
-                admission.mark("stale_epoch");
+                admission.mark(AdmissionOutcome::StaleEpoch);
             }
             log_ingress_rejection("stale_epoch");
             return None;
@@ -2133,7 +2124,7 @@ impl Extension {
                     .identity_failure_reported = false;
                 if identity.is_none() {
                     if let Some(admission) = admission {
-                        admission.mark("rejected_identity");
+                        admission.mark(AdmissionOutcome::RejectedIdentity);
                     }
                     log_ingress_rejection("sender_not_human");
                 }
@@ -2141,7 +2132,7 @@ impl Extension {
             }
             Err(error) => {
                 if let Some(admission) = admission {
-                    admission.mark("rejected_identity");
+                    admission.mark(AdmissionOutcome::RejectedIdentity);
                 }
                 let should_report = {
                     let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2551,7 +2542,7 @@ impl Extension {
             return;
         }
         if let Some(admission) = admission {
-            admission.mark("submitted");
+            admission.mark(AdmissionOutcome::Submitted);
         }
     }
 
@@ -2622,7 +2613,7 @@ impl Extension {
         }
         if !self.insert_received_message(&message, admission) {
             if let Some(admission) = admission {
-                admission.mark("duplicate_ingress");
+                admission.mark(AdmissionOutcome::DuplicateIngress);
             }
             return;
         }
@@ -3156,7 +3147,7 @@ impl Extension {
                 admission.map(|context| context.trace),
             );
             if let Some(admission) = admission {
-                admission.mark("local_effect");
+                admission.mark(AdmissionOutcome::LocalEffect);
             }
         }
     }
@@ -3193,7 +3184,7 @@ impl Extension {
                 schema = LATENCY_SCHEMA,
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
-                event_class = trace.event_class,
+                event_class = trace.event_class.as_str(),
                 post_class = "local_reply",
                 "slack.api.post_message_started"
             );
@@ -3208,7 +3199,7 @@ impl Extension {
                 schema = LATENCY_SCHEMA,
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
-                event_class = trace.event_class,
+                event_class = trace.event_class.as_str(),
                 post_class = "local_reply",
                 duration_us = elapsed_us(started_at),
                 outcome = result.trace_label(),
@@ -3306,7 +3297,7 @@ impl Extension {
                 || self.shutdown.is_requested()
             {
                 if let Some(admission) = admission {
-                    admission.mark("stale_epoch");
+                    admission.mark(AdmissionOutcome::StaleEpoch);
                 }
                 return;
             }
@@ -3314,7 +3305,7 @@ impl Extension {
                 || !is_route_authorized(&state, cfg, &conversation, &user_id)
             {
                 if let Some(admission) = admission {
-                    admission.mark("rejected_route");
+                    admission.mark(AdmissionOutcome::RejectedRoute);
                 }
                 return;
             }
@@ -3323,13 +3314,13 @@ impl Extension {
                 .or_else(|| state.installation_team_id.clone());
             let Some(installation_team_id) = installation_team_id else {
                 if let Some(admission) = admission {
-                    admission.mark("rejected_route");
+                    admission.mark(AdmissionOutcome::RejectedRoute);
                 }
                 return;
             };
             let Some(instance_name) = state.instance_name.as_ref() else {
                 if let Some(admission) = admission {
-                    admission.mark("rejected_route");
+                    admission.mark(AdmissionOutcome::RejectedRoute);
                 }
                 return;
             };
@@ -3430,7 +3421,7 @@ impl Extension {
         if !sent {
             self.retire_after_output_failure();
             if let Some(admission) = admission {
-                admission.mark("rejected_route");
+                admission.mark(AdmissionOutcome::RejectedRoute);
             }
             return;
         }
@@ -3483,14 +3474,14 @@ impl Extension {
             }
         }
         if let Some(admission) = admission {
-            admission.mark("submitted");
+            admission.mark(AdmissionOutcome::Submitted);
             let trace = admission.trace;
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
                 connection_generation = trace.connection_generation,
                 trace_seq = trace.trace_seq,
-                event_class = trace.event_class,
+                event_class = trace.event_class.as_str(),
                 frame_to_submit_us = elapsed_us(admission.trace_received_at()),
                 identity_us = admission.identity_us.get(),
                 queue_wait_us = admission.queue_wait_us,
@@ -3855,7 +3846,7 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
             schema = LATENCY_SCHEMA,
             connection_generation = trace.connection_generation,
             trace_seq = trace.trace_seq,
-            event_class = trace.event_class,
+            event_class = trace.event_class.as_str(),
             queue_wait_us = elapsed_us(work.enqueued_at),
             queue_depth_bucket = work.queue_depth_bucket.as_str(),
             "slack.ingress.admission_started"
@@ -3870,7 +3861,7 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
             installation_team_id: work.installation_team_id,
             queue_wait_us: elapsed_us(work.enqueued_at),
             identity_us: Cell::new(0),
-            outcome: Cell::new("rejected_policy"),
+            outcome: Cell::new(AdmissionOutcome::RejectedPolicy),
         };
         let process_result = ext.admission_authority_is_current(Some(&context)).then(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match work.event {
@@ -3890,9 +3881,9 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
         });
         let panicked = process_result.is_some_and(|result| result.is_err());
         let outcome = if panicked {
-            "rejected_policy"
+            AdmissionOutcome::RejectedPolicy
         } else if !ext.admission_authority_is_current(Some(&context)) {
-            "stale_epoch"
+            AdmissionOutcome::StaleEpoch
         } else {
             context.outcome.get()
         };
@@ -3901,9 +3892,9 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
             schema = LATENCY_SCHEMA,
             connection_generation = trace.connection_generation,
             trace_seq = trace.trace_seq,
-            event_class = trace.event_class,
+            event_class = trace.event_class.as_str(),
             duration_us = elapsed_us(started_at),
-            outcome,
+            outcome = outcome.as_str(),
             "slack.ingress.admission_finished"
         );
         if panicked {
@@ -3913,7 +3904,7 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
                 failure = "admission_worker_panic",
                 "Slack admission occurrence panicked; continuing ordered admission"
             );
-            context.mark("rejected_policy");
+            context.mark(AdmissionOutcome::RejectedPolicy);
         }
     }
 }
@@ -4071,7 +4062,7 @@ async fn socket_worker_once_with_heartbeat(
             schema = LATENCY_SCHEMA,
             connection_generation,
             trace_seq,
-            event_class = "unsupported",
+            event_class = EventClass::Unsupported.as_str(),
             frame_class = socket_frame_class(&frame),
             since_hello_us = elapsed_us(hello_at.unwrap_or(connected_at)),
             "slack.ws.frame_received"
@@ -4183,7 +4174,7 @@ async fn handle_socket_text_frame(
             schema = LATENCY_SCHEMA,
             connection_generation,
             trace_seq,
-            event_class = "malformed",
+            event_class = EventClass::Malformed.as_str(),
             envelope_class = "oversized",
             duration_us = 0_u64,
             outcome = "rejected",
@@ -4200,9 +4191,9 @@ async fn handle_socket_text_frame(
     let event_class = action.event.as_ref().map_or_else(
         || {
             if action.envelope_class == EnvelopeClass::Malformed {
-                "malformed"
+                EventClass::Malformed
             } else {
-                "unsupported"
+                EventClass::Unsupported
             }
         },
         DecodedSlackEvent::event_class,
@@ -4212,7 +4203,7 @@ async fn handle_socket_text_frame(
         schema = LATENCY_SCHEMA,
         connection_generation,
         trace_seq,
-        event_class,
+        event_class = event_class.as_str(),
         envelope_class = action.envelope_class.as_str(),
         duration_us = elapsed_us(decode_started),
         outcome = if action.event.is_some() {
@@ -4254,7 +4245,7 @@ async fn handle_socket_text_frame(
                     schema = LATENCY_SCHEMA,
                     connection_generation,
                     trace_seq,
-                    event_class,
+                    event_class = event_class.as_str(),
                     outcome = "reserved",
                     queue_depth_bucket = admission.depth_bucket().as_str(),
                     "slack.ws.admission_slot_reserved"
@@ -4271,7 +4262,7 @@ async fn handle_socket_text_frame(
                     schema = LATENCY_SCHEMA,
                     connection_generation,
                     trace_seq,
-                    event_class,
+                    event_class = event_class.as_str(),
                     outcome,
                     queue_depth_bucket = admission.depth_bucket().as_str(),
                     "slack.ws.admission_slot_reserved"
@@ -4289,7 +4280,7 @@ async fn handle_socket_text_frame(
             schema = LATENCY_SCHEMA,
             connection_generation,
             trace_seq,
-            event_class,
+            event_class = event_class.as_str(),
             has_supported_event = supported_event,
             elapsed_us = elapsed_us(received_at),
             "slack.ws.ack_queued"
@@ -4306,7 +4297,7 @@ async fn handle_socket_text_frame(
             schema = LATENCY_SCHEMA,
             connection_generation,
             trace_seq,
-            event_class,
+            event_class = event_class.as_str(),
             has_supported_event = supported_event,
             duration_us = elapsed_us(ack_started),
             outcome = if result.is_ok() { "flushed" } else { "failed" },
