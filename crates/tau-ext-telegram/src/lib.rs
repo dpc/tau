@@ -42,6 +42,9 @@ use tau_proto::{
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "telegram";
 
+/// Maximum bytes in one gateway protocol response, including its newline.
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 64 * 1024;
+
 /// Logical tool name for registering the current agent as a Telegram listener.
 pub const REGISTER_TOOL_NAME: &str = "telegram_register";
 

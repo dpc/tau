@@ -6,13 +6,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::MAX_GATEWAY_RESPONSE_BYTES;
+
 /// Version of the private gateway socket protocol used by sidecars.
 ///
 /// This stays at zero under `DECISION-no-backward-compatibility`.
 const SOCKET_PROTOCOL_VERSION: u32 = 0;
-
-/// Maximum bytes accepted from one gateway response line.
-const MAX_GATEWAY_RESPONSE_BYTES: u64 = 64 * 1024;
 
 /// Configuration for the no-poll gateway-client sidecar mode.
 #[derive(Clone, Debug)]
@@ -159,11 +158,11 @@ impl GatewayClient {
             stream
                 .try_clone()
                 .map_err(|error| format!("cloning Telegram gateway socket: {error}"))?
-                .take(MAX_GATEWAY_RESPONSE_BYTES + 1),
+                .take(MAX_GATEWAY_RESPONSE_BYTES as u64 + 1),
         )
         .read_line(&mut line)
         .map_err(|error| format!("reading Telegram gateway response: {error}"))?;
-        if line.len() as u64 > MAX_GATEWAY_RESPONSE_BYTES {
+        if line.len() > MAX_GATEWAY_RESPONSE_BYTES {
             return Err("Telegram gateway response is too large".to_owned());
         }
         if line.trim().is_empty() {

@@ -1,6 +1,6 @@
 # ARCH-tau-telegram-gateway: Telegram gateway daemon
 
-The gateway shape implements the unconfirmed choice in
+The gateway shape implements the confirmed topology choice in
 [DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).
 Its socket, lease, durable-state, loss-window, routing, and resource contracts
 are [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md). Shared stream
@@ -43,6 +43,11 @@ their route unregisters, transfers ownership, disconnects, or expires before the
 drains them. The socket is private same-UID local IPC, not an authentication boundary;
 this MVP bounds request size and closes protocol-error connections but does not attempt
 to defend against all same-user local denial-of-service patterns.
+Successful sidecar operations drain only the oldest delivery prefix whose exact
+serialized JSON line fits the shared 65,536-byte response limit. A record that cannot
+fit alone is rejected at enqueue with no private content in the diagnostic. The tested
+implementation covers maximum-depth batching through both send and heartbeat response
+paths, exact boundaries, JSON escaping, and multibyte UTF-8.
 
 The regular `std-telegram`/`tau-ext-telegram` sidecar supports `mode: gateway_client`
 for this architecture. In that mode its startup configuration names

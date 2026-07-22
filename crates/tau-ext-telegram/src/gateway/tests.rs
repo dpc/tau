@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
-use std::io::{BufRead as _, Read as _, Write as _};
+use std::io::BufRead as _;
 
 use super::*;
+use crate::gateway_client::{GatewayClient, GatewayClientConfig, GatewaySocketResponse};
 
 /// Ensures the daemon refuses to start without an explicit user allowlist.
 #[test]
@@ -737,6 +738,205 @@ fn sidecar_heartbeat_drains_queued_delivery_response() {
     );
 }
 
+/// Proves the response limit includes the newline and accepts an exact
+/// 65,536-byte serialized singleton while rejecting one additional byte.
+#[test]
+fn delivery_response_limit_has_exact_json_line_boundary() {
+    let generation = "test-generation";
+    let empty = test_delivery(1, "");
+    let fixed_bytes = successful_response_wire_bytes(generation, &[empty]);
+    let boundary = test_delivery(1, &"x".repeat(MAX_GATEWAY_RESPONSE_BYTES - fixed_bytes));
+
+    assert_eq!(
+        successful_response_wire_bytes(generation, std::slice::from_ref(&boundary)),
+        MAX_GATEWAY_RESPONSE_BYTES
+    );
+    assert!(delivery_response_fits(
+        generation,
+        std::slice::from_ref(&boundary)
+    ));
+
+    let oversized = test_delivery(1, &format!("{}x", boundary.text));
+    assert!(!delivery_response_fits(
+        generation,
+        std::slice::from_ref(&oversized)
+    ));
+}
+
+/// Ensures JSON escaping drives delivery-prefix selection by actual serialized
+/// bytes rather than unescaped Rust string length.
+#[test]
+fn delivery_batching_accounts_for_json_escaping() {
+    assert_delivery_batch_splits_two_records(&"\"\\\n".repeat(6_000));
+}
+
+/// Ensures multibyte UTF-8 drives delivery-prefix selection by encoded bytes
+/// without splitting or miscounting Unicode scalar values.
+#[test]
+fn delivery_batching_accounts_for_multibyte_utf8() {
+    assert_delivery_batch_splits_two_records(&"界".repeat(11_000));
+}
+
+/// Ensures enqueue rejects an impossible singleton with a bounded,
+/// content-free outcome rather than leaving an undrainable queue head.
+#[test]
+fn enqueue_rejects_delivery_that_cannot_fit_one_response() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    let private_marker = "PRIVATE-OVERSIZED-CONTENT";
+    let text = format!("{}{private_marker}", "x".repeat(MAX_GATEWAY_RESPONSE_BYTES));
+
+    let error = fixture
+        .gateway
+        .socket_state
+        .enqueue_delivery(
+            &GatewayRegistrationKey {
+                session_id: "session-alpha".to_owned(),
+                agent_id: "agent-alpha".to_owned(),
+            },
+            &message(7, 10, &text),
+            101,
+            &text,
+        )
+        .expect_err("oversized singleton must be rejected");
+
+    assert_eq!(error, DELIVERY_TOO_LARGE_MESSAGE);
+    assert!(error.len() <= MAX_SOCKET_ERROR_BYTES);
+    assert!(!error.contains(private_marker));
+    assert!(fixture.take_deliveries(1).is_empty());
+}
+
+/// Ensures stale-route rejection precedes singleton-size validation so an
+/// oversized body does not change existing route-authority diagnostics.
+#[test]
+fn enqueue_checks_missing_route_before_singleton_size() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    let text = "x".repeat(MAX_GATEWAY_RESPONSE_BYTES);
+
+    let error = fixture
+        .gateway
+        .socket_state
+        .enqueue_delivery(
+            &GatewayRegistrationKey {
+                session_id: "missing-session".to_owned(),
+                agent_id: "missing-agent".to_owned(),
+            },
+            &message(7, 10, &text),
+            102,
+            &text,
+        )
+        .expect_err("missing route must be rejected first");
+
+    assert!(error.contains("no longer live"), "{error}");
+}
+
+/// Ensures queue-capacity rejection precedes singleton-size validation so full
+/// live queues preserve their existing bounded backpressure outcome.
+#[test]
+fn enqueue_checks_full_queue_before_singleton_size() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    for update_id in 1..=MAX_PENDING_DELIVERIES_PER_SIDECAR as i64 {
+        fixture
+            .gateway
+            .process_update(update(update_id, message(7, 10, "queued")))
+            .expect("fill pending queue");
+    }
+    let text = "x".repeat(MAX_GATEWAY_RESPONSE_BYTES);
+
+    let error = fixture
+        .gateway
+        .socket_state
+        .enqueue_delivery(
+            &GatewayRegistrationKey {
+                session_id: "session-alpha".to_owned(),
+                agent_id: "agent-alpha".to_owned(),
+            },
+            &message(7, 10, &text),
+            103,
+            &text,
+        )
+        .expect_err("full queue must be rejected first");
+
+    assert!(error.contains("queue is full"), "{error}");
+}
+
+/// Reproduces 32 queued 3,500-byte records through the real client,
+/// exercises both send and heartbeat response producers, and proves every
+/// bounded batch preserves ordered exactly-once delivery.
+#[test]
+fn gateway_client_drains_32_3500_byte_deliveries_in_bounded_ordered_batches() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    let tempdir = tempfile::tempdir().expect("socket tempdir");
+    let socket_path = tempdir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind gateway socket");
+    let state = Arc::clone(&fixture.gateway.socket_state);
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept gateway client");
+        handle_gateway_socket_client(stream, state);
+    });
+    let client = GatewayClient::new(GatewayClientConfig { socket_path });
+
+    let _connected = bounded_gateway_response(client.connect());
+    let _registered = bounded_gateway_response(client.register_agent(
+        "session-alpha",
+        "agent-alpha",
+        Some("tester".to_owned()),
+    ));
+
+    let text = "x".repeat(3_500);
+    for update_id in 1..=MAX_PENDING_DELIVERIES_PER_SIDECAR as i64 {
+        fixture
+            .gateway
+            .process_update(update(update_id, message(7, 10, &text)))
+            .expect("queue maximum-size delivery");
+    }
+
+    let first =
+        bounded_gateway_response(client.send_message("session-alpha", "agent-alpha", "outbound"));
+    let mut request_ids = first
+        .deliveries
+        .into_iter()
+        .map(|delivery| delivery.request_id)
+        .collect::<Vec<_>>();
+    assert!(
+        request_ids.len() < MAX_PENDING_DELIVERIES_PER_SIDECAR,
+        "the reproduction must require more than one response"
+    );
+
+    for _ in 0..MAX_PENDING_DELIVERIES_PER_SIDECAR {
+        if request_ids.len() == MAX_PENDING_DELIVERIES_PER_SIDECAR {
+            break;
+        }
+        let response = bounded_gateway_response(client.heartbeat());
+        request_ids.extend(
+            response
+                .deliveries
+                .into_iter()
+                .map(|delivery| delivery.request_id),
+        );
+    }
+    assert_eq!(
+        request_ids.len(),
+        MAX_PENDING_DELIVERIES_PER_SIDECAR,
+        "bounded heartbeat draining made no sufficient progress"
+    );
+    let drained = bounded_gateway_response(client.heartbeat());
+    assert!(drained.deliveries.is_empty());
+
+    let expected = (1..=MAX_PENDING_DELIVERIES_PER_SIDECAR)
+        .map(|id| format!("telegram-{id}"))
+        .collect::<Vec<_>>();
+    assert_eq!(request_ids, expected);
+    assert_eq!(
+        request_ids.iter().collect::<HashSet<_>>().len(),
+        MAX_PENDING_DELIVERIES_PER_SIDECAR
+    );
+
+    drop(client);
+    server.join().expect("gateway socket server");
+}
+
 /// Ensures outbound gateway sends require a live sidecar-owned registration and
 /// choose the gateway's configured chat instead of accepting any model-provided
 /// destination.
@@ -1320,7 +1520,7 @@ impl GatewayFixture {
             .registry
             .lock()
             .expect("registry lock")
-            .take_deliveries(connection_id)
+            .take_deliveries(connection_id, &self.gateway.socket_state.generation)
     }
 }
 
@@ -1366,6 +1566,68 @@ fn register_request(session_id: &str, agent_id: &str) -> GatewaySocketRequest {
         display_name: Some("tester".to_owned()),
         ..GatewaySocketRequest::default()
     }
+}
+
+/// Build one deterministic delivery record for response-boundary tests.
+fn test_delivery(request_id: u64, text: &str) -> GatewayDelivery {
+    GatewayDelivery {
+        request_id: format!("telegram-{request_id}"),
+        session_id: "session-alpha".to_owned(),
+        agent_id: "agent-alpha".to_owned(),
+        message_id: format!("telegram:10:{request_id}"),
+        sender_id: "7".to_owned(),
+        source: "tester".to_owned(),
+        conversation_id: "10".to_owned(),
+        text: text.to_owned(),
+    }
+}
+
+/// Return exact serialized response bytes, including the JSON-line newline.
+fn successful_response_wire_bytes(generation: &str, deliveries: &[GatewayDelivery]) -> usize {
+    serde_json::to_vec(&successful_socket_response(generation, deliveries))
+        .expect("serialize successful socket response")
+        .len()
+        + 1
+}
+
+/// Prove two individually valid records split after the oldest record.
+fn assert_delivery_batch_splits_two_records(text: &str) {
+    let generation = "test-generation";
+    let first = test_delivery(1, text);
+    let second = test_delivery(2, text);
+    assert!(delivery_response_fits(
+        generation,
+        std::slice::from_ref(&first)
+    ));
+    assert!(delivery_response_fits(
+        generation,
+        std::slice::from_ref(&second)
+    ));
+    assert!(!delivery_response_fits(
+        generation,
+        &[first.clone(), second.clone()]
+    ));
+    let mut registry = GatewayRegistry::default();
+    registry
+        .pending_deliveries
+        .insert(1, vec![first.clone(), second.clone()]);
+
+    let selected = registry.take_deliveries(1, generation);
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].request_id, first.request_id);
+    assert_eq!(
+        registry.pending_deliveries[&1][0].request_id,
+        second.request_id
+    );
+    assert!(successful_response_wire_bytes(generation, &selected) <= MAX_GATEWAY_RESPONSE_BYTES);
+}
+
+/// Require the real client to accept a newline-inclusive bounded response.
+fn bounded_gateway_response(
+    response: Result<GatewaySocketResponse, String>,
+) -> GatewaySocketResponse {
+    response.expect("real GatewayClient must accept a response within the shared line limit")
 }
 
 /// Read one JSON-line response from a gateway socket test client.

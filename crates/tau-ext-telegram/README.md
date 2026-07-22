@@ -90,7 +90,8 @@ active registrations rather than silently continuing.
 
 ## Gateway daemon MVP
 
-The crate also builds a standalone `tau-telegram-gateway` daemon. This
+The crate also builds a standalone `tau-telegram-gateway` daemon that operators
+must supervise. This
 single-token multi-session gateway owns one
 Telegram update stream, takes the same advisory stream lock as the legacy
 extension, checks for active webhooks before polling, enforces
@@ -106,6 +107,12 @@ text gets a Telegram explanation instead of being guessed. Unconfigured
 group/supergroup chats are ignored instead of linked or replied to.
 Queued inbound deliveries are bounded live gateway state: they are removed when
 the sidecar drains them, unregisters, disconnects, or loses the route lease.
+Each response, including its newline, is limited to 65,536 bytes. The gateway
+returns only the oldest delivery prefix whose actual serialized JSON fits and
+leaves the remainder for later requests. A record that cannot fit by itself is
+rejected without reflecting its content in the diagnostic. A selected prefix is
+removed before socket write, so a write failure can still lose it; the queue has
+no durable acknowledgement or retry contract.
 
 Run it with the bot token in an environment variable rather than on the command
 line:

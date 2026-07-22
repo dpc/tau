@@ -109,7 +109,9 @@ semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
 socket parser/response bounds, sidecar heartbeat/lease cleanup, disconnect and
 unregister pruning, gateway restart reannouncement hints, command routing,
 chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
-socket delivery response shape, and CLI/env parsing. Gateway-client sidecar
+exact serialized delivery-response batching through send and heartbeat paths,
+boundary/escaping/multibyte accounting, ordered maximum-depth draining, socket
+delivery response shape, and CLI/env parsing. Gateway-client sidecar
 tests use fake Unix sockets and in-memory harness channels to cover no-poll
 registration, inbound report submission, gateway-client outbound send forwarding,
 and stale-delivery filtering. Outbound-send tests use fake gateway clients rather

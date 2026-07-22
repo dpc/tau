@@ -26,11 +26,17 @@ live sidecar registration or routing authority. Gateway restart may recover its
 own durable offset, links/selections, and recent-ID state; that does not recreate
 a sidecar lease.
 
-Protocol version is 0. Request frames are at most 8,192 bytes, responses 64 KiB,
-and socket errors 512 bytes. Heartbeat is 10 seconds, lease expiry 30 seconds,
-sidecar queue depth 32, outbound/reply text 3,500 bytes, send rate 20 per 60
-seconds, and recent dedup capacity 128. Protocol errors close the connection;
-bounded ordinary send failures keep it live.
+Protocol version is 0. Request frames are at most 8,192 bytes, response JSON lines
+including their newline are at most 65,536 bytes, and socket errors are at most
+512 bytes. A successful operation removes and returns only the oldest queued
+delivery prefix whose actual serialized response fits; later records remain for
+subsequent requests. Enqueue rejects a record that cannot fit by itself with a
+bounded content-free outcome. Removal still precedes the socket write, so write
+failure may lose that selected prefix under the accepted non-durable queue
+semantics. Heartbeat is 10 seconds, lease expiry 30 seconds, sidecar queue depth 32,
+outbound/reply text 3,500 bytes, send rate 20 per 60 seconds, and recent dedup
+capacity 128. Protocol errors close the connection; bounded ordinary send failures
+keep it live.
 
 The topology choice is
 [DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).

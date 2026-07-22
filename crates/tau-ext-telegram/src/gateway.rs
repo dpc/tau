@@ -31,8 +31,9 @@ use crate::stream_owner::{
     UpdateStreamLock, telegram_contention_diagnostic, webhook_active_message,
 };
 use crate::{
-    DEFAULT_API_BASE, DEFAULT_POLL_TIMEOUT_SECONDS, HttpTelegramClient, RuntimeConfig,
-    TelegramClient, TgMessage, TgUpdate, is_private_message_chat, parse_command, validate_api_base,
+    DEFAULT_API_BASE, DEFAULT_POLL_TIMEOUT_SECONDS, HttpTelegramClient, MAX_GATEWAY_RESPONSE_BYTES,
+    RuntimeConfig, TelegramClient, TgMessage, TgUpdate, is_private_message_chat, parse_command,
+    validate_api_base,
 };
 
 /// Maximum Telegram reply text emitted by the gateway MVP.
@@ -43,6 +44,10 @@ const MAX_OUTBOUND_MESSAGE_BYTES: usize = 3500;
 
 /// Maximum error text returned over the sidecar socket.
 const MAX_SOCKET_ERROR_BYTES: usize = 512;
+
+/// Content-free outcome for an inbound record that cannot fit one response.
+const DELIVERY_TOO_LARGE_MESSAGE: &str =
+    "Telegram gateway delivery is too large for the sidecar protocol.";
 
 /// Maximum accepted outbound sends per rate-limit window.
 const MAX_OUTBOUND_SENDS_PER_WINDOW: usize = 20;
@@ -1190,7 +1195,14 @@ impl GatewaySocketState {
         let request_id = self.next_delivery_id.fetch_add(1, Ordering::Relaxed);
         let mut registry = self.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
-        registry.enqueue_delivery(target, message, update_id, text, request_id)
+        registry.enqueue_delivery(
+            target,
+            message,
+            update_id,
+            text,
+            request_id,
+            &self.generation,
+        )
     }
 
     /// Send one outbound Telegram message for a currently registered route.
@@ -1481,6 +1493,7 @@ impl GatewayRegistry {
         update_id: i64,
         text: &str,
         request_id: u64,
+        gateway_generation: &str,
     ) -> Result<(), String> {
         let registration = self
             .registrations
@@ -1496,26 +1509,40 @@ impl GatewayRegistry {
                     .to_owned(),
             );
         }
-        let source = telegram_source_label(message);
         let delivery = GatewayDelivery {
             request_id: format!("telegram-{request_id}"),
             session_id: target.session_id.clone(),
             agent_id: target.agent_id.clone(),
             message_id: format!("telegram:{}:{update_id}", message.chat_id),
             sender_id: message.user_id.to_string(),
-            source,
+            source: telegram_source_label(message),
             conversation_id: message.chat_id.to_string(),
             text: text.to_owned(),
         };
+        if !delivery_response_fits(gateway_generation, std::slice::from_ref(&delivery)) {
+            return Err(DELIVERY_TOO_LARGE_MESSAGE.to_owned());
+        }
         pending.push(delivery);
         Ok(())
     }
 
-    /// Drain inbound delivery records queued for one sidecar connection.
-    fn take_deliveries(&mut self, connection_id: u64) -> Vec<GatewayDelivery> {
-        self.pending_deliveries
-            .remove(&connection_id)
-            .unwrap_or_default()
+    /// Remove the oldest delivery prefix whose response fits the wire limit.
+    fn take_deliveries(
+        &mut self,
+        connection_id: u64,
+        gateway_generation: &str,
+    ) -> Vec<GatewayDelivery> {
+        let Some(pending) = self.pending_deliveries.get_mut(&connection_id) else {
+            return Vec::new();
+        };
+        let selected_count = (1..=pending.len())
+            .take_while(|end| delivery_response_fits(gateway_generation, &pending[..*end]))
+            .count();
+        let selected = pending.drain(..selected_count).collect();
+        if pending.is_empty() {
+            self.pending_deliveries.remove(&connection_id);
+        }
+        selected
     }
 
     /// Remove queued deliveries for one route after ownership becomes stale.
@@ -1772,7 +1799,7 @@ where
             .registry
             .lock()
             .expect("registry lock")
-            .take_deliveries(connection_id)
+            .take_deliveries(connection_id, &state.generation)
     } else {
         Vec::new()
     };
@@ -1789,7 +1816,7 @@ where
         registry.prune_expired(Instant::now());
         let result = f(&mut registry);
         let deliveries = if result.is_ok() {
-            registry.take_deliveries(connection_id)
+            registry.take_deliveries(connection_id, &state.generation)
         } else {
             Vec::new()
         };
@@ -1805,14 +1832,7 @@ fn socket_response(
     deliveries: Vec<GatewayDelivery>,
 ) -> serde_json::Value {
     match result {
-        Ok(()) => serde_json::json!({
-            "protocol_version": SOCKET_PROTOCOL_VERSION,
-            "ok": true,
-            "heartbeat_interval_seconds": SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
-            "registration_lease_seconds": REGISTRATION_LEASE_DURATION.as_secs(),
-            "gateway_generation": state.generation,
-            "deliveries": deliveries,
-        }),
+        Ok(()) => successful_socket_response(&state.generation, &deliveries),
         Err(error) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": false,
@@ -1820,6 +1840,27 @@ fn socket_response(
             "keep_connection": true,
         }),
     }
+}
+
+/// Build the exact successful response shape used for delivery size selection.
+fn successful_socket_response(
+    gateway_generation: &str,
+    deliveries: &[GatewayDelivery],
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol_version": SOCKET_PROTOCOL_VERSION,
+        "ok": true,
+        "heartbeat_interval_seconds": SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
+        "registration_lease_seconds": REGISTRATION_LEASE_DURATION.as_secs(),
+        "gateway_generation": gateway_generation,
+        "deliveries": deliveries,
+    })
+}
+
+/// Return whether a successful delivery response fits, including its newline.
+fn delivery_response_fits(gateway_generation: &str, deliveries: &[GatewayDelivery]) -> bool {
+    serde_json::to_vec(&successful_socket_response(gateway_generation, deliveries))
+        .is_ok_and(|response| response.len() < MAX_GATEWAY_RESPONSE_BYTES)
 }
 
 /// Write one JSON-line response to a gateway socket client.

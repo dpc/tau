@@ -98,7 +98,7 @@ fn gateway_error_response_is_rejected() {
 /// cannot force unbounded buffering in the sidecar.
 #[test]
 fn oversized_gateway_response_is_rejected() {
-    let error = connect_error_with_response("x".repeat(MAX_GATEWAY_RESPONSE_BYTES as usize + 1));
+    let error = connect_error_with_response("x".repeat(MAX_GATEWAY_RESPONSE_BYTES + 1));
     assert!(error.contains("too large"), "{error}");
 }
 
