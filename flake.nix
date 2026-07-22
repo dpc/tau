@@ -6,7 +6,7 @@
 
     flake-utils.url = "github:numtide/flake-utils";
     flakebox = {
-      url = "github:rustshop/flakebox?rev=cf89db7a3ac6b1431693d17276225ba352e48a5c";
+      url = "github:rustshop/flakebox?rev=f00197a6545284292defc80140e118231252291b";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     dpc-public-skills = {
@@ -51,9 +51,17 @@
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
+            # Tau's cargo-crap derivations use a locally pinned package and
+            # project-specific CI gates rather than Flakebox's integration.
+            cargo-crap.enable = false;
             github.ci.buildOutputs = [ ".#ci.workspace" ];
             just.importPaths = [ "justfile.custom.just" ];
             just.rules.watch.enable = false;
+            rootDir.".envrc".text = pkgs.lib.mkForce ''
+              use flake
+
+              source_env_if_exists .envrc.local
+            '';
             toolchain.components = [
               "rustc"
               "cargo"
