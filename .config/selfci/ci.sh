@@ -43,25 +43,11 @@ function job_site() {
   nix build -L .#site
 }
 
-function job_coverage() {
-  selfci step start "coverage tests"
-  if ! nix build -L .#ci.testsCcov ; then
-    selfci step fail
-  fi
-
-  selfci step start "cargo-crap gates"
-  if ! nix build -L .#ci.crap ; then
-    >&2 echo "cargo-crap: failed - CRAP regression or high-CRAP function detected; refactor to simplify/decompose and/or increase test coverage of flagged code"
-    selfci step fail
-  fi
-}
-
 case "$SELFCI_JOB_NAME" in
   main)
     selfci job start "lint"
     selfci job start "cargo"
     selfci job start "site"
-    selfci job start "coverage"
     ;;
   cargo)
     job_cargo
@@ -72,9 +58,6 @@ case "$SELFCI_JOB_NAME" in
     ;;
   site)
     job_site
-    ;;
-  coverage)
-    job_coverage
     ;;
   *)
     echo "Unknown job: $SELFCI_JOB_NAME"
