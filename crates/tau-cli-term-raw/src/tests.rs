@@ -37,6 +37,7 @@ fn run_full_render(
         log_end: history_lines,
         history_generation: 0,
         history_width: cols as usize,
+        history_height: history_lines,
         cursor_row,
         cursor_col,
     };
@@ -273,6 +274,7 @@ fn full_render_limits_replayed_history_rows() {
         log_end: 6,
         history_generation: 0,
         history_width: 30,
+        history_height: 6,
         cursor_row: 6,
         cursor_col: 8,
     };
@@ -401,6 +403,7 @@ fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
         log_end: 2,
         history_generation: 0,
         history_width: 30,
+        history_height: 2,
         cursor_row: 3,
         cursor_col: 8,
     };
@@ -429,6 +432,7 @@ fn full_render_cursor_uses_physical_viewport_start() {
         log_end: 2,
         history_generation: 0,
         history_width: 30,
+        history_height: 2,
         cursor_row: 3,
         cursor_col: 8,
     };
@@ -458,6 +462,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
         log_end: 10,
         history_generation: 0,
         history_width: 30,
+        history_height: 10,
         cursor_row: 10,
         cursor_col: 8,
     };
@@ -466,6 +471,8 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
         rubber_height: 0,
         history_generation: 0,
         history_width: 30,
+        history_height: 10,
+        active_height: 0,
         known_lines: Vec::new(),
         known_sources: Vec::new(),
     };
@@ -2943,6 +2950,7 @@ fn full_redraw_queues_without_flushing_mid_frame() {
         log_end: 2,
         history_generation: 0,
         history_width: 40,
+        history_height: 2,
         cursor_row: 2,
         cursor_col: 8,
     };
@@ -5107,6 +5115,129 @@ fn hidden_lines_changed_detects_removed_scrollback_line() {
     let next = plain_lines(&["visible"]);
 
     assert!(hidden_lines_changed(&prev, &next, 1));
+}
+
+/// Appends one ordinary persistent output block through the same state mutation
+/// used by `TermHandle::print_output`.
+fn append_history_for_cache_test(st: &mut SharedState, text: String) {
+    let id = st.alloc_id();
+    st.blocks.insert(id, plain_block(text));
+    st.block_debug_ids.insert(id, "cache-test".to_owned());
+    st.append_history(id);
+}
+
+/// A new prompt on a long transcript must lay out only its appended history
+/// entry, preventing redraw CPU from growing with session length.
+#[test]
+fn history_layout_cache_refreshes_only_appended_suffix() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    for index in 0..10_000 {
+        append_history_for_cache_test(&mut st, format!("history {index}"));
+    }
+    let mut cache = HistoryLayoutCache::default();
+    assert_eq!(cache.refresh(&mut st), 10_000);
+    assert_eq!(cache.lines.len(), 10_000);
+
+    append_history_for_cache_test(&mut st, "submitted prompt".to_owned());
+
+    assert_eq!(
+        cache.refresh(&mut st),
+        1,
+        "append refresh must not revisit the old transcript"
+    );
+    assert_eq!(cache.lines.len(), 10_001);
+    assert_eq!(
+        line_text(cache.lines.last().expect("appended line")).trim_end(),
+        "submitted prompt"
+    );
+}
+
+/// Appending a prompt after the viewport has overflowed must use the
+/// suffix-only scrolling frame rather than materializing a full-transcript
+/// render plan.
+#[test]
+fn long_history_append_selects_fast_scrolling_frame() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    for index in 0..10_000 {
+        append_history_for_cache_test(&mut st, format!("history {index}"));
+    }
+    let mut cache = HistoryLayoutCache::default();
+    cache.refresh(&mut st);
+    let tail = layout_tail(&st, cache.lines.len());
+    let layout = layout_all_from_cached_history(&cache, tail);
+    let mut model = TerminalModel::default();
+    let plan = model.plan_view(&layout, st.height);
+    model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
+    let width = st.width;
+    let height = st.height;
+
+    append_history_for_cache_test(&mut st, "submitted prompt".to_owned());
+    let state = Arc::new(Mutex::new(st));
+    let pass = prepare_redraw_pass(
+        &state,
+        &mut cache,
+        &model,
+        width,
+        height,
+        &std::sync::Condvar::new(),
+    )
+    .expect("append should produce a redraw pass");
+
+    let RenderFrame::Fast { tail, metrics } = &pass.frame else {
+        panic!("append should avoid the full-transcript frame");
+    };
+    let suffix = scrolling_suffix(&cache.lines, tail, metrics, &model);
+    assert_eq!(
+        suffix.len(),
+        height + 1,
+        "one-row append should build only the old viewport plus its new row"
+    );
+}
+
+/// Finalizing a mutable active block into history can rewrite rows at the
+/// history/active boundary, so it must retain hidden-prefix validation.
+#[test]
+fn history_append_replacing_active_rows_selects_full_frame() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    for index in 0..100 {
+        append_history_for_cache_test(&mut st, format!("history {index}"));
+    }
+    let active_id = st.alloc_id();
+    st.blocks
+        .insert(active_id, plain_block("partial 0\npartial 1"));
+    st.block_debug_ids
+        .insert(active_id, "active-cache-test".to_owned());
+    st.above_active.push(active_id);
+
+    let mut cache = HistoryLayoutCache::default();
+    cache.refresh(&mut st);
+    let tail = layout_tail(&st, cache.lines.len());
+    let layout = layout_all_from_cached_history(&cache, tail);
+    let mut model = TerminalModel::default();
+    let plan = model.plan_view(&layout, st.height);
+    model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
+    let width = st.width;
+    let height = st.height;
+
+    st.above_active.clear();
+    st.blocks.remove(&active_id);
+    st.block_debug_ids.remove(&active_id);
+    append_history_for_cache_test(&mut st, "final 0\nfinal 1".to_owned());
+    let state = Arc::new(Mutex::new(st));
+    let pass = prepare_redraw_pass(
+        &state,
+        &mut cache,
+        &model,
+        width,
+        height,
+        &std::sync::Condvar::new(),
+    )
+    .expect("finalization should produce a redraw pass");
+
+    assert!(
+        matches!(pass.frame, RenderFrame::Full { .. }),
+        "active replacement must validate the complete hidden prefix"
+    );
 }
 
 /// Protects the external-program pause invariant: if releasing the terminal

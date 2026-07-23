@@ -7,8 +7,9 @@
 //! Three rendering paths (see `README.md`):
 //! - **Differential update** — common case, diffs visible viewport via
 //!   [`Screen`]
-//! - **Scrolling render** — on overflow, diffs full content and renders in
-//!   order; `\r\n` at the bottom pushes content into scrollback
+//! - **Scrolling render** — on overflow, diffs a suffix rebased at the prior
+//!   viewport and renders in order; `\r\n` at the bottom pushes content into
+//!   scrollback without materializing older hidden history
 //! - **Full render** — on resize/invalidation, clears screen + scrollback and
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
@@ -206,6 +207,11 @@ struct SharedState {
     history_refs: HashMap<BlockId, usize>,
     /// Bumped whenever persistent history content, order, or layout changes.
     history_generation: u64,
+    /// Earliest history entry changed since the redraw cache last refreshed.
+    ///
+    /// Ordinary output appends mark only the new suffix. Destructive or
+    /// content-changing operations conservatively invalidate from entry zero.
+    history_dirty_from: Option<usize>,
     /// Mutable blocks above the prompt (can be reordered).
     above_active: Vec<BlockId>,
     /// Blocks pinned right above the prompt.
@@ -295,6 +301,7 @@ impl SharedState {
             history: Vec::new(),
             history_refs: HashMap::new(),
             history_generation: 0,
+            history_dirty_from: None,
             above_active: Vec::new(),
             above_sticky: Vec::new(),
             suggestions: Vec::new(),
@@ -335,13 +342,23 @@ impl SharedState {
         id
     }
 
-    fn bump_history_generation(&mut self) {
+    fn mark_history_dirty_from(&mut self, entry: usize) {
         self.history_generation = self.history_generation.wrapping_add(1);
+        self.history_dirty_from = Some(
+            self.history_dirty_from
+                .map_or(entry, |dirty| dirty.min(entry)),
+        );
     }
 
     fn add_history_ref(&mut self, id: BlockId) {
         *self.history_refs.entry(id).or_insert(0) += 1;
-        self.bump_history_generation();
+    }
+
+    fn append_history(&mut self, id: BlockId) {
+        let appended_at = self.history.len();
+        self.history.push(id);
+        self.add_history_ref(id);
+        self.mark_history_dirty_from(appended_at);
     }
 
     fn remove_history_refs(&mut self, id: BlockId, count: usize) {
@@ -355,7 +372,6 @@ impl SharedState {
                 *existing -= count;
             }
         }
-        self.bump_history_generation();
     }
 
     fn rebuild_history_refs(&mut self) {
@@ -363,7 +379,7 @@ impl SharedState {
         for &id in &self.history {
             *self.history_refs.entry(id).or_insert(0) += 1;
         }
-        self.bump_history_generation();
+        self.mark_history_dirty_from(0);
     }
 
     fn block_in_history(&self, id: BlockId) -> bool {
@@ -1185,7 +1201,7 @@ impl TermHandle {
             .entry(id)
             .or_insert_with(|| format!("set-block-{}", id.0));
         if affects_history {
-            st.bump_history_generation();
+            st.mark_history_dirty_from(0);
         }
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
     }
@@ -1199,6 +1215,9 @@ impl TermHandle {
         let debug_id = st.block_debug_ids.remove(&id);
         let removed_history_refs = remove_all_from_zone(&mut st.history, id);
         st.remove_history_refs(id, removed_history_refs);
+        if removed_history_refs != 0 {
+            st.mark_history_dirty_from(0);
+        }
         st.above_active.retain(|&x| x != id);
         st.above_sticky.retain(|&x| x != id);
         st.suggestions.retain(|&x| x != id);
@@ -1212,8 +1231,7 @@ impl TermHandle {
     pub fn push_history(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        st.history.push(id);
-        st.add_history_ref(id);
+        st.append_history(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "history", "push block zone");
     }
 
@@ -1328,8 +1346,7 @@ impl TermHandle {
         let content_empty = block.content.is_empty();
         st.blocks.insert(id, block);
         st.block_debug_ids.insert(id, debug_id.clone());
-        st.history.push(id);
-        st.add_history_ref(id);
+        st.append_history(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
         let notify = Self::request_redraw_locked(&mut st);
         drop(st);
@@ -2810,35 +2827,106 @@ fn layout_id_list(
 }
 
 /// Cached layout for persistent history blocks.
-#[derive(Default)]
 struct HistoryLayoutCache {
+    /// Terminal width used to lay out cached entries.
     width: usize,
+    /// Shared-state history generation represented by this cache.
     generation: u64,
+    /// Generation represented before the most recent refresh.
+    previous_generation: u64,
+    /// Rendered line where an append-only refresh began.
+    appended_from_line: Option<usize>,
+    /// Start line for each cached history entry plus one final end offset.
+    entry_line_offsets: Vec<usize>,
+    /// Rendered persistent-history lines.
     lines: Vec<Vec<Cell>>,
+    /// Source metadata parallel to `lines`.
     sources: Vec<LineSource>,
 }
 
+impl Default for HistoryLayoutCache {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            generation: 0,
+            previous_generation: 0,
+            appended_from_line: None,
+            entry_line_offsets: vec![0],
+            lines: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+}
+
 impl HistoryLayoutCache {
-    fn refresh(&mut self, st: &SharedState) {
+    /// Refreshes the changed history suffix and returns entries laid out.
+    fn refresh(&mut self, st: &mut SharedState) -> usize {
         if self.width == st.width && self.generation == st.history_generation {
-            return;
+            return 0;
         }
 
-        let mut lines = Vec::new();
-        let mut sources = Vec::new();
-        layout_id_list(
-            &st.history,
-            &st.blocks,
-            &st.block_debug_ids,
-            st.width,
-            &mut lines,
-            &mut sources,
-        );
+        let previous_generation = self.generation;
+        let previous_entry_count = self.entry_line_offsets.len().saturating_sub(1);
+        let width_changed = self.width != st.width;
+        let requested_dirty_from = st.history_dirty_from.take().unwrap_or(0);
+        let can_reuse_prefix = !width_changed
+            && requested_dirty_from <= previous_entry_count
+            && requested_dirty_from <= st.history.len();
+        let dirty_from = if can_reuse_prefix {
+            requested_dirty_from
+        } else {
+            0
+        };
+        let line_start = self
+            .entry_line_offsets
+            .get(dirty_from)
+            .copied()
+            .unwrap_or(0);
+        let append_only = can_reuse_prefix
+            && dirty_from == previous_entry_count
+            && previous_entry_count <= st.history.len();
+
+        self.lines.truncate(line_start);
+        self.sources.truncate(line_start);
+        self.entry_line_offsets.truncate(dirty_from + 1);
+        for id in &st.history[dirty_from..] {
+            layout_id_list(
+                std::slice::from_ref(id),
+                &st.blocks,
+                &st.block_debug_ids,
+                st.width,
+                &mut self.lines,
+                &mut self.sources,
+            );
+            self.entry_line_offsets.push(self.lines.len());
+        }
 
         self.width = st.width;
+        self.previous_generation = previous_generation;
         self.generation = st.history_generation;
-        self.lines = lines;
-        self.sources = sources;
+        self.appended_from_line = append_only.then_some(line_start);
+        st.history.len().saturating_sub(dirty_from)
+    }
+
+    /// Rebuilds an independent cache without consuming redraw dirty state.
+    fn rebuild(st: &SharedState) -> Self {
+        let mut cache = Self {
+            width: st.width,
+            generation: st.history_generation,
+            ..Self::default()
+        };
+        for id in &st.history {
+            layout_id_list(
+                std::slice::from_ref(id),
+                &st.blocks,
+                &st.block_debug_ids,
+                st.width,
+                &mut cache.lines,
+                &mut cache.sources,
+            );
+            cache.entry_line_offsets.push(cache.lines.len());
+        }
+        cache
     }
 }
 
@@ -2879,6 +2967,8 @@ struct LayoutAll {
     history_generation: u64,
     /// Terminal width used to build persistent-history lines.
     history_width: usize,
+    /// Number of leading log rows owned by persistent history.
+    history_height: usize,
     /// Absolute cursor row in `all_lines`.
     cursor_row: usize,
     /// Cursor column.
@@ -2926,11 +3016,21 @@ struct PlanMetrics {
 /// back from scrollback.
 #[derive(Default)]
 struct TerminalModel {
+    /// First absolute row currently represented by the physical viewport.
     viewport_start: usize,
+    /// Temporary blank rows retaining the viewport after visible shrinkage.
     rubber_height: usize,
+    /// Persistent-history generation represented by `known_lines`.
     history_generation: u64,
+    /// Width used for the represented persistent-history layout.
     history_width: usize,
+    /// Leading persistent-history rows in `known_lines`.
+    history_height: usize,
+    /// Mutable active rows following persistent history in `known_lines`.
+    active_height: usize,
+    /// Complete represented log rows, including hidden scrollback.
     known_lines: Vec<Vec<Cell>>,
+    /// Source metadata parallel to `known_lines`.
     known_sources: Vec<LineSource>,
 }
 
@@ -2944,6 +3044,16 @@ impl TerminalModel {
             && self.history_width == history.width
             && history.lines.len() <= self.known_lines.len()
             && history.sources.len() <= self.known_sources.len()
+    }
+
+    fn history_append_matches(&self, history: &HistoryLayoutCache) -> bool {
+        self.history_generation == history.previous_generation
+            && self.history_width == history.width
+            && history.appended_from_line == Some(self.history_height)
+            // History is inserted before the mutable active zone. If active rows
+            // existed in the prior frame, an append can replace rather than
+            // merely follow those rows; use the full hidden-prefix check.
+            && self.active_height == 0
     }
 
     fn hidden_prefix_changed(&self, layout: &LayoutAll) -> bool {
@@ -3085,8 +3195,14 @@ impl TerminalModel {
         self.rubber_height = metrics.rubber_height;
         self.history_generation = history.generation;
         self.history_width = history.width;
-        self.known_lines.truncate(history.lines.len());
-        self.known_sources.truncate(history.sources.len());
+        self.known_lines.truncate(self.history_height);
+        self.known_sources.truncate(self.history_height);
+        self.known_lines
+            .extend_from_slice(&history.lines[self.history_height..]);
+        self.known_sources
+            .extend_from_slice(&history.sources[self.history_height..]);
+        self.history_height = history.lines.len();
+        self.active_height = tail.active_height;
         self.known_lines
             .extend_from_slice(&tail.lines[..tail.active_height]);
         self.known_sources
@@ -3098,6 +3214,8 @@ impl TerminalModel {
         self.rubber_height = rubber_height;
         self.history_generation = layout.history_generation;
         self.history_width = layout.history_width;
+        self.history_height = layout.history_height;
+        self.active_height = layout.log_end.saturating_sub(layout.history_height);
         self.known_lines = layout.all_lines[..layout.log_end].to_vec();
         self.known_sources = layout.line_sources[..layout.log_end].to_vec();
     }
@@ -3304,6 +3422,7 @@ fn layout_all_from_cached_history(history: &HistoryLayoutCache, tail: TailLayout
         log_end,
         history_generation: history.generation,
         history_width: history.width,
+        history_height: history.lines.len(),
         cursor_row,
         cursor_col,
     }
@@ -3311,8 +3430,7 @@ fn layout_all_from_cached_history(history: &HistoryLayoutCache, tail: TailLayout
 
 /// Lays out the full content (history + above + input + below).
 fn layout_all(st: &SharedState) -> LayoutAll {
-    let mut history = HistoryLayoutCache::default();
-    history.refresh(st);
+    let history = HistoryLayoutCache::rebuild(st);
     let tail = layout_tail(st, history.lines.len());
     layout_all_from_cached_history(&history, tail)
 }
@@ -3322,39 +3440,59 @@ fn visible_lines_from_parts(
     tail: &TailLayout,
     metrics: &PlanMetrics,
 ) -> Vec<Vec<Cell>> {
+    render_rows_from(history_lines, tail, metrics, metrics.viewport_start)
+}
+
+/// Materializes rendered rows from `start` through the current plan end.
+fn render_rows_from(
+    history_lines: &[Vec<Cell>],
+    tail: &TailLayout,
+    metrics: &PlanMetrics,
+    start: usize,
+) -> Vec<Vec<Cell>> {
     let history_height = history_lines.len();
     let log_height = history_height + tail.active_height;
     let fixed_start = log_height + metrics.rubber_height;
-    let mut visible = Vec::with_capacity(metrics.render_len.saturating_sub(metrics.viewport_start));
+    let mut rows = Vec::with_capacity(metrics.render_len.saturating_sub(start));
 
-    for idx in metrics.viewport_start..metrics.render_len {
+    for idx in start..metrics.render_len {
         if idx < history_height {
-            visible.push(
+            rows.push(
                 history_lines
                     .get(idx)
-                    .expect("visible history row should exist")
+                    .expect("requested history row should exist")
                     .clone(),
             );
         } else if idx < log_height {
-            visible.push(
+            rows.push(
                 tail.lines
                     .get(idx - history_height)
-                    .expect("visible active row should exist")
+                    .expect("requested active row should exist")
                     .clone(),
             );
         } else if idx < fixed_start {
-            visible.push(Vec::new());
+            rows.push(Vec::new());
         } else {
-            visible.push(
+            rows.push(
                 tail.lines
                     .get(tail.active_height + idx - fixed_start)
-                    .expect("visible fixed row should exist")
+                    .expect("requested fixed row should exist")
                     .clone(),
             );
         }
     }
 
-    visible
+    rows
+}
+
+/// Builds the bounded scrolling input rebased at the prior viewport.
+fn scrolling_suffix(
+    history_lines: &[Vec<Cell>],
+    tail: &TailLayout,
+    metrics: &PlanMetrics,
+    terminal_model: &TerminalModel,
+) -> Vec<Vec<Cell>> {
+    render_rows_from(history_lines, tail, metrics, terminal_model.viewport_start)
 }
 
 // --- Redraw thread ---
@@ -3550,15 +3688,17 @@ fn prepare_redraw_pass(
     let pending_raw = std::mem::take(&mut st.pending_raw);
     let redraw_history_size = st.redraw_history_size;
 
-    history_cache.refresh(&st);
+    history_cache.refresh(&mut st);
     let tail = layout_tail(&st, history_cache.lines.len());
     let log_height = history_cache.lines.len() + tail.active_height;
     let fixed_height = tail.fixed_height();
     let metrics = terminal_model.plan_metrics(log_height, fixed_height, tail.cursor_row, height);
     let can_fast = !size_changed
         && !force_full
-        && terminal_model.history_cache_matches(history_cache)
-        && metrics.viewport_start == terminal_model.viewport_start
+        && ((terminal_model.history_cache_matches(history_cache)
+            && metrics.viewport_start == terminal_model.viewport_start)
+            || (terminal_model.history_append_matches(history_cache)
+                && terminal_model.viewport_start <= metrics.viewport_start))
         && metrics.viewport_start <= history_cache.lines.len();
     let frame = if can_fast {
         RenderFrame::Fast { tail, metrics }
@@ -3609,7 +3749,7 @@ fn render_redraw_pass(
                 screen,
                 history_cache,
                 terminal_model,
-                pass.width,
+                pass,
                 tail,
                 metrics,
             );
@@ -3625,15 +3765,34 @@ fn render_fast_frame(
     screen: &mut Screen,
     history_cache: &HistoryLayoutCache,
     terminal_model: &mut TerminalModel,
-    width: usize,
+    pass: &RedrawPass,
     tail: &TailLayout,
     metrics: &PlanMetrics,
 ) {
-    screen.set_width(width);
-    let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
-    let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
-    if let Err(e) = screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col)) {
-        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
+    screen.set_width(pass.width);
+    if terminal_model.viewport_start < metrics.viewport_start {
+        let previous_viewport_start = terminal_model.viewport_start;
+        // `Screen` retains only the old visible rows. Rebase the bounded suffix
+        // beginning at that viewport to row zero: `prev_viewport_top = 0` then
+        // describes the same physical screen without copying or comparing older
+        // terminal scrollback.
+        let suffix = scrolling_suffix(&history_cache.lines, tail, metrics, terminal_model);
+        let cursor_row = metrics.cursor_row.saturating_sub(previous_viewport_start);
+        if let Err(e) = screen.render_scrolling(
+            writer,
+            &suffix,
+            0,
+            pass.height,
+            (cursor_row, tail.cursor_col),
+        ) {
+            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
+        }
+    } else {
+        let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
+        let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
+        if let Err(e) = screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col)) {
+            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
+        }
     }
     terminal_model.apply_fast_plan(history_cache, tail, metrics);
 }

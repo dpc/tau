@@ -7,8 +7,10 @@
 //!   viewport against the actual buffer and queues only the escape sequences
 //!   needed to update changed cells.
 //! - [`Screen::render_scrolling()`] — **Path 2** (scrolling render): diffs the
-//!   full content array, queues changed lines in order, and lets `\r\n` at the
-//!   bottom edge push content into the terminal's scrollback buffer.
+//!   caller's complete coordinate window, queues changed lines in order, and
+//!   lets `\r\n` at the bottom edge push content into terminal scrollback. The
+//!   window may be the full logical content or a suffix rebased at the prior
+//!   viewport.
 //!
 //! See `README.md` for the full rendering strategy.
 //!
@@ -244,20 +246,23 @@ impl Screen {
 
     /// Renders all lines with scrolling support (Pi-style).
     ///
-    /// Unlike `update()` which diffs only the visible viewport,
-    /// this method diffs against the full previous content and
-    /// queues changed lines in order. When rendering goes past
-    /// the bottom of the terminal, `\r\n` naturally pushes the
-    /// top row into the terminal's scrollback buffer.
+    /// Unlike `update()` which diffs only the new visible viewport, this method
+    /// diffs a complete caller-chosen coordinate window against the previously
+    /// visible rows and queues changed lines in order. When rendering goes past
+    /// the bottom of the terminal, `\r\n` naturally pushes the top row into the
+    /// terminal's scrollback buffer.
     ///
     /// Call this instead of `update()` when `viewport_top`
     /// increased (content overflowed the viewport). The caller owns flushing
     /// so it can batch a whole render frame.
     ///
-    /// `all_lines` is the complete content (not just the visible
-    /// slice). `prev_viewport_top` is where the viewport was on
-    /// the previous frame. `height` is the terminal height.
-    /// `desired_cursor` is `(row, col)` in absolute line indices.
+    /// `all_lines` must be complete from the coordinate origin chosen by the
+    /// caller through the new content end; it cannot be only the new visible
+    /// slice. The caller may use the full logical content with absolute
+    /// coordinates, or a suffix beginning at the previous viewport with that
+    /// viewport rebased to zero. `prev_viewport_top` locates the old visible
+    /// rows in the supplied coordinate window. `height` is terminal height.
+    /// `desired_cursor` uses the same coordinate system.
     ///
     /// Inspired by the Pi coding agent's TUI renderer.
     pub fn render_scrolling(

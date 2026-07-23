@@ -11,12 +11,15 @@ different situations, chosen by the redraw loop in `redraw_loop()`.
 
 ### Path 1 — Differential update (common case)
 
-On each redraw the layout engine produces a flat list of `all_lines` covering
-all content: history, live blocks, the prompt, and status zones. We slice the
-last `height` lines as the visible viewport and pass them to
-`Screen::update()`, which diffs against what was previously on the terminal and
-emits only the escape sequences needed to update changed cells. This minimizes
-terminal I/O — important over slow SSH connections.
+The layout engine caches wrapped persistent-history rows. Ordinary history
+appends lay out only the new suffix; updates, removals, snapshot replacement,
+and width changes conservatively relayout the complete history cache. For a
+non-scrolling redraw we combine the cached history with freshly laid-out live,
+prompt, and status rows, then pass only the visible viewport to
+`Screen::update()`. It diffs against what was previously on the terminal and
+emits only the escape sequences needed to update changed cells. This keeps both
+CPU work and terminal I/O independent of old transcript length on the common
+append path.
 
 Cursor movement is always relative (`MoveUp`, `\r`, `\n`, `MoveToColumn`) —
 never absolute positioning. Downward movement uses `\n` rather than `MoveDown`
@@ -32,14 +35,20 @@ of the viewport), a plain differential update would lose those lines — they
 were rendered to the terminal previously but `Screen::update()` only knows
 about the visible slice, so it can't push them into scrollback.
 
-Instead, `Screen::render_scrolling()` diffs against the *full* content array
-(not just the visible slice). It finds the first changed line and renders from
-there downward using `\r\n` between lines. When `\r\n` is emitted while the
-cursor is at the bottom terminal row, the terminal's native scroll mechanism
-kicks in — the top screen row is pushed into the **scrollback buffer** and
-everything shifts up. Because changed lines are rendered in top-to-bottom
-order (overwriting their screen rows before they scroll off), the correct
-content enters scrollback.
+Instead, `Screen::render_scrolling()` receives the content suffix beginning at
+the previous viewport. It finds the first changed line in that bounded suffix
+and renders from there downward using `\r\n` between lines. When `\r\n` is
+emitted while the cursor is at the bottom terminal row, the terminal's native
+scroll mechanism kicks in — the top screen row is pushed into the **scrollback
+buffer** and everything shifts up. Because changed lines are rendered in
+top-to-bottom order (overwriting their screen rows before they scroll off), the
+correct content enters scrollback without copying or comparing the old hidden
+transcript.
+
+The suffix-only path applies only when prior mutable `above_active` rows cannot
+be replaced at the history boundary. Finalizing a streaming/live block into
+history retains the full hidden-prefix validation and full-plan path so shorter
+settled output can correctly pull earlier rows back into view.
 
 The key insight: scrollback is populated as a *side effect* of rendering, not
 as a separate step. Content must be written to the terminal before it can
@@ -240,6 +249,11 @@ completion, paste/newline normalization, and local prompt scrolling. Tests that
 exercise terminal ownership use the virtual pause/resume hooks to verify that
 the redraw thread stays silent while an external editor or picker owns the
 terminal.
+
+Work-bound regressions separately use large synthetic history and inspect cache
+visit counts plus the production suffix builder's row count. They prove that an
+ordinary append does not revisit or materialize the old transcript; vt100 tests
+remain responsible for visible rows, scrollback, and cursor semantics.
 
 ## References
 
