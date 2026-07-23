@@ -262,7 +262,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
     assert!(harness.provider_quota.is_empty());
     let events = committed_quota_events(&harness);
     assert_eq!(events.len(), 6);
-    for pair in events.chunks_exact(2) {
+    for pair in events.as_chunks::<2>().0 {
         assert!(matches!(
             pair,
             [

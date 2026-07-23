@@ -116,6 +116,10 @@ struct RuntimeLookupPermit;
 
 impl RuntimeLookupPermit {
     fn try_acquire() -> Option<Self> {
+        #[allow(
+            deprecated,
+            reason = "AtomicUsize::try_update requires Rust 1.95, above the workspace MSRV"
+        )]
         ACTIVE_RUNTIME_LOOKUPS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAX_OUTBOUND_PEER_IO_JOBS).then_some(active + 1)

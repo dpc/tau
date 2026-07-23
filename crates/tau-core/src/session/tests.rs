@@ -1436,7 +1436,12 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         sibling_message,
     );
     let sibling_node = sibling_node.expect("sibling input materializes immediately");
-    assert_eq!(tree.node(sibling_node).unwrap().parent_id, Some(root_node));
+    assert_eq!(
+        tree.node(sibling_node)
+            .expect("materialized sibling node remains addressable")
+            .parent_id,
+        Some(root_node)
+    );
 
     let descendant_message = Event::AgentMessageReceived(AgentMessageReceived {
         message_id: "descendant-message".into(),
@@ -1474,7 +1479,12 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         drained_node.entry,
         AgentEntry::AgentMessage { .. }
     ));
-    let results_node = tree.node(drained_node.parent_id.unwrap()).unwrap();
+    let results_node_id = drained_node
+        .parent_id
+        .expect("drained message has a tool-results parent");
+    let results_node = tree
+        .node(results_node_id)
+        .expect("tool-results parent remains addressable");
     assert_eq!(results_node.parent_id, Some(assistant_node));
     assert!(!tree.has_open_foreground_tool_round());
 }

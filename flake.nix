@@ -218,6 +218,9 @@
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
               cargoNextestExtraArgs = "--workspace ${nextestReporterArgs}";
+              # This terminal gate has no downstream Cargo consumer. Exporting
+              # its target directory would recompress about 3 GiB after every run.
+              doInstallCargoArtifacts = false;
               nativeBuildInputs = [ pkgs.ripgrep ];
             };
 

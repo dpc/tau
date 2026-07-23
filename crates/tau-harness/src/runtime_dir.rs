@@ -59,6 +59,10 @@ struct DiscoveryCallLease;
 impl DiscoveryCallPermit {
     /// Acquires one process-wide call slot or rejects immediately.
     pub(crate) fn try_acquire() -> Option<Self> {
+        #[allow(
+            deprecated,
+            reason = "AtomicUsize::try_update requires Rust 1.95, above the workspace MSRV"
+        )]
         ACTIVE_DISCOVERY_CALLS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < SESSION_DISCOVERY_MAX_CALLS).then_some(active + 1)
