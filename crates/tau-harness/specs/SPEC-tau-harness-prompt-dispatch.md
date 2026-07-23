@@ -91,6 +91,11 @@ filtered to the connections that own an effective `shell:workdir` tool, so
 hiding one prefixed instance does not expose its path through another instance's
 shared fragment.
 
+The built-in available-sub-task-roles fragment is prompt-visible only when the
+effective snapshot contains `agent_start`. It applies across role groups and
+renders the currently available delegate role catalog from per-agent context;
+agents without `agent_start` omit the fragment from template data entirely.
+
 Tools tagged `provider-content:image` survive effective-tool filtering only
 when the selected route publishes image in both `input_modalities` and
 `tool_result_modalities`. Role and global tool policy may narrow that result but

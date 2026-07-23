@@ -988,6 +988,44 @@ fn build_system_prompt_ignores_empty_prompt_fragment_sections() {
     assert_eq!(with_empty_hook, without_hook);
 }
 
+/// A capability-gated ordinary fragment that renders empty is omitted from
+/// `prompt_fragments`, so custom system templates cannot observe instructions
+/// for tools outside the effective prompt surface.
+#[test]
+fn rendered_empty_prompt_fragments_are_omitted_from_custom_templates() {
+    let fragments = vec![tau_proto::PromptFragment::new(
+        "agent.available-roles",
+        tau_proto::PromptPriority::new(6),
+        "{{#if (tool_available capabilities.tools \"agent_start\")}}ROLES{{/if}}",
+    )];
+    let render = |fragments: &[tau_proto::PromptFragment], capabilities| {
+        try_build_system_prompt_with_tool_template_context(
+            "{{#each prompt_fragments}}{{name}}={{content}}{{/each}}",
+            &std::collections::HashMap::new(),
+            fragments,
+            &[],
+            serde_json::json!({}),
+            RolePromptTemplateContext::for_role("engineer"),
+            capabilities,
+        )
+        .expect("render custom prompt")
+    };
+
+    let baseline = render(&[], PromptCapabilities::default());
+    assert_eq!(render(&fragments, PromptCapabilities::default()), baseline);
+    assert_eq!(
+        render(
+            &fragments,
+            PromptCapabilities::new(
+                ["agent_start".to_owned()],
+                std::iter::empty::<String>(),
+                std::iter::empty::<String>(),
+            )
+        ),
+        "agent.available-roles=ROLES"
+    );
+}
+
 #[test]
 fn cbor_to_text_puts_output_body_on_next_line_without_label() {
     let text = cbor_to_text(&CborValue::Map(vec![

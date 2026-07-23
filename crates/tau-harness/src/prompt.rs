@@ -342,18 +342,19 @@ fn rendered_prompt_fragment_template_parts(
             if fragment.template.is_empty() {
                 return None;
             }
-            Some(
-                handlebars
-                    .render_template(fragment.template.as_str(), data)
-                    .map(|content| {
-                        serde_json::json!({
-                            "name": fragment.name,
-                            "priority": fragment.priority.get(),
-                            "content": content,
-                            "early": fragment.priority.get() < 100,
-                        })
-                    }),
-            )
+            let content = match handlebars.render_template(fragment.template.as_str(), data) {
+                Ok(content) => content,
+                Err(error) => return Some(Err(error)),
+            };
+            if content.trim().is_empty() {
+                return None;
+            }
+            Some(Ok(serde_json::json!({
+                "name": fragment.name,
+                "priority": fragment.priority.get(),
+                "content": content,
+                "early": fragment.priority.get() < 100,
+            })))
         })
         .collect::<Result<Vec<_>, _>>()?,
     ))

@@ -42,10 +42,11 @@ fn previews_remove_owned_daemon_runtime_pairs() {
     }
 }
 
-/// Proves prompt previews wait for extension startup, honor public environment
-/// enablement, preserve CLI precedence, and retain the deterministic fake id.
+/// Prompt previews omit a conditionally empty shell fragment regardless of how
+/// the extension is enabled, while retaining CLI precedence and the
+/// deterministic fake id.
 #[test]
-fn print_prompt_composes_extension_environment_and_cli() {
+fn print_prompt_omits_conditionally_empty_extension_fragment() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     std::fs::create_dir_all(&config_dir).expect("create config directory");
@@ -90,7 +91,7 @@ fn print_prompt_composes_extension_environment_and_cli() {
             "fake preview identity must remain deterministic"
         );
     }
-    assert_ne!(baseline.stdout, from_environment.stdout);
+    assert_eq!(baseline.stdout, from_environment.stdout);
     assert_eq!(baseline.stdout, cli_disabled.stdout);
     assert_eq!(baseline.stdout, empty_environment.stdout);
 }

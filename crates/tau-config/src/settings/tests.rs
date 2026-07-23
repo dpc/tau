@@ -2191,13 +2191,13 @@ fn harness_settings_role_cli_overrides_later_disable_wins() {
     let s = load_harness_settings_with_role_overrides_in(
         &dirs_with_config(dir),
         &[
-            RoleCliOverride::Enable("micro-manager".to_owned()),
-            RoleCliOverride::Disable("micro-manager".to_owned()),
+            RoleCliOverride::Enable("engineer-senior".to_owned()),
+            RoleCliOverride::Disable("engineer-senior".to_owned()),
         ],
     )
     .expect("load");
 
-    assert!(!s.roles.contains_key("micro-manager"));
+    assert!(!s.roles.contains_key("engineer-senior"));
 }
 
 /// Ensures CLI overrides can disable every role and produce an empty effective
@@ -2282,7 +2282,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
                 role_groups: {
                 manager: {
                     roles: {
-                        "micro-manager": { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
+                        "project-manager": { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
                     },
                 },
             },
@@ -2305,7 +2305,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
                 role_groups: {
                 manager: {
                     roles: {
-                        "micro-manager": { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
+                        "project-manager": { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
                     },
                 },
             },
@@ -2334,13 +2334,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             .iter()
             .any(|fragment| fragment.text.as_str() == "Drop-in global instruction.")
     );
-    let manager = &s.roles["micro-manager"];
-    assert!(
-        manager
-            .prompt_fragments
-            .iter()
-            .any(|fragment| { fragment.text.as_str().contains("delegating to sub-agents") })
-    );
+    let manager = &s.roles["project-manager"];
     assert!(
         manager
             .prompt_fragments
@@ -2415,7 +2409,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             .count(),
         1
     );
-    for role_name in ["engineer", "micro-manager", "custom"] {
+    for role_name in ["engineer", "custom"] {
         let role = &s.roles[role_name];
         assert_eq!(
             role.prompt_fragments
@@ -2505,7 +2499,7 @@ fn harness_roles_merge_with_built_ins() {
                 },
                 manager: {
                     roles: {
-                        "micro-manager": { model: "openai/gpt-5.5" },
+                        "project-manager": { model: "openai/gpt-5.5" },
                     },
                 },
             },
@@ -2516,7 +2510,7 @@ fn harness_roles_merge_with_built_ins() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(s.roles.contains_key("engineer"));
-    assert!(s.roles.contains_key("micro-manager"));
+    assert!(s.roles.contains_key("project-manager"));
     assert!(!s.roles.contains_key("assistant"));
     assert!(!s.roles.contains_key("smart"));
     assert!(!s.roles.contains_key("deep"));
@@ -2545,97 +2539,13 @@ fn harness_roles_merge_with_built_ins() {
         Some(vec![tau_proto::ToolName::new("read")])
     );
 
-    let manager = &s.roles["micro-manager"];
     assert_eq!(
-        manager.description.as_deref(),
-        Some(
-            "Role focused on splitting and delegation of tasks to other sub-agents via micro-management."
-        )
-    );
-    assert!(
-        manager
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str().contains("delegating to sub-agents"))
-    );
-}
-
-/// Ensures partial manager role overrides preserve built-in prompt fragments.
-#[test]
-fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
-    // Built-in manager prompt fragments are stored in the built-in harness
-    // config, so a user can partially override manager settings without
-    // accidentally disabling delegation prompt behavior.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"{
-            agents: {
-                role_groups: {
-                manager: {
-                    roles: {
-                        "micro-manager": { model: "openai/gpt-5.5" },
-                    },
-                },
-            },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let manager = &s.roles["micro-manager"];
-    assert!(manager.prompt_fragments.iter().any(|fragment| {
-        fragment
-            .text
-            .as_str()
-            .contains("self-contained instructions")
-    }));
-    assert_eq!(
-        manager.model.as_ref().map(ToString::to_string).as_deref(),
+        s.roles["project-manager"]
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
         Some("openai/gpt-5.5")
-    );
-}
-
-/// Ensures manager role prompt fragments append to, rather than replace,
-/// built-in fragments.
-#[test]
-fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
-    // User-provided role prompt fragments are added to the built-in role
-    // fragments so partial manager customization does not disable delegation
-    // instructions.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        r#"{
-            agents: {
-                role_groups: {
-                manager: {
-                    roles: {
-                        "micro-manager": { prompt_fragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
-                    },
-                },
-            },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let manager = &s.roles["micro-manager"];
-    assert!(manager.prompt_fragments.iter().any(|fragment| {
-        fragment
-            .text
-            .as_str()
-            .contains("self-contained instructions")
-    }));
-    assert!(
-        manager
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str() == "Custom manager prompt.")
     );
 }
 
@@ -2744,13 +2654,12 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     );
 }
 
-/// Ensures the embedded built-in roles load with the expected manager prompt
-/// content.
+/// Ensures the embedded built-in role catalog contains only engineer roles and
+/// gives each role the capability-gated delegate-role fragment.
 #[test]
-fn harness_built_in_roles_load_from_json_with_manager_prompt() {
-    // Built-in role defaults live in built-in.harness.yaml. Manager has a
-    // visible orchestration prompt there. Engineer roles share a lightweight
-    // instruction prompt.
+fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
+    // The available-role list is shared across roles, but its Handlebars guard
+    // leaves prompts unchanged when `agent_start` is absent.
     let s = HarnessSettings::built_in();
     assert_eq!(s.default_role.as_deref(), Some("engineer"));
     assert_eq!(
@@ -2758,32 +2667,49 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .iter()
             .map(|group| (group.name.clone(), group.roles.clone()))
             .collect::<Vec<_>>(),
-        vec![
-            (
+        vec![(
+            "engineer".to_owned(),
+            vec![
+                "engineer-junior".to_owned(),
                 "engineer".to_owned(),
-                vec![
-                    "engineer-junior".to_owned(),
-                    "engineer".to_owned(),
-                    "engineer-senior".to_owned(),
-                ],
-            ),
-            ("manager".to_owned(), vec!["micro-manager".to_owned()]),
-        ]
+                "engineer-senior".to_owned(),
+            ],
+        )]
+    );
+    let mut role_names = s.roles.keys().map(String::as_str).collect::<Vec<_>>();
+    role_names.sort_unstable();
+    assert_eq!(
+        role_names,
+        vec!["engineer", "engineer-junior", "engineer-senior"]
     );
     let engineer_junior = &s.roles["engineer-junior"];
     assert_eq!(engineer_junior.effort, Some(tau_proto::Effort::Low));
     let engineer = &s.roles["engineer"];
-    assert_eq!(
-        engineer.prompt_fragments[0].priority,
-        PromptPriority::new(15)
-    );
+    let delegate_roles = engineer
+        .prompt_fragments
+        .iter()
+        .find(|fragment| fragment.name == "agent.available-roles")
+        .expect("global delegate-role prompt fragment");
+    assert_eq!(delegate_roles.priority, PromptPriority::new(6));
     assert!(
-        engineer.prompt_fragments[0]
+        delegate_roles
+            .text
+            .contains("{{#if (tool_available capabilities.tools \"agent_start\")~}}")
+    );
+    assert!(delegate_roles.text.contains("## Available sub-task roles"));
+    let engineer_instructions = engineer
+        .prompt_fragments
+        .iter()
+        .find(|fragment| fragment.name == "engineer.instructions")
+        .expect("engineer prompt fragment");
+    assert_eq!(engineer_instructions.priority, PromptPriority::new(15));
+    assert!(
+        engineer_instructions
             .text
             .contains("Trust the `<instructions>`")
     );
     assert_eq!(
-        engineer.prompt_fragments[0]
+        engineer_instructions
             .text
             .lines()
             .filter(|line| *line == "## Best practices")
@@ -2791,7 +2717,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
         1
     );
     assert_eq!(
-        engineer.prompt_fragments[0]
+        engineer_instructions
             .text
             .lines()
             .filter(|line| *line == "### Best practices")
@@ -2807,22 +2733,6 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .iter()
             .any(|fragment| fragment.text.contains("Trust the `<instructions>`"))
     );
-    let manager = &s.roles["micro-manager"];
-    assert_eq!(
-        manager.enable_tool_groups,
-        vec![tau_proto::ToolGroupName::new("timer")]
-    );
-    let prompt = manager
-        .prompt_fragments
-        .first()
-        .expect("manager prompt fragment")
-        .text
-        .as_str();
-    assert_eq!(manager.prompt_fragments[0].priority, PromptPriority::new(5));
-    assert_eq!(manager.prompt_fragments[1].priority, PromptPriority::new(6));
-    assert!(prompt.contains("You are a planning and orchestration agent"));
-    assert!(prompt.contains("delegating to sub-agents"));
-    assert!(prompt.contains("available sub-task roles list"));
 }
 
 /// Ensures user-defined role groups can load custom role definitions.
@@ -2841,11 +2751,6 @@ fn harness_role_groups_load_custom_roles() {
                         custom: { effort: "medium", tools: ["read"] },
                     },
                 },
-                manager: {
-                    roles: {
-                        "micro-manager": { model: "openai/gpt-5.5" },
-                    },
-                },
             },
             },
         }"#,
@@ -2857,17 +2762,6 @@ fn harness_role_groups_load_custom_roles() {
     assert_eq!(
         s.roles["custom"].tools.as_ref().expect("tools"),
         &vec![tau_proto::ToolName::new("read")]
-    );
-    let manager = &s.roles["micro-manager"];
-    assert!(
-        manager
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str().contains("delegating to sub-agents"))
-    );
-    assert_eq!(
-        manager.model.as_ref().map(ToString::to_string).as_deref(),
-        Some("openai/gpt-5.5")
     );
 }
 
@@ -3018,7 +2912,7 @@ agents:
       inter_session_auto_start: true
       roles:
         project-manager: {}
-        micro-manager:
+        task-manager:
           inter_session_auto_start: false
 "#,
     )
@@ -3026,11 +2920,11 @@ agents:
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load receiver policy");
     assert_eq!(
-        settings.roles["micro-manager"].inter_session_receiver,
+        settings.roles["task-manager"].inter_session_receiver,
         Some(true)
     );
     assert_eq!(
-        settings.roles["micro-manager"].inter_session_auto_start,
+        settings.roles["task-manager"].inter_session_auto_start,
         Some(false)
     );
     assert_eq!(
@@ -3054,9 +2948,9 @@ agents:
         settings.roles["project-manager"].inter_session_auto_start,
         None
     );
-    assert_eq!(settings.roles["micro-manager"].inter_session_receiver, None);
+    assert_eq!(settings.roles["task-manager"].inter_session_receiver, None);
     assert_eq!(
-        settings.roles["micro-manager"].inter_session_auto_start, None,
+        settings.roles["task-manager"].inter_session_auto_start, None,
         "later group defaults apply to every existing member"
     );
 }
@@ -3180,12 +3074,12 @@ agents:
 fn inter_session_configuration_layers_cli_aliases() {
     let td = TempDir::new().expect("tempdir");
     let overrides = [
-        HarnessConfigCliOverride::from_str("agents.roleGroups.manager.interSessionReceiver=true")
+        HarnessConfigCliOverride::from_str("agents.roleGroups.engineer.interSessionReceiver=true")
             .expect("receiver override"),
-        HarnessConfigCliOverride::from_str("agents.roleGroups.manager.interSessionAutoStart=true")
+        HarnessConfigCliOverride::from_str("agents.roleGroups.engineer.interSessionAutoStart=true")
             .expect("auto-start override"),
         HarnessConfigCliOverride::from_str(
-            "agents.roleGroups.manager.roles.micro-manager.interSessionAutoStart=false",
+            "agents.roleGroups.engineer.roles.engineer-senior.interSessionAutoStart=false",
         )
         .expect("role override"),
     ];
@@ -3195,11 +3089,11 @@ fn inter_session_configuration_layers_cli_aliases() {
             .expect("load aliases");
 
     assert_eq!(
-        settings.roles["micro-manager"].inter_session_receiver,
+        settings.roles["engineer-senior"].inter_session_receiver,
         Some(true)
     );
     assert_eq!(
-        settings.roles["micro-manager"].inter_session_auto_start,
+        settings.roles["engineer-senior"].inter_session_auto_start,
         Some(false)
     );
 }
@@ -3215,7 +3109,6 @@ fn missing_user_files_load_the_built_in_baseline() {
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
     assert!(harness.roles.contains_key("engineer-junior"));
     assert!(harness.roles.contains_key("engineer"));
-    assert!(harness.roles.contains_key("micro-manager"));
     assert_eq!(harness.default_role.as_deref(), Some("engineer"));
     assert!(!harness.roles.contains_key("assistant"));
     assert!(harness.roles.contains_key("engineer-senior"));
@@ -3263,13 +3156,7 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     assert!(!s.roles.contains_key("engineer-senior"));
     assert!(!s.roles.contains_key("assistant"));
     assert_eq!(s.default_role.as_deref(), Some("engineer"));
-    assert_eq!(
-        s.role_groups
-            .iter()
-            .map(|group| (group.name.as_str(), group.roles.as_slice()))
-            .collect::<Vec<_>>(),
-        vec![("manager", &["micro-manager".to_owned()][..]),]
-    );
+    assert!(s.role_groups.is_empty());
 }
 
 /// Ensures legacy `enabled` role fields continue to disable roles in old config

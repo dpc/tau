@@ -157,6 +157,72 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
     h.shutdown().expect("shutdown");
 }
 
+/// The built-in delegate-role prompt fragment follows the prompt-owned
+/// `agent_start` capability, so every role that can delegate sees the available
+/// role catalog while roles that cannot delegate keep their previous prompt.
+#[test]
+fn available_delegate_roles_prompt_follows_agent_start_capability() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    let role = h.selected_role.clone();
+    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+
+    let with_agent_start = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+    let rendered = h
+        .try_build_system_prompt_for_role_and_agent(
+            &role,
+            Some(&agent_id),
+            &with_agent_start,
+            model.as_ref(),
+            false,
+        )
+        .expect("render prompt with agent_start");
+    assert!(rendered.contains("## Available sub-task roles"));
+    let catalog_rows = rendered
+        .split_once("## Available sub-task roles")
+        .expect("delegate role heading")
+        .1
+        .lines()
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| line.starts_with("* `"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        catalog_rows,
+        vec![
+            "* `engineer` - \"Capable individual contributor. Good default for most tasks.\"",
+            "* `engineer-junior` - \"Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.\"",
+            "* `engineer-senior` - \"Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.\"",
+        ]
+    );
+
+    h.available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .disable_tools
+        .push(ToolName::new("agent_start"));
+    let without_agent_start = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+    let rendered = h
+        .try_build_system_prompt_for_role_and_agent(
+            &role,
+            Some(&agent_id),
+            &without_agent_start,
+            model.as_ref(),
+            false,
+        )
+        .expect("render prompt without agent_start");
+    assert!(!rendered.contains("## Available sub-task roles"));
+    assert!(!rendered.contains("* `engineer` - \"Capable individual contributor."));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A malformed selected template blocks before the durable dispatch checkpoint,
 /// publishes a mandatory replayable diagnostic, and remains retryable after the
 /// template is repaired.

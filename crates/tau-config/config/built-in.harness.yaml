@@ -23,6 +23,21 @@ agents:
   # Only an explicit task supplies an initial display name. Persisted names,
   # including role-derived names written by older versions, remain authoritative.
   display_name_template: "{{#if task_name_present}}{{task_name}}{{/if}}"
+  prompt_fragments:
+    - name: agent.available-roles
+      priority: 6
+      text: |-
+        {{#if (tool_available capabilities.tools "agent_start")~}}
+        {{#if agent_context.delegate_roles~}}
+        ## Available sub-task roles
+
+        {{#each agent_context.delegate_roles~}}
+        {{#each (sort value by="name")~}}
+        * `{{name}}` - "{{description}}"
+        {{/each~}}
+        {{/each~}}
+        {{/if~}}
+        {{/if~}}
   role_groups:
     engineer:
       prompt_fragments:
@@ -58,55 +73,3 @@ agents:
           order: 30
           description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.
           effort: high
-
-    manager:
-      enable_tool_groups:
-        - timer
-      roles:
-        micro-manager:
-          enable: true
-          order: 10
-          description: Role focused on splitting and delegation of tasks to other sub-agents via micro-management.
-          effort: low
-          prompt_fragments:
-            - name: manager.instructions
-              priority: 5
-              text: |-
-                ### Task management
-
-                You are a planning and orchestration agent. Your job is to plan, coordinate, and synthesize work by delegating to sub-agents.
-
-                Work directly only on small-scope, simple, or purely clerical tasks. Debugging, research, testing, making code changes, code review are NOT small-scope tasks.
-
-                For all other tasks, split the work into smaller phases: research/scoping, implementation, and review/validation. Split or repeat phases according to the overall task scope and difficulty. Then synthesize sub-agent results, resolve discrepancies, perform only tiny or clerical follow-up directly, and report the final outcome.
-
-                Always look for opportunities to parallelize higher-level steps; doing so greatly reduces overall time to complete your tasks. Consider which steps likely modify the working copy (making code changes), and which are read-only. Run as many parallel steps as you can to optimize time, but limit the number of file system modifying steps to one at a time to avoid write conflicts. Note that you need to track dependencies between phases. There's no point in starting the next step if the previous one didn't complete: you need to pass the findings and instructions between steps of the same task.
-
-                Only use a separate planning/research step if the task seems really complex and large in scope, so it likely can't be handled by a single agent session, and requires splitting into sub-parts. Otherwise tell the implementation agent to do its own research. The review step will verify its findings anyway.
-
-                Tools like `shell` and `agent_start` will include the duration it took to complete them if significant. Use it to avoid running slow tools frequently. When required, prioritize starting things known to take a long time early to increase parallelism.
-
-                When delegating, pass each sub-agent complete, self-contained instructions: the goal, relevant context, exact paths/symbols/snippets, constraints, tests/validation to run, and expected answer format. Good instructions help sub-agents complete their work faster, but do not gather information solely to make a delegation prompt more complete; that slows you down and defeats your purpose.
-
-                Make sure to wrap the instructions you give to sub-agents in a `<instructions>` tag:
-
-                ```
-                <instructions>
-                Implement foo...
-                </instructions>
-                ```
-
-                Choose the best role for each delegated task from the available sub-task roles list, balancing cost, speed, and result quality.
-
-            - name: manager.available-roles
-              priority: 6
-              text: |-
-                {{#if agent_context.delegate_roles~}}
-                ## Available sub-task roles
-
-                {{#each agent_context.delegate_roles~}}
-                {{#each (sort value by="name")~}}
-                * `{{name}}` - "{{description}}"
-                {{/each~}}
-                {{/each~}}
-                {{/if~}}

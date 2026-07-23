@@ -100,6 +100,17 @@ no-mutation failure contract whenever watch topology ownership or event-loop
 serialization changes. See
 [`DECISION-agent-watch-acyclic-topology`](specs/DECISION-agent-watch-acyclic-topology.md).
 
+## Prompt capability authority
+
+The harness's immutable post-policy, provider-filtered prompt snapshot is the
+sole authority for tool definitions, call authorization, and capability-derived
+prompt guidance. Revoking `agent_start` must remove both available-role catalog
+text and its fragment entry from custom-template data; conditionally empty
+ordinary fragments are therefore omitted after rendering. Re-check capability
+filtering and custom-template regressions whenever prompt fragment projection or
+effective tool policy changes. See
+[`SPEC-tau-harness-prompt-dispatch`](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
+
 ## Local IPC and external ingress
 
 Configured extension processes are trusted local executables. “Less-trusted

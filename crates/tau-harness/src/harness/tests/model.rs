@@ -259,12 +259,18 @@ fn inter_session_receivers_preserve_configured_role_order_across_groups() {
     let engineer = settings.roles.get_mut("engineer").expect("engineer role");
     engineer.inter_session_receiver = Some(true);
     engineer.inter_session_auto_start = Some(true);
-    let manager = settings
-        .roles
-        .get_mut("micro-manager")
-        .expect("micro-manager role");
-    manager.inter_session_receiver = Some(true);
-    manager.inter_session_auto_start = Some(true);
+    settings.roles.insert(
+        "project-manager".to_owned(),
+        tau_config::settings::AgentRole {
+            inter_session_receiver: Some(true),
+            inter_session_auto_start: Some(true),
+            ..Default::default()
+        },
+    );
+    settings.role_groups.push(tau_config::settings::RoleGroup {
+        name: "project".to_owned(),
+        roles: vec!["project-manager".to_owned()],
+    });
 
     let loaded = load_roles(&settings);
 
@@ -274,7 +280,7 @@ fn inter_session_receivers_preserve_configured_role_order_across_groups() {
             .iter()
             .map(|receiver| receiver.role.as_str())
             .collect::<Vec<_>>(),
-        vec!["engineer", "micro-manager"]
+        vec!["engineer", "project-manager"]
     );
     assert!(
         loaded
@@ -1499,12 +1505,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
                         "engineer-senior": { enable: false },
                     },
                 },
-                manager: {
-                    roles: {
-                        "micro-manager": { enable: false },
-                    },
                 },
-            },
             },
         }"#,
     )
