@@ -289,6 +289,9 @@
             clippy = craneLib.cargoClippy {
               cargoArtifacts = workspaceDeps;
               cargoClippyExtraArgs = "-- -D warnings";
+              # Clippy consumes prebuilt dependencies but is a terminal gate;
+              # do not export its post-check target directory.
+              doInstallCargoArtifacts = false;
             };
 
             workspaceDepsCcov = craneLib.buildDepsOnly {
@@ -333,11 +336,15 @@
               doCheck = false;
             };
 
+            # cargo-crap reads source and explicit LCOV only. Keep cargoArtifacts
+            # explicitly null below: enhanced Crane may otherwise infer and unpack
+            # compiled artifacts which none of these derivations consume.
+            #
             # Regenerate nix/cargo-crap-baseline.json from this derivation after
             # intentional CRAP-score changes land on the mainline.
             crapBaseline = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-baseline";
-              cargoArtifacts = workspaceCcov;
+              cargoArtifacts = null;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
                 mkdir -p $out
@@ -354,7 +361,7 @@
 
             crapReport = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-report";
-              cargoArtifacts = workspaceCcov;
+              cargoArtifacts = null;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
                 mkdir -p $out
@@ -375,7 +382,7 @@
 
             crapRegression = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-regression";
-              cargoArtifacts = workspaceCcov;
+              cargoArtifacts = null;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
                 # Keep this gate focused on severe CRAP-score regressions.
@@ -397,7 +404,7 @@
 
             crapAbsolute = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov-absolute";
-              cargoArtifacts = workspaceCcov;
+              cargoArtifacts = null;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
                 # Catch severe new high-CRAP functions that --fail-regression
