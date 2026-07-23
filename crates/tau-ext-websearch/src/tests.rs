@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter, Read as _};
+use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex, mpsc};
