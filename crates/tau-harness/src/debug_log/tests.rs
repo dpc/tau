@@ -16,6 +16,174 @@ fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Every possible line-byte failure, including the final newline, rolls back to
+/// a parseable prefix and permits a later complete append.
+#[test]
+fn line_byte_failures_roll_back_and_allow_later_append() {
+    let rejected = serde_json::json!({
+        "type": "published",
+        "event_name": "provider.tool_result",
+        "event": {"output": "diagnostic payload"},
+    });
+    let mut encoded = serde_json::to_vec(&rejected).expect("serialize expected line");
+    encoded.push(b'\n');
+
+    for fail_write_at in 0..encoded.len() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut log = DebugEventLog::open(td.path()).expect("open");
+        log.write_entry(&serde_json::json!({"type": "baseline"}))
+            .expect("write baseline");
+        let baseline = std::fs::read(log.path()).expect("read baseline");
+        log.inject_fault(AppendFault {
+            fail_write_at: Some(fail_write_at),
+            ..AppendFault::default()
+        });
+
+        let error = log
+            .write_entry(&rejected)
+            .expect_err("injected line write must fail");
+
+        assert!(error.should_report());
+        assert_eq!(
+            std::fs::read(log.path()).expect("read rolled-back log"),
+            baseline,
+            "failure before line byte {fail_write_at} retained a fragment"
+        );
+        assert_eq!(read_lines(log.path()).len(), 1);
+        log.write_entry(&serde_json::json!({"type": "after_rollback"}))
+            .expect("append after successful rollback");
+        assert_eq!(read_lines(log.path()).len(), 2);
+    }
+}
+
+/// A failed commit flush removes the fully written line and keeps the log
+/// appendable under the existing `Write::flush` policy.
+#[test]
+fn commit_flush_failure_rolls_back_complete_line() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+    log.write_entry(&serde_json::json!({"type": "baseline"}))
+        .expect("write baseline");
+    let baseline = std::fs::read(log.path()).expect("read baseline");
+    log.inject_fault(AppendFault {
+        fail_commit_flush: true,
+        ..AppendFault::default()
+    });
+
+    log.write_entry(&serde_json::json!({"type": "rejected"}))
+        .expect_err("commit flush must fail");
+
+    assert_eq!(
+        std::fs::read(log.path()).expect("read rolled-back log"),
+        baseline
+    );
+    log.write_entry(&serde_json::json!({"type": "retry"}))
+        .expect("append after flush rollback");
+    assert_eq!(read_lines(log.path()).len(), 2);
+}
+
+/// Either rollback operation failing poisons the writer, leaves later attempts
+/// byte-for-byte inert, and makes only the poisoning failure reportable.
+#[test]
+fn rollback_failure_disables_later_writes_and_reports_once() {
+    for fault in [
+        AppendFault {
+            fail_write_at: Some(3),
+            fail_truncate: true,
+            ..AppendFault::default()
+        },
+        AppendFault {
+            fail_write_at: Some(3),
+            fail_rollback_flush: true,
+            ..AppendFault::default()
+        },
+        AppendFault {
+            fail_commit_flush: true,
+            fail_truncate: true,
+            ..AppendFault::default()
+        },
+        AppendFault {
+            fail_commit_flush: true,
+            fail_rollback_flush: true,
+            ..AppendFault::default()
+        },
+    ] {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut log = DebugEventLog::open(td.path()).expect("open");
+        log.inject_fault(fault);
+
+        let poisoning_error = log
+            .write_entry(&serde_json::json!({"type": "poison"}))
+            .expect_err("rollback uncertainty must fail");
+        let bytes_after_failure = std::fs::read(log.path()).expect("read poisoned log");
+        let disabled_error = log
+            .write_entry(&serde_json::json!({"type": "must_not_append"}))
+            .expect_err("poisoned writer stays disabled");
+
+        assert!(poisoning_error.should_report());
+        assert!(!disabled_error.should_report());
+        assert!(poisoning_error.bounded_diagnostic().chars().count() <= 257);
+        assert_eq!(
+            std::fs::read(log.path()).expect("read untouched poisoned log"),
+            bytes_after_failure
+        );
+    }
+}
+
+/// Diagnostics retain a fixed 256-character body and one ellipsis even when an
+/// operating-system error string is unexpectedly large.
+#[test]
+fn debug_log_diagnostic_is_bounded_at_documented_limit() {
+    let error = DebugLogError::Append {
+        source: std::io::Error::other("x".repeat(DEBUG_LOG_DIAGNOSTIC_CHARS * 2)),
+        rollback: None,
+    };
+
+    let diagnostic = error.bounded_diagnostic();
+
+    assert_eq!(diagnostic.chars().count(), DEBUG_LOG_DIAGNOSTIC_CHARS + 1);
+    assert!(diagnostic.ends_with('…'));
+}
+
+/// Raw harness events and published events share the same failure-atomic append
+/// path and expose failures to their harness caller.
+#[test]
+fn harness_and_published_logging_observe_append_failures_consistently() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut harness_log =
+        DebugEventLog::open(&td.path().join("harness")).expect("open harness log");
+    harness_log.inject_fault(AppendFault {
+        fail_write_at: Some(1),
+        ..AppendFault::default()
+    });
+    harness_log
+        .log_harness_event(&HarnessEvent::Disconnected {
+            connection_id: ConnectionId::from("conn-1"),
+        })
+        .expect_err("raw harness append failure is observable");
+    assert!(read_lines(harness_log.path()).is_empty());
+
+    let mut published_log =
+        DebugEventLog::open(&td.path().join("published")).expect("open published log");
+    published_log.inject_fault(AppendFault {
+        fail_write_at: Some(1),
+        ..AppendFault::default()
+    });
+    let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: PromptOriginator::User,
+    });
+    published_log
+        .log_published_event(None, &event, UnixMicros::now())
+        .expect_err("published append failure is observable");
+    assert!(read_lines(published_log.path()).is_empty());
+}
+
 #[test]
 fn published_line_preserves_enriched_token_usage() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -61,7 +229,8 @@ fn published_line_preserves_enriched_token_usage() {
         Some(&ConnectionId::from("conn-1")),
         &event,
         UnixMicros::now(),
-    );
+    )
+    .expect("log published event");
 
     let lines = read_lines(log.path());
     assert_eq!(lines.len(), 1);
@@ -107,7 +276,8 @@ fn published_line_compacts_long_strings() {
         originator: PromptOriginator::User,
     });
 
-    log.log_published_event(None, &event, UnixMicros::now());
+    log.log_published_event(None, &event, UnixMicros::now())
+        .expect("log published event");
 
     let lines = read_lines(log.path());
     assert_eq!(lines.len(), 1);
@@ -152,7 +322,8 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
         ]),
     });
 
-    log.log_published_event(None, &event, UnixMicros::now());
+    log.log_published_event(None, &event, UnixMicros::now())
+        .expect("log published event");
 
     let raw = std::fs::read_to_string(log.path()).expect("read events.jsonl");
     assert!(!raw.contains("auth-code-secret"));
@@ -320,7 +491,8 @@ fn transient_from_connection_events_are_not_logged_twice() {
     log.log_harness_event(&HarnessEvent::FromConnection {
         connection_id: ConnectionId::from("conn-1"),
         message: Box::new(HarnessInputMessage::emit(event)),
-    });
+    })
+    .expect("skip transient harness event");
 
     let lines = read_lines(log.path());
     assert!(
@@ -343,7 +515,8 @@ fn ui_debug_event_stats_requests_are_not_logged() {
                 extension_name: "secret-extension".into(),
             },
         )),
-    });
+    })
+    .expect("skip UI debug stats request");
 
     assert!(read_lines(log.path()).is_empty());
 }

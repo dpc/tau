@@ -53,6 +53,16 @@ salvaging a valid-looking suffix. Re-check byte-boundary, commit-sync,
 rollback-failure, retry-sequence, restore-journal, and suffix regressions whenever
 framed I/O changes.
 
+Session debug `events.jsonl` appends serialize a complete redacted object and
+newline before touching the file. Under the session's single-writer lock, a
+returned write or `Write::flush` failure rolls back to the exact prior EOF; an
+uncertain truncation or rollback flush disables later debug writes for that
+process. This mirror is non-authoritative and does not promise crash or power-loss
+durability: termination can leave a missing or torn final line, and restart does
+not repair or salvage it. Re-check every line-byte, newline, commit-flush,
+rollback, retry-after-rollback, and poison regression whenever debug-log I/O
+changes.
+
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can
 acquire the agent lock. Repair never rewrites or salvages a journal, and failure

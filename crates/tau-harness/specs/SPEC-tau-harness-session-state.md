@@ -95,6 +95,15 @@ classified before logging. New event kinds that carry agent transcript content o
 reference prompt/tool-call ids must update that classifier and its regression
 tests.
 
+Each debug JSON object and its trailing newline are serialized before the file is
+touched, then appended under the existing `Write::flush` policy. Under the
+session's single-writer lock, a returned write or flush error truncates the file
+to its exact prior EOF. If truncation or its rollback flush fails, the process
+disables later debug-log writes rather than appending after an uncertain line
+boundary. This non-authoritative diagnostic mirror does not promise crash or
+power-loss durability: termination can leave a missing or torn final line, and
+restart neither repairs nor salvages that line.
+
 The debug JSONL mirror also has a narrow temporary redaction exception for
 `action.invoke` events with action id `email.auth.google.finish`: the harness
 redacts raw action arguments because the current action schema cannot mark the

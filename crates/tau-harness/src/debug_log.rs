@@ -1,10 +1,15 @@
 //! [`DebugEventLog`]: append-only JSONL log of every harness event for
 //! offline inspection.
 
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use test_io::{AppendFault, FaultInjectingFile};
 
 const DEBUG_STRING_COMPACT_THRESHOLD: usize = 100;
 const DEBUG_STRING_COMPACT_EDGE_BYTES: usize = 20;
+const DEBUG_LOG_DIAGNOSTIC_CHARS: usize = 256;
 
 use tau_proto::{ConnectionId, Event, UnixMicros};
 
@@ -13,11 +18,20 @@ use crate::event::HarnessEvent;
 
 /// Append-only JSON event log for debugging.
 pub(crate) struct DebugEventLog {
+    /// Path of the JSONL file exposed to diagnostics and tests.
     path: PathBuf,
+    /// Append-open JSONL file.
     file: std::fs::File,
+    /// Whether an uncertain rollback permanently disabled this process's
+    /// writer.
+    poisoned: bool,
+    /// Deterministic one-shot append fault used by debug-log tests.
+    #[cfg(test)]
+    fault: Option<AppendFault>,
 }
 
 impl DebugEventLog {
+    /// Opens the session's append-only debug event log.
     pub(crate) fn open(dir: &Path) -> Result<Self, HarnessError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("events.jsonl");
@@ -25,14 +39,26 @@ impl DebugEventLog {
             .create(true)
             .append(true)
             .open(&path)?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            poisoned: false,
+            #[cfg(test)]
+            fault: None,
+        })
     }
 
+    /// Returns the debug JSONL path.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn log_harness_event(&mut self, harness_event: &HarnessEvent) {
+    /// Logs one eligible raw harness event without changing event semantics on
+    /// failure.
+    pub(crate) fn log_harness_event(
+        &mut self,
+        harness_event: &HarnessEvent,
+    ) -> Result<(), DebugLogError> {
         // Stamped on every line — including incoming-frame and
         // lifecycle entries that aren't event-log emissions — so an
         // offline reader can compute inter-event gaps and bursts
@@ -47,11 +73,11 @@ impl DebugEventLog {
                 let name = match message.as_ref() {
                     tau_proto::HarnessInputMessage::Emit(emit) => {
                         if !emit.event.defaults_to_persist() {
-                            return;
+                            return Ok(());
                         }
                         emit.event.name().to_string()
                     }
-                    tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return,
+                    tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return Ok(()),
                     _ => "<message>".to_owned(),
                 };
                 let mut redacted_message = message.as_ref().clone();
@@ -91,10 +117,10 @@ impl DebugEventLog {
                 })
             }
             HarnessEvent::SupervisedWriterCleanupComplete { .. } | HarnessEvent::Command(_) => {
-                return;
+                return Ok(());
             }
         };
-        self.write_entry(&entry);
+        self.write_entry(&entry)
     }
 
     /// Logs an event the harness committed (broadcast onto the bus).
@@ -109,7 +135,7 @@ impl DebugEventLog {
         source: Option<&ConnectionId>,
         event: &Event,
         recorded_at: UnixMicros,
-    ) {
+    ) -> Result<(), DebugLogError> {
         let mut event_json = debug_event_json(event);
         redact_debug_event(&mut event_json);
         compact_debug_json_strings(&mut event_json);
@@ -120,15 +146,201 @@ impl DebugEventLog {
             "event_name": event.name(),
             "event": event_json,
         });
-        self.write_entry(&entry);
+        self.write_entry(&entry)
     }
 
-    fn write_entry(&mut self, entry: &serde_json::Value) {
-        use std::io::Write;
-        let _ = serde_json::to_writer(&mut self.file, entry);
-        let _ = self.file.write_all(b"\n");
-        let _ = self.file.flush();
+    /// Serializes one complete line before touching the file, then appends it
+    /// failure-atomically under the debug log's existing [`Write::flush`]
+    /// policy.
+    fn write_entry(&mut self, entry: &serde_json::Value) -> Result<(), DebugLogError> {
+        if self.poisoned {
+            return Err(DebugLogError::Disabled);
+        }
+        let mut line = serde_json::to_vec(entry).map_err(DebugLogError::Serialize)?;
+        line.push(b'\n');
+
+        #[cfg(test)]
+        let result = if let Some(fault) = self.fault.take() {
+            append_line(
+                &mut FaultInjectingFile::new(&mut self.file, fault, line.len()),
+                &line,
+            )
+        } else {
+            append_line(&mut self.file, &line)
+        };
+        #[cfg(not(test))]
+        let result = append_line(&mut self.file, &line);
+
+        result.map_err(|error| {
+            if error.rollback.is_some() {
+                self.poisoned = true;
+            }
+            DebugLogError::Append {
+                source: error.source,
+                rollback: error.rollback,
+            }
+        })
     }
+
+    /// Installs one deterministic failure for the next line append.
+    #[cfg(test)]
+    fn inject_fault(&mut self, fault: AppendFault) {
+        self.fault = Some(fault);
+    }
+
+    /// Makes the next append leave an uncertain rollback for harness-lifecycle
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn inject_rollback_failure(&mut self) {
+        self.inject_fault(AppendFault {
+            fail_write_at: Some(1),
+            fail_truncate: true,
+            ..AppendFault::default()
+        });
+    }
+}
+
+/// An internally observable debug-log failure.
+#[derive(Debug)]
+pub(crate) enum DebugLogError {
+    /// JSON serialization failed before the log file was touched.
+    Serialize(serde_json::Error),
+    /// The append failed, with rollback uncertainty when present.
+    Append {
+        /// Original write or commit-flush error.
+        source: io::Error,
+        /// Truncation or rollback-flush error that poisoned the writer.
+        rollback: Option<io::Error>,
+    },
+    /// An earlier uncertain rollback disabled this process's writer.
+    Disabled,
+}
+
+impl DebugLogError {
+    /// Returns whether this failure should emit a harness diagnostic.
+    ///
+    /// The append that poisons the writer reports its failure. Later disabled
+    /// attempts stay silent, so rollback uncertainty emits exactly one
+    /// diagnostic.
+    pub(crate) fn should_report(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Returns whether this failure makes the append boundary uncertain.
+    pub(crate) fn disables_logging(&self) -> bool {
+        matches!(
+            self,
+            Self::Append {
+                rollback: Some(_),
+                ..
+            } | Self::Disabled
+        )
+    }
+
+    /// Renders a character-bounded, content-free diagnostic.
+    pub(crate) fn bounded_diagnostic(&self) -> String {
+        let message = self.to_string();
+        let mut bounded = message
+            .chars()
+            .take(DEBUG_LOG_DIAGNOSTIC_CHARS)
+            .collect::<String>();
+        if message.chars().nth(DEBUG_LOG_DIAGNOSTIC_CHARS).is_some() {
+            bounded.push('…');
+        }
+        bounded
+    }
+}
+
+impl std::fmt::Display for DebugLogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(source) => write!(f, "failed to serialize debug JSONL entry: {source}"),
+            Self::Append {
+                source,
+                rollback: None,
+            } => write!(f, "failed to append debug JSONL entry: {source}"),
+            Self::Append {
+                source,
+                rollback: Some(rollback),
+            } => write!(
+                f,
+                "failed to append debug JSONL entry: {source}; rollback failed: {rollback}"
+            ),
+            Self::Disabled => {
+                f.write_str("debug JSONL append disabled after an incomplete rollback")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DebugLogError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialize(source) => Some(source),
+            Self::Append { source, .. } => Some(source),
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// Minimal operations needed to append and roll back one JSONL line.
+trait LineIo {
+    /// Returns the exact current EOF.
+    fn seek_to_end(&mut self) -> io::Result<u64>;
+
+    /// Writes every line byte or returns the first failure.
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// Truncates the log to the supplied byte offset.
+    fn truncate(&mut self, offset: u64) -> io::Result<()>;
+
+    /// Applies the debug log's existing [`Write::flush`] policy.
+    fn flush(&mut self) -> io::Result<()>;
+}
+
+impl LineIo for std::fs::File {
+    fn seek_to_end(&mut self) -> io::Result<u64> {
+        self.seek(SeekFrom::End(0))
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        Write::write_all(self, bytes)
+    }
+
+    fn truncate(&mut self, offset: u64) -> io::Result<()> {
+        self.set_len(offset)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(self)
+    }
+}
+
+/// One failed line append and the status of its rollback.
+#[derive(Debug)]
+struct LineAppendError {
+    /// Original write or commit-flush error.
+    source: io::Error,
+    /// Rollback failure, when future append position is uncertain.
+    rollback: Option<io::Error>,
+}
+
+/// Appends and flushes one complete line, rolling back every failed mutation.
+fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<(), LineAppendError> {
+    let start_offset = io.seek_to_end().map_err(|source| LineAppendError {
+        source,
+        rollback: None,
+    })?;
+    let append_result = io.write_all(line).and_then(|()| io.flush());
+    if let Err(source) = append_result {
+        let truncate_error = io.truncate(start_offset).err();
+        let rollback_flush_error = io.flush().err();
+        return Err(LineAppendError {
+            source,
+            rollback: truncate_error.or(rollback_flush_error),
+        });
+    }
+    Ok(())
 }
 
 fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessInputMessage) {
@@ -244,5 +456,7 @@ fn compact_debug_string(s: &str) -> String {
     )
 }
 
+#[cfg(test)]
+mod test_io;
 #[cfg(test)]
 mod tests;

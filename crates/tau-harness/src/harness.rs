@@ -2054,6 +2054,11 @@ pub struct Harness {
     pub(crate) turn_state: TurnState,
     /// Append-only event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
+    /// Whether rollback uncertainty disabled debug logging for this process.
+    ///
+    /// This state intentionally survives session switches and replacement of
+    /// the per-session [`DebugEventLog`] instance.
+    debug_log_poisoned: bool,
     /// Event emission interceptors, exact name first and prefix fallback.
     pub(crate) interceptors: InterceptorRegistry,
     /// Interceptor connections with one destructively canceled request whose
@@ -2802,6 +2807,7 @@ impl Harness {
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
+            debug_log_poisoned: false,
             interceptors: InterceptorRegistry::default(),
             suspended_interceptor_connections: HashSet::new(),
             pending_intercept: None,
@@ -3805,7 +3811,26 @@ impl Harness {
             return;
         }
         if let Some(log) = &mut self.debug_log {
-            log.log_harness_event(harness_event);
+            let result = log.log_harness_event(harness_event);
+            self.observe_debug_log_result(result);
+        }
+    }
+
+    /// Reports a debug-log failure without changing semantic-event commit
+    /// behavior.
+    fn observe_debug_log_result(&mut self, result: Result<(), crate::debug_log::DebugLogError>) {
+        if let Err(error) = result {
+            if error.disables_logging() {
+                self.debug_log_poisoned = true;
+                self.debug_log = None;
+            }
+            if error.should_report() {
+                tracing::warn!(
+                    target: "tau_harness",
+                    error = %error.bounded_diagnostic(),
+                    "debug event log append failed"
+                );
+            }
         }
     }
 
@@ -4520,7 +4545,8 @@ impl Harness {
         let _ = seq;
         let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
-            log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            self.observe_debug_log_result(result);
         }
         let frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
         let _ = self.bus.publish_from(source, frame);
@@ -4713,7 +4739,8 @@ impl Harness {
             .is_some_and(|extension| extension.shell_report_targets_ephemeral)
             || self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
-            log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            self.observe_debug_log_result(result);
         }
         let persistence_source = match &event {
             // A configured peer's durable request must not retain its run-local
@@ -6890,6 +6917,12 @@ impl Harness {
     }
 
     fn enable_debug_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
+        if self.debug_log_poisoned {
+            return Err(std::io::Error::other(
+                "debug JSONL append disabled after an incomplete rollback",
+            )
+            .into());
+        }
         let log = DebugEventLog::open(dir)?;
         let path = log.path().to_path_buf();
         self.debug_log = Some(log);

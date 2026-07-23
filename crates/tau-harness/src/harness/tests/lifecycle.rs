@@ -16,6 +16,35 @@ use crate::harness::{
 };
 use crate::settings::ExtensionConfig;
 
+/// Rollback uncertainty disables debug logging across later per-session log
+/// replacement attempts in the same harness process.
+#[test]
+fn debug_log_poison_prevents_process_lifetime_reenable() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut harness = echo_harness(td.path()).expect("harness");
+    harness
+        .debug_log
+        .as_mut()
+        .expect("durable harness debug log")
+        .inject_rollback_failure();
+
+    harness.log_event(&HarnessEvent::Disconnected {
+        connection_id: tau_proto::ConnectionId::from("conn-1"),
+    });
+
+    assert!(harness.debug_log_poisoned);
+    assert!(harness.debug_log.is_none());
+    let replacement_dir = td.path().join("replacement-session");
+    let error = harness
+        .enable_debug_log(&replacement_dir)
+        .expect_err("process-lifetime poison rejects replacement log");
+    assert!(error.to_string().contains("append disabled"));
+    assert!(
+        !replacement_dir.exists(),
+        "poison must reject replacement before touching its path"
+    );
+}
+
 fn context_text(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
