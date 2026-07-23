@@ -92,6 +92,13 @@ to publish derived metadata does not invalidate an already committed record.
 This is cooperative same-UID crash consistency, not tamper detection: arbitrary
 same-inode/same-size journal mutation is outside the append-only store contract.
 
+Global prompt history uses the same cooperative boundary. A process-local
+device/inode/EOF/final-boundary witness avoids rescanning an unchanged framed
+prefix under the cross-process lock and falls back on ordinary replacement,
+truncation, or tail mismatch. The witness is not cryptographic tamper evidence;
+a same-UID process deliberately preserving its identity and witnessed tail while
+rewriting older bytes remains outside the prompt-history contract.
+
 Cold restore detaches completed start-agent workers only from validated journal
 evidence that matches warm side-conversation terminalization. Explicitly
 continuing recovery is not completion; terminal compaction failures are

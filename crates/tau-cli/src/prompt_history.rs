@@ -4,12 +4,25 @@
 //! unreadable tail records, and appending first truncates torn or oversized
 //! tail frames so newly appended prompts remain reachable after a crash. Load
 //! and repair work are bounded by a total file-size cap; oversized history
-//! files are ignored on load and discarded before writing the next prompt.
+//! files are ignored on load and discarded before writing the next prompt. A
+//! process-local file-identity, offset, and final-up-to-64-byte boundary
+//! witness lets warm appends validate only records added by another CLI since
+//! the known-good prefix. Identity, length, or boundary mismatch falls back to
+//! the complete bounded repair scan. Errors during locked validation, repair,
+//! write, flush, or sync invalidate the witness; setup/lock errors before that
+//! work leave it unchanged, and an unlock error after successful append keeps
+//! the newly captured witness.
+//! This cooperative same-user optimization detects ordinary replacement,
+//! truncation, and tail mutation but is not tamper evidence. Framing, locking,
+//! append-before-send ordering, repair, flush, and `sync_data` semantics remain
+//! unchanged.
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -24,9 +37,43 @@ const MAX_PROMPT_HISTORY_ENTRIES: usize = 1000;
 // Keep at zero per `DECISION-no-backward-compatibility`.
 const PROMPT_HISTORY_VERSION: u8 = 0;
 
-#[derive(Clone, Debug)]
+/// Persistent prompt-history access with a shared process-local tail witness.
+#[derive(Clone)]
 pub(crate) struct PromptHistoryStore {
+    /// Global prompt-history path, or none when state persistence is
+    /// unavailable.
     path: Option<PathBuf>,
+    /// Last prefix validated by this process's clones.
+    validated_tail: Arc<Mutex<Option<ValidatedTail>>>,
+}
+
+/// Identity and boundary witness for one validated append-only file prefix.
+///
+/// The witness has authority only after device, inode, length, and `boundary`
+/// all match under the cross-process history lock. A mismatch falls back to
+/// validating from byte zero.
+#[derive(Clone, Eq, PartialEq)]
+struct ValidatedTail {
+    /// Device containing the validated file.
+    device: u64,
+    /// Inode of the validated file.
+    inode: u64,
+    /// First byte not covered by validation.
+    end_offset: u64,
+    /// Last bytes ending exactly at `end_offset`.
+    boundary: Vec<u8>,
+    /// Records visited by the append that produced this witness.
+    #[cfg(test)]
+    records_scanned: usize,
+}
+
+/// Result of validating one possibly empty framed-file suffix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TailValidation {
+    /// First byte after the validated framed prefix.
+    end_offset: u64,
+    /// Framed records visited after the trusted starting offset.
+    records_scanned: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -42,6 +89,15 @@ impl PromptHistoryStore {
     pub(crate) fn new(dirs: &TauDirs) -> Self {
         Self {
             path: dirs.state_dir.as_ref().map(|dir| dir.join(HISTORY_FILE)),
+            validated_tail: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_path(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            validated_tail: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -49,7 +105,12 @@ impl PromptHistoryStore {
         let Some(path) = self.path.as_deref() else {
             return Ok(Vec::new());
         };
-        load_prompt_history(path)
+        let (entries, validated_tail) = load_prompt_history(path)?;
+        *self
+            .validated_tail
+            .lock()
+            .expect("prompt-history tail mutex poisoned") = validated_tail;
+        Ok(entries)
     }
 
     pub(crate) fn append(&self, text: &str) -> io::Result<()> {
@@ -59,13 +120,13 @@ impl PromptHistoryStore {
         if text.is_empty() {
             return Ok(());
         }
-        append_prompt_history(path, text)
+        append_prompt_history(path, text, &self.validated_tail)
     }
 }
 
-fn load_prompt_history(path: &Path) -> io::Result<Vec<String>> {
+fn load_prompt_history(path: &Path) -> io::Result<(Vec<String>, Option<ValidatedTail>)> {
     let Some(parent) = path.parent() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     fs::create_dir_all(parent)?;
     let lock_file = open_lock_file(parent)?;
@@ -78,10 +139,12 @@ fn load_prompt_history(path: &Path) -> io::Result<Vec<String>> {
     }
 }
 
-fn load_prompt_history_locked(path: &Path) -> io::Result<Vec<String>> {
+fn load_prompt_history_locked(path: &Path) -> io::Result<(Vec<String>, Option<ValidatedTail>)> {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None));
+        }
         Err(error) => return Err(error),
     };
     if MAX_HISTORY_FILE_BYTES < file.metadata()?.len() {
@@ -91,9 +154,10 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<Vec<String>> {
             max_file_bytes = MAX_HISTORY_FILE_BYTES,
             "ignoring oversized prompt-history file"
         );
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let mut entries = VecDeque::new();
+    let mut valid_len = 0_u64;
     loop {
         let mut length_bytes = [0_u8; 8];
         match file.read_exact(&mut length_bytes) {
@@ -121,7 +185,9 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<Vec<String>> {
         }
         let mut record_bytes = vec![0_u8; record_length as usize];
         match file.read_exact(&mut record_bytes) {
-            Ok(()) => {}
+            Ok(()) => {
+                valid_len = valid_len.saturating_add(8).saturating_add(record_length);
+            }
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                 tracing::warn!(
                     target: "tau_cli::prompt_history",
@@ -163,30 +229,65 @@ fn load_prompt_history_locked(path: &Path) -> io::Result<Vec<String>> {
         }
         entries.push_back(record.text);
     }
-    Ok(entries.into_iter().collect())
+    let validated_tail = ValidatedTail::capture_at(&mut file, valid_len)?;
+    Ok((entries.into_iter().collect(), Some(validated_tail)))
 }
 
-fn append_prompt_history(path: &Path, text: &str) -> io::Result<()> {
+fn append_prompt_history(
+    path: &Path,
+    text: &str,
+    validated_tail: &Mutex<Option<ValidatedTail>>,
+) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
     fs::create_dir_all(parent)?;
     let lock_file = open_lock_file(parent)?;
     FileExt::lock_exclusive(&lock_file)?;
-    let result = append_prompt_history_locked(path, text);
+    let previous_tail = validated_tail
+        .lock()
+        .expect("prompt-history tail mutex poisoned")
+        .clone();
+    let result = append_prompt_history_locked_with_tail(path, text, previous_tail.as_ref());
+    let mut cached_tail = validated_tail
+        .lock()
+        .expect("prompt-history tail mutex poisoned");
+    match &result {
+        Ok(new_tail) => *cached_tail = Some(new_tail.clone()),
+        Err(_) => *cached_tail = None,
+    }
     let unlock_result = FileExt::unlock(&lock_file);
-    result.and(unlock_result)
+    result.map(|_| ()).and(unlock_result)
 }
 
-fn append_prompt_history_locked(path: &Path, text: &str) -> io::Result<()> {
-    append_prompt_history_locked_with_limit(path, text, MAX_HISTORY_FILE_BYTES)
-}
-
+#[cfg(test)]
 fn append_prompt_history_locked_with_limit(
     path: &Path,
     text: &str,
     max_file_bytes: u64,
-) -> io::Result<()> {
+) -> io::Result<ValidatedTail> {
+    append_prompt_history_locked_with_tail_and_limit(path, text, None, max_file_bytes)
+}
+
+fn append_prompt_history_locked_with_tail(
+    path: &Path,
+    text: &str,
+    validated_tail: Option<&ValidatedTail>,
+) -> io::Result<ValidatedTail> {
+    append_prompt_history_locked_with_tail_and_limit(
+        path,
+        text,
+        validated_tail,
+        MAX_HISTORY_FILE_BYTES,
+    )
+}
+
+fn append_prompt_history_locked_with_tail_and_limit(
+    path: &Path,
+    text: &str,
+    validated_tail: Option<&ValidatedTail>,
+    max_file_bytes: u64,
+) -> io::Result<ValidatedTail> {
     let record = PromptHistoryRecord {
         version: PROMPT_HISTORY_VERSION,
         recorded_at_micros: UnixMicros::now().get(),
@@ -222,8 +323,16 @@ fn append_prompt_history_locked_with_limit(
         .write(true)
         .truncate(false)
         .open(path)?;
-    truncate_corrupt_prompt_history_tail_with_limit(path, &mut file, max_file_bytes)?;
-    let current_len = file.metadata()?.len();
+    let validation_start = validated_tail
+        .filter(|tail| tail.matches(&mut file).unwrap_or(false))
+        .map_or(0, |tail| tail.end_offset);
+    let validation = truncate_corrupt_prompt_history_tail_from_with_limit(
+        path,
+        &mut file,
+        max_file_bytes,
+        validation_start,
+    )?;
+    let current_len = validation.end_offset;
     if max_file_bytes.saturating_sub(current_len) < framed_len {
         tracing::warn!(
             target: "tau_cli::prompt_history",
@@ -238,15 +347,81 @@ fn append_prompt_history_locked_with_limit(
     file.seek(io::SeekFrom::End(0))?;
     file.write_all(&entry)?;
     file.flush()?;
-    file.sync_data()
+    file.sync_data()?;
+    let tail = ValidatedTail::capture(&mut file)?;
+    #[cfg(test)]
+    let tail = {
+        let mut tail = tail;
+        tail.records_scanned = validation.records_scanned;
+        tail
+    };
+    Ok(tail)
 }
 
+impl ValidatedTail {
+    fn matches(&self, file: &mut File) -> io::Result<bool> {
+        let metadata = file.metadata()?;
+        if metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || metadata.len() < self.end_offset
+            || self.end_offset < self.boundary.len() as u64
+        {
+            return Ok(false);
+        }
+        let boundary_start = self.end_offset - self.boundary.len() as u64;
+        file.seek(io::SeekFrom::Start(boundary_start))?;
+        let mut boundary = vec![0_u8; self.boundary.len()];
+        file.read_exact(&mut boundary)?;
+        Ok(boundary == self.boundary)
+    }
+
+    fn capture(file: &mut File) -> io::Result<Self> {
+        let end_offset = file.seek(io::SeekFrom::End(0))?;
+        Self::capture_at(file, end_offset)
+    }
+
+    fn capture_at(file: &mut File, end_offset: u64) -> io::Result<Self> {
+        const BOUNDARY_BYTES: u64 = 64;
+
+        let metadata = file.metadata()?;
+        if metadata.len() < end_offset {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "validated prompt-history offset exceeds file length",
+            ));
+        }
+        let boundary_start = end_offset.saturating_sub(BOUNDARY_BYTES);
+        file.seek(io::SeekFrom::Start(boundary_start))?;
+        let mut boundary = vec![0_u8; (end_offset - boundary_start) as usize];
+        file.read_exact(&mut boundary)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            end_offset,
+            boundary,
+            #[cfg(test)]
+            records_scanned: 0,
+        })
+    }
+}
+
+#[cfg(test)]
 fn truncate_corrupt_prompt_history_tail_with_limit(
     path: &Path,
     file: &mut File,
     max_file_bytes: u64,
-) -> io::Result<()> {
-    if max_file_bytes < file.metadata()?.len() {
+) -> io::Result<TailValidation> {
+    truncate_corrupt_prompt_history_tail_from_with_limit(path, file, max_file_bytes, 0)
+}
+
+fn truncate_corrupt_prompt_history_tail_from_with_limit(
+    path: &Path,
+    file: &mut File,
+    max_file_bytes: u64,
+    validation_start: u64,
+) -> io::Result<TailValidation> {
+    let file_len = file.metadata()?.len();
+    if max_file_bytes < file_len {
         tracing::warn!(
             target: "tau_cli::prompt_history",
             path = %path.display(),
@@ -254,10 +429,21 @@ fn truncate_corrupt_prompt_history_tail_with_limit(
             "truncating oversized prompt-history file before appending"
         );
         file.set_len(0)?;
+        return Ok(TailValidation {
+            end_offset: 0,
+            records_scanned: 0,
+        });
     }
 
-    file.seek(io::SeekFrom::Start(0))?;
-    let mut valid_len = 0_u64;
+    let mut valid_len = validation_start.min(file_len);
+    file.seek(io::SeekFrom::Start(valid_len))?;
+    if valid_len == file_len {
+        return Ok(TailValidation {
+            end_offset: valid_len,
+            records_scanned: 0,
+        });
+    }
+    let mut records_scanned = 0_usize;
     loop {
         let record_start = valid_len;
         let mut length_bytes = [0_u8; 8];
@@ -265,7 +451,10 @@ fn truncate_corrupt_prompt_history_tail_with_limit(
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                 truncate_prompt_history_file(path, file, record_start, "partial length header")?;
-                return Ok(());
+                return Ok(TailValidation {
+                    end_offset: record_start,
+                    records_scanned,
+                });
             }
             Err(error) => return Err(error),
         }
@@ -273,7 +462,10 @@ fn truncate_corrupt_prompt_history_tail_with_limit(
         let record_length = u64::from_le_bytes(length_bytes);
         if MAX_RECORD_BYTES < record_length {
             truncate_prompt_history_file(path, file, record_start, "oversized record")?;
-            return Ok(());
+            return Ok(TailValidation {
+                end_offset: record_start,
+                records_scanned,
+            });
         }
 
         let record_end = record_start
@@ -288,21 +480,30 @@ fn truncate_corrupt_prompt_history_tail_with_limit(
         match file.seek(io::SeekFrom::Start(record_end)) {
             Ok(_) => {
                 valid_len = record_end;
+                records_scanned = records_scanned.saturating_add(1);
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                 truncate_prompt_history_file(path, file, record_start, "invalid record offset")?;
-                return Ok(());
+                return Ok(TailValidation {
+                    end_offset: record_start,
+                    records_scanned,
+                });
             }
             Err(error) => return Err(error),
         }
 
-        let file_len = file.metadata()?.len();
         if file_len < record_end {
             truncate_prompt_history_file(path, file, record_start, "partial record payload")?;
-            return Ok(());
+            return Ok(TailValidation {
+                end_offset: record_start,
+                records_scanned,
+            });
         }
         if file_len == record_end {
-            return Ok(());
+            return Ok(TailValidation {
+                end_offset: record_end,
+                records_scanned,
+            });
         }
     }
 }

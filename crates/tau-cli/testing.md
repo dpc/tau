@@ -18,7 +18,11 @@ suggestions while stale candidates disappear.
 
 Prompt-history tests cover ordered length-prefixed round trips, malformed or
 unsupported records, torn or oversized tails, and command-layer redaction and
-routing. They do not require interactive terminal E2E checks.
+routing. Witness tests must separately prove zero-prefix warm validation,
+delta-only validation after a cooperative external append, and full bounded
+fallback after replacement, same-inode truncation, or boundary mismatch. They
+also exercise the production store append rather than only the scanner helper.
+They do not require interactive terminal E2E checks.
 
 Developer prompt and tool-preview startup regressions execute the bundled `tau`
 binary with isolated home and working directories. They assert observable rendered
