@@ -63,6 +63,15 @@ the same semantic event/parent invariants as live append. Corrupt, truncated,
 spliced, or semantically invalid records fail with a typed store error rather
 than being skipped or partially folded.
 
+Durable agent, ordinary-session, and session-restore appends capture the exact
+journal EOF before writing a length-prefixed CBOR frame. Prefix, payload, or
+commit-sync failure rolls the journal back to that EOF and durably syncs the
+truncation before returning the original append error. A live store that cannot
+complete either rollback operation rejects later appends to that journal without
+touching it. Sequence, folded state, agent checkpoints, and session metadata
+advance only after the frame commit succeeds; strict replay never salvages a
+valid suffix after a partial frame.
+
 Durable sequence numbers count only records written to that stream. In a
 durable session, memory-only ephemeral-agent membership is retained in a
 separately sequenced process-local overlay. Late same-daemon replay validates

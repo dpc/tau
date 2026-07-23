@@ -41,6 +41,18 @@ stale or invalid checkpoints are repaired only under nonblocking byte, record,
 and time budgets. Metadata-only, empty, corrupt, or otherwise unvalidated
 artifacts reserve ids but cannot receive routed facts.
 
+Agent `events.cbor` and session `events.cbor`/`restore-events.cbor` use
+length-prefixed CBOR frames. Prefix, payload, or frame-data-sync failure triggers
+truncation to the exact pre-append EOF and a rollback data sync before the caller
+receives the original append error. Failure of either rollback operation poisons
+only that journal path in the live store; later appends reject it before opening
+the journal. Folded state, sequences, agent checkpoints, and session metadata
+advance only after frame data sync succeeds. Poison is process-local: a crash
+during rollback can leave a partial frame, and restart remains strict rather than
+salvaging a valid-looking suffix. Re-check byte-boundary, commit-sync,
+rollback-failure, retry-sequence, restore-journal, and suffix regressions whenever
+framed I/O changes.
+
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can
 acquire the agent lock. Repair never rewrites or salvages a journal, and failure

@@ -1,4 +1,5 @@
 use super::*;
+use crate::record_log::AppendFault;
 
 fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFactsBudget {
     AgentCreationFactsBudget {
@@ -242,4 +243,215 @@ fn truncated_creation_records_consume_aggregate_budget() {
             assert_eq!(facts, Err(AgentCreationFactsBudgetExceeded));
         }
     }
+}
+
+/// A durable agent append failure rolls back the frame, leaves its checkpoint
+/// and folded sequence unchanged, and reuses that sequence on retry.
+#[test]
+fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            UnixMicros::new(41),
+        )
+        .expect("baseline appends");
+    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    let checkpoint_path = store.agent_dir(agent_id.as_str()).join("meta.json");
+    let journal_before = fs::read(&journal_path).expect("baseline journal");
+    let checkpoint_before = fs::read(&checkpoint_path).expect("baseline checkpoint");
+    store.framed_appends.inject_fault(
+        &journal_path,
+        AppendFault {
+            fail_write_at: Some(3),
+            ..AppendFault::default()
+        },
+    );
+
+    let error = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "failed"),
+            UnixMicros::new(42),
+        )
+        .expect_err("injected append fails");
+
+    assert!(matches!(error, AgentStoreError::Write { .. }));
+    assert_eq!(fs::read(&journal_path).expect("journal"), journal_before);
+    assert_eq!(
+        fs::read(&checkpoint_path).expect("checkpoint"),
+        checkpoint_before
+    );
+    assert_eq!(
+        store
+            .load_agent(agent_id.as_str())
+            .expect("agent remains loadable")
+            .expect("agent remains loaded")
+            .display_name(),
+        None
+    );
+    let retry = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "retry"),
+            UnixMicros::new(43),
+        )
+        .expect("retry appends");
+    assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
+    assert_eq!(
+        store
+            .load_agent(agent_id.as_str())
+            .expect("agent remains loadable")
+            .expect("agent remains loaded")
+            .display_name(),
+        Some("retry")
+    );
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("valid journal")
+            .len(),
+        2
+    );
+}
+
+/// An uncertain agent-journal rollback poisons only that live stream and later
+/// appends reject it without changing its bytes.
+#[test]
+fn rollback_failure_poisons_agent_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            UnixMicros::new(41),
+        )
+        .expect("baseline appends");
+    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    store.framed_appends.inject_fault(
+        &journal_path,
+        AppendFault {
+            fail_write_at: Some(3),
+            fail_truncate: true,
+            ..AppendFault::default()
+        },
+    );
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "failed"),
+            UnixMicros::new(42),
+        )
+        .expect_err("injected append fails");
+    let bytes_after_failure = fs::read(&journal_path).expect("failed journal");
+
+    let poisoned = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "rejected"),
+            UnixMicros::new(43),
+        )
+        .expect_err("poisoned journal rejects append");
+    let other_agent_id = AgentId::parse("agent-2").expect("agent id");
+    let other = store
+        .append_agent_event_at(
+            other_agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&other_agent_id),
+            UnixMicros::new(44),
+        )
+        .expect("other journal remains writable");
+
+    assert!(
+        poisoned
+            .to_string()
+            .contains("append disabled after an incomplete durable rollback")
+    );
+    assert_eq!(other.seq, PersistedAgentEventSeq::new(0));
+    assert_eq!(
+        fs::read(&journal_path).expect("poisoned journal"),
+        bytes_after_failure
+    );
+}
+
+/// Strict replay rejects a partial frame even when a complete valid frame
+/// follows it, preventing suffix-based salvage.
+#[test]
+fn strict_replay_rejects_partial_frame_before_valid_suffix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let journal_path;
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::InheritHead,
+                started_event(&agent_id),
+                UnixMicros::new(41),
+            )
+            .expect("baseline appends");
+        journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    }
+    let record = PersistedAgentEvent {
+        seq: PersistedAgentEventSeq::new(1),
+        source: None,
+        event: display_name_event(&agent_id, "suffix"),
+        parent: AgentEventParent::InheritHead,
+        recorded_at: UnixMicros::new(42),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&record, &mut encoded).expect("encode suffix");
+    let mut suffix = vec![1, 2, 3];
+    suffix.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+    suffix.extend_from_slice(&encoded);
+    OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open journal")
+        .write_all(&suffix)
+        .expect("append malformed suffix");
+
+    let error = AgentStore::open(temp.path()).expect_err("strict replay rejects torn frame");
+
+    assert!(matches!(error, AgentStoreError::Read { .. }));
+}
+
+/// Builds the immutable first event used by durable append tests.
+fn started_event(agent_id: &AgentId) -> Event {
+    Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id.clone(),
+        parent_agent: None,
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    })
+}
+
+/// Builds one sequence-advancing event used by durable append tests.
+fn display_name_event(agent_id: &AgentId, display_name: &str) -> Event {
+    Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+        agent_id: agent_id.clone(),
+        display_name: display_name.to_owned(),
+    })
 }

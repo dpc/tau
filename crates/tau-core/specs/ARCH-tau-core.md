@@ -7,6 +7,16 @@ memory-only membership does not consume that cursor. Both durable journal
 writers reject encoded records larger than the shared 64 MiB reader allocation
 limit before opening or mutating the journal.
 
+Agent journals and both ordinary and restore session journals use the same
+failure-atomic frame append. A writer captures the exact pre-append EOF, commits
+the length prefix and CBOR payload with a data sync, and advances folded state,
+sequence, checkpoint, or session metadata only after that commit. A prefix,
+payload, or commit-sync failure truncates to the captured EOF and durably syncs
+the rollback. If either rollback operation fails, the live store poisons that
+journal path and rejects later appends without reopening it. Verification
+ownership is documented in
+[Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
+
 A durable session keeps ephemeral-agent loads and matching unloads in a separate
 process-local, independently sequenced overlay. Late same-daemon replay first
 validates and folds the durable snapshot, then validates and composes the

@@ -136,6 +136,15 @@ test -n "$scratch_root" && test "$scratch_root" != / &&
   rmdir -- "$scratch_parent"
 ```
 
+## Durable journal append tests
+
+Keep failure-atomic journal tests separated by ownership. `tau-core`'s
+`record_log` tests exhaust length-prefix and payload offsets, commit sync, and
+both rollback operations. Agent and session store tests prove derived-state,
+metadata/checkpoint, sequence-retry, restore-stream, and per-path poison
+behavior. Replay tests append a valid frame after a partial frame to preserve the
+strict no-salvage contract. Use deterministic injected I/O failures without
+sleeps or timing assumptions.
 
 ## Provider response streaming tests
 

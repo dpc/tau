@@ -27,7 +27,7 @@ use crate::agent_checkpoint::{
     AgentCheckpoint, AgentSummary, CommittedJournalPosition, journal_position, read_checkpoint,
     read_journal_bound_checkpoint, write_checkpoint_atomic,
 };
-use crate::record_log::MAX_RECORD_BYTES;
+use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
     PersistedAgentEventSeq,
@@ -349,11 +349,19 @@ pub struct AgentAppendOutcome {
 /// on first durable write so read-only consumers (e.g. inspection commands)
 /// don't contend with a running daemon.
 ///
+/// Durable frame failures return their original I/O error after an exact-EOF,
+/// data-synced rollback. If that rollback is uncertain, the store poisons only
+/// that journal and rejects later appends before reopening it. Trees,
+/// sequences, summaries, and checkpoints advance only after the frame data sync
+/// succeeds.
+///
 /// Durable replay and memory-only parity follow
 /// `DECISION-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,
+    /// Failure-atomic append and per-journal poison state.
+    framed_appends: FramedAppendState,
     agents: HashMap<AgentId, AgentTree>,
     /// Agents whose validated stream begins with their immutable creation fact.
     created_agents: HashSet<AgentId>,
@@ -426,6 +434,7 @@ impl AgentStore {
 
         Ok(Self {
             agents_dir,
+            framed_appends: FramedAppendState::default(),
             agents: HashMap::new(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
@@ -795,6 +804,12 @@ impl AgentStore {
     /// Convenience wrapper around
     /// [`AgentStore::append_agent_event_at`] that uses the
     /// agent tree's current head as the fold parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentStoreError`] for invalid ids or events, lock and file
+    /// failures, and poisoned durable journals. A frame I/O failure returns its
+    /// original error after successful rollback.
     pub fn append_agent_event(
         &mut self,
         agent_id: &str,
@@ -816,6 +831,13 @@ impl AgentStore {
     /// publishing on a conversation's behalf, so cross-conversation
     /// events don't have to bounce a shared `head` cursor through
     /// `UiNavigateTree`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentStoreError`] for invalid ids, events, parents, locks,
+    /// durable I/O, or a journal poisoned by an uncertain prior rollback.
+    /// Durable state advances only after the complete frame and its data
+    /// sync succeed.
     pub fn append_agent_event_at(
         &mut self,
         agent_id: &str,
@@ -826,7 +848,14 @@ impl AgentStore {
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
         let sid = parse_agent_id_for_store(agent_id)?;
         let persistence = self.agent_persistence(agent_id);
+        let journal_path = self.agent_dir(agent_id).join("events.cbor");
         if persistence.is_durable() {
+            self.framed_appends
+                .ensure_appendable(&journal_path)
+                .map_err(|source| AgentStoreError::Write {
+                    path: journal_path.clone(),
+                    source,
+                })?;
             self.ensure_locked(agent_id)?;
         }
         self.load_agent_if_needed(agent_id)?;
@@ -866,7 +895,11 @@ impl AgentStore {
             recorded_at,
         };
         let committed_position = if persistence.is_durable() {
-            Some(append_cbor_record(&agent_dir.join("events.cbor"), &record)?)
+            Some(append_cbor_record(
+                &mut self.framed_appends,
+                &journal_path,
+                &record,
+            )?)
         } else {
             self.ephemeral_events
                 .entry(sid.clone())
@@ -918,7 +951,9 @@ impl AgentStore {
     /// Returns [`AgentStoreError`] when `event` is not a `message.*` fact, the
     /// target agent id is invalid, the fact's target differs from the selected
     /// journal owner, or the selected durable or memory-only stream cannot
-    /// append the record.
+    /// append the record. A durable frame failure returns its original error
+    /// after rollback; rollback uncertainty poisons only that journal
+    /// before any later append can reopen it.
     pub fn append_agent_message_fact_at(
         &mut self,
         agent_id: &str,
@@ -940,7 +975,14 @@ impl AgentStore {
             });
         }
         let persistence = self.agent_persistence(agent_id);
+        let journal_path = self.agent_dir(agent_id).join("events.cbor");
         if persistence.is_durable() {
+            self.framed_appends
+                .ensure_appendable(&journal_path)
+                .map_err(|source| AgentStoreError::Write {
+                    path: journal_path.clone(),
+                    source,
+                })?;
             self.ensure_locked(agent_id)?;
         }
         self.load_agent_if_needed(agent_id)?;
@@ -966,7 +1008,11 @@ impl AgentStore {
             recorded_at,
         };
         let committed_position = if persistence.is_durable() {
-            Some(append_cbor_record(&agent_dir.join("events.cbor"), &record)?)
+            Some(append_cbor_record(
+                &mut self.framed_appends,
+                &journal_path,
+                &record,
+            )?)
         } else {
             self.ephemeral_events
                 .entry(aid.clone())
@@ -1323,9 +1369,16 @@ fn preview_text(text: &str, max: usize) -> String {
 }
 
 fn append_cbor_record<T: Serialize>(
+    framed_appends: &mut FramedAppendState,
     path: &Path,
     record: &T,
 ) -> Result<CommittedJournalPosition, AgentStoreError> {
+    framed_appends
+        .ensure_appendable(path)
+        .map_err(|source| AgentStoreError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let newly_created = !path.exists();
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| AgentStoreError::Encode {
@@ -1363,32 +1416,17 @@ fn append_cbor_record<T: Serialize>(
     if committed_boundary.len() > 64 {
         committed_boundary.drain(..committed_boundary.len() - 64);
     }
-    file.write_all(&record_length.to_le_bytes())
+    let appended = framed_appends
+        .append(path, &mut file, &encoded)
         .map_err(|source| AgentStoreError::Write {
             path: path.to_path_buf(),
             source,
         })?;
-    file.write_all(&encoded)
-        .map_err(|source| AgentStoreError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    // Durability: sync_data() guards against the failure mode where
-    // the kernel acknowledged the write (length + payload bytes
-    // visible) but a crash before flush leaves a torn record on
-    // disk. read_cbor_records would then either error or — pre-bound
-    // — try to allocate a garbage length on the next read.
-    file.sync_data().map_err(|source| AgentStoreError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    debug_assert_eq!(appended.start_offset, start.end_offset);
     Ok(CommittedJournalPosition {
         device: start.device,
         inode: start.inode,
-        end_offset: start
-            .end_offset
-            .saturating_add(8)
-            .saturating_add(record_length),
+        end_offset: appended.end_offset,
         boundary: committed_boundary,
     })
 }

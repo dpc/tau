@@ -6,6 +6,9 @@
 //! memory only. Agent transcripts live in [`crate::AgentStore`] under the
 //! global agents directory in both modes.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -18,7 +21,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ConnectionId, Event, SessionId, UnixMicros};
 
-use crate::record_log::MAX_RECORD_BYTES;
+use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES};
 use crate::session::SessionMeta;
 
 /// Persistence policy for session events and sidecar state.
@@ -365,11 +368,19 @@ impl SessionMembership {
 /// logs, metadata, or locks. Both ordinary session events and execution/restore
 /// facts remain available for same-daemon replay.
 ///
+/// Durable frame failures return their original I/O error after an exact-EOF,
+/// data-synced rollback. If rollback is uncertain, the store poisons only that
+/// ordinary or restore journal and rejects later appends before reopening it.
+/// Sequences, membership, and session metadata advance only after frame data
+/// sync.
+///
 /// Durable replay and memory-only parity follow
 /// `DECISION-tau-core-semantic-store-durability`.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
+    /// Failure-atomic append and per-journal poison state.
+    framed_appends: FramedAppendState,
     sessions: HashMap<SessionId, SessionMembership>,
     /// Ordinary replay records retained by a wholly ephemeral session.
     ephemeral_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
@@ -420,6 +431,7 @@ impl SessionStore {
         })?;
         Ok(Self {
             sessions_dir,
+            framed_appends: FramedAppendState::default(),
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
@@ -437,6 +449,7 @@ impl SessionStore {
     pub fn open_ephemeral(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         Ok(Self {
             sessions_dir: sessions_dir.into(),
+            framed_appends: FramedAppendState::default(),
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
@@ -524,6 +537,12 @@ impl SessionStore {
     }
 
     /// Appends one session membership or fallback event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] for invalid events or ids, lock and
+    /// durable I/O failures, or an ordinary journal poisoned by uncertain
+    /// rollback.
     pub fn append_session_event(
         &mut self,
         session_id: &str,
@@ -534,6 +553,11 @@ impl SessionStore {
     }
 
     /// Like [`Self::append_session_event`] with an explicit timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::append_session_event`]. A durable
+    /// frame failure returns its original error after successful rollback.
     pub fn append_session_event_at(
         &mut self,
         session_id: &str,
@@ -563,7 +587,9 @@ impl SessionStore {
     /// Returns [`SessionStoreError`] for invalid session facts or identifiers,
     /// non-membership/durable-agent facts requested as ephemeral in a durable
     /// store, unmatched overlay unloads, lock failures, or durable I/O
-    /// failures.
+    /// failures. Rollback uncertainty poisons only the selected durable
+    /// journal; sequences, membership, and metadata advance only after
+    /// frame data sync.
     pub fn append_session_event_at_with_persistence(
         &mut self,
         session_id: &str,
@@ -580,12 +606,19 @@ impl SessionStore {
         if retain_membership_overlay {
             validate_ephemeral_membership_overlay_event(session_id, &event)?;
         }
+        let session_dir = self.session_dir(&sid);
+        let journal_path = session_dir.join("events.cbor");
         if write_to_disk {
+            self.framed_appends
+                .ensure_appendable(&journal_path)
+                .map_err(|source| SessionStoreError::Write {
+                    path: journal_path.clone(),
+                    source,
+                })?;
             let _ = self.lock_and_load_session(session_id)?;
         } else {
             self.load_session_if_needed(session_id)?;
         }
-        let session_dir = self.session_dir(&sid);
         if write_to_disk {
             fs::create_dir_all(&session_dir).map_err(|source| {
                 SessionStoreError::CreateParentDirectory {
@@ -623,7 +656,7 @@ impl SessionStore {
             validate_ephemeral_membership_overlay(session_id, &candidate)?;
         }
         if write_to_disk {
-            append_cbor_record(&session_dir.join("events.cbor"), &record)?;
+            append_cbor_record(&mut self.framed_appends, &journal_path, &record)?;
         } else if retain_in_memory {
             self.ephemeral_events
                 .entry(sid.clone())
@@ -702,6 +735,13 @@ impl SessionStore {
     }
 
     /// Appends one session-scoped execution/restore fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] for invalid restore facts or session ids,
+    /// strict replay, lock, and durable I/O failures, or a restore journal
+    /// poisoned by uncertain rollback. A frame failure returns its original
+    /// error after successful rollback.
     pub fn append_session_restore_event_at(
         &mut self,
         session_id: &str,
@@ -722,14 +762,21 @@ impl SessionStore {
             });
             return Ok(());
         }
-        let _ = self.lock_and_load_session(session_id)?;
         let path = self.session_dir(&sid).join("restore-events.cbor");
+        self.framed_appends
+            .ensure_appendable(&path)
+            .map_err(|source| SessionStoreError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        let _ = self.lock_and_load_session(session_id)?;
         let events = load_session_events(&path)?;
         for record in &events {
             validate_restore_event(&record.event)?;
         }
         let seq = PersistedSessionEventSeq::new(events.len() as u64);
         append_cbor_record(
+            &mut self.framed_appends,
             &path,
             &PersistedSessionEvent {
                 seq,
@@ -1052,7 +1099,17 @@ fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     write_meta(path, &meta)
 }
 
-fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), SessionStoreError> {
+fn append_cbor_record<T: Serialize>(
+    framed_appends: &mut FramedAppendState,
+    path: &Path,
+    record: &T,
+) -> Result<(), SessionStoreError> {
+    framed_appends
+        .ensure_appendable(path)
+        .map_err(|source| SessionStoreError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| SessionStoreError::Encode {
         path: path.to_path_buf(),
@@ -1068,20 +1125,13 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Sessi
             path: path.to_path_buf(),
             source,
         })?;
-    file.write_all(&record_length.to_le_bytes())
+    framed_appends
+        .append(path, &mut file, &encoded)
+        .map(|_| ())
         .map_err(|source| SessionStoreError::Write {
             path: path.to_path_buf(),
             source,
-        })?;
-    file.write_all(&encoded)
-        .map_err(|source| SessionStoreError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.sync_data().map_err(|source| SessionStoreError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+        })
 }
 
 fn validate_record_length(path: &Path, record_length: u64) -> Result<(), SessionStoreError> {
