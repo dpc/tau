@@ -1,5 +1,19 @@
 # SPEC-tau-ext-xmpp-muc-lifecycle: XMPP MUC lifecycle
 
+## Status
+
+This record describes current MUC behavior. The confirmed but unimplemented
+[SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
+will place registration and remote cleanup in one FIFO, clamp registration to
+the whole-intent deadline, and revoke local routing before best-effort cleanup.
+Implementation is not authorized by that prospective record.
+
+## Record justification
+
+MUC lifecycle spans configuration and room rendering, pending and active route
+state, stanza handling and authorization, registration completion and rollback,
+and shutdown cleanup. No one area defines safe route installation and removal.
+
 Registration sends join presence and retains the exact room/nick as pending and
 non-routable. It waits for matching self-presence or a presence error. Status 201 for a
 newly created room requires successful XEP-0045 instant-room owner config. Only after

@@ -1,5 +1,20 @@
 # SPEC-tau-ext-xmpp-readiness-waits: Bounded readiness waits
 
+## Status
+
+This record describes the current implementation. The confirmed but
+unimplemented
+[SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
+will move readiness off the serialized reader and clamp this 30-second cap to
+one absolute 60-second reservation-to-terminal deadline. Implementation is not
+authorized by that prospective record.
+
+## Record justification
+
+Readiness behavior spans tool handlers, bridge command/response waits, and the
+worker's online and reconnect state. These areas jointly determine whether a
+command may proceed, time out, or require a fresh authenticated `Online` event.
+
 `xmpp_register(enabled: true)` starts the bridge and waits up to 30 seconds for the
 worker to observe an authenticated XMPP `Online` event before creating the conversation.
 `xmpp_send` waits up to 30 seconds only when the bridge has already been started; it

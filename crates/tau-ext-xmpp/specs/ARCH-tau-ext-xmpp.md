@@ -6,6 +6,14 @@ Fail-closed admission and readiness behavior is specified by
 and [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md).
 MUC join, authorization, rollback, and cleanup behavior is
 [SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).
+The confirmed prospective tool-delivery lifecycle is
+[DECISION-tau-ext-xmpp-tool-delivery-lifecycle](DECISION-tau-ext-xmpp-tool-delivery-lifecycle.md),
+with its distributed contract in
+[SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md).
+It is not implemented or authorized for implementation; this record describes
+the current architecture.
+Current and prospective security and reliability boundaries are documented in
+[the XMPP security notes](../SECURITY.md).
 
 `std-xmpp` is a disabled-by-default personal XMPP text bridge. It exposes only
 `xmpp_register` and `xmpp_send`; the model never supplies arbitrary destination

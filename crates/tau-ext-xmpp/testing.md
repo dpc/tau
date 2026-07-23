@@ -46,6 +46,41 @@ Automated extension tests own bridge-local admission and report/result ordering.
 Harness tests own interception, canonical durability, replay, projection, and
 wake.
 
+## Prospective lifecycle acceptance
+
+The confirmed
+[XMPP tool-delivery lifecycle](specs/SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
+is not implemented or authorized for implementation, and the coverage below is
+not present. Its implementation must use a fake monotonic clock, explicitly
+stepped executor, fake bridge/transport, and controllable output, without
+wall-clock sleeps. Deterministic coverage must establish:
+
+- blocked readiness and stanza waits do not stop the reader from promptly
+  processing unload, session shutdown, or `Disconnect`;
+- exactly 32 live records are admitted and the next is rejected before bridge
+  startup or remote I/O;
+- queue time consumes the 60-second deadline, every inner cap is clamped, and
+  the deadline does not reset across a 33-part maximum-size send;
+- cross-agent register/send/cleanup order is strict FIFO, multipart sends do not
+  interleave, revocation is immediate, and cleanup joins the tail;
+- stale registration completion cannot install or route after configuration,
+  session, re-registration, unload, or output-loss races;
+- between-part and handed-off-stanza revocation, stanza and whole-intent
+  timeouts, and worker failures produce exact terminal strings, bounded
+  residual-copy classifications, no later parts, and no sent/success report;
+- queue-full, spawn failure, worker death before and after handoff, queued drain,
+  and forced races produce exactly one local terminal disposition;
+- explicit unregister succeeds despite cleanup failure, timeout, worker loss, or
+  full queue, without restoring authority;
+- output failure before remote I/O, between report and result admission, and
+  after detached admission preserves the documented publication boundary;
+- inbound stanzas stop routing immediately after local revocation even if remote
+  conversation state remains.
+
+Existing readiness, direct/MUC registration, 4096-byte UTF-8 multipart,
+all-parts-success, report-before-result, disconnect, and aggregate cleanup-budget
+coverage remains required.
+
 If the MUC service hides real JIDs, keep `trust_muc_membership: false` for the
 default smoke test and verify replies are rejected. Only repeat with
 `trust_muc_membership: true` when the server-side room membership list is the
