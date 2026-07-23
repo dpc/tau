@@ -4078,11 +4078,10 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
     h.shutdown().expect("shutdown");
 }
 
+/// Disconnect cleanup unregisters the provider first, commits every in-flight
+/// terminal as one batch, and only then drains queued work.
 #[test]
 fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
-    // Regression: disconnect cleanup must unregister the provider before it
-    // synthesizes terminal errors, and every in-flight call for that provider
-    // must be closed exactly once.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -4150,8 +4149,64 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         vec!["running-call".to_owned(), "queued-call".to_owned()]
     );
     assert_eq!(h.tool_turn.pending_len(), 0);
+    h.tool_turn.push(
+        cid.clone(),
+        AgentToolCall {
+            id: "queued-after-disconnect".into(),
+            name: ToolName::new("dead_slow"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        tau_proto::BackgroundSupport::Never,
+    );
+    let _interceptor = connect_test_tool(&mut h, "disconnect-terminal-interceptor");
+    h.handle_extension_event(
+        "disconnect-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_ERROR,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register disconnect terminal interceptor");
 
     h.handle_disconnect("conn-dead-tool");
+
+    assert_eq!(h.tool_turn.pending_len(), 1);
+    h.handle_extension_event(
+        "disconnect-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit first disconnect terminal");
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        1,
+        "first foreground commit must not drain work before the batch completes"
+    );
+    h.handle_extension_event(
+        "disconnect-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit second disconnect terminal");
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        0,
+        "queued work drains only after the full disconnect batch commits"
+    );
+    if h.pending_intercept.is_some() {
+        h.handle_extension_event(
+            "disconnect-terminal-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("commit queued-call rejection projection");
+    }
 
     assert_eq!(
         tool_invoke_call_ids(&tool_events),
@@ -4180,6 +4235,49 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     )));
 
     h.shutdown().expect("shutdown");
+}
+
+/// A synchronous terminal append fault during disconnect must discard the batch
+/// continuation without dispatching queued work to another live provider.
+#[test]
+fn disconnect_append_fault_does_not_drain_queued_work() {
+    let (_td, mut h) = setup_routed_test_tool_call("disconnect-fault", "owned_tool");
+    let cid = h.tool_agents["disconnect-fault"].clone();
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let live_events = connect_test_tool(&mut h, "conn-live-after-fault");
+    h.registry.register(
+        "conn-live-after-fault",
+        shared_test_tool_spec("live_after_fault"),
+    );
+    h.tool_turn.push(
+        cid,
+        AgentToolCall {
+            id: "queued-after-fault".into(),
+            name: ToolName::new("live_after_fault"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        tau_proto::BackgroundSupport::Never,
+    );
+
+    let journal = h
+        .state_dir
+        .join("agents")
+        .join(agent_id)
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.disconnect-fault-backup");
+    std::fs::rename(&journal, &backup).expect("park journal");
+    std::fs::create_dir(&journal).expect("block journal");
+    h.handle_disconnect("conn-owner");
+
+    assert!(h.semantic_storage_fault.is_some());
+    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert!(tool_invoke_call_ids(&live_events).is_empty());
+    assert!(h.disconnect_terminal_batch_pending.is_empty());
+    assert!(h.disconnect_terminal_batch_completed.is_empty());
+
+    std::fs::remove_dir(&journal).expect("remove journal blocker");
+    std::fs::rename(&backup, &journal).expect("restore journal");
 }
 
 /// Builds a final successful result fixture for dispatch and interception
@@ -4253,10 +4351,10 @@ fn ext_query(query_id: &str) -> StartAgentRequest {
     }
 }
 
-/// A post-accept creation failure must terminalize exactly once without
-/// exposing the failed identity or blocking the next accepted FIFO request.
+/// A physical post-accept creation failure terminalizes accepted requests
+/// without exposing identities and fail-stops later FIFO semantic work.
 #[test]
-fn accepted_start_failure_terminalizes_and_continues_fifo() {
+fn accepted_start_storage_failure_terminalizes_and_fail_stops_fifo() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = quiet_provider_harness(&state).expect("harness");
@@ -4334,22 +4432,30 @@ fn accepted_start_failure_terminalizes_and_continues_fifo() {
         event,
         Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
     )));
-    assert!(h.agent_routes.contains_key(&second_agent_id));
+    assert!(h.semantic_storage_fault.is_some());
+    assert!(!h.agent_routes.contains_key(&second_agent_id));
     let second_records = h
         .agent_store
         .agent_events(&second_agent_id)
         .expect("second agent records");
-    assert!(matches!(
-        second_records.first().map(|record| &record.event),
-        Some(Event::AgentStarted(started)) if started.agent_id.as_str() == second_agent_id
-    ));
-    assert!(h.store.session("s1").is_some_and(|membership| {
-        membership.contains_agent(&crate::parse_agent_id(&second_agent_id))
+    assert!(second_records.is_empty());
+    assert!(h.store.session("s1").is_none_or(|membership| {
+        !membership.contains_agent(&crate::parse_agent_id(&second_agent_id))
     }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::StartAgentResult(result)
+                    if result.query_id == "q-next" && result.error.is_some()
+            ))
+            .count(),
+        1
+    );
     assert!(events.iter().all(|event| !matches!(
         event,
-        Event::StartAgentResult(result)
-            if result.query_id == "q-next" && result.error.is_some()
+        Event::AgentStarted(started) if started.agent_id.as_str() == second_agent_id
     )));
     assert!(h.pending_start_agent_requests.is_empty());
 }
@@ -5061,7 +5167,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         )
     })
     .expect("foreground synthetic error");
-    let background_error_seq = event_log_position_after(&h, foreground_error_seq, |event| {
+    let background_error_seq = event_log_position(&h, |event| {
         matches!(
             event,
             Event::ToolBackgroundError(error)
@@ -5070,10 +5176,9 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
     })
     .expect("background synthetic error");
     let prompt_after_foreground_error_seq =
-        event_log_position_after(&h, foreground_error_seq, |event| {
-            matches!(event, Event::AgentPromptCreated(_))
-        })
-        .expect("post-disconnect follow-up prompt");
+        event_log_position(&h, |event| matches!(event, Event::AgentPromptCreated(_)))
+            .expect("post-disconnect follow-up prompt");
+    assert!(foreground_error_seq < prompt_after_foreground_error_seq);
     assert!(background_error_seq < prompt_after_foreground_error_seq);
 
     h.shutdown().expect("shutdown");
@@ -5717,6 +5822,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     h.tool_agents.insert(call_id.clone(), cid.clone());
     h.tool_turn
         .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cid, vec![call_id.clone()]);
@@ -5740,7 +5846,9 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
             event,
             Event::ToolBackgroundError(error) if error.call_id == call_id
         )),
-        1
+        1,
+        "events: {:?}",
+        event_log_events(&h)
     );
     assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
     assert!(h.agents[&cid].pending_cancel.is_none());
@@ -5830,6 +5938,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
     h.tool_turn
         .record_unqueued_in_flight(cancel_cid.clone(), call_id.clone());
+    assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
@@ -6222,6 +6331,7 @@ fn cancel_target_rechecks_background_state_after_cancel_request() {
             target_call_id: call_id.clone(),
         }),
     );
+    assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
 
@@ -6259,6 +6369,14 @@ fn cancel_clears_active_wait_state() {
     let wait_call_id: ToolCallId = "wait-call".into();
 
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    seed_assistant_tool_round(
+        &mut h,
+        &cid,
+        &[
+            (target_call_id.as_str(), "slow"),
+            (wait_call_id.as_str(), "wait"),
+        ],
+    );
     h.tool_agents.insert(target_call_id.clone(), cid.clone());
     h.pending_tools.insert(
         target_call_id.clone(),
@@ -6287,12 +6405,40 @@ fn cancel_clears_active_wait_state() {
         &cid,
         vec![target_call_id.clone(), wait_call_id.clone()],
     );
+    let _interceptor = connect_test_tool(&mut h, "user-cancel-terminal-interceptor");
+    h.handle_extension_event(
+        "user-cancel-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register cancellation interceptor");
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
         session_id: "s1".into(),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
+    assert!(h.agents[&cid].pending_cancel.is_some());
+    assert!(h.tool_agents.contains_key(&target_call_id));
+    assert!(h.tool_agents.contains_key(&wait_call_id));
+    h.handle_extension_event(
+        "user-cancel-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit first cancellation");
+    assert!(h.agents[&cid].pending_cancel.is_some());
+    h.handle_extension_event(
+        "user-cancel-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit final cancellation");
+    assert!(h.agents[&cid].pending_cancel.is_none());
 
     let second_wait_call = AgentToolCall {
         id: "wait-call-2".into(),
@@ -13677,11 +13823,11 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     assert!(h.pending_publish_idle_dispatches.is_empty());
 }
 
-/// A restored standalone continuation rejects off-branch reconciliation without
-/// leaving an attempt marker, retains its exact tuple across journal append
-/// failure, and retries exactly once after owning-branch reselection.
+/// A restored standalone continuation rejects off-branch reconciliation
+/// without an attempt marker, then fail-stops after a journal append failure
+/// without retrying on owning-branch reselection.
 #[test]
-fn standalone_checkpoint_rejection_retains_awaiting_owner() {
+fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
@@ -13748,6 +13894,7 @@ fn standalone_checkpoint_rejection_retains_awaiting_owner() {
     );
     std::fs::remove_dir(&event_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
+    assert!(h.semantic_storage_fault.is_some());
 
     h.publish_for_agent(
         &cid,
@@ -13767,7 +13914,7 @@ fn standalone_checkpoint_rejection_retains_awaiting_owner() {
             head: through,
         }),
     );
-    assert!(event_log_events(&h).iter().any(|event| matches!(
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentPromptCreated(created) if created.agent_prompt_id == prompt_id
     )));
@@ -13785,21 +13932,7 @@ fn standalone_checkpoint_rejection_retains_awaiting_owner() {
             _ => None,
         })
         .collect();
-    assert_eq!(committed.len(), 1);
-    assert_eq!(committed[0].agent_prompt_id, prompt_id);
-    assert_eq!(committed[0].through, through);
-    assert_eq!(
-        committed[0].model.as_ref(),
-        Some(&tau_proto::ModelId::from("test/model"))
-    );
-    assert_eq!(
-        committed[0].operation,
-        Some(tau_proto::PromptOperation::Inference)
-    );
-    assert_eq!(
-        committed[0].activation_cut,
-        Some(tau_proto::AgentHead::Root)
-    );
+    assert!(committed.is_empty());
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -13812,7 +13945,7 @@ fn standalone_checkpoint_rejection_retains_awaiting_owner() {
             .iter()
             .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
             .count(),
-        1
+        0
     );
 }
 
@@ -14340,6 +14473,260 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
         .expect("self compaction checkpoints continuation");
     assert!(background_index < checkpoint_index);
     h.shutdown().expect("shutdown");
+}
+
+/// Test-only internal handler that exercises scheduler-driven compaction.
+struct SchedulerCompactionTools;
+
+impl crate::internal_tools::InternalToolHandler for SchedulerCompactionTools {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        ["compact", "agent_compact"]
+            .into_iter()
+            .map(|name| ToolSpec {
+                name: ToolName::new(name),
+                model_visible_name: None,
+                description: Some("test compaction tool".to_owned()),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: name == "compact",
+                background_support: Some(tau_proto::BackgroundSupport::Instant),
+                examples: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn handles(&self, internal_tool_name: &ToolName) -> bool {
+        matches!(internal_tool_name.as_str(), "compact" | "agent_compact")
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::internal_tools::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::ToolStarted(started) = event else {
+            return Ok(());
+        };
+        let Some((cid, call, visible_name)) = host.internal_started_call(started) else {
+            return Ok(());
+        };
+        let target = if call.name.as_str() == "agent_compact" {
+            let CborValue::Map(fields) = &call.arguments else {
+                return Ok(());
+            };
+            fields.iter().find_map(|(key, value)| match (key, value) {
+                (CborValue::Text(key), CborValue::Text(value)) if key == "agent_id" => {
+                    tau_proto::AgentId::parse(value).ok()
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        host.request_agent_tool_compaction(&cid, &call, visible_name, target.as_ref())
+    }
+}
+
+/// Register [`SchedulerCompactionTools`] after constructing the generic
+/// harness.
+fn install_scheduler_compaction_tools(harness: &mut Harness) {
+    let handler: std::sync::Arc<dyn crate::internal_tools::InternalToolHandler> =
+        std::sync::Arc::new(SchedulerCompactionTools);
+    {
+        let mut host = crate::internal_tools::InternalToolHost::new(harness);
+        for spec in handler.tool_specs() {
+            host.register_internal_tool(spec, None);
+        }
+    }
+    harness.internal_tool_handlers.push(handler);
+}
+
+/// The real scheduler path for `compact` must consume the built-in tool's
+/// custom placeholder reservation instead of publishing a second placeholder,
+/// keep foreground and wait state pending while interception parks that
+/// placeholder, and keep ordinary publication live after commit.
+#[test]
+fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    install_scheduler_compaction_tools(&mut h);
+    let _interceptor = connect_test_tool(&mut h, "compact-placeholder-interceptor");
+    h.handle_extension_event(
+        "compact-placeholder-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_RESULT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register placeholder interceptor");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let prompt_id: AgentPromptId = "sp-scheduler-compact".into();
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "scheduler-compact".into(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("scheduler dispatch");
+
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::ProviderToolResult(result))
+            if result.call_id.as_str() == "scheduler-compact"
+                && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+    ));
+    assert!(
+        !h.tool_turn
+            .is_backgrounded(&ToolCallId::from("scheduler-compact")),
+        "parking the placeholder must also park dependent state"
+    );
+    assert!(!h.wait_call_is_backgrounded_for_test(&ToolCallId::from("scheduler-compact")));
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "scheduler-compact"
+        )),
+        0
+    );
+    h.handle_extension_event(
+        "compact-placeholder-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit placeholder");
+    assert!(h.wait_call_is_backgrounded_for_test(&ToolCallId::from("scheduler-compact")));
+
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "scheduler-compact"
+                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+        )),
+        1,
+        "events: {:?}",
+        event_log_events(&h)
+    );
+    assert!(
+        h.tool_turn
+            .is_backgrounded(&ToolCallId::from("scheduler-compact"))
+    );
+    assert!(h.semantic_storage_fault.is_none());
+    let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
+    h.emit_info("publication still advances after scheduler compact");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_))),
+        notices_before + 1
+    );
+}
+
+/// The real scheduler path for `agent_compact` likewise publishes exactly one
+/// provider placeholder and cannot wedge a subsequent unrelated publication.
+#[test]
+fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    install_scheduler_compaction_tools(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .enable_tools
+        .push(ToolName::new("agent_compact"));
+    let caller_cid = ensure_test_user_agent(&mut h);
+    let target_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let caller_id = h.agents[&caller_cid].agent_id.clone().expect("caller id");
+    let target_id = h.agents[&target_cid].agent_id.clone().expect("target id");
+    let prompt_id: AgentPromptId = "sp-scheduler-agent-compact".into();
+    seed_agent_thinking(&mut h, &caller_cid, prompt_id.as_str());
+    h.prompt_agents
+        .insert(prompt_id.clone(), caller_cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: prompt_id,
+        agent_id: crate::parse_agent_id(&caller_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "scheduler-agent-compact".into(),
+            name: ToolName::new("agent_compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("agent_id".into()),
+                CborValue::Text(target_id),
+            )]),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("scheduler dispatch");
+
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "scheduler-agent-compact"
+                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+        )),
+        1
+    );
+    assert!(
+        h.tool_turn
+            .is_backgrounded(&ToolCallId::from("scheduler-agent-compact"))
+    );
+    assert!(h.semantic_storage_fault.is_none());
+    let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
+    h.emit_info("publication still advances after scheduler agent compact");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_))),
+        notices_before + 1
+    );
 }
 
 /// Cancelling an accepted self request before its safe boundary records one
@@ -16417,14 +16804,41 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let input = wait_input_call("wait-input-combined-deadline");
+    seed_assistant_tool_round(
+        &mut h,
+        &cid,
+        &[
+            (input.id.as_str(), "wait"),
+            ("combined-deadline-sibling", "slow"),
+            ("background-deadline-first", "slow"),
+            ("background-deadline-after-input", "slow"),
+        ],
+    );
     seed_tools_running(
         &mut h,
         &cid,
         vec![
             input.id.clone(),
             ToolCallId::from("combined-deadline-sibling"),
+            ToolCallId::from("background-deadline-first"),
+            ToolCallId::from("background-deadline-after-input"),
         ],
     );
+    for call_id in [
+        ToolCallId::from("background-deadline-first"),
+        ToolCallId::from("background-deadline-after-input"),
+    ] {
+        h.tool_agents.insert(call_id.clone(), cid.clone());
+        h.pending_tools.insert(
+            call_id,
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+    }
     h.handle_wait_tool_call(&cid, &input, ToolName::new("wait"))
         .expect("register input wait");
     let input_deadline = h.next_input_wait_deadline().expect("input deadline");
@@ -18839,7 +19253,6 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             examples: Vec::new(),
         },
     );
-
     let parent_cid = ensure_test_user_agent(&mut h);
     let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
@@ -19051,7 +19464,6 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
             examples: Vec::new(),
         },
     );
-
     let parent_cid = ensure_test_user_agent(&mut h);
     h.handle_start_agent_request("conn-agent", ext_query("q-removed-bg"))
         .expect("side query");
@@ -19063,6 +19475,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
         .insert(call_id.clone(), side_cid.clone());
     h.tool_turn
         .record_unqueued_in_flight(side_cid.clone(), call_id.clone());
+    assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.queue_background_completion_prompt(&side_cid, &call_id);
 
@@ -19133,6 +19546,10 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         },
     );
 
+    h.registry.register(
+        "conn-slow",
+        scheduled_test_tool_spec("foreground_slow", tau_proto::BackgroundSupport::Never),
+    );
     let parent_cid = ensure_test_user_agent(&mut h);
     let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
     let main_spid: AgentPromptId = "sp-main-cancel".into();
@@ -19191,14 +19608,24 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: side_spid,
         agent_id: crate::parse_agent_id(&side_agent_id),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "slow-call-cancel".into(),
-            name: ToolName::new("slow"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "slow-call-cancel".into(),
+                name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "foreground-slow-call-cancel".into(),
+                name: ToolName::new("foreground_slow"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            }),
+        ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
@@ -19216,9 +19643,32 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         ws_pool_delta: None,
     })
     .expect("side tool call");
+    assert!(
+        h.tool_turn
+            .is_backgrounded(&ToolCallId::from("slow-call-cancel")),
+        "scheduler placeholder must commit before delegate cancellation"
+    );
+    let _interceptor = connect_test_tool(&mut h, "delegate-cancel-terminal-interceptor");
+    h.handle_extension_event(
+        "delegate-cancel-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register delegate cancellation interceptor");
 
     h.cancel_start_agent_request("q-bg-cancel", &"delegate-call-cancel".into(), false)
         .expect("cancel delegate");
+    assert!(h.agents[&side_cid].terminating);
+    assert!(h.tool_agents.contains_key("foreground-slow-call-cancel"));
+    h.handle_extension_event(
+        "delegate-cancel-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit delegate cancellation");
     assert!(!h.agents.contains_key(&side_cid));
     assert!(!h.tool_agents.contains_key("slow-call-cancel"));
     assert!(event_log_contains_any_source(&h, |event| matches!(

@@ -1188,6 +1188,9 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
         admission: Option<ExtensionFrameAdmission>,
     ) {
+        if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
+            return;
+        }
         let shell_report_targets_ephemeral = match &event {
             Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
@@ -1579,6 +1582,9 @@ impl Harness {
                 must_pass,
                 sync_head_for,
             } = deferred;
+            if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
+                continue;
+            }
             self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
         }
     }

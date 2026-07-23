@@ -76,6 +76,9 @@ fn instant_background_completes_foreground_but_remains_running() {
     );
     assert!(!machine.is_backgrounded(&"bg".into()));
     assert!(machine.any_in_flight_for(&conv));
+    assert!(machine.begin_backgrounding(&"bg".into()));
+    assert!(!machine.begin_backgrounding(&"bg".into()));
+    assert!(machine.any_in_flight_for(&conv));
     assert!(machine.mark_backgrounded(&"bg".into()));
     assert!(machine.is_backgrounded(&"bg".into()));
     assert!(!machine.any_in_flight_for(&conv));
@@ -106,10 +109,12 @@ fn min_foreground_deadline_backgrounds_once_when_due() {
         machine.background_due(start + std::time::Duration::from_secs(5)),
         vec![ToolCallId::from("slow")]
     );
+    assert!(machine.begin_backgrounding(&"slow".into()));
     assert_eq!(
         machine.background_due(start + std::time::Duration::from_secs(6)),
         Vec::<ToolCallId>::new()
     );
+    assert!(machine.mark_backgrounded(&"slow".into()));
     assert!(machine.is_backgrounded(&"slow".into()));
 }
 
@@ -135,6 +140,7 @@ fn late_background_completion_clears_actual_running_once() {
     let conv = cid("conv");
     machine.push(conv, call("late"), BackgroundSupport::Instant);
     machine.pop_dispatchable(Instant::now()).expect("dispatch");
+    assert!(machine.begin_backgrounding(&"late".into()));
     assert!(machine.mark_backgrounded(&"late".into()));
     assert!(machine.is_backgrounded(&"late".into()));
 

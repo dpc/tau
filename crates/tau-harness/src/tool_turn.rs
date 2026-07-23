@@ -48,6 +48,8 @@ pub(crate) enum ForegroundAction {
 struct InFlightToolInvocation {
     conversation_id: AgentId,
     foreground_pending: bool,
+    /// The sole placeholder is reserved but has not committed yet.
+    backgrounding: bool,
     backgrounded: bool,
     foreground_deadline: Option<Instant>,
 }
@@ -113,6 +115,7 @@ impl ToolTurnMachine {
             InFlightToolInvocation {
                 conversation_id,
                 foreground_pending: true,
+                backgrounding: false,
                 backgrounded: false,
                 foreground_deadline: None,
             },
@@ -129,16 +132,32 @@ impl ToolTurnMachine {
         self.mark_complete(call_id)
     }
 
-    /// Mark one running call as completed in the foreground by the synthetic
-    /// background placeholder. The real call remains actual-running.
+    /// Reserve the sole provider-facing background placeholder for a call.
+    ///
+    /// The call remains foreground-pending until that placeholder commits.
+    pub(crate) fn begin_backgrounding(&mut self, call_id: &ToolCallId) -> bool {
+        let Some(in_flight) = self.in_flight_tool_invocations.get_mut(call_id) else {
+            return false;
+        };
+        if !in_flight.foreground_pending || in_flight.backgrounding {
+            return false;
+        }
+        in_flight.backgrounding = true;
+        in_flight.foreground_deadline = None;
+        true
+    }
+
+    /// Mark one running call as completed in the foreground after its durable
+    /// background placeholder commits. The real call remains actual-running.
     pub(crate) fn mark_backgrounded(&mut self, call_id: &ToolCallId) -> bool {
         let Some(in_flight) = self.in_flight_tool_invocations.get_mut(call_id) else {
             return false;
         };
-        if !in_flight.foreground_pending {
+        if !in_flight.foreground_pending || !in_flight.backgrounding {
             return false;
         }
         in_flight.foreground_pending = false;
+        in_flight.backgrounding = false;
         in_flight.backgrounded = true;
         in_flight.foreground_deadline = None;
         true
@@ -151,6 +170,7 @@ impl ToolTurnMachine {
             .or_insert(InFlightToolInvocation {
                 conversation_id,
                 foreground_pending: false,
+                backgrounding: false,
                 backgrounded: true,
                 foreground_deadline: None,
             });
@@ -175,30 +195,26 @@ impl ToolTurnMachine {
             .collect()
     }
 
-    /// Return and mark any calls whose foreground deadline has expired.
-    pub(crate) fn background_due(&mut self, now: Instant) -> Vec<ToolCallId> {
-        let due: Vec<_> = self
-            .in_flight_tool_invocations
+    /// Return calls whose foreground deadline has expired.
+    pub(crate) fn background_due(&self, now: Instant) -> Vec<ToolCallId> {
+        self.in_flight_tool_invocations
             .iter()
             .filter_map(|(call_id, in_flight)| {
                 (in_flight.foreground_pending
+                    && !in_flight.backgrounding
                     && in_flight
                         .foreground_deadline
                         .is_some_and(|deadline| deadline <= now))
                 .then_some(call_id.clone())
             })
-            .collect();
-        for call_id in &due {
-            self.mark_backgrounded(call_id);
-        }
-        due
+            .collect()
     }
 
     /// Earliest foreground background deadline that still needs a wakeup.
     pub(crate) fn next_background_deadline(&self) -> Option<Instant> {
         self.in_flight_tool_invocations
             .values()
-            .filter(|in_flight| in_flight.foreground_pending)
+            .filter(|in_flight| in_flight.foreground_pending && !in_flight.backgrounding)
             .filter_map(|in_flight| in_flight.foreground_deadline)
             .min()
     }
@@ -299,6 +315,7 @@ impl ToolTurnMachine {
             InFlightToolInvocation {
                 conversation_id: pending.conversation_id.clone(),
                 foreground_pending,
+                backgrounding: false,
                 backgrounded,
                 foreground_deadline,
             },

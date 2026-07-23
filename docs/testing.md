@@ -184,9 +184,9 @@ oracle, not backend acknowledgement, exactly-once work, transactional checkpoint
 coordination, or retry/abandon/recovery coverage.
 S6 enables only the closed `hold_no_side_effect` dummy tool for the worker,
 kills after its durable request/start pair and canonical readiness, and observes
-the eager live `tool.error` then durable `provider.tool_error` repair without
-redispatch. One explicit worker continuation validates the exact balanced error
-round. A second resume consumes no input or provider action and must preserve
+the durable `provider.tool_error` repair followed by its live `tool.error`
+renderer projection, without redispatch. One explicit worker continuation
+validates the exact balanced error round. A second resume consumes no input or provider action and must preserve
 current/history membership, execution restore, and agent journals without a
 second repair pair.
 S7 combines a completed worker, a dispatch-uncertain worker, and an interrupted

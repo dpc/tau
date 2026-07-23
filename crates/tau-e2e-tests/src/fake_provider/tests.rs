@@ -270,27 +270,27 @@ fn v2_dummy_repair_live_pair_is_exact_and_ordered() {
     state.lane_cursors = vec![1];
     assert!(
         state
-            .record_dummy_repair_event(&provider_tool_error("call", "repair"))
-            .is_err()
-    );
-    assert!(state.repair_progress.is_none());
-    assert!(
-        state
-            .record_dummy_repair_event(&tool_error("wrong", "repair"))
-            .is_err()
-    );
-    assert!(state.repair_progress.is_none());
-    state
-        .record_dummy_repair_event(&tool_error("call", "repair"))
-        .expect("exact tool error");
-    assert!(
-        state
             .record_dummy_repair_event(&tool_error("call", "repair"))
             .is_err()
     );
+    assert!(state.repair_progress.is_none());
+    assert!(
+        state
+            .record_dummy_repair_event(&provider_tool_error("wrong", "repair"))
+            .is_err()
+    );
+    assert!(state.repair_progress.is_none());
     state
         .record_dummy_repair_event(&provider_tool_error("call", "repair"))
         .expect("exact provider error");
+    assert!(
+        state
+            .record_dummy_repair_event(&provider_tool_error("call", "repair"))
+            .is_err()
+    );
+    state
+        .record_dummy_repair_event(&tool_error("call", "repair"))
+        .expect("exact tool error");
     state.lane_cursors[0] = 2;
     assert!(
         state

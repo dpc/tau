@@ -33,12 +33,20 @@ in pending accounting, wait projection, ephemeral classification, and agent
 unload cleanup. Result/error completion publishes ownerless, non-transcript
 terminal facts, decrements runtime accounting, clears live correlation, and
 retains the completed-call tombstone. Unavailable routing publishes
-harness-sourced `tool.rejected`,
-then protected `tool.error` and `provider.tool_error`, and closes the pending
-call while retaining its completed-call tombstone. `tool.started` preserves the
+harness-sourced `tool.rejected`. For an ownerless, non-transcript call it then
+publishes protected `tool.error` and `provider.tool_error` in that order and
+closes the pending call while retaining its completed-call tombstone.
+`tool.started` preserves the
 committed request's agent id, arguments, tool identity, and originator;
 request-time rejection preserves its tool identity and originator. Later
 terminal reports retain their routed producer metadata.
+
+Ownerless, non-transcript calls have no durable provider-terminal journal
+authority and remain outside
+[DECISION-tool-terminal-publication-transactions](DECISION-tool-terminal-publication-transactions.md).
+For journal-backed request rejection, the durable provider terminal instead
+commits before renderer projection or pending-call cleanup, as specified by
+[SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
 Generic intake preserves `Emit.persist`. A request with `persist=false` is live-only.
 A request with `persist=true` enters the session restore stream with the stable

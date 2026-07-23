@@ -175,9 +175,10 @@ S6 uses the closed hold boundary from
 [ARCH-tau-ext-test-dummy](../../tau-ext-test-dummy/specs/ARCH-tau-ext-test-dummy.md).
 Boot A requires exactly one correlated worker `tool.request` followed by canonical
 `tool.started` in the typed execution-restore stream and one live readiness fact
-before the process-group kill. Boot B requires one live nonsemantic `tool.error`
-then one durable `provider.tool_error` with the full restart/possible-side-effect
-diagnostic, no live dummy redispatch, and one explicit worker continuation whose
+before the process-group kill. Boot B requires one durable
+`provider.tool_error` with the full restart/possible-side-effect diagnostic,
+followed by one derived live nonsemantic `tool.error`, no live dummy redispatch,
+and one explicit worker continuation whose
 complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.

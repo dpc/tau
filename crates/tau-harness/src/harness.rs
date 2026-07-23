@@ -1886,6 +1886,15 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
 
 const MAX_UI_SHELL_COMMAND_ID_BYTES: usize = 256;
 
+/// Semantic-store failure that ends the current live harness epoch.
+#[derive(Clone, Debug)]
+pub(crate) struct SemanticStorageFault {
+    /// Publication whose authoritative append failed.
+    pub(crate) event_name: tau_proto::EventName,
+    /// Stable diagnostic text from the rejected append.
+    pub(crate) error: String,
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -2167,6 +2176,14 @@ pub struct Harness {
     /// Fatal error raised while a parked publish commits downstream. The
     /// surrounding runtime/interception operation takes and propagates it.
     pending_publish_error: Option<HarnessError>,
+    /// First semantic append failure in this live harness epoch.
+    ///
+    /// Once set, authoritative work stays fail-stopped until reopen/restart.
+    pub(crate) semantic_storage_fault: Option<SemanticStorageFault>,
+    /// Foreground terminals synthesized as one disconnect batch.
+    disconnect_terminal_batch_pending: HashSet<ToolCallId>,
+    /// Calls whose runtime settlement waits for the whole disconnect batch.
+    disconnect_terminal_batch_completed: Vec<(ToolCallId, AgentId)>,
     /// Publishes that arrived while `pending_intercept` was active.
     /// Drained in FIFO order once the pending intercept resolves.
     pub(crate) deferred_publishes: VecDeque<DeferredPublish>,
@@ -2924,6 +2941,9 @@ impl Harness {
             suspended_interceptor_connections: HashSet::new(),
             pending_intercept: None,
             pending_publish_error: None,
+            semantic_storage_fault: None,
+            disconnect_terminal_batch_pending: HashSet::new(),
+            disconnect_terminal_batch_completed: Vec::new(),
             deferred_publishes: VecDeque::new(),
             pending_publish_idle_dispatches: VecDeque::new(),
             available_models: Vec::new(),
@@ -4314,46 +4334,84 @@ impl Harness {
         self.publish_for_agent_from(cid, None, event);
     }
 
+    /// Publish one terminal result and return whether postcommit reaction owns
+    /// runtime settlement for a durable transcript call.
     fn publish_terminal_tool_result(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&str>,
         result: ToolResult,
-    ) {
-        let mut ui_result = result.clone();
-        ui_result.provider_content.clear();
+    ) -> bool {
         match cid {
+            Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &result.call_id) => {
+                self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
+                true
+            }
             Some(cid) => {
+                let mut ui_result = result.clone();
+                ui_result.provider_content.clear();
+                self.publish_event(source, Event::ToolResult(ui_result.clone()));
+                self.publish_event(source, Event::ProviderToolResult(result));
                 self.reset_loop_guard_for_progress(cid);
-                self.publish_for_agent_from(cid, source, Event::ToolResult(ui_result.clone()));
-                self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result.clone()));
+                self.record_wait_tool_result(ui_result);
+                false
             }
             None => {
+                let mut ui_result = result.clone();
+                ui_result.provider_content.clear();
                 self.publish_event(source, Event::ToolResult(ui_result.clone()));
-                self.publish_event(source, Event::ProviderToolResult(result.clone()));
+                self.publish_event(source, Event::ProviderToolResult(result));
+                self.record_wait_tool_result(ui_result);
+                false
             }
         }
-        self.record_wait_tool_result(ui_result);
     }
 
+    /// Publish one terminal error and return whether postcommit reaction owns
+    /// runtime settlement for a durable transcript call.
     fn publish_terminal_tool_error(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&str>,
         error: ToolError,
-    ) {
+    ) -> bool {
         match cid {
+            Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &error.call_id) => {
+                self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
+                true
+            }
             Some(cid) => {
+                self.publish_event(source, Event::ToolError(error.clone()));
+                self.publish_event(source, Event::ProviderToolError(error.clone()));
                 self.record_tool_failure_loop_signature(cid, &error);
-                self.publish_for_agent_from(cid, source, Event::ToolError(error.clone()));
-                self.publish_for_agent_from(cid, source, Event::ProviderToolError(error.clone()));
+                self.record_wait_tool_error(error);
+                false
             }
             None => {
                 self.publish_event(source, Event::ToolError(error.clone()));
                 self.publish_event(source, Event::ProviderToolError(error.clone()));
+                self.record_wait_tool_error(error);
+                false
             }
         }
-        self.record_wait_tool_error(error);
+    }
+
+    /// Return whether `call_id` has an unresolved durable tool-call node owned
+    /// by `cid`.
+    pub(crate) fn tool_terminal_has_open_durable_owner(
+        &self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        self.agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .is_some_and(|tree| {
+                tree.unresolved_foreground_tool_calls()
+                    .iter()
+                    .any(|call| &call.call_id == call_id)
+            })
     }
 
     fn publish_terminal_background_error(
@@ -4630,6 +4688,9 @@ impl Harness {
     /// calling this canonical-fact commit path.
     pub(crate) fn commit_message_fact(&mut self, source: Option<&str>, event: Event) {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
+        if self.semantic_storage_fault.is_some() {
+            return;
+        }
         let recorded_at = tau_proto::UnixMicros::now();
         let source_id = source.map(tau_proto::ConnectionId::from);
         let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
@@ -4640,6 +4701,7 @@ impl Harness {
         let persisted_agent = match self.persist_message_fact_record(source, &event, recorded_at) {
             Ok(outcome) => outcome,
             Err(error) => {
+                self.enter_semantic_storage_fault(event.name(), &error);
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event.name(),
@@ -4668,6 +4730,135 @@ impl Harness {
         self.with_derived_publish_source(source.map(Into::into), |harness| {
             harness.react_to_committed_event(source, &event, None);
         });
+    }
+
+    /// End the live semantic epoch after its first physical or persisted-
+    /// integrity append error.
+    fn enter_semantic_storage_fault(
+        &mut self,
+        event_name: tau_proto::EventName,
+        error: &HarnessError,
+    ) {
+        let storage_fault = match error {
+            HarnessError::AgentStore(error) => matches!(
+                error,
+                tau_core::AgentStoreError::CreateParentDirectory { .. }
+                    | tau_core::AgentStoreError::Open { .. }
+                    | tau_core::AgentStoreError::Read { .. }
+                    | tau_core::AgentStoreError::Write { .. }
+                    | tau_core::AgentStoreError::Decode { .. }
+                    | tau_core::AgentStoreError::Locked { .. }
+                    | tau_core::AgentStoreError::InvalidSequence { .. }
+            ),
+            HarnessError::SessionStore(error) => matches!(
+                error,
+                tau_core::SessionStoreError::CreateParentDirectory { .. }
+                    | tau_core::SessionStoreError::Open { .. }
+                    | tau_core::SessionStoreError::Read { .. }
+                    | tau_core::SessionStoreError::Write { .. }
+                    | tau_core::SessionStoreError::Decode { .. }
+                    | tau_core::SessionStoreError::Locked { .. }
+                    | tau_core::SessionStoreError::InvalidSequence { .. }
+            ),
+            HarnessError::Io(_) => true,
+            _ => false,
+        };
+        if !storage_fault {
+            return;
+        }
+        if self.semantic_storage_fault.is_none() {
+            self.semantic_storage_fault = Some(SemanticStorageFault {
+                event_name,
+                error: error.to_string(),
+            });
+            self.disconnect_terminal_batch_pending.clear();
+            self.disconnect_terminal_batch_completed.clear();
+        }
+    }
+
+    /// Return whether this publication would mutate authoritative semantic
+    /// state.
+    fn publication_requires_semantic_store(
+        &self,
+        event: &Event,
+        persist: bool,
+        sync_head_for: Option<&ConversationHeadSync>,
+    ) -> bool {
+        if event.message_agent_target().is_some() {
+            return true;
+        }
+        if !semantic_event_router::should_persist_event(event, persist) {
+            return false;
+        }
+        if matches!(event, Event::ToolRequest(_) | Event::ToolStarted(_))
+            || semantic_event_router::session_membership_id_for_event(event).is_some()
+        {
+            return true;
+        }
+        self.agent_id_for_event(event).is_some()
+            || self
+                .agent_scoped_agent_id_for_event(event, sync_head_for)
+                .is_some()
+    }
+
+    /// Reject direct semantic work after the live epoch storage-faults.
+    fn ensure_semantic_epoch_live(&self, operation: &str) -> Result<(), HarnessError> {
+        let Some(fault) = self.semantic_storage_fault.as_ref() else {
+            return Ok(());
+        };
+        Err(HarnessError::Participant(format!(
+            "semantic work `{operation}` rejected after {} storage fault: {}",
+            fault.event_name, fault.error
+        )))
+    }
+
+    /// Append a direct agent semantic fact under the same live-epoch fail-stop
+    /// policy as publication-driven semantic facts.
+    fn append_direct_agent_semantic_event(
+        &mut self,
+        agent_id: &str,
+        parent: tau_core::AgentEventParent,
+        event: Event,
+    ) -> Result<tau_core::AgentAppendOutcome, HarnessError> {
+        self.ensure_semantic_epoch_live(&event.name().to_string())?;
+        let event_name = event.name();
+        self.agent_store
+            .append_agent_event_at(agent_id, None, parent, event, tau_proto::UnixMicros::now())
+            .map_err(|error| {
+                let error = HarnessError::AgentStore(error);
+                self.enter_semantic_storage_fault(event_name, &error);
+                error
+            })
+    }
+
+    /// Reject semantic work before it can park in interception after a storage
+    /// fault.
+    pub(crate) fn semantic_publication_is_fail_stopped(
+        &mut self,
+        event: &Event,
+        persist: bool,
+        sync_head_for: Option<&ConversationHeadSync>,
+    ) -> bool {
+        if !self.publication_requires_semantic_store(event, persist, sync_head_for) {
+            return false;
+        }
+        let Some(fault) = self.semantic_storage_fault.as_ref() else {
+            return false;
+        };
+        tracing::warn!(
+            target: "tau_harness",
+            event = %event.name(),
+            fault_event = %fault.event_name,
+            fault_error = %fault.error,
+            "rejecting semantic publication after storage fault"
+        );
+        if let Some(sync) = sync_head_for
+            && let Some(completion) = sync.completion.as_ref()
+        {
+            self.discard_deferred_agent_publish_batch(&sync.cid, completion);
+            self.pending_agent_publish_completions.remove(&sync.cid);
+        }
+        true
     }
 
     /// Select and append the canonical journal record for one stamped fact.
@@ -4772,6 +4963,9 @@ impl Harness {
         persist: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
+            return;
+        }
         if event.message_agent_target().is_some() {
             debug_assert!(persist, "canonical message facts must be durable");
             self.commit_message_fact(source, event);
@@ -4882,8 +5076,18 @@ impl Harness {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
+                self.enter_semantic_storage_fault(event.name(), &error);
                 self.rollback_rejected_activation_successor(&event);
-                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+                if self.semantic_storage_fault.is_some() {
+                    if let Some(sync) = sync_head_for.as_ref()
+                        && let Some(completion) = sync.completion.as_ref()
+                    {
+                        self.discard_deferred_agent_publish_batch(&sync.cid, completion);
+                        self.pending_agent_publish_completions.remove(&sync.cid);
+                    }
+                } else {
+                    self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+                }
                 if semantic_event_router::session_membership_id_for_event(&event)
                     .is_some_and(|session_id| session_id == self.current_session_id)
                 {
@@ -5743,18 +5947,122 @@ impl Harness {
         }
     }
 
-    /// Post-commit reactions. Drains the deferred-agent-dispatch
-    /// queue when a user-message-bearing event commits, so the
-    /// agent prompt assembled in `send_prompt_to_agent_for` sees
-    /// the just-folded user message. The `c.head` sync that this
-    /// dispatch depends on is handled inside `commit_event` for any
-    /// publish stamped via `publish_event_for_agent`.
+    /// Derive renderer output and settle runtime state from one committed
+    /// authoritative tool terminal.
+    fn react_to_committed_tool_terminal(
+        &mut self,
+        source: Option<&str>,
+        event: &Event,
+        append_outcome: Option<&tau_core::AgentAppendOutcome>,
+    ) {
+        let call_id = match event {
+            Event::ProviderToolResult(result) => &result.call_id,
+            Event::ProviderToolError(error) => &error.call_id,
+            Event::ToolCancelled(cancelled) => &cancelled.call_id,
+            _ => return,
+        };
+        match event {
+            Event::ProviderToolResult(result)
+                if result.kind == ToolResultKind::BackgroundPlaceholder =>
+            {
+                if !self.tool_agents.contains_key(call_id)
+                    && !self.peer_internal_tool_agents.contains_key(call_id)
+                {
+                    return;
+                }
+                let newly_backgrounded = self.tool_turn.mark_backgrounded(call_id);
+                if !newly_backgrounded && !self.tool_turn.is_backgrounded(call_id) {
+                    return;
+                }
+                self.record_wait_tool_result(result.clone());
+                if newly_backgrounded {
+                    self.on_tool_call_foreground_complete(call_id.as_str());
+                }
+                return;
+            }
+            _ => {}
+        }
+        if append_outcome.is_none() {
+            return;
+        }
+        let Some(cid) = self.tool_agents.get(call_id).cloned() else {
+            return;
+        };
+        match event {
+            Event::ProviderToolResult(result) => {
+                let mut renderer_result = result.clone();
+                renderer_result.provider_content.clear();
+                self.publish_for_agent_from(
+                    &cid,
+                    source,
+                    Event::ToolResult(renderer_result.clone()),
+                );
+                self.reset_loop_guard_for_progress(&cid);
+                self.record_wait_tool_result(renderer_result);
+            }
+            Event::ProviderToolError(error) => {
+                self.publish_for_agent_from(&cid, source, Event::ToolError(error.clone()));
+                self.record_tool_failure_loop_signature(&cid, error);
+                self.record_wait_tool_error(error.clone());
+            }
+            Event::ToolCancelled(_) => {
+                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+            }
+            _ => unreachable!("terminal variants handled above"),
+        }
+
+        if self.disconnect_terminal_batch_pending.remove(call_id) {
+            self.finish_tool_call_runtime_state(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+            self.disconnect_terminal_batch_completed
+                .push((call_id.clone(), cid));
+            if self.disconnect_terminal_batch_pending.is_empty()
+                && self.semantic_storage_fault.is_none()
+            {
+                let completed = std::mem::take(&mut self.disconnect_terminal_batch_completed);
+                self.drain_pending_tool_invocations_or_report();
+                for (completed_call_id, completed_cid) in completed {
+                    self.maybe_complete_agent_turn_for(&completed_cid, completed_call_id.as_str());
+                }
+                self.drain_publish_idle_dispatches();
+                self.try_advance_queue();
+            }
+            return;
+        }
+
+        let deferred_teardown = self
+            .agents
+            .get(&cid)
+            .is_some_and(|agent| agent.terminating || agent.pending_cancel.is_some());
+        if deferred_teardown {
+            self.finish_tool_call_runtime_state(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+            let foreground_remains = self
+                .tool_agents
+                .iter()
+                .any(|(pending, owner)| owner == &cid && !self.tool_turn.is_backgrounded(pending));
+            if !foreground_remains {
+                if self.agents.get(&cid).is_some_and(|agent| agent.terminating) {
+                    self.finish_cancel_delegate_side_conversation(&cid);
+                } else {
+                    self.finalize_cancelled_tool_turn(&cid);
+                }
+            }
+        } else {
+            self.on_tool_call_complete(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+    }
+
+    /// Run post-commit reactions after semantic persistence and observer
+    /// delivery. Agent dispatch therefore sees the just-folded semantic state.
     fn react_to_committed_event(
         &mut self,
         source: Option<&str>,
         event: &Event,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
+        self.react_to_committed_tool_terminal(source, event, append_outcome);
         if let Event::AgentStandaloneCompactionStarted(started) = event {
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
@@ -6534,23 +6842,19 @@ impl Harness {
         if cancelled.len() != remaining_calls.len() {
             return;
         }
-        let cancelled_call_ids: std::collections::HashSet<ToolCallId> = cancelled
-            .iter()
-            .map(|(call_id, _, _)| call_id.clone())
-            .collect();
-        self.record_wait_tool_cancelled(&cancelled_call_ids);
         for (call_id, tool_name, tool_type) in cancelled {
+            self.tool_agents
+                .entry(call_id.clone())
+                .or_insert_with(|| cid.clone());
             self.publish_for_agent(
                 cid,
                 Event::ToolCancelled(ToolCancelled {
-                    call_id: call_id.clone(),
+                    call_id,
                     tool_name,
                     tool_type,
                 }),
             );
-            self.clear_tool_call_tracking(call_id.as_str());
         }
-        self.set_agent_turn_state(cid, AgentTurnState::Idle);
     }
 
     /// Writes or retains `event` in its semantic store and folds it into the
@@ -11441,7 +11745,9 @@ impl Harness {
             display: None,
         };
         self.publish_terminal_tool_error(owning_cid.as_ref(), Some(HARNESS_CONNECTION_ID), error);
-        self.clear_tool_call_tracking(&call_id);
+        if owning_cid.is_none() {
+            self.clear_tool_call_tracking(&call_id);
+        }
     }
 
     fn handle_extension_tool_terminal_event(
@@ -11493,7 +11799,7 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&result.call_id) {
             self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
-            let call_id = result.call_id.to_string();
+            let call_id = result.call_id.clone();
             let mut allows_provider_image = false;
             if let Some(tool) = self.pending_tools.get(&result.call_id) {
                 result.tool_name = tool.name.clone();
@@ -11534,7 +11840,7 @@ impl Harness {
                     %error,
                     "rejecting tool result before dedup and generic publication"
                 );
-                self.publish_terminal_tool_error(
+                let journal_backed = self.publish_terminal_tool_error(
                     Some(&cid),
                     Some(HARNESS_CONNECTION_ID),
                     ToolError {
@@ -11551,8 +11857,10 @@ impl Harness {
                         originator: result.originator,
                     },
                 );
-                self.on_tool_call_complete(&call_id);
-                self.clear_tool_call_tracking(&call_id);
+                if !journal_backed {
+                    self.on_tool_call_complete(call_id.as_str());
+                    self.clear_tool_call_tracking(call_id.as_str());
+                }
                 return;
             }
             // Collapse byte-identical large results into a pointer back to the
@@ -11564,9 +11872,12 @@ impl Harness {
             // (during its teardown) leaves `tree.head` on the *parent* branch —
             // folding the result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
-            self.publish_terminal_tool_result(Some(&cid), Some(HARNESS_CONNECTION_ID), result);
-            self.on_tool_call_complete(&call_id);
-            self.clear_tool_call_tracking(&call_id);
+            let journal_backed =
+                self.publish_terminal_tool_result(Some(&cid), Some(HARNESS_CONNECTION_ID), result);
+            if !journal_backed {
+                self.on_tool_call_complete(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
         } else if self.peer_tool_requests.contains(&result.call_id)
             && let Some(tool) = self.pending_tools.get(&result.call_id).cloned()
         {
@@ -11606,15 +11917,18 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&error.call_id) {
             self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
         } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
-            let call_id = error.call_id.to_string();
+            let call_id = error.call_id.clone();
             if let Some(tool) = self.pending_tools.get(&error.call_id) {
                 error.tool_name = tool.name.clone();
                 error.tool_type = tool.tool_type;
             }
             self.dedup_tool_error(&cid, &mut error);
-            self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
-            self.on_tool_call_complete(&call_id);
-            self.clear_tool_call_tracking(&call_id);
+            let journal_backed =
+                self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
+            if !journal_backed {
+                self.on_tool_call_complete(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
         } else if self.peer_tool_requests.contains(&error.call_id)
             && let Some(tool) = self.pending_tools.get(&error.call_id).cloned()
         {
@@ -11638,18 +11952,23 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&cancelled.call_id) {
             self.handle_background_tool_cancelled(HARNESS_CONNECTION_ID, cancelled);
         } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
-            let call_id = cancelled.call_id.to_string();
+            let call_id = cancelled.call_id.clone();
             if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
                 cancelled.tool_name = tool.name.clone();
                 cancelled.tool_type = tool.tool_type;
             }
-            self.publish_for_agent_from(
-                &cid,
-                Some(HARNESS_CONNECTION_ID),
-                Event::ToolCancelled(cancelled),
-            );
-            self.on_tool_call_complete(&call_id);
-            self.clear_tool_call_tracking(&call_id);
+            if self.tool_terminal_has_open_durable_owner(&cid, &call_id) {
+                self.publish_for_agent_from(
+                    &cid,
+                    Some(HARNESS_CONNECTION_ID),
+                    Event::ToolCancelled(cancelled),
+                );
+            } else {
+                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
+                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+                self.on_tool_call_complete(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
         } else if self.peer_tool_requests.contains(&cancelled.call_id)
             && let Some(tool) = self.pending_tools.get(&cancelled.call_id).cloned()
         {
@@ -12752,13 +13071,7 @@ impl Harness {
                 tau_core::AgentEventParent::Root,
                 tau_core::AgentEventParent::Under,
             );
-        self.agent_store.append_agent_event_at(
-            agent_id,
-            None,
-            parent,
-            event.clone(),
-            tau_proto::UnixMicros::now(),
-        )?;
+        self.append_direct_agent_semantic_event(agent_id, parent, event.clone())?;
         *self
             .precommitted_user_interactions
             .entry(agent_id.to_owned())
@@ -13444,26 +13757,32 @@ impl Harness {
                 cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(cid));
                 cancelled_calls.sort();
                 cancelled_calls.dedup();
-                self.cancel_remaining_tool_calls(
+                let foreground_pending = self.cancel_remaining_tool_calls(
                     cid,
                     cancelled_calls,
                     &cancel.reason,
                     BackgroundCompletionPromptMode::QueuePassive,
                 );
-                if let Some(conv) = self.agents.get_mut(cid) {
-                    conv.pending_cancel = None;
-                    // User cancellation discards stale queued work, but keeps
-                    // passive background notices so the next user prompt can
-                    // observe terminal background cancellation events.
-                    conv.pending_prompts
-                        .retain(PendingPrompt::is_passive_background_completion);
-                    conv.in_flight_prompt = None;
+                if !foreground_pending {
+                    self.finalize_cancelled_tool_turn(cid);
                 }
-                self.set_agent_turn_state(cid, AgentTurnState::Idle);
-                self.emit_info("cancelled current turn");
-                self.try_advance_queue();
             }
         }
+    }
+
+    fn finalize_cancelled_tool_turn(&mut self, cid: &AgentId) {
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.pending_cancel = None;
+            // User cancellation discards stale queued work, but keeps passive
+            // background notices so the next user prompt can observe terminal
+            // background cancellation events.
+            conv.pending_prompts
+                .retain(PendingPrompt::is_passive_background_completion);
+            conv.in_flight_prompt = None;
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.emit_info("cancelled current turn");
+        self.try_advance_queue();
     }
 
     /// Terminalizes one live cancellation and rejects its eventual late
@@ -13556,7 +13875,7 @@ impl Harness {
         remaining_calls: Vec<ToolCallId>,
         _reason: &str,
         background_completion_prompt_mode: BackgroundCompletionPromptMode,
-    ) {
+    ) -> bool {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
         let mut to_cancel: Vec<CancelTarget> = self
@@ -13586,12 +13905,7 @@ impl Harness {
             });
         }
 
-        let cancelled_call_ids: std::collections::HashSet<ToolCallId> = to_cancel
-            .iter()
-            .map(|target| target.call_id.clone())
-            .collect();
-        self.record_wait_tool_cancelled(&cancelled_call_ids);
-
+        let mut foreground_call_ids = Vec::new();
         for target in to_cancel {
             self.publish_event(
                 Some(HARNESS_CONNECTION_ID),
@@ -13627,20 +13941,28 @@ impl Harness {
             if !self.pending_tools.contains_key(&target.call_id) {
                 continue;
             }
-            self.publish_for_agent(
-                cid,
-                Event::ToolCancelled(ToolCancelled {
-                    call_id: target.call_id.clone(),
-                    tool_name: target.tool_name,
-                    tool_type: target.tool_type,
-                }),
-            );
-            self.tool_turn.mark_complete(&target.call_id);
-            self.clear_tool_call_tracking(target.call_id.as_str());
+            self.tool_agents
+                .entry(target.call_id.clone())
+                .or_insert_with(|| cid.clone());
+            let call_id = target.call_id;
+            let cancelled = ToolCancelled {
+                call_id: call_id.clone(),
+                tool_name: target.tool_name,
+                tool_type: target.tool_type,
+            };
+            if self.tool_terminal_has_open_durable_owner(cid, &call_id) {
+                foreground_call_ids.push(call_id);
+                self.publish_for_agent(cid, Event::ToolCancelled(cancelled));
+            } else {
+                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
+                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+                self.finish_tool_call_runtime_state(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
         }
-        if let Some(conv) = self.agents.get_mut(cid) {
-            conv.tools_in_flight = 0;
-        }
+        foreground_call_ids
+            .iter()
+            .any(|call_id| self.tool_agents.get(call_id) == Some(cid))
     }
 
     fn cancel_target_should_finish_as_background_error(&self, target: &CancelTarget) -> bool {
@@ -13808,22 +14130,17 @@ impl Harness {
     }
 
     fn cancel_delegate_side_conversation(&mut self, target_call_id: &ToolCallId) {
-        let Some((cid, session_id, spid, turn_state, originator)) =
-            self.agents.iter().find_map(|(cid, conv)| {
-                if conv.parent_tool_call_id.as_ref() != Some(target_call_id) {
-                    return None;
-                }
-                Some((
-                    cid.clone(),
-                    conv.session_id.clone(),
-                    conv.in_flight_prompt.clone(),
-                    conv.turn_state.clone(),
-                    conv.originator.clone(),
-                ))
-            })
-        else {
+        let Some((cid, turn_state)) = self.agents.iter().find_map(|(cid, conv)| {
+            if conv.parent_tool_call_id.as_ref() != Some(target_call_id) {
+                return None;
+            }
+            Some((cid.clone(), conv.turn_state.clone()))
+        }) else {
             return;
         };
+        if let Some(agent) = self.agents.get_mut(&cid) {
+            agent.terminating = true;
+        }
 
         let mut cancelled_calls = match turn_state {
             AgentTurnState::ToolsRunning { remaining_calls } => remaining_calls,
@@ -13833,15 +14150,34 @@ impl Harness {
         cancelled_calls.extend(self.background_completion_call_ids_for_teardown(&cid));
         cancelled_calls.sort();
         cancelled_calls.dedup();
-        self.cancel_remaining_tool_calls(
+        let foreground_pending = self.cancel_remaining_tool_calls(
             &cid,
             cancelled_calls,
             "delegate cancel tool",
             BackgroundCompletionPromptMode::DoNotQueue,
         );
-        self.cancel_pending_context_claim(&cid);
+        if foreground_pending {
+            return;
+        }
+        self.finish_cancel_delegate_side_conversation(&cid);
+    }
+
+    fn finish_cancel_delegate_side_conversation(&mut self, cid: &AgentId) {
+        let Some((session_id, spid, originator)) = self.agents.get(cid).map(|conv| {
+            (
+                conv.session_id.clone(),
+                conv.in_flight_prompt.clone(),
+                conv.originator.clone(),
+            )
+        }) else {
+            return;
+        };
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.terminating = false;
+        }
+        self.cancel_pending_context_claim(cid);
         if let Some(spid) = spid {
-            self.cancel_running_compaction(&cid, &spid);
+            self.cancel_running_compaction(cid, &spid);
             self.prompt_semantic_output.remove(&spid);
             self.canceled_prompts.insert(spid.clone());
             self.publish_prompt_terminated(
@@ -13860,15 +14196,15 @@ impl Harness {
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id,
                     target_agent_id: self
-                        .target_agent_id_for_agent(&cid)
+                        .target_agent_id_for_agent(cid)
                         .map(crate::parse_agent_id),
                     agent_prompt_id: Some(spid),
                 }),
             );
         }
-        self.release_start_agent_request(&cid);
-        self.discard_background_completion_target_before_teardown(&cid);
-        self.remove_agent(&cid);
+        self.release_start_agent_request(cid);
+        self.discard_background_completion_target_before_teardown(cid);
+        self.remove_agent(cid);
         self.try_advance_queue();
     }
 
@@ -14063,13 +14399,17 @@ impl Harness {
             self.refresh_provider_models_and_publish_state();
         }
         if !self.resolving_initial_extension_collisions {
-            self.drain_pending_tool_invocations_or_report();
-            for (call_id, cid) in completed_foreground_calls {
-                self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+            if self.disconnect_terminal_batch_pending.is_empty()
+                && self.semantic_storage_fault.is_none()
+            {
+                self.drain_pending_tool_invocations_or_report();
+                for (call_id, cid) in completed_foreground_calls {
+                    self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+                }
+                self.drain_publish_idle_dispatches();
+                self.try_advance_queue();
             }
             self.maybe_complete_session_init_for_disconnect(connection_id);
-            self.drain_publish_idle_dispatches();
-            self.try_advance_queue();
         }
         let Some(meta) = disconnected_meta.or(meta) else {
             return;
@@ -14313,11 +14653,25 @@ impl Harness {
                 }
             })
             .collect();
-        // Keep disconnect cleanup deterministic; queued work is drained only
-        // after the whole sorted batch is terminalized below.
-        failed_call_ids.sort();
+        // Keep disconnect cleanup deterministic and publish background
+        // terminals before a foreground terminal can complete the agent turn.
+        // Queued work is drained only after the whole batch below.
+        failed_call_ids
+            .sort_by_key(|call_id| (!self.tool_turn.is_backgrounded(call_id), call_id.clone()));
+        let foreground_batch = failed_call_ids
+            .iter()
+            .filter(|call_id| !self.tool_turn.is_backgrounded(call_id))
+            .filter(|call_id| {
+                self.tool_agents
+                    .get(*call_id)
+                    .is_some_and(|cid| self.tool_terminal_has_open_durable_owner(cid, call_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.disconnect_terminal_batch_pending
+            .extend(foreground_batch);
 
-        let mut completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();
+        let completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();
 
         for call_id in failed_call_ids {
             let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
@@ -14359,17 +14713,21 @@ impl Harness {
             // have been terminalized.
             let owner = self.tool_agents.get(call_id.as_str()).cloned();
             if let Some(cid) = owner.as_ref() {
-                self.publish_terminal_tool_error(Some(cid), Some(HARNESS_CONNECTION_ID), error);
+                let journal_backed =
+                    self.publish_terminal_tool_error(Some(cid), Some(HARNESS_CONNECTION_ID), error);
+                if !journal_backed {
+                    self.disconnect_terminal_batch_pending.remove(&call_id);
+                    self.on_tool_call_complete_inner(call_id.as_str(), false);
+                    self.clear_tool_call_tracking(call_id.as_str());
+                }
             } else {
                 // No conversation attribution — fall back to the
                 // unsnapped publish so the error still reaches the
                 // bus / log.
                 self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
+                self.tool_turn.mark_complete(&call_id);
+                self.clear_tool_call_tracking(call_id.as_str());
             }
-            if let Some(cid) = self.finish_tool_call_runtime_state(call_id.as_str()) {
-                completed_foreground_calls.push((call_id.clone(), cid));
-            }
-            self.clear_tool_call_tracking(call_id.as_str());
         }
 
         completed_foreground_calls
@@ -15793,6 +16151,7 @@ impl Harness {
         publish_initial_instruction: bool,
         peer_entrypoint_endpoint: bool,
     ) -> Result<(), HarnessError> {
+        self.ensure_semantic_epoch_live("start agent")?;
         let PendingStartAgentRequest {
             source_id,
             extension_name,
@@ -15860,12 +16219,10 @@ impl Harness {
             metadata: initial_metadata.clone(),
             ephemeral: persistence.is_ephemeral(),
         });
-        self.agent_store.append_agent_event_at(
+        self.append_direct_agent_semantic_event(
             &agent_id,
-            None,
             tau_core::AgentEventParent::InheritHead,
             started.clone(),
-            tau_proto::UnixMicros::now(),
         )?;
         let mut conv = Agent::new(
             cid.clone(),
@@ -16444,29 +16801,29 @@ impl Harness {
                 visible_tool_name,
             },
         );
-        self.tool_turn.mark_backgrounded(&call.id);
-        self.publish_internal_background_placeholder(
-            &call.id,
-            tau_proto::CborValue::Map(vec![
-                (
-                    tau_proto::CborValue::Text("status".into()),
-                    tau_proto::CborValue::Text("accepted".into()),
-                ),
-                (
-                    tau_proto::CborValue::Text("target_agent_id".into()),
-                    tau_proto::CborValue::Text(target_public_id.clone()),
-                ),
-                (
-                    tau_proto::CborValue::Text("request_id".into()),
-                    tau_proto::CborValue::Text(request_id.to_string()),
-                ),
-                (
-                    tau_proto::CborValue::Text("deferred".into()),
-                    tau_proto::CborValue::Bool(self_request),
-                ),
-            ]),
-        );
-        self.on_tool_call_foreground_complete(call.id.as_str());
+        if self.tool_turn.begin_backgrounding(&call.id) {
+            self.publish_internal_background_placeholder(
+                &call.id,
+                tau_proto::CborValue::Map(vec![
+                    (
+                        tau_proto::CborValue::Text("status".into()),
+                        tau_proto::CborValue::Text("accepted".into()),
+                    ),
+                    (
+                        tau_proto::CborValue::Text("target_agent_id".into()),
+                        tau_proto::CborValue::Text(target_public_id.clone()),
+                    ),
+                    (
+                        tau_proto::CborValue::Text("request_id".into()),
+                        tau_proto::CborValue::Text(request_id.to_string()),
+                    ),
+                    (
+                        tau_proto::CborValue::Text("deferred".into()),
+                        tau_proto::CborValue::Bool(self_request),
+                    ),
+                ]),
+            );
+        }
         self.emit_info(&format!(
             "Agent {caller_public_id} accepted compaction request for {target_public_id} ({request_id})"
         ));
@@ -20252,6 +20609,7 @@ impl Harness {
         metadata: Vec<tau_proto::AgentInitialMetadata>,
         persistence: tau_core::AgentPersistenceMode,
     ) -> Result<AgentId, HarnessError> {
+        self.ensure_semantic_epoch_live("create agent")?;
         let agent_id = self.mint_available_agent_id_for_role(role);
         if persistence.is_ephemeral() {
             self.agent_store.mark_agent_ephemeral(&agent_id)?;
@@ -20270,12 +20628,10 @@ impl Harness {
             metadata: metadata.clone(),
             ephemeral: persistence.is_ephemeral(),
         });
-        self.agent_store.append_agent_event_at(
+        self.append_direct_agent_semantic_event(
             &agent_id,
-            None,
             tau_core::AgentEventParent::InheritHead,
             started.clone(),
-            tau_proto::UnixMicros::now(),
         )?;
         self.session_ever_loaded_agents
             .insert(crate::parse_agent_id(&agent_id));
@@ -20319,6 +20675,9 @@ impl Harness {
             self.emit_agent_stats_updated(cid);
             return Some(agent_id);
         }
+        if self.ensure_semantic_epoch_live("create agent").is_err() {
+            return None;
+        }
         let role = self
             .agents
             .get(cid)
@@ -20350,12 +20709,10 @@ impl Harness {
             metadata: Vec::new(),
             ephemeral: persistence.is_ephemeral(),
         });
-        if let Err(error) = self.agent_store.append_agent_event_at(
+        if let Err(error) = self.append_direct_agent_semantic_event(
             &agent_id,
-            None,
             tau_core::AgentEventParent::InheritHead,
             started.clone(),
-            tau_proto::UnixMicros::now(),
         ) {
             self.emit_harness_failure(&format!(
                 "failed to commit creation for agent `{agent_id}`: {error}"
@@ -20423,6 +20780,9 @@ impl Harness {
             .agent_store
             .agent_has_committed_identity(&agent_id_proto);
         if !has_creation {
+            if self.ensure_semantic_epoch_live("create agent").is_err() {
+                return;
+            }
             let persistence = self
                 .agents
                 .get(cid)
@@ -20443,12 +20803,10 @@ impl Harness {
                 metadata: initial_metadata.clone(),
                 ephemeral: persistence.is_ephemeral(),
             });
-            if let Err(error) = self.agent_store.append_agent_event_at(
+            if let Err(error) = self.append_direct_agent_semantic_event(
                 agent_id,
-                None,
                 tau_core::AgentEventParent::InheritHead,
                 started.clone(),
-                tau_proto::UnixMicros::now(),
             ) {
                 self.emit_harness_failure(&format!(
                     "failed to commit creation for agent `{agent_id}`: {error}"
@@ -23437,10 +23795,9 @@ impl Harness {
         match action {
             ForegroundAction::None => {}
             ForegroundAction::Background { call_id } => {
-                if self.tool_turn.mark_backgrounded(&call_id) {
+                if self.tool_turn.begin_backgrounding(&call_id) {
                     self.publish_synthetic_background_result(&call_id);
                 }
-                self.on_tool_call_foreground_complete(call_id.as_str());
             }
         }
     }
@@ -23486,7 +23843,6 @@ impl Harness {
         } else {
             self.publish_for_agent(&cid, Event::ProviderToolResult(result.clone()));
         }
-        self.record_wait_tool_result(result);
     }
 
     fn publish_synthetic_background_result_inner(
@@ -23521,13 +23877,13 @@ impl Harness {
             display: None,
         };
         self.publish_for_agent(&cid, Event::ProviderToolResult(result.clone()));
-        self.record_wait_tool_result(result);
     }
 
     fn process_background_deadlines_at(&mut self, now: Instant) {
         for call_id in self.tool_turn.background_due(now) {
-            self.publish_synthetic_background_result(&call_id);
-            self.on_tool_call_foreground_complete(call_id.as_str());
+            if self.tool_turn.begin_backgrounding(&call_id) {
+                self.publish_synthetic_background_result(&call_id);
+            }
         }
     }
 
@@ -24204,7 +24560,7 @@ impl Harness {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
         self.bump_tools_started_for(cid);
-        self.publish_terminal_tool_error(
+        let journal_backed = self.publish_terminal_tool_error(
             Some(cid),
             source,
             ToolError {
@@ -24218,12 +24574,14 @@ impl Harness {
                 display: None,
             },
         );
-        if complete_turn {
-            self.on_tool_call_complete(call_id.as_str());
-        } else {
-            self.finish_tool_call_runtime_state(call_id.as_str());
+        if !journal_backed {
+            if complete_turn {
+                self.on_tool_call_complete(call_id.as_str());
+            } else {
+                self.finish_tool_call_runtime_state(call_id.as_str());
+            }
+            self.clear_tool_call_tracking(call_id.as_str());
         }
-        self.clear_tool_call_tracking(call_id.as_str());
     }
 
     fn tool_owner_agent_id(&self, cid: &AgentId) -> AgentId {
@@ -24462,7 +24820,7 @@ impl Harness {
                 originator: owner_originator.clone(),
             };
             self.publish_for_agent_from(cid, source, Event::ToolRequest(request));
-            self.publish_terminal_tool_error(
+            let journal_backed = self.publish_terminal_tool_error(
                 Some(cid),
                 source,
                 ToolError {
@@ -24476,8 +24834,10 @@ impl Harness {
                     display: None,
                 },
             );
-            self.on_tool_call_complete(call_id.as_str());
-            self.clear_tool_call_tracking(call_id.as_str());
+            if !journal_backed {
+                self.on_tool_call_complete(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
             return Ok(());
         };
         let internal_tool_name = tool_spec.name.clone();
@@ -24608,9 +24968,11 @@ impl Harness {
 
                     display: None,
                 };
-                self.publish_terminal_tool_error(Some(cid), source, error);
-                self.on_tool_call_complete(&call.id);
-                self.clear_tool_call_tracking(call_id.as_str());
+                let journal_backed = self.publish_terminal_tool_error(Some(cid), source, error);
+                if !journal_backed {
+                    self.on_tool_call_complete(call_id.as_str());
+                    self.clear_tool_call_tracking(call_id.as_str());
+                }
             }
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }

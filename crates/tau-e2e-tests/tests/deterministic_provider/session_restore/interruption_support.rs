@@ -315,7 +315,7 @@ pub(super) fn assert_no_terminal_tool_event(
     Ok(())
 }
 
-/// Requires one live non-semantic/durable repair pair owned by the worker.
+/// Requires one live durable/derived repair pair owned by the worker.
 pub(super) fn assert_boot_b_repair_pair(
     fixture: &DeterministicFixture,
     events: &[Observed],
@@ -370,7 +370,7 @@ pub(super) fn assert_single_repair_trace(
         .collect::<Vec<_>>();
     if tool_positions.len() != 1
         || provider_positions.len() != 1
-        || tool_positions[0] >= provider_positions[0]
+        || provider_positions[0] >= tool_positions[0]
     {
         return Err(format!("live repair trace changed for call {call_id}: {trace}").into());
     }

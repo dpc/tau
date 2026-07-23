@@ -457,8 +457,8 @@ network, child-process, or environment-control capability.
 
 On resume, assert that only the worker journal receives one durable
 `provider.tool_error` with the restart/possible-side-effect diagnostic. Require
-the correlated Boot B live repair pair—one non-semantic `tool.error` followed by
-that durable provider error—and no pair on Boot C. The execution-restore stream
+the correlated Boot B live repair pair—the durable provider error followed by
+one derived non-semantic `tool.error`—and no pair on Boot C. The execution-restore stream
 produces no second live `tool.started`; the main journal and lane are unchanged.
 Add a closed repair-aware fake continuation that validates the exact call ID,
 error status, and synthetic diagnostic before emitting a terminal response;

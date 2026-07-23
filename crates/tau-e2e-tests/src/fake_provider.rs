@@ -96,7 +96,7 @@ struct FakeState {
     /// Admitted facts for the current two-chain watch action.
     watch_chain_progress: HashMap<tau_proto::AgentId, WatchChainProgress>,
     /// Live S6 repair-pair progress for the sole closed dummy call; `None`
-    /// means the exact `tool.error` has not arrived.
+    /// means the exact `provider.tool_error` has not arrived.
     repair_progress: Option<DummyRepairProgress>,
 }
 
@@ -110,8 +110,8 @@ struct DummyRepairProgress {
 
 /// Closed live-event ordering for one S6 repair pair.
 enum DummyRepairPhase {
-    /// The non-semantic error arrived; the durable provider error is next.
-    AwaitingProviderToolError,
+    /// The durable provider error arrived; the renderer error is next.
+    AwaitingToolError,
     /// Both events arrived in exact order.
     Complete,
 }
@@ -421,7 +421,7 @@ impl FakeState {
             .and_then(|children| children.last())
     }
 
-    /// Validates and traces the exact live S6 non-semantic/durable repair pair
+    /// Validates and traces the exact live S6 durable/derived repair pair
     /// without turning either observation into provider work.
     fn record_dummy_repair_event(&mut self, event: &Event) -> ClientResult<()> {
         let (error, label) = match event {
@@ -477,15 +477,15 @@ impl FakeState {
             ));
         }
         match (&mut self.repair_progress, event) {
-            (None, Event::ToolError(_)) => {
+            (None, Event::ProviderToolError(_)) => {
                 self.repair_progress = Some(DummyRepairProgress {
                     call_id: error.call_id.clone(),
-                    phase: DummyRepairPhase::AwaitingProviderToolError,
+                    phase: DummyRepairPhase::AwaitingToolError,
                 });
             }
-            (Some(progress), Event::ProviderToolError(_))
+            (Some(progress), Event::ToolError(_))
                 if progress.call_id == error.call_id
-                    && matches!(progress.phase, DummyRepairPhase::AwaitingProviderToolError) =>
+                    && matches!(progress.phase, DummyRepairPhase::AwaitingToolError) =>
             {
                 progress.phase = DummyRepairPhase::Complete;
             }

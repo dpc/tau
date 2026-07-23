@@ -370,7 +370,7 @@ impl Harness {
     }
 
     /// Return transcript ownership only for ordinary agent-owned internal
-    /// calls.
+    /// calls with an open durable tool-call node.
     ///
     /// Peer-internal correlation is runtime state and must not graft terminal
     /// facts into a transcript without a matching tool-call node.
@@ -379,7 +379,9 @@ impl Harness {
         cid: &'a AgentId,
         call_id: &ToolCallId,
     ) -> Option<&'a AgentId> {
-        (!self.peer_internal_tool_agents.contains_key(call_id)).then_some(cid)
+        (!self.peer_internal_tool_agents.contains_key(call_id)
+            && self.tool_terminal_has_open_durable_owner(cid, call_id))
+        .then_some(cid)
     }
 
     /// Complete waits owned by `owner` after inference-activating input has
@@ -412,6 +414,13 @@ impl Harness {
             .wait_tracker
             .input_waiters
             .contains_key(owner)
+    }
+
+    #[cfg(test)]
+    /// Report whether a placeholder has moved this call into waitable
+    /// background state.
+    pub(crate) fn wait_call_is_backgrounded_for_test(&self, call_id: &ToolCallId) -> bool {
+        self.subagents.wait_tracker.is_backgrounded(call_id)
     }
 
     pub(crate) fn record_wait_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) {
@@ -1840,7 +1849,9 @@ impl Harness {
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
         self.publish_terminal_tool_result(transcript_owner, None, result);
-        self.finish_harness_owned_tool_tracking(&call_id);
+        if transcript_owner.is_none() {
+            self.finish_harness_owned_tool_tracking(&call_id);
+        }
     }
 
     pub(crate) fn finish_harness_owned_tool_with_error(
@@ -1879,7 +1890,9 @@ impl Harness {
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
         self.publish_terminal_tool_error(transcript_owner, None, error);
-        self.finish_harness_owned_tool_tracking(&call_id);
+        if transcript_owner.is_none() {
+            self.finish_harness_owned_tool_tracking(&call_id);
+        }
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
@@ -1898,7 +1911,9 @@ impl Harness {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
             self.publish_terminal_tool_result(transcript_owner, None, result);
-            self.finish_harness_owned_tool_tracking(&call_id);
+            if transcript_owner.is_none() {
+                self.finish_harness_owned_tool_tracking(&call_id);
+            }
         }
     }
 
@@ -1918,7 +1933,9 @@ impl Harness {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
             self.publish_terminal_tool_error(transcript_owner, None, error);
-            self.finish_harness_owned_tool_tracking(&call_id);
+            if transcript_owner.is_none() {
+                self.finish_harness_owned_tool_tracking(&call_id);
+            }
         }
     }
 
@@ -1941,6 +1958,7 @@ impl Harness {
             };
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&cid, &wait_call_id);
+            let ownerless = transcript_owner.is_none();
             match reply.kind {
                 WaitReplyKind::Result { result, display } => {
                     self.publish_terminal_tool_result(
@@ -1978,7 +1996,9 @@ impl Harness {
                     );
                 }
             }
-            self.finish_harness_owned_tool_tracking(&wait_call_id);
+            if ownerless {
+                self.finish_harness_owned_tool_tracking(&wait_call_id);
+            }
         }
     }
 }

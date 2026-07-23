@@ -289,27 +289,13 @@ impl<'a> InternalToolHost<'a> {
         self.harness.drain_pending_start_agent_requests()
     }
 
-    /// Mark a call as backgrounded for instant-background tools.
-    pub fn mark_tool_backgrounded(&mut self, call_id: &ToolCallId) -> bool {
-        self.harness.tool_turn.mark_backgrounded(call_id)
-    }
-
-    /// Publish a background placeholder with custom text.
-    pub fn publish_background_placeholder(&mut self, call_id: &ToolCallId, result: CborValue) {
-        self.harness
-            .publish_internal_background_placeholder(call_id, result);
-    }
-
     /// Background an internal tool call with a custom placeholder and release
-    /// the foreground turn so the caller can continue while the tool remains
-    /// waitable.
+    /// the foreground turn after that placeholder commits.
     pub fn background_tool_call(&mut self, call_id: &ToolCallId, result: CborValue) {
-        if self.harness.tool_turn.mark_backgrounded(call_id) {
+        if self.harness.tool_turn.begin_backgrounding(call_id) {
             self.harness
                 .publish_internal_background_placeholder(call_id, result);
         }
-        self.harness
-            .on_tool_call_foreground_complete(call_id.as_str());
     }
 
     /// Request standalone compaction on behalf of a committed built-in tool

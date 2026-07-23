@@ -180,11 +180,11 @@ whose background call was repaired, so one loaded agent in a resumed session
 cannot consume or see another agent's restored background-tool notice.
 
 Cold restore closes each unresolved foreground tool call conservatively without
-redispatch. It publishes one harness-authored nonsemantic `tool.error` followed
-by one durable agent-owned `provider.tool_error` with the restart and
-possible-side-effect diagnostic. The durable provider error balances the
-provider context and makes later cold resumes idempotent; an already repaired
-call receives no second pair. Canonical terminal publication follows
+redispatch. It commits one durable agent-owned `provider.tool_error` with the
+restart and possible-side-effect diagnostic, then derives one harness-authored
+nonsemantic `tool.error`. The durable provider error balances the provider
+context and makes later cold resumes idempotent; an already repaired call
+receives no second pair. Canonical terminal publication follows
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
 New durable agents commit `AgentStarted` as journal sequence zero before the

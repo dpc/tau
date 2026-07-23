@@ -2098,12 +2098,10 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     h.shutdown().expect("shutdown");
 }
 
-/// First-suffix persistence failure retains the exact interceptor-approved
-/// replacement, recommits it without repeated interception, publishes only the
-/// untouched remaining suffix, and fans out the sanctioned watcher text only
-/// after its successful durable commit.
+/// A first-suffix persistence failure drops the interceptor-approved
+/// continuation and fail-stops later semantic work in the live epoch.
 #[test]
-fn rejected_compaction_completion_steer_retries_on_reselection() {
+fn rejected_compaction_completion_steer_fail_stops_without_retry() {
     let tmp = TempDir::new().expect("tempdir");
     let state_dir = tmp.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("harness");
@@ -2201,9 +2199,10 @@ fn rejected_compaction_completion_steer_retries_on_reselection() {
     )
     .expect("release approved replacement into append failure");
     assert!(
-        h.pending_agent_publish_completions.contains_key(&cid),
-        "failed append must retain the exact completion envelope"
+        !h.pending_agent_publish_completions.contains_key(&cid),
+        "storage failure must not retain an exact completion envelope"
     );
+    assert!(h.semantic_storage_fault.is_some());
     assert!(matches!(
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Running { .. }
@@ -2226,110 +2225,13 @@ fn rejected_compaction_completion_steer_retries_on_reselection() {
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-            agent_id: agent_id.clone(),
+            agent_id,
             head: batch_parent,
         }),
     );
-    assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
-        Some(Event::AgentPromptSteered(steered))
-            if steered.text == "retry final completion steer"
-    ));
-    h.handle_extension_event(
-        "retry-replacement-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release remaining suffix steer");
+    assert!(h.pending_intercept.is_none());
     assert!(!h.pending_agent_publish_completions.contains_key(&cid));
-    let checkpoint = event_log_events(&h)
-        .into_iter()
-        .rev()
-        .find_map(|event| match event {
-            Event::AgentInferenceDispatchStarted(started)
-                if started.transaction_id.as_ref() == Some(&transaction_id) =>
-            {
-                Some(started)
-            }
-            _ => None,
-        })
-        .expect("retried continuation checkpoint");
-    assert_ne!(checkpoint.through, batch_parent);
-    let prompt = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
-            _ => None,
-        })
-        .expect("retried owner prompt");
-    assert_eq!(
-        prompt
-            .context
-            .flatten_iter()
-            .filter(|item| matches!(
-                item,
-                ContextItem::Message(MessageItem { content, .. })
-                    if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text } if text == "approved replacement steer"
-                    ))
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        prompt
-            .context
-            .flatten_iter()
-            .filter(|item| matches!(
-                item,
-                ContextItem::Message(MessageItem { content, .. })
-                    if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text } if text == "retry exact completion steer"
-                    ))
-            ))
-            .count(),
-        0
-    );
-    assert_eq!(
-        prompt
-            .context
-            .flatten_iter()
-            .filter(|item| matches!(
-                item,
-                ContextItem::Message(MessageItem { content, .. })
-                    if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text } if text == "retry final completion steer"
-                    ))
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        interceptor
-            .lock()
-            .expect("interceptor frames")
-            .iter()
-            .filter(|frame| matches!(frame.frame, HarnessOutputMessage::InterceptRequest(_)))
-            .count(),
-        2,
-        "approved first steer must not restart interception; only the remaining suffix is new"
-    );
-    let watcher_messages: Vec<_> = session_agent_message_received_events(&h)
-        .into_iter()
-        .filter(|message| {
-            message.recipient_id == watcher_id
-                && message.kind == tau_proto::AgentMessageKind::WatchPrompt
-        })
-        .collect();
-    assert_eq!(watcher_messages.len(), watcher_messages_before + 1);
-    assert!(watcher_messages.iter().any(|message| {
-        message.message.contains("approved replacement steer")
-            && !message.message.contains("retry exact completion steer")
-    }));
+    assert_eq!(prompt_created_count(&h), 0);
 }
 
 fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
@@ -4993,7 +4895,7 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
 }
 
 /// An activating fact rejected by the agent journal leaves no detached
-/// activation ownership that a later committed occurrence could consume.
+/// activation ownership and fail-stops later semantic work in the live epoch.
 #[test]
 fn rejected_activating_append_leaves_no_stale_dispatch() {
     let tmp = TempDir::new().expect("tempdir");
@@ -5040,35 +4942,8 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("committed activation".to_owned()))
         .expect("dispatch later activation");
     assert!(h.pending_publish_idle_dispatches.is_empty());
-    assert_eq!(prompt_created_count(&h), 1);
-    let prompt = read_nth_prompt_created(&h, 0);
-    let checkpoint = event_log_events(&h)
-        .into_iter()
-        .rev()
-        .find_map(|event| match event {
-            Event::AgentInferenceDispatchStarted(started)
-                if started.agent_prompt_id == prompt.agent_prompt_id =>
-            {
-                Some(started)
-            }
-            _ => None,
-        })
-        .expect("later checkpoint");
-    let tau_proto::AgentHead::Node(through) = checkpoint.through else {
-        panic!("later activation watermark");
-    };
-    assert!(matches!(
-        &default_agent_node(&h, through).entry,
-        AgentEntry::UserInput { items, .. }
-            if items.iter().any(|item| matches!(
-                item,
-                ContextItem::Message(MessageItem { content, .. })
-                    if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text } if text == "committed activation"
-                    ))
-            ))
-    ));
+    assert!(h.semantic_storage_fault.is_some());
+    assert_eq!(prompt_created_count(&h), 0);
 }
 
 #[test]
