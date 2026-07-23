@@ -222,6 +222,17 @@ text but cannot change the bit. Missing legacy fields deserialize false.
 Replay considers only true facts after the last completed checkpoint; an
 uncompleted checkpoint remains uncertain and is never automatically resent.
 
+Committed compaction replacement windows contain the provider items that the
+compacting request actually consumed. Replay does not reinterpret or rewrite
+those materialized items when a later release changes source-based presentation.
+Typed suffix facts use the current projection, so a historical raw user prompt or
+`<tau_message>` may coexist with newly projected `<user>` or external `<message>`
+items across the compaction boundary. New compactions preserve their actual
+provider-visible input. See
+[DECISION-interactive-user-prompt-envelope](DECISION-interactive-user-prompt-envelope.md)
+and
+[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+
 Cold agent rehydration restores context usage only from the latest
 model-qualified durable assistant response on the selected branch and never
 across a later compaction boundary. The producing model travels with the

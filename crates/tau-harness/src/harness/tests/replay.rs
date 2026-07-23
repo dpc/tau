@@ -492,7 +492,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     assert!(
         projected_prompt
             .system_prompt
-            .contains("<tau_message> elements are committed canonical external-message facts.")
+            .contains("<message event=\"…\" publisher=\"…\"> elements are committed canonical external-message facts.")
     );
     assert!(projected_prompt.context.blocks.iter().any(|block| {
         matches!(
@@ -505,7 +505,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
                             && matches!(
                                 message.content.first(),
                                 Some(tau_proto::ContentPart::Text { text })
-                                    if text.contains("<tau_message event=\"created\"")
+                                    if text.contains("<message event=\"created\"")
                             )
                 ))
         )
@@ -699,7 +699,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
                     if matches!(
                         message.content.first(),
                         Some(ContentPart::Text { text })
-                            if text.contains("<tau_message event=\"created\"")
+                            if text.contains("<message event=\"created\"")
                     )
             )
         })
@@ -829,7 +829,7 @@ fn agent_message_fact_replay_projects_without_wake() {
     let tau_proto::ContentPart::Text { text } = &item.content[0];
     assert_eq!(
         text,
-        "<tau_message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</tau_message>"
+        "<message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</message>"
     );
     assert!(
         event_log_events(&resumed).iter().all(|event| !matches!(

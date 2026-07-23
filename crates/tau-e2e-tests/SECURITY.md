@@ -18,6 +18,14 @@ commands. Scenario counts, bytes, hold deadlines, barriers, and diagnostics are
 bounded; Nix additionally runs the exact lane in a network-denied build sandbox.
 Children still inherit the ordinary process environment, but the closed fake
 does not read provider credentials or use environment values as control.
+The closed fixture grammar reserves exact canonical fieldless
+`<user>...</user>` syntax for HumanUi provider projections because provider text
+does not itself carry durable provenance. The fake decodes that syntax and its
+five fixed XML entities before comparing against scenario text. This is test
+matching, not prompt-control authority; malformed, attributed, differently
+wrapped, or noncanonical bodies remain mismatches, and a future non-Human
+fixture needing literal canonical wrapper syntax requires a typed scenario
+distinction.
 
 The S1 session-restore fixture enables the production harness-owned `agent_start`
 built-in only for its closed main role; S2 adds only `agent_watch`. The worker

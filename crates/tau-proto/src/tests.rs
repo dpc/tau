@@ -839,6 +839,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::AgentPromptSteered(AgentPromptSteered {
             inference_activation: false,
+            submission_source: PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id("engineer_abcd1234"),
             text: "steer".to_owned(),
             message_class: PromptMessageClass::User,
@@ -2214,6 +2215,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
 
     let active_steered = AgentPromptSteered {
         inference_activation: true,
+        submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "steered".to_owned(),
         message_class: PromptMessageClass::User,
@@ -3709,15 +3711,9 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     .expect("queued prompt decodes");
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
-    let legacy_steered: AgentPromptSteered = serde_json::from_value(serde_json::json!({
-        "agent_id": "worker",
-        "text": "steered"
-    }))
-    .expect("legacy steered prompt decodes");
-    assert_eq!(legacy_steered.internal_kind, None);
-
     let internal = serde_json::to_value(AgentPromptSteered {
         inference_activation: false,
+        submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         message_class: PromptMessageClass::Internal,
@@ -3727,6 +3723,36 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     .expect("serialize steered prompt");
     assert_eq!(internal["message_class"], serde_json::json!("internal"));
     assert!(internal.get("internal_kind").is_none());
+}
+
+/// Steered prompt provenance is required so replay never guesses which provider
+/// presentation applies to a queued prompt.
+#[test]
+fn steered_prompt_requires_submission_source() {
+    let missing_source = serde_json::json!({
+        "agent_id": "worker",
+        "text": "steered"
+    });
+    assert!(
+        serde_json::from_value::<AgentPromptSteered>(missing_source).is_err(),
+        "old steered records without typed provenance must not decode"
+    );
+
+    let steered = AgentPromptSteered {
+        inference_activation: true,
+        submission_source: PromptSubmissionSource::HumanUi,
+        agent_id: agent_id("worker"),
+        text: "steered".to_owned(),
+        message_class: PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    };
+    let encoded = serde_json::to_value(&steered).expect("serialize steered prompt");
+    assert_eq!(encoded["submission_source"], serde_json::json!("human_ui"));
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSteered>(encoded).expect("decode steered prompt"),
+        steered
+    );
 }
 
 /// Context-size alerts keep a typed optional tag on both durable prompt shapes
@@ -3758,6 +3784,7 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
 
     let steered = AgentPromptSteered {
         inference_activation: true,
+        submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
         text: "compact after tools".to_owned(),
         message_class: PromptMessageClass::Internal,

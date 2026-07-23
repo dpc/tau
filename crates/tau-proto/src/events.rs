@@ -3784,6 +3784,8 @@ pub struct AgentPromptSteered {
     /// and cannot independently wake inference during replay.
     #[serde(default, skip_serializing_if = "is_false")]
     pub inference_activation: bool,
+    /// Harness-stamped provenance of this accepted prompt.
+    pub submission_source: PromptSubmissionSource,
     /// Prompt text appended to the in-flight turn.
     pub text: String,
     /// Whether this prompt text is user-authored or internal control text.

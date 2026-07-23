@@ -97,6 +97,11 @@ optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
 which that harness-owned alert reaches model context; missing tags preserve
 legacy hidden-internal presentation. The contract is
 [DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+Both prompt facts also carry required harness-stamped
+`PromptSubmissionSource` provenance while retaining raw accepted prompt text.
+Core and harness use that typed source for provider-only presentation; protocol
+CBOR, durable authority, and UI consumers remain raw. See
+[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
 
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes

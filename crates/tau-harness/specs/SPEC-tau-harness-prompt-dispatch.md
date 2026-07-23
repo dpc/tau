@@ -184,6 +184,23 @@ typed fact, and live activation uses only a sequence-keyed payload-free wake.
 Replay renders context without waking. See
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
+## Interactive user prompt provider projection
+
+The harness stamps `HumanUi` on accepted visible UI prompts for existing agents,
+new-agent initial prompts, and queued prompts later committed as steering facts.
+Submitted and steered facts keep the accepted effective text raw and carry that
+required typed provenance through the derived transcript. Prompt assembly alone
+projects each such entry as one fieldless `<user>...</user>` user-role text item,
+escaping only the five XML delimiters. Replay follows the same source-based path.
+
+Successful user skill commands are expanded before acceptance, so the canonical
+expanded `<skill>` block remains raw in the fact while the complete expansion is
+escaped inside the provider `<user>` body. Internal, injected, extension,
+external-message, agent-message, and watch domains retain their existing
+projections. UI/history/tree anchors, activation, queueing, and wake behavior do
+not consume the provider wrapper. See
+[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+
 Compaction-triggered dispatch and continuation refine [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md); that record owns their transaction, checkpoint, replay, and model-correlation behavior.
 
 ## Prompt capability trust boundary

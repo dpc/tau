@@ -469,8 +469,8 @@ fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures user slash invocation expands to a Pi-style prompt block and appends
-/// opaque arguments without making disabled-model skills unavailable to users.
+/// Ensures actual UI slash-command intake expands to a raw Pi-style canonical
+/// prompt and sends its complete escaped HumanUi envelope to the provider.
 #[test]
 fn user_skill_command_expands_prompt_block() {
     let tmp = TempDir::new().expect("tempdir");
@@ -501,6 +501,61 @@ fn user_skill_command_expands_prompt_block() {
     assert!(expanded.contains("References are relative to"));
     assert!(expanded.contains("Use manual steps."));
     assert!(expanded.ends_with("</skill>\n\ndo this"));
+
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "/skill manual do this".to_owned(),
+        agent_id: agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("skill-ui".to_owned()),
+    })
+    .expect("submit user skill command");
+
+    let submitted = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.ctx_id.as_deref() == Some("skill-ui") =>
+            {
+                Some(submitted)
+            }
+            _ => None,
+        })
+        .expect("expanded canonical prompt");
+    assert_eq!(submitted.text, expanded);
+    assert_eq!(
+        submitted.submission_source,
+        tau_proto::PromptSubmissionSource::HumanUi
+    );
+    let provider_prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("provider prompt");
+    let escaped = expanded
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
+    assert_eq!(
+        provider_prompt.context.flatten(),
+        vec![ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
+                text: format!("<user>{escaped}</user>"),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })]
+    );
 }
 
 /// Ensures `disable-model-invocation` is treated as manual-only rather than

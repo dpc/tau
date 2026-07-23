@@ -916,7 +916,7 @@ impl FakeState {
             };
             expected_user_text.push(text);
         }
-        let actual_user_text = user_texts(prompt);
+        let actual_user_text = scenario_user_texts(prompt);
         if !actual_user_text.ends_with(&expected_user_text) {
             self.trace(&format!(
                 "watch markup expected={expected_user_text:?} actual={actual_user_text:?}"
@@ -996,7 +996,7 @@ impl FakeState {
                 deltas,
                 response,
             } => {
-                self.require_user_text(index, prompt, &user_text)?;
+                self.require_human_ui_user_text(index, prompt, &user_text)?;
                 for text in deltas {
                     handle.emit_transient(Event::ProviderResponseUpdatedReported(
                         ProviderResponseUpdated {
@@ -1025,7 +1025,7 @@ impl FakeState {
                 tool_name,
                 call_id,
             } => {
-                self.require_user_text(index, prompt, &user_text)?;
+                self.require_human_ui_user_text(index, prompt, &user_text)?;
                 let tool_names = prompt
                     .tools
                     .iter()
@@ -1220,7 +1220,7 @@ impl FakeState {
                     "scenario first mismatch: no-context agent is not the validated child",
                 ));
             }
-            let actual = latest_user_text(prompt);
+            let actual = latest_scenario_user_text(prompt);
             let candidates = self
                 .v2()?
                 .lanes
@@ -1976,12 +1976,31 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         expected: &str,
     ) -> ClientResult<()> {
-        let actual = latest_user_text(prompt);
+        let actual = latest_scenario_user_text(prompt);
         if actual.as_deref() != Some(expected) {
             self.trace(&format!(
                 "last user expected={expected:?} actual={actual:?}"
             ))?;
             return Err(self.mismatch(index, "last user text mismatch"));
+        }
+        Ok(())
+    }
+
+    fn require_human_ui_user_text(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        expected: &str,
+    ) -> ClientResult<()> {
+        let actual = latest_provider_user_text(prompt);
+        let decoded = actual
+            .as_deref()
+            .and_then(decode_scenario_human_ui_user_prompt);
+        if decoded.as_deref() != Some(expected) {
+            self.trace(&format!(
+                "last HumanUi user expected={expected:?} actual={actual:?}"
+            ))?;
+            return Err(self.mismatch(index, "last HumanUi user envelope mismatch"));
         }
         Ok(())
     }
@@ -2087,11 +2106,26 @@ fn require_repaired_dummy_result(
     Ok(())
 }
 
-fn latest_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
-    user_texts(prompt).pop()
+fn latest_scenario_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
+    scenario_user_texts(prompt).pop()
 }
 
-fn user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
+/// Return semantic text under the closed deterministic-scenario convention.
+///
+/// Exact canonical `<user>` syntax is reserved for fixture HumanUi projections;
+/// the fake cannot infer durable provenance from provider text alone.
+fn scenario_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
+    provider_user_texts(prompt)
+        .into_iter()
+        .map(|text| decode_scenario_human_ui_user_prompt(&text).unwrap_or(text))
+        .collect()
+}
+
+fn latest_provider_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
+    provider_user_texts(prompt).pop()
+}
+
+fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
     prompt
         .context
         .flatten()
@@ -2109,6 +2143,18 @@ fn user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Decode one exact provider-only HumanUi envelope into its semantic text.
+fn decode_scenario_human_ui_user_prompt(text: &str) -> Option<String> {
+    let body = text.strip_prefix("<user>")?.strip_suffix("</user>")?;
+    let decoded = body
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    (xml_escape(&decoded) == body).then_some(decoded)
 }
 
 fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {

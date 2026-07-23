@@ -2170,6 +2170,7 @@ fn rejected_compaction_completion_steer_retries_on_reselection() {
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             inference_activation: true,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
             text: retry_prompt.text.clone(),
             message_class: retry_prompt.message_class,
@@ -2383,6 +2384,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             inference_activation: true,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
             text: completion_prompt.text.clone(),
             message_class: completion_prompt.message_class,
@@ -2507,6 +2509,7 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
             None,
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                 inference_activation: true,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: text.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -2907,6 +2910,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                 tau_proto::EventName::AGENT_PROMPT_STEERED,
                 Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                     inference_activation,
+                    submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id,
                     text: "steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
@@ -2959,6 +2963,55 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
     }
 }
 
+/// Interceptors may rewrite ordinary steered text but cannot change the
+/// harness-stamped provenance that selects provider presentation.
+#[test]
+fn interception_rejects_steered_submission_source_forgery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let interceptor = connect_test_tool(&mut h, "steered-source-rewriter");
+    h.handle_extension_event(
+        "steered-source-rewriter",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let original = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        inference_activation: true,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        text: "steered".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    });
+
+    h.publish_for_agent(&cid, original.clone());
+    let mut replacement = original.clone();
+    let Event::AgentPromptSteered(prompt) = &mut replacement else {
+        unreachable!()
+    };
+    prompt.submission_source = tau_proto::PromptSubmissionSource::HarnessInternal;
+    h.handle_extension_event(
+        "steered-source-rewriter",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement.clone()))),
+        })),
+    )
+    .expect("intercept reply");
+
+    let events = event_log_events(&h);
+    assert!(events.contains(&original));
+    assert!(!events.contains(&replacement));
+    drop(interceptor);
+    h.shutdown().expect("shutdown");
+}
+
 /// Interceptors cannot add or remove the harness-owned context-alert tag, and a
 /// tagged alert keeps its configured text on both durable prompt shapes.
 #[test]
@@ -2983,6 +3036,7 @@ fn interception_preserves_context_alert_tag_and_text() {
             tau_proto::EventName::AGENT_PROMPT_STEERED,
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                 inference_activation: true,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: "configured steered alert".to_owned(),
                 message_class: tau_proto::PromptMessageClass::Internal,

@@ -1837,6 +1837,7 @@ fn manual_completion_notification_lookup_is_branch_specific() {
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             inference_activation: false,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         })
     };

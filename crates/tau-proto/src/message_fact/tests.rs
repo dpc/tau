@@ -205,7 +205,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         assert_eq!(projection.item.role, expected_role);
         assert_eq!(projection.activates_model, expected_activation);
         let ContentPart::Text { text } = &projection.item.content[0];
-        assert!(text.starts_with("<tau_message event="));
+        assert!(text.starts_with("<message event="));
         assert!(!text.contains("<hello>"));
         assert!(!text.contains('\u{202e}'));
         assert!(!text.contains("opaque sentinel"));
@@ -214,12 +214,12 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<tau_message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">&lt;hello&gt;</tau_message>",
-            "<tau_message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</tau_message>",
-            "<tau_message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\"/>",
-            "<tau_message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
-            "<tau_message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
-            "<tau_message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</tau_message>",
+            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">&lt;hello&gt;</message>",
+            "<message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
+            "<message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\"/>",
+            "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
+            "<message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</message>",
         ]
     );
 }

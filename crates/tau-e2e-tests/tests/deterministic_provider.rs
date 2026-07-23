@@ -133,7 +133,9 @@ fn deterministic_prompt_mismatch_fails_closed() -> Result<(), Box<dyn std::error
         "unexpected mismatch error: {error}"
     );
     let trace = fixture.trace()?;
-    assert!(trace.contains("scenario first mismatch at turn 0: last user text mismatch"));
+    assert!(
+        trace.contains("scenario first mismatch at turn 0: last HumanUi user envelope mismatch")
+    );
     assert!(trace.lines().all(|line| line.len() <= 1024));
     assert!(fixture.assert_consumed().is_err());
     fixture.acknowledge_expected_failure();

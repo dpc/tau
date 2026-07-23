@@ -22,6 +22,16 @@ tool call IDs must return unchanged in tool-result continuations. Unknown
 configuration, unexpected prompts, overlaps, first mismatches, and unconsumed
 actions fail closed with bounded synthetic diagnostics.
 
+Scenario `user_text` remains semantic accepted text. Closed fixtures reserve the
+exact canonical fieldless `<user>...</user>` syntax for HumanUi provider
+projections; the fake cannot infer durable provenance from provider text alone.
+It decodes that reserved syntax before V2 lane and action matching, while every
+other fixture string remains literal. A future non-Human fixture that needs the
+same literal syntax requires a typed scenario distinction rather than heuristic
+inference. V1's first text and tool-call actions additionally require the exact
+HumanUi envelope, so the always-on deterministic lane fails if interactive
+prompt projection disappears or changes structure.
+
 The fixture uses fresh private config, state, session, and artifact directories.
 It disables every unrelated built-in extension and normally enables only the
 no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled

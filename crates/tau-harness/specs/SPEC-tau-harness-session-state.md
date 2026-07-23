@@ -147,6 +147,9 @@ folded `UserInput` node shape: visible user-originated `agent.prompt_submitted`
 facts and visible queued-user `agent.prompt_steered` facts are anchors, while
 injected user messages, internal prompts, compaction triggers, assistant/tool
 nodes, and agent-message projections are not.
+Anchor previews use the raw canonical accepted prompt text, never the
+provider-only `<user>` projection described by
+[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
 
 Live agent-message activation is runtime-only branch ownership. Navigation to a
 sibling is allowed but cannot acknowledge or scan an owed wake from the other

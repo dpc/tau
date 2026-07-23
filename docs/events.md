@@ -20,7 +20,7 @@ interpret extension data. Transport authentication, admission, deduplication,
 native routing, reply authority, and send/retry policy remain extension-local.
 
 Valid committed canonical incoming facts immediately request one payload-free
-live activation and project as escaped `<tau_message event="…">` user context
+live activation and project as escaped `<message event="…">` user context
 when branch placement permits.
 `message.sent` projects as assistant context and never activates by itself.
 Replay reconstructs the same projection without waking the agent or restoring
@@ -156,7 +156,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   steered and injected facts use the same default-false marker. The optional
   harness-owned `internal_kind=context_size_alert` marks an alert delivery for
   exact-position live and replay UI history; missing tags retain legacy hidden
-  internal presentation.
+  internal presentation. Harness-stamped `submission_source` selects late
+  provider presentation; `HumanUi` facts keep raw canonical text but project as
+  fieldless `<user>...</user>` context.
 - **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
   queued instead of dispatched. Runtime UI state; not durable transcript truth.
 - **`agent.prompt_steered`** — A previously queued prompt folded into an
@@ -164,7 +166,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   Its immutable harness-owned `inference_activation` marker is true for
   checkpoint-governed work; missing/default-false values are passive or legacy
   and cannot independently wake replay. It carries the same optional
-  `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`.
+  `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`
+  and requires the same harness-stamped `submission_source`; old steered records
+  without that field are unsupported.
 - **`agent.user_message_injected`** — Synthetic transcript context inserted by
   the harness (for example shell output or an AGENTS.md preamble) and folded
   like user input. It uses the same immutable harness-owned, default-false

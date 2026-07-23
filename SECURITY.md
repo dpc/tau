@@ -121,6 +121,18 @@ filtering and custom-template regressions whenever prompt fragment projection or
 effective tool policy changes. See
 [`SPEC-tau-harness-prompt-dispatch`](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
 
+Harness-stamped prompt provenance is also provider-presentation authority.
+Only `PromptSubmissionSource::HumanUi` receives the fieldless `<user>` envelope,
+and the five XML delimiters are escaped so accepted text cannot close that
+structural boundary. The body remains the authenticated user's instruction
+channel, not external untrusted-message metadata. Canonical journal facts,
+UI/history/navigation, and watch fanout retain raw accepted text; replay derives
+the same provider form from the typed source and never infers provenance from
+text. Re-check submitted/steered source preservation, delimiter escaping,
+compaction suffix handling, and non-HumanUi exclusions whenever prompt folding
+or provider assembly changes. See
+[`DECISION-interactive-user-prompt-envelope`](specs/DECISION-interactive-user-prompt-envelope.md).
+
 ## Local IPC and external ingress
 
 Configured extension processes are trusted local executables. “Less-trusted

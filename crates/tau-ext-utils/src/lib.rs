@@ -1196,6 +1196,7 @@ mod tests {
         .expect("schedule");
         let steered = AgentPromptSteered {
             inference_activation: false,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent.clone(),
             text: "Timer `busy` fired: wake".to_owned(),
             message_class: PromptMessageClass::Internal,

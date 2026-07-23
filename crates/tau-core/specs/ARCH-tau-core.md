@@ -17,6 +17,13 @@ journal path and rejects later appends without reopening it. Verification
 ownership is documented in
 [Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
 
+Prompt facts are the canonical raw-text and typed-provenance authority. Folding
+preserves their `PromptSubmissionSource` in derived user-input entries; provider
+assembly may then apply the source-specific presentation required by
+[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+UI/history/navigation continue to consume canonical facts rather than that late
+provider projection.
+
 A durable session keeps ephemeral-agent loads and matching unloads in a separate
 process-local, independently sequenced overlay. Late same-daemon replay first
 validates and folds the durable snapshot, then validates and composes the

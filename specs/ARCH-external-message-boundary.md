@@ -41,7 +41,7 @@ occurrence. Adapters may apply bounded transport-local retry suppression. Slack
 keeps only a process-local recent native-id cache, so cache eviction, restart, or
 races may duplicate delivery.
 
-Valid committed facts project to an escaped `<tau_message event="…">` boundary
+Valid committed facts project to an escaped `<message event="…">` boundary
 with opaque message/sender references and optional display, authentication, and
 configured-alias metadata as specified by
 [DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).

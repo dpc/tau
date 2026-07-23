@@ -1,5 +1,13 @@
 # SPEC-tau-proto-provider-data: Provider-visible data
 
+## Record justification
+
+Provider-visible data contracts span protocol DTOs, core transcript folding,
+harness prompt assembly, tool rendering, and backend-specific lowering. No one
+of those implementation areas can coherently state the shared semantic
+authority, replay sidecars, escaping boundaries, and provider presentation
+rules described here.
+
 ## Provider-visible tool responses
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.
@@ -84,18 +92,32 @@ must synthesize replay from the typed fields.
 ## Provider-visible message facts
 
 The six harness-authored canonical `message.*` event types share one compact, valid
-`<tau_message event="…">` provider projection. Canonically ordered attributes
+`<message event="…">` provider projection. Canonically ordered attributes
 carry the harness-stamped publisher plus applicable message, target, party, and
 conversation identifiers. Text-bearing facts use direct escaped text; delete and
 reaction facts are self-closing. Publisher-provided text and metadata are
 untrusted data and grant no identity, routing, instruction, tool, or control
 authority. Opaque `extension_data` is never projected generically.
 
-Attribute and text escaping are deliberately separate. Attribute controls,
-line separators, bidi/format controls, and noncharacters become visible
-`\u{XXXX}` escapes; element text preserves ordinary LF/tab but visibly escapes
-unsafe controls and format characters. Message-fact references are descriptive
-opaque identifiers, not generic reply routes or capabilities.
+Attribute and text escaping share the centralized existing policy. Controls
+(including LF and tab), line separators, bidi/format controls, and noncharacters
+become visible `\u{XXXX}` escapes before XML delimiters are escaped.
+Message-fact references are descriptive opaque identifiers, not generic reply
+routes or capabilities.
+
+## Provider-visible interactive user prompts
+
+Canonical submitted and steered prompt facts retain raw accepted text plus
+harness-stamped `PromptSubmissionSource`. Derived transcript entries preserve that
+typed source. During provider assembly only, `HumanUi` text projects as one
+fieldless `<user>...</user>` user-role item with the five XML delimiters escaped;
+all other text, whitespace, and Unicode remain unchanged. Every other submission
+source and injected input remains raw or uses its separate typed projection.
+
+This late presentation boundary makes live and replay deterministic, including
+historical facts already tagged `HumanUi`, without changing canonical text,
+provider-specific lowering, or provider cache identity. See
+[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
 
 ## Provider model declarations and canonical state
 

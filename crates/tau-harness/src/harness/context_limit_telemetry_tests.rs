@@ -22,6 +22,7 @@ fn user_entry(text: &str) -> AgentEntry {
             phase: None,
             responses_raw_json: None,
         })],
+        submission_source: None,
         inference_activation: true,
     }
 }

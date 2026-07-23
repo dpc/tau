@@ -114,8 +114,14 @@ pub enum AgentMessageDirection {
 pub enum AgentEntry {
     /// User-style model input recorded in the transcript.
     UserInput {
-        /// Context items appended by the user or harness.
+        /// Context items appended by the user or harness. Prompt-derived
+        /// entries contain exactly one user-role message with one text
+        /// part; compaction replacement windows use their separate
+        /// entry variant.
         items: Vec<ContextItem>,
+        /// Typed accepted-prompt provenance, absent for synthetic injections.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        submission_source: Option<tau_proto::PromptSubmissionSource>,
         /// Whether this node creates checkpoint-governed inference work.
         #[serde(default)]
         inference_activation: bool,
@@ -1377,16 +1383,19 @@ impl AgentTree {
             Event::AgentPromptSubmitted(prompt) => Some(self.append_user_text_input(
                 parent,
                 prompt.text.clone(),
+                Some(prompt.submission_source.clone()),
                 prompt.inference_activation,
             )),
             Event::AgentUserMessageInjected(injected) => Some(self.append_user_text_input(
                 parent,
                 injected.text.clone(),
+                None,
                 injected.inference_activation,
             )),
             Event::AgentPromptSteered(steered) => Some(self.append_user_text_input(
                 parent,
                 steered.text.clone(),
+                Some(steered.submission_source.clone()),
                 steered.inference_activation,
             )),
             Event::AgentCompactionTriggered(triggered) => Some(self.append_node_at(
@@ -1424,6 +1433,7 @@ impl AgentTree {
         &mut self,
         parent: Option<NodeId>,
         text: String,
+        submission_source: Option<tau_proto::PromptSubmissionSource>,
         inference_activation: bool,
     ) -> NodeId {
         self.append_node_at(
@@ -1435,6 +1445,7 @@ impl AgentTree {
                     phase: None,
                     responses_raw_json: None,
                 })],
+                submission_source,
                 inference_activation,
             },
         )

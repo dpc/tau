@@ -533,6 +533,114 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.shutdown().expect("shutdown");
 }
 
+/// Existing-agent UI intake keeps the accepted fact and navigation preview raw
+/// while every provider receives the typed HumanUi `<user>` projection.
+#[test]
+fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let raw = "  hello <world> & 雪\nnext  ";
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: raw.to_owned(),
+        agent_id: agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("ui-existing".to_owned()),
+    })
+    .expect("submit existing-agent UI prompt");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == raw
+                && submitted.submission_source
+                    == tau_proto::PromptSubmissionSource::HumanUi
+    )));
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("provider prompt");
+    assert!(prompt.context.flatten().iter().any(|item| {
+        text_part(item) == Some("<user>  hello &lt;world&gt; &amp; 雪\nnext  </user>")
+    }));
+    let tree = h.tree_request_result(&"s1".into(), Some(agent_id.as_str()));
+    assert!(tree.contains("hello <world> & 雪"));
+    assert!(
+        !tree.contains("<user>"),
+        "tree preview must not expose provider markup"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// New-agent initial UI intake follows the same HumanUi provider projection as
+/// an existing-agent submission without storing provider markup in the journal.
+#[test]
+fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    h.selected_model = Some("test/model".into());
+    let raw = "initial <prompt> & text";
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: None,
+        session_id: "s1".into(),
+        role: h.selected_role.clone(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: Some(raw.to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("ui-new".to_owned()),
+        ephemeral: false,
+    })
+    .expect("create agent with initial UI prompt");
+
+    let submitted = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptSubmitted(submitted) if submitted.text == raw => Some(submitted),
+            _ => None,
+        })
+        .expect("canonical initial prompt");
+    assert_eq!(
+        submitted.submission_source,
+        tau_proto::PromptSubmissionSource::HumanUi
+    );
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == submitted.agent_id => {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("initial provider prompt");
+    assert!(
+        prompt.context.flatten().iter().any(|item| {
+            text_part(item) == Some("<user>initial &lt;prompt&gt; &amp; text</user>")
+        })
+    );
+    assert!(
+        prompt
+            .context
+            .flatten()
+            .iter()
+            .all(|item| text_part(item) != Some(raw)),
+        "provider context must not retain a second raw copy"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// `UiCreateAgent.metadata` must be embedded in the durable creation fact so
 /// replay restores shell cwd before `session.agent_loaded`.
 #[test]
@@ -1487,6 +1595,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 None,
                 Event::AgentPromptSteered(AgentPromptSteered {
                     inference_activation: false,
+                    submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
                     text: "side steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
@@ -7647,13 +7756,16 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         AgentTurnState::ToolsRunning { .. }
     ));
 
-    let submission = h
-        .submit_user_prompt("s1".into(), "redirect".to_owned())
-        .expect("submit");
-    assert!(
-        matches!(submission, PromptSubmission::Queued),
-        "in-flight turn should force queueing, got {submission:?}"
-    );
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "redirect".to_owned(),
+        agent_id,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("submit interactive UI prompt");
     assert_eq!(
         h.agents.get(&cid).expect("default").pending_prompts.len(),
         1,
@@ -7683,6 +7795,10 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         match &entry.event {
             Event::AgentPromptSteered(steered) => {
                 assert_eq!(steered.text, "redirect");
+                assert_eq!(
+                    steered.submission_source,
+                    tau_proto::PromptSubmissionSource::HumanUi
+                );
                 assert!(
                     !saw_next_round,
                     "steered event must precede the prompt it folds into",
@@ -7709,7 +7825,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                     })
                     .collect();
                 assert!(
-                    user_texts.iter().any(|t| t == "redirect"),
+                    user_texts.iter().any(|t| t == "<user>redirect</user>"),
                     "next-round prompt should fold the steered message into messages; \
                      user texts were {user_texts:?}",
                 );
@@ -7729,7 +7845,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                         ContextItem::Message(MessageItem {
                             role: ContextRole::User,
                             ..
-                        }) if text_part(item) == Some("redirect")
+                        }) if text_part(item) == Some("<user>redirect</user>")
                     )
                 });
                 assert!(
@@ -8901,6 +9017,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
             "steered activation",
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                 inference_activation: true,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: "steered activation".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -8957,6 +9074,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             inference_activation: false,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,
             text: "passive steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
@@ -25806,6 +25924,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             inference_activation: true,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -25868,6 +25987,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             inference_activation: true,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,
             text: "forged steered".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,

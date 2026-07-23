@@ -65,7 +65,8 @@ impl MessageProjectionFailure {
 /// Successful generic model projection of one committed message fact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MessageFactProjection {
-    /// Ordinary context message carrying the escaped `tau_message` boundary.
+    /// Ordinary context message carrying the escaped external `message`
+    /// boundary.
     pub item: MessageItem,
     /// Whether a live commit requests one agent activation.
     pub activates_model: bool,
@@ -693,7 +694,7 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
     // Keep this common transport-neutral projection aligned with
     // DECISION-common-external-message-envelope.
     let mut output = format!(
-        "<tau_message event=\"{}\" publisher=\"{}\"",
+        "<message event=\"{}\" publisher=\"{}\"",
         view.event_name(),
         xml_escape(view.publisher().as_str())
     );
@@ -735,7 +736,7 @@ fn render_message_fact(view: &MessageFactView<'_>) -> String {
             }
             output.push('>');
             output.push_str(&xml_escape(text));
-            output.push_str("</tau_message>");
+            output.push_str("</message>");
         }
         None => output.push_str("/>"),
     }

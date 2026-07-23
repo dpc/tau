@@ -976,10 +976,14 @@ pub(crate) fn assemble_prompt_context_from(
                     },
                 ));
             }
-            AgentEntry::UserInput { items, .. } => {
+            AgentEntry::UserInput {
+                items,
+                submission_source,
+                ..
+            } => {
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
-                        items: items.clone(),
+                        items: project_user_prompt_items(items, submission_source.as_ref()),
                     },
                 ));
             }
@@ -1158,6 +1162,30 @@ pub(crate) fn assemble_prompt_context_from(
         context: tau_proto::PromptContext { blocks },
         contains_message_fact,
     }
+}
+
+/// Apply the provider-only envelope selected by typed prompt provenance.
+///
+/// Prompt folding guarantees that a sourced entry contains exactly one
+/// user-role message with one text part, so this preserves the one-item
+/// provider shape while changing only that part's presentation text.
+fn project_user_prompt_items(
+    items: &[ContextItem],
+    submission_source: Option<&tau_proto::PromptSubmissionSource>,
+) -> Vec<ContextItem> {
+    let mut projected = items.to_vec();
+    if submission_source != Some(&tau_proto::PromptSubmissionSource::HumanUi) {
+        return projected;
+    }
+    for item in &mut projected {
+        if let ContextItem::Message(message) = item {
+            for part in &mut message.content {
+                let tau_proto::ContentPart::Text { text } = part;
+                *text = format!("<user>{}</user>", xml_escape(text));
+            }
+        }
+    }
+    projected
 }
 
 /// Converts a CBOR value to human-readable text for tool results.

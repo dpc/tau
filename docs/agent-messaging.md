@@ -9,7 +9,7 @@ authenticated configured publisher and publishes the corresponding immutable
 durable `message.*` fact. Slack, Telegram, and XMPP all use this interface;
 bundled IM bridges have no legacy user-message prompt path.
 
-Valid committed facts project to compact `<tau_message event="…">` provider
+Valid committed facts project to compact `<message event="…">` provider
 context. External content and publisher-provided metadata remain untrusted data;
 they grant no identity, routing, tool, or instruction authority. Live incoming
 facts immediately create a payload-free wake; branch-applicable transcript

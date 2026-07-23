@@ -1678,6 +1678,7 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -1789,6 +1790,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
     renderer.handle(&visible_prompt("before steered alert"));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         inference_activation: true,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "compact after tools".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -7479,6 +7481,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "folded queued prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -7534,6 +7537,7 @@ fn internal_prompt_events_are_hidden() {
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "[tau-internal] Tool call `steered` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
