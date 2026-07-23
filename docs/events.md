@@ -603,8 +603,12 @@ intent.
 
 - **`ui.prompt_submitted`** — The user submitted a prompt request for an
   existing agent: session id, text, required `agent_id`, originator (defaults to
-  `user`), and user/internal message class. The harness translates accepted requests into durable
-  `agent.prompt_submitted` facts.
+  `user`), and user/internal message class. For an authenticated visible-user
+  request, successful admission durably records the interaction, makes the exact
+  existing target `active`, broadcasts fresh complete stats, and then queues or
+  dispatches the prompt. The required id is the target; textual mentions do not
+  route. Other accepted requests do not mutate navigation. The harness translates
+  accepted requests into durable `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Defaults to transient and is used for "user is alive" signals
   (e.g. notification idle reset), not persisted. Carries the viewed
@@ -804,3 +808,13 @@ current session and loaded membership, broadcasts a fresh stats snapshot after
 accepted writes, and directs `ui.set_agent_navigation_mode_result` only to the
 requester. Event-loop order is last-accepted-write-wins. Results are diagnostics,
 not cache updates, and have no ordering guarantee relative to snapshots.
+
+An authenticated visible human prompt successfully admitted to an existing
+loaded target is an implicit absolute `set_active` write. After the durable
+content-free interaction marker succeeds, the harness broadcasts a fresh
+complete stats snapshot before queue or dispatch; it does not synthesize a
+navigation result. Rejected, internal, extension-originated, or unauthorized
+requests do not write. Queue promotion, steering, and replay do not repeat the
+write. Same-daemon reconnect sees the current classification; cold restore
+recomputes defaults. UIs therefore update navigation only from complete stats,
+never optimistically from outgoing or replayed prompt events.

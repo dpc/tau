@@ -12016,9 +12016,14 @@ impl Harness {
             Event::UiRoleUpdate(req) => self
                 .handle_ui_role_update(req)
                 .map(|keep_going| (keep_going, None)),
-            Event::UiPromptSubmitted(prompt) => self
-                .handle_ui_prompt_submitted(prompt)
-                .map(|keep_going| (keep_going, None)),
+            Event::UiPromptSubmitted(prompt) => {
+                if self.is_attached_socket_ui(client_id) {
+                    self.handle_authenticated_ui_prompt_submitted(prompt)
+                        .map(|keep_going| (keep_going, None))
+                } else {
+                    Ok((true, None))
+                }
+            }
             Event::ActionInvoke(invoke) => self
                 .handle_action_invoke(client_id, invoke)
                 .map(|keep_going| (keep_going, None)),
@@ -12560,7 +12565,7 @@ impl Harness {
         }
     }
 
-    fn handle_ui_prompt_submitted(
+    fn handle_authenticated_ui_prompt_submitted(
         &mut self,
         prompt: tau_proto::UiPromptSubmitted,
     ) -> Result<bool, HarnessError> {
@@ -12589,8 +12594,31 @@ impl Harness {
                 .get(&agent_id)
                 .and_then(|cid| self.agents.get(cid))
                 .is_some_and(|agent| !agent.terminating);
+        if will_accept
+            && is_user_interaction
+            && (!self.session_loaded_agents.contains(&prompt.agent_id)
+                || !self.agent_navigation_modes.contains_key(&prompt.agent_id))
+        {
+            tracing::error!(
+                target: "tau_harness",
+                agent_id,
+                "routable prompt target is missing loaded membership or navigation mode"
+            );
+            return Ok(true);
+        }
         if will_accept && is_user_interaction {
             self.record_accepted_visible_user_interaction(&agent_id)?;
+            if self
+                .write_loaded_agent_navigation_mode(
+                    &prompt.agent_id,
+                    tau_proto::AgentNavigationMode::Active,
+                )
+                .is_err()
+            {
+                return Err(HarnessError::Participant(format!(
+                    "accepted UI prompt target `{agent_id}` lost its navigation mode"
+                )));
+            }
         }
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
         debug_assert_eq!(
@@ -15870,39 +15898,55 @@ impl Harness {
         }
     }
 
+    /// Applies one absolute harness-owned navigation-mode write to a loaded
+    /// agent.
+    ///
+    /// Every successful write publishes a fresh complete stats snapshot,
+    /// including same-value writes. The caller remains responsible for
+    /// authenticating the request and publishing any requester-directed
+    /// outcome.
+    fn write_loaded_agent_navigation_mode(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        mode: tau_proto::AgentNavigationMode,
+    ) -> Result<(), tau_proto::UiSetAgentNavigationModeRejection> {
+        if !self.session_loaded_agents.contains(agent_id) {
+            return Err(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded);
+        }
+        let Some(current_mode) = self.agent_navigation_modes.get_mut(agent_id) else {
+            return Err(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded);
+        };
+        *current_mode = mode;
+        if let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() {
+            self.emit_agent_stats_updated(&cid);
+        }
+        Ok(())
+    }
+
     fn handle_set_agent_navigation_mode(
         &mut self,
         client_id: &str,
         request: tau_proto::UiSetAgentNavigationMode,
     ) {
-        let rejection = if request.session_id != self.current_session_id {
-            Some(tau_proto::UiSetAgentNavigationModeRejection::StaleSession)
-        } else if !self.session_loaded_agents.contains(&request.agent_id)
-            || !self.agent_navigation_modes.contains_key(&request.agent_id)
-        {
-            Some(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded)
-        } else {
-            None
+        let mode = match request.action {
+            tau_proto::UiAgentNavigationModeAction::SetActive => {
+                tau_proto::AgentNavigationMode::Active
+            }
+            tau_proto::UiAgentNavigationModeAction::SetActiveAuto => {
+                tau_proto::AgentNavigationMode::ActiveAuto
+            }
+            tau_proto::UiAgentNavigationModeAction::SetSuspended => {
+                tau_proto::AgentNavigationMode::Suspended
+            }
         };
-        let outcome = if let Some(reason) = rejection {
+        let write = if request.session_id != self.current_session_id {
+            Err(tau_proto::UiSetAgentNavigationModeRejection::StaleSession)
+        } else {
+            self.write_loaded_agent_navigation_mode(&request.agent_id, mode)
+        };
+        let outcome = if let Err(reason) = write {
             tau_proto::UiSetAgentNavigationModeOutcome::Rejected { reason }
         } else {
-            let mode = match request.action {
-                tau_proto::UiAgentNavigationModeAction::SetActive => {
-                    tau_proto::AgentNavigationMode::Active
-                }
-                tau_proto::UiAgentNavigationModeAction::SetActiveAuto => {
-                    tau_proto::AgentNavigationMode::ActiveAuto
-                }
-                tau_proto::UiAgentNavigationModeAction::SetSuspended => {
-                    tau_proto::AgentNavigationMode::Suspended
-                }
-            };
-            self.agent_navigation_modes
-                .insert(request.agent_id.clone(), mode);
-            if let Some(cid) = self.agent_routes.get(request.agent_id.as_str()).cloned() {
-                self.emit_agent_stats_updated(&cid);
-            }
             tau_proto::UiSetAgentNavigationModeOutcome::Applied
         };
         let _ = self.bus.send_to(

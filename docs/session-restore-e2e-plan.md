@@ -29,7 +29,10 @@ Tests must keep these distinct:
 - `AgentRuntimeState::{Idle, Running}`, watch edges, and navigation overrides are
   daemon-lifetime state. A restored durable route is live, but that alone does
   not mean model work is running. Cold restore recomputes the ordinary
-  `active` and delegated `active_auto` navigation defaults.
+  `active` and delegated `active_auto` navigation defaults. A fresh accepted
+  direct human prompt makes an existing restored worker `active` within that
+  daemon lifetime; a subsequent cold restore recomputes `active_auto` rather than
+  replaying the implicit write.
 - Ephemeral agent transcripts and membership survive same-daemon catch-up but not
   cold resume. Durable agents remain durable in an ephemeral session; these are
   separate policies.
@@ -206,7 +209,8 @@ actions) and two actions in each distinct worker lane, below the 16 KiB ceiling.
 Boot A spends eight main and one provider turn per worker. Boot B activates only
 the workers, in reverse creation order, and spends one provider turn per worker,
 totaling eight main and two turns per worker. Roster queries and replay consume no
-fake-provider action.
+fake-provider action. Boot C receives no input and consumes no provider action
+while proving cold restore recomputes both delegated workers as `active_auto`.
 
 S5 uses two lanes and compact 1,192-byte scenario JSON: exactly five main
 actions (the Boot A start pair and one-record running watch action, then Boot B's
@@ -376,7 +380,12 @@ creation, one durable load, no unload, and current composed membership. Require
 one agent boundary per current member, no lane rebinding, no cross-agent
 transcript suffix, and an ID-keyed roster result independent of the observed
 runtime completion order. Treat RPC rows as a set; their order is not a
-protocol contract. Do not use
+protocol contract. Require every accepted fresh worker prompt to publish a
+non-replay `agent.stats_updated` with `active`, and require the current roster to
+retain `active` after both turns become idle. After clean Boot B shutdown, an
+input-free Boot C must consume no provider action and report both delegated
+workers as `active_auto`, proving the implicit writes are daemon-lifetime only.
+Do not use
 `BarrierText`: its lane must contain no other actions and it cannot also support
 the resumed activation in this scenario.
 
@@ -384,7 +393,9 @@ Implemented by
 `session_restore::multiple_workers::cold_resume_multiple_workers_is_order_independent`
 using two sequential production starts, exact distinct roles/instructions/lanes,
 observed-but-nonauthoritative completion order, reverse-creation activation after
-cold resume, and ID-keyed durable and RPC assertions.
+cold resume, ID-keyed durable and RPC assertions, live `active` snapshots and
+retained roster modes after the accepted worker prompts, and an input-free second
+cold resume that recomputes `active_auto` without provider work.
 
 ### S5 — Worker inference is dispatch-uncertain
 

@@ -288,9 +288,17 @@ you do not trust.
 ## Navigation-mode writes
 
 The event loop consumes `ui.set_agent_navigation_mode` only from UI intake and
-serializes accepted absolute writes, so the last accepted write wins. Extensions
-cannot mutate this state. Harness-authored `agent.stats_updated` snapshots are
-must-pass and immutable because they carry the complete shared classification.
+serializes accepted absolute writes, so the last accepted write wins. It also
+authenticates visible human `ui.prompt_submitted` intake and, after target/skill
+validation and durable `agent.user_interaction_recorded` append, applies an
+implicit absolute `active` write and enqueues fresh complete stats before queue
+or dispatch. The implicit write emits no explicit-navigation result.
+
+Rejected, internal, extension-originated, stale, unloaded, unavailable, or
+terminating targets do not mutate navigation. Later queue dispatch, steering,
+interception completion, and replay do not reapply the write. Extensions cannot
+mutate this state. Harness-authored `agent.stats_updated` snapshots are must-pass
+and immutable because they carry the complete shared classification.
 
 ## Directed agent-roster reads
 

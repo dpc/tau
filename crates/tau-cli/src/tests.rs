@@ -3371,10 +3371,10 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 }
 
-/// Ensures accepted input and stale terminal events preserve a delegated
-/// agent's mode.
+/// Ensures prompt echoes, transcript facts, and terminal events never replace
+/// complete harness stats as the CLI's navigation-cache authority.
 #[test]
-fn accepted_input_and_terminal_events_preserve_active_auto() {
+fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
@@ -3405,6 +3405,14 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
         tools: Default::default(),
         context: Default::default(),
     }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "follow up".to_owned(),
+        agent_id: agent_id("worker-1"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: agent_id("worker-1"),
@@ -3433,18 +3441,15 @@ fn accepted_input_and_terminal_events_preserve_active_auto() {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
-        navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
         tools: Default::default(),
         context: Default::default(),
     }));
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
-    assert_eq!(
-        navigation.mode("worker-1"),
-        AgentNavigationState::ActiveAuto
-    );
-    assert!(!navigation.is_active("worker-1"));
+    assert_eq!(navigation.mode("worker-1"), AgentNavigationState::Active);
+    assert!(navigation.is_active("worker-1"));
 }
 
 /// Applies one complete authoritative navigation snapshot in renderer tests.

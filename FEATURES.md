@@ -90,8 +90,10 @@ changing watch state.
 Attached UIs share the harness-owned `active`, `active-auto`, or `suspended`
 navigation classification for each loaded agent while keeping their selected
 transcript, drafts, and presentation local. Explicit classifications survive UI
-reconnect while the agent remains loaded in the same daemon session. Unload,
-session switch, and daemon exit forget them.
+reconnect while the agent remains loaded in the same daemon session. Successfully
+submitting a visible prompt to an existing target implicitly makes it `active`;
+selection alone does not. Unload, session switch, and daemon exit forget both
+explicit and implicit writes, and cold restore recomputes defaults.
 Running sessions also expose a bounded, pipe-friendly `tau agent list` roster.
 `tau session list` similarly prints one line- and ANSI-control-safe row per
 distinct session id authoritatively reported by responsive local harnesses,

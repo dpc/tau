@@ -544,7 +544,7 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let raw = "  hello <world> & 雪\nnext  ";
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: raw.to_owned(),
         agent_id: agent_id.clone(),
@@ -7757,7 +7757,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     ));
 
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "redirect".to_owned(),
         agent_id,
@@ -17125,7 +17125,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "fresh worker turn".to_owned(),
         agent_id: worker_agent_id.clone(),
@@ -17134,6 +17134,11 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         ctx_id: None,
     })
     .expect("submit fresh worker turn");
+    assert_eq!(
+        h.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active),
+        "accepted direct UI input overrides the restored delegated default"
+    );
     let fresh_prompt_id = h
         .prompt_agents
         .iter()
@@ -17150,6 +17155,11 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         "fresh worker response",
     ))
     .expect("finish fresh worker turn");
+    assert_eq!(
+        h.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active),
+        "the implicit write survives the turn becoming idle"
+    );
 
     assert_eq!(
         h.agent_routes.get(worker_agent_id.as_str()),
@@ -17199,6 +17209,19 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
             .contains_agent(&worker_agent_id)
     );
     h.shutdown().expect("shutdown resumed boot");
+    drop(h);
+
+    let mut restored_again =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("second cold resume");
+    assert_eq!(
+        restored_again.agent_navigation_modes.get(&worker_agent_id),
+        Some(&tau_proto::AgentNavigationMode::ActiveAuto),
+        "cold replay must recompute the delegated default instead of replaying Active"
+    );
+    restored_again
+        .shutdown()
+        .expect("shutdown second cold resume");
 }
 
 /// A process can stop after the terminal provider event is durable but before
@@ -17267,7 +17290,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "fresh after terminal cut".to_owned(),
         agent_id: worker_agent_id.clone(),
@@ -17485,7 +17508,7 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
     resumed
-        .handle_ui_prompt_submitted(UiPromptSubmitted {
+        .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "fresh after compaction failure".to_owned(),
             agent_id: worker_agent_id.clone(),
@@ -21401,7 +21424,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
         "replay must not queue the historical status as fresh model input"
     );
     resumed
-        .handle_ui_prompt_submitted(UiPromptSubmitted {
+        .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "continue after restart".to_owned(),
             agent_id: crate::parse_agent_id(&watcher_id),
@@ -25594,7 +25617,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: h.current_session_id.clone(),
         text: "please continue <now>&</now> >".to_owned(),
         agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
@@ -25673,7 +25696,7 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: h.current_session_id.clone(),
         text: "[tau-internal] Tool call `call-1` is complete.".to_owned(),
         agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
@@ -25735,11 +25758,16 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
+    let watched_agent_id = tau_proto::AgentId::parse(&watched_id).expect("watched id");
+    h.agent_navigation_modes.insert(
+        watched_agent_id.clone(),
+        tau_proto::AgentNavigationMode::Suspended,
+    );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: h.current_session_id.clone(),
         text: "queued follow-up".to_owned(),
-        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+        agent_id: watched_agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -25752,6 +25780,16 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
             .any(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt),
         "queued prompt must not notify watchers before it becomes active"
     );
+    assert_eq!(
+        h.agent_navigation_modes.get(&watched_agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active),
+        "accepted queued UI input resumes immediately"
+    );
+    h.write_loaded_agent_navigation_mode(
+        &watched_agent_id,
+        tau_proto::AgentNavigationMode::Suspended,
+    )
+    .expect("explicit suspend after queue admission");
 
     h.agents
         .get_mut(&watched_cid)
@@ -25766,6 +25804,11 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
     assert_eq!(received[0].message, "queued follow-up");
+    assert_eq!(
+        h.agent_navigation_modes.get(&watched_agent_id),
+        Some(&tau_proto::AgentNavigationMode::Suspended),
+        "later queue dispatch or steer must not reapply the implicit write"
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -26577,7 +26620,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
         1
     );
 
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "fresh child turn".to_owned(),
         agent_id: child_agent_id.clone(),
@@ -27056,6 +27099,19 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         }),
     )
     .expect("set mode before reconnect");
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: h.current_session_id.clone(),
+        text: "resume before reconnect".to_owned(),
+        agent_id: agent_id.clone(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("navigation-reconnect".to_owned()),
+    })
+    .expect("accepted prompt before reconnect");
+    assert_eq!(
+        h.agent_navigation_modes.get(&agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
     h.bus.disconnect("navigation-ui");
     let reconnected =
         connect_test_client(&mut h, "navigation-reconnected", tau_proto::ClientKind::Ui);
@@ -27078,7 +27134,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
                 peel_inner_event(&frame.frame),
                 Some(Event::AgentStatsUpdated(stats))
                     if stats.agent_id == agent_id
-                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Suspended
+                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
             ))
     );
 
@@ -27093,7 +27149,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         .expect("extension intake");
     assert_eq!(
         h.agent_navigation_modes.get(&agent_id),
-        Some(&tau_proto::AgentNavigationMode::Suspended)
+        Some(&tau_proto::AgentNavigationMode::Active)
     );
     h.react_to_committed_event(
         None,
@@ -27109,5 +27165,538 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     h.switch_session("navigation-next".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
     assert!(h.agent_navigation_modes.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// Accepted visible prompts from an authenticated socket UI must perform one
+/// unconditional target-only Active write and publish its complete pre-dispatch
+/// snapshot across representative prior mode/runtime combinations, including a
+/// same-value write.
+#[test]
+fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
+    for (case, prior_mode, turn_state, expected_runtime) in [
+        (
+            "suspended-idle",
+            tau_proto::AgentNavigationMode::Suspended,
+            AgentTurnState::Idle,
+            tau_proto::AgentRuntimeState::Idle,
+        ),
+        (
+            "auto-idle",
+            tau_proto::AgentNavigationMode::ActiveAuto,
+            AgentTurnState::Idle,
+            tau_proto::AgentRuntimeState::Idle,
+        ),
+        (
+            "auto-running",
+            tau_proto::AgentNavigationMode::ActiveAuto,
+            AgentTurnState::AgentThinking {
+                agent_prompt_id: "current-auto".into(),
+            },
+            tau_proto::AgentRuntimeState::Running,
+        ),
+        (
+            "active-running",
+            tau_proto::AgentNavigationMode::Active,
+            AgentTurnState::AgentThinking {
+                agent_prompt_id: "current-active".into(),
+            },
+            tau_proto::AgentRuntimeState::Running,
+        ),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join(case)).expect("harness");
+        let target_cid = ensure_test_user_agent(&mut h);
+        let other_cid =
+            h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+        let target_id = h
+            .agents
+            .get(&target_cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .map(crate::parse_agent_id)
+            .expect("target id");
+        let other_id = h
+            .agents
+            .get(&other_cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .map(crate::parse_agent_id)
+            .expect("other id");
+        h.agent_navigation_modes
+            .insert(target_id.clone(), prior_mode);
+        h.agent_navigation_modes
+            .insert(other_id.clone(), tau_proto::AgentNavigationMode::Suspended);
+        h.agents
+            .get_mut(&target_cid)
+            .expect("target conversation")
+            .turn_state = turn_state;
+        let requester = connect_test_client_with_origin(
+            &mut h,
+            "prompt-ui",
+            tau_proto::ClientKind::Ui,
+            ConnectionOrigin::Socket,
+        );
+        let observer = connect_test_client_with_origin(
+            &mut h,
+            "prompt-observer",
+            tau_proto::ClientKind::Ui,
+            ConnectionOrigin::Socket,
+        );
+        h.bus
+            .set_subscriptions(
+                "prompt-observer",
+                Vec::new(),
+                vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_STATS_UPDATED,
+                )],
+            )
+            .expect("observer subscription");
+        requester.lock().expect("requester frames").clear();
+        observer.lock().expect("observer frames").clear();
+
+        h.handle_client_event_inner(
+            "prompt-ui",
+            Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: h.current_session_id.clone(),
+                text: format!("target this agent, not @{other_id}"),
+                agent_id: target_id.clone(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: Some(case.to_owned()),
+            }),
+        )
+        .expect("authenticated UI prompt");
+
+        assert_eq!(
+            h.agent_navigation_modes.get(&target_id),
+            Some(&tau_proto::AgentNavigationMode::Active),
+            "{case}"
+        );
+        assert_eq!(
+            h.agent_navigation_modes.get(&other_id),
+            Some(&tau_proto::AgentNavigationMode::Suspended),
+            "{case}: a textual mention is not a route"
+        );
+        let target_stats = observer
+            .lock()
+            .expect("observer frames")
+            .iter()
+            .filter_map(|frame| match peel_inner_event(&frame.frame) {
+                Some(Event::AgentStatsUpdated(stats)) if stats.agent_id == target_id => {
+                    Some(stats.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !target_stats.is_empty(),
+            "{case}: same-value writes must also publish"
+        );
+        assert_eq!(
+            (
+                target_stats[0].navigation_mode,
+                target_stats[0].runtime_state
+            ),
+            (tau_proto::AgentNavigationMode::Active, expected_runtime),
+            "{case}: the implicit write snapshot must precede dispatch changes"
+        );
+        assert!(
+            requester
+                .lock()
+                .expect("requester frames")
+                .iter()
+                .all(|frame| !matches!(
+                    peel_inner_event(&frame.frame),
+                    Some(Event::UiSetAgentNavigationModeResult(_))
+                )),
+            "{case}: implicit writes have no synthetic explicit-write result"
+        );
+
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Rejected, synthetic, internal, and unauthenticated UI-shaped prompt frames
+/// must not gain the visible-human prompt's shared navigation authority.
+#[test]
+fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        StaleSession,
+        UnknownTarget,
+        TerminatingTarget,
+        InvalidSkill,
+        InternalClass,
+        ExtensionOriginator,
+        ExternalPeer,
+        PromotedExternalPeer,
+        InMemoryUi,
+        SocketTool,
+        ConfiguredExtension,
+        MissingPeer,
+        MissingMembership,
+        MissingMode,
+    }
+
+    for case in [
+        Case::StaleSession,
+        Case::UnknownTarget,
+        Case::TerminatingTarget,
+        Case::InvalidSkill,
+        Case::InternalClass,
+        Case::ExtensionOriginator,
+        Case::ExternalPeer,
+        Case::PromotedExternalPeer,
+        Case::InMemoryUi,
+        Case::SocketTool,
+        Case::ConfiguredExtension,
+        Case::MissingPeer,
+        Case::MissingMembership,
+        Case::MissingMode,
+    ] {
+        let case_name = match case {
+            Case::StaleSession => "stale-session",
+            Case::UnknownTarget => "unknown-target",
+            Case::TerminatingTarget => "terminating-target",
+            Case::InvalidSkill => "invalid-skill",
+            Case::InternalClass => "internal-class",
+            Case::ExtensionOriginator => "extension-originator",
+            Case::ExternalPeer => "external-peer",
+            Case::PromotedExternalPeer => "promoted-external-peer",
+            Case::InMemoryUi => "in-memory-ui",
+            Case::SocketTool => "socket-tool",
+            Case::ConfiguredExtension => "configured-extension",
+            Case::MissingPeer => "missing-peer",
+            Case::MissingMembership => "missing-membership",
+            Case::MissingMode => "missing-mode",
+        };
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join(case_name)).expect("harness");
+        let cid = ensure_test_user_agent(&mut h);
+        let target_id = h
+            .agents
+            .get(&cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .map(crate::parse_agent_id)
+            .expect("target id");
+        h.agent_navigation_modes
+            .insert(target_id.clone(), tau_proto::AgentNavigationMode::Suspended);
+        let observer = connect_test_client(&mut h, "prompt-observer", tau_proto::ClientKind::Ui);
+        h.bus
+            .set_subscriptions(
+                "prompt-observer",
+                Vec::new(),
+                vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_STATS_UPDATED,
+                )],
+            )
+            .expect("observer subscription");
+        observer.lock().expect("observer frames").clear();
+        let source_id = match case {
+            Case::ExternalPeer => {
+                connect_test_client_with_origin(
+                    &mut h,
+                    "prompt-source",
+                    tau_proto::ClientKind::External,
+                    ConnectionOrigin::Socket,
+                );
+                "prompt-source"
+            }
+            Case::PromotedExternalPeer => {
+                connect_test_client_with_origin(
+                    &mut h,
+                    "prompt-source",
+                    tau_proto::ClientKind::Ui,
+                    ConnectionOrigin::Socket,
+                );
+                h.external_message_peers.insert("prompt-source".into());
+                "prompt-source"
+            }
+            Case::InMemoryUi => {
+                connect_test_client_with_origin(
+                    &mut h,
+                    "prompt-source",
+                    tau_proto::ClientKind::Ui,
+                    ConnectionOrigin::InMemory,
+                );
+                "prompt-source"
+            }
+            Case::SocketTool => {
+                connect_test_client_with_origin(
+                    &mut h,
+                    "prompt-source",
+                    tau_proto::ClientKind::Tool,
+                    ConnectionOrigin::Socket,
+                );
+                "prompt-source"
+            }
+            Case::ConfiguredExtension => {
+                connect_ready_configured_extension(
+                    &mut h,
+                    "prompt-source",
+                    "prompt-extension",
+                    tau_proto::ClientKind::Tool,
+                );
+                "prompt-source"
+            }
+            Case::MissingPeer => "prompt-source",
+            _ => {
+                connect_test_client_with_origin(
+                    &mut h,
+                    "prompt-source",
+                    tau_proto::ClientKind::Ui,
+                    ConnectionOrigin::Socket,
+                );
+                "prompt-source"
+            }
+        };
+        if matches!(case, Case::TerminatingTarget) {
+            h.agents.get_mut(&cid).expect("target").terminating = true;
+        }
+        if matches!(case, Case::MissingMembership) {
+            h.session_loaded_agents.remove(&target_id);
+        }
+        if matches!(case, Case::MissingMode) {
+            h.agent_navigation_modes.remove(&target_id);
+        }
+        let session_id = if matches!(case, Case::StaleSession) {
+            tau_proto::SessionId::from("stale-session")
+        } else {
+            h.current_session_id.clone()
+        };
+        let submitted_agent_id = if matches!(case, Case::UnknownTarget) {
+            tau_proto::AgentId::parse("unknown-target").expect("agent id")
+        } else {
+            target_id.clone()
+        };
+        let text = if matches!(case, Case::InvalidSkill) {
+            "/skill definitely-not-installed".to_owned()
+        } else {
+            case_name.to_owned()
+        };
+        let message_class = if matches!(case, Case::InternalClass) {
+            tau_proto::PromptMessageClass::Internal
+        } else {
+            tau_proto::PromptMessageClass::User
+        };
+        let originator = if matches!(case, Case::ExtensionOriginator) {
+            tau_proto::PromptOriginator::Extension {
+                name: "synthetic".into(),
+                query_id: "side-query".to_owned(),
+            }
+        } else {
+            tau_proto::PromptOriginator::User
+        };
+
+        let prompt_event = Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id,
+            text,
+            agent_id: submitted_agent_id,
+            message_class,
+            originator,
+            ctx_id: Some(case_name.to_owned()),
+        });
+        if matches!(case, Case::ConfiguredExtension) {
+            h.handle_extension_message(
+                source_id,
+                TestMessage::Emit(tau_proto::Emit {
+                    event: Box::new(prompt_event),
+                    persist: false,
+                }),
+            )
+            .expect("configured-extension prompt-shaped Emit");
+        } else {
+            h.handle_client_event_inner(source_id, prompt_event)
+                .expect("UI-shaped prompt frame");
+        }
+
+        if matches!(case, Case::MissingMode) {
+            assert!(
+                !h.agent_navigation_modes.contains_key(&target_id),
+                "{case_name}"
+            );
+        } else {
+            assert_eq!(
+                h.agent_navigation_modes.get(&target_id),
+                Some(&tau_proto::AgentNavigationMode::Suspended),
+                "{case_name}"
+            );
+        }
+        assert!(
+            observer
+                .lock()
+                .expect("observer frames")
+                .iter()
+                .all(|frame| !matches!(
+                    peel_inner_event(&frame.frame),
+                    Some(Event::AgentStatsUpdated(stats))
+                        if stats.agent_id == target_id
+                            && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+                )),
+            "{case_name}: no Active snapshot may be published"
+        );
+        assert_eq!(
+            h.agent_store
+                .agent_events(target_id.as_str())
+                .expect("agent journal")
+                .into_iter()
+                .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
+                .count(),
+            0,
+            "{case_name}: no visible-interaction admission marker"
+        );
+        let accepted_nonvisible = matches!(case, Case::InternalClass | Case::ExtensionOriginator);
+        if accepted_nonvisible {
+            assert!(
+                event_log_events(&h).iter().any(|event| matches!(
+                    event,
+                    Event::AgentPromptSubmitted(prompt)
+                        if prompt.ctx_id.as_deref() == Some(case_name)
+                )),
+                "{case_name}: accepted non-visible prompts still execute"
+            );
+        } else {
+            assert!(
+                event_log_events(&h).iter().all(|event| match event {
+                    Event::AgentPromptSubmitted(prompt) => {
+                        prompt.ctx_id.as_deref() != Some(case_name)
+                    }
+                    Event::AgentPromptSteered(prompt) => {
+                        prompt.ctx_id.as_deref() != Some(case_name)
+                    }
+                    _ => true,
+                }),
+                "{case_name}: unauthorized or invalid input must not execute"
+            );
+            assert!(
+                h.agents.values().all(|agent| agent
+                    .pending_prompts
+                    .iter()
+                    .all(|prompt| prompt.ctx_id.as_deref() != Some(case_name))),
+                "{case_name}: unauthorized or invalid input must not queue"
+            );
+        }
+
+        h.agents.get_mut(&cid).expect("target").terminating = false;
+        h.session_loaded_agents.insert(target_id.clone());
+        h.agent_navigation_modes
+            .entry(target_id)
+            .or_insert(tau_proto::AgentNavigationMode::Suspended);
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// A failed durable accepted-interaction append must abort before the implicit
+/// navigation write, stats publication, or prompt admission.
+#[test]
+fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = echo_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let target_id = h
+        .agents
+        .get(&cid)
+        .and_then(|agent| agent.agent_id.as_deref())
+        .map(crate::parse_agent_id)
+        .expect("target id");
+    h.agent_navigation_modes
+        .insert(target_id.clone(), tau_proto::AgentNavigationMode::Suspended);
+    connect_test_client_with_origin(
+        &mut h,
+        "append-failure-ui",
+        tau_proto::ClientKind::Ui,
+        ConnectionOrigin::Socket,
+    );
+    let observer =
+        connect_test_client(&mut h, "append-failure-observer", tau_proto::ClientKind::Ui);
+    h.bus
+        .set_subscriptions(
+            "append-failure-observer",
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
+
+    let failure_store = state_dir.join("interaction-failure-agent-store");
+    let mut agent_store = tau_core::AgentStore::open(&failure_store).expect("failure agent store");
+    agent_store
+        .append_agent_event(
+            target_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: target_id.clone(),
+                role: h.selected_role.clone(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed failure agent");
+    let event_path = failure_store.join(target_id.as_str()).join("events.cbor");
+    let backup_path = event_path.with_extension("cbor.interaction-backup");
+    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&event_path).expect("block agent append with directory");
+    h.agent_store = agent_store;
+
+    let result = h.handle_client_event_inner(
+        "append-failure-ui",
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: h.current_session_id.clone(),
+            text: "must not be admitted".to_owned(),
+            agent_id: target_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("interaction-append-failure".to_owned()),
+        }),
+    );
+    std::fs::remove_dir(&event_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
+
+    assert!(matches!(result, Err(HarnessError::AgentStore(_))));
+    assert_eq!(
+        h.agent_navigation_modes.get(&target_id),
+        Some(&tau_proto::AgentNavigationMode::Suspended)
+    );
+    assert!(
+        observer
+            .lock()
+            .expect("observer frames")
+            .iter()
+            .all(|frame| !matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::AgentStatsUpdated(stats))
+                    if stats.agent_id == target_id
+                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+            ))
+    );
+    assert_eq!(
+        h.agent_store
+            .agent_events(target_id.as_str())
+            .expect("agent journal")
+            .into_iter()
+            .filter(|record| matches!(record.event, Event::AgentUserInteractionRecorded(_)))
+            .count(),
+        0
+    );
+    assert!(event_log_events(&h).iter().all(|event| match event {
+        Event::AgentPromptSubmitted(prompt) => {
+            prompt.ctx_id.as_deref() != Some("interaction-append-failure")
+        }
+        Event::AgentPromptSteered(prompt) => {
+            prompt.ctx_id.as_deref() != Some("interaction-append-failure")
+        }
+        _ => true,
+    }));
+    assert!(h.agents.values().all(|agent| {
+        agent
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.ctx_id.as_deref() != Some("interaction-append-failure"))
+    }));
+
     h.shutdown().expect("shutdown");
 }

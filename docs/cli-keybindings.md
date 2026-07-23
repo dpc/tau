@@ -122,7 +122,9 @@ that preserve Shift.
   idle `active_auto` and explicitly suspended agents. Both preserve the
   independent running/idle display column and revalidate the selected id.
   Cancel, failure, and stale selections preserve the current transcript and
-  prompt draft. See [Listing and picking agents](list-agents.md).
+  prompt draft. Selection alone preserves navigation mode; a later accepted
+  visible prompt to that selected existing agent makes it `active`. See
+  [Listing and picking agents](list-agents.md).
 - `prompt-history-search` — feed indexed prompt-history rows
   (`<index>\t<single-line summary>`) to `command`; bounded original-prompt
   previews are also written under `$TAU_PROMPT_HISTORY_DIR/<index>`. Replace the

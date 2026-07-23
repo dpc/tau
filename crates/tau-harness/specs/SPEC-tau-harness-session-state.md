@@ -191,6 +191,13 @@ UI disconnect preserves it; committed unload, session switch, and process exit
 forget it. Cold restore recomputes ordinary/delegated defaults and does not
 restore explicit overrides.
 
+An authenticated visible human prompt accepted for an existing loaded target
+performs an implicit absolute `active` write. Selection alone, rejected prompts,
+internal or extension inputs, queue promotion, steering, and replay do not write.
+The implicit value survives same-daemon disconnect/reconnect like an explicit
+override, but unload or session switch clears it and cold restore recomputes the
+ordinary/delegated default despite durable historical prompt facts.
+
 A completed durable parented start-agent worker is an ordinary loaded, idle,
 addressable conversation rather than work still owned by its transient request.
 Warm completion detaches both tool-backed starts and explicit-parent typed

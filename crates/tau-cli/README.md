@@ -36,8 +36,10 @@ and any attached UI can request `suspended`, `active`, or `active-auto` with
 `/agent suspend`, `/agent resume`, or `/agent auto`. Complete
 `agent.stats_updated` snapshots update each UI cache. Selection, transcript,
 drafts, and presentation remain UI-local. Explicit overrides are not persisted;
-cold restore recomputes defaults from existing provenance. Selecting or
-prompting a hidden agent does not change its mode.
+cold restore recomputes defaults from existing provenance. Selecting, picking, or
+focusing a hidden agent alone does not change its mode. A successfully admitted
+visible user prompt to an existing target is an implicit absolute `active` write;
+the harness publishes the resulting complete stats before queue or dispatch.
 
 The public `tau agent list <session-id>` command reads a directed harness roster
 and emits stable headerless TSV; it does not infer membership or navigation from

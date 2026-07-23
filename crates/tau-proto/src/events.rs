@@ -2840,9 +2840,13 @@ impl PromptMessageClass {
 /// exists so the harness can re-use this event type when dispatching
 /// side queries spawned by extensions. The harness routes this UI request to a
 /// concrete agent and publishes an `AgentPromptSubmitted` transcript fact when
-/// the prompt is accepted; UIs and other extensions filter on
-/// `originator.is_user()` to avoid rendering side conversations as
-/// real user turns.
+/// the prompt is accepted. For an authenticated visible-user request to an
+/// existing target, acceptance also makes that target's harness-owned
+/// navigation mode `Active` before queue or dispatch and publishes a fresh
+/// complete stats snapshot. The required `agent_id` is the routing target;
+/// agent-like text mentions do not retarget the request. UIs and other
+/// extensions filter on `originator.is_user()` to avoid rendering side
+/// conversations as real user turns.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,

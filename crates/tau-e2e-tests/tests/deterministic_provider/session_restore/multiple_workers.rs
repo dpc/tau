@@ -108,6 +108,33 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
         observer_b.submit(agent_id, fresh.ctx_id, fresh.prompt)?;
         observer_b.wait_for_agent_marker(agent_id, fresh.response, turn_start)?;
         observer_b.wait_for_agent_idle_after(agent_id, turn_start)?;
+        if !observer_b.events[turn_start..].iter().any(|observed| {
+            !observed.replay
+                && matches!(
+                    &observed.event,
+                    Event::AgentStatsUpdated(stats)
+                        if &stats.agent_id == agent_id
+                            && stats.navigation_mode == AgentNavigationMode::Active
+                )
+        }) {
+            return Err(format!(
+                "S4 accepted worker prompt did not publish live Active stats for {agent_id}"
+            )
+            .into());
+        }
+    }
+    let active_roster =
+        roster_by_id(observer_b.roster(&session_id, SessionAgentListScope::Current)?)?;
+    for worker in identities.workers() {
+        if !matches!(
+            active_roster.get(worker).map(|row| row.lifecycle),
+            Some(SessionAgentLifecycle::Live {
+                navigation_mode: AgentNavigationMode::Active,
+                ..
+            })
+        ) {
+            return Err(format!("S4 worker {worker} did not remain Active after its turn").into());
+        }
     }
     assert_no_s4_watch_refanout(&observer_b.events[fresh_start..], &identities)?;
     assert_provider_turn_counts_by_agent(
@@ -129,6 +156,24 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
     }
     assert_s4_owned_suffixes(&snapshot_a, &snapshot_b, &identities)?;
     assert_s4_lane_continuations(&fixture.trace()?)?;
+
+    let socket_c = fixture.socket_path("s4-boot-c");
+    let daemon_c = spawn_daemon(
+        &fixture,
+        &socket_c,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut observer_c = SessionRestoreObserver::connect(&socket_c)?;
+    observer_c.wait_for_session_boundary(&session_id)?;
+    let cold_roster =
+        roster_by_id(observer_c.roster(&session_id, SessionAgentListScope::Current)?)?;
+    assert_s4_roster(&cold_roster, &identities)?;
+    if matched_action_count(&fixture)? != boot_a_action_matches + 2 {
+        return Err("S4 second cold replay consumed a fake-provider action".into());
+    }
+    disconnect_ui(&mut observer_c.peer)?;
+    daemon_c.finish()?;
+
     fixture.assert_consumed()?;
     Ok(())
 }

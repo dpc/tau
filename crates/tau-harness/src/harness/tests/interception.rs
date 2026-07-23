@@ -4052,6 +4052,22 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
         .get(&cid)
         .and_then(|agent| agent.agent_id.clone())
         .expect("agent id");
+    let parsed_agent_id = crate::parse_agent_id(&agent_id);
+    h.agent_navigation_modes.insert(
+        parsed_agent_id.clone(),
+        tau_proto::AgentNavigationMode::Suspended,
+    );
+    let observer = connect_test_client(&mut h, "interaction-observer", tau_proto::ClientKind::Ui);
+    h.bus
+        .set_subscriptions(
+            "interaction-observer",
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("observer subscription");
+    observer.lock().expect("observer frames").clear();
     let _interceptor = connect_test_tool(&mut h, "interaction-interceptor");
     h.handle_extension_event(
         "interaction-interceptor",
@@ -4064,10 +4080,10 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     )
     .expect("register interceptor");
 
-    h.handle_ui_prompt_submitted(tau_proto::UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(tau_proto::UiPromptSubmitted {
         session_id: h.current_session_id.clone(),
         text: "park me".to_owned(),
-        agent_id: crate::parse_agent_id(&agent_id),
+        agent_id: parsed_agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -4084,6 +4100,23 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
         .collect();
     assert_eq!(interactions.len(), 1);
     assert_ne!(interactions[0].recorded_at.get(), 0);
+    assert_eq!(
+        h.agent_navigation_modes.get(&parsed_agent_id),
+        Some(&tau_proto::AgentNavigationMode::Active)
+    );
+    assert!(
+        observer
+            .lock()
+            .expect("observer frames")
+            .iter()
+            .any(|frame| matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::AgentStatsUpdated(stats))
+                    if stats.agent_id == parsed_agent_id
+                        && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+            )),
+        "the Active snapshot must publish before prompt content can remain parked"
+    );
 }
 
 fn session_agent_loaded_event(agent_id: &str) -> Event {

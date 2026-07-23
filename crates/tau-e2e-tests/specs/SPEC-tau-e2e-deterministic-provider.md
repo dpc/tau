@@ -233,9 +233,13 @@ provider prompt or action.
 S4 consumes two sequential start pairs and two three-record automatic-watch
 actions in Boot A: eight main turns and one turn in each distinct worker lane.
 Boot B consumes one fresh turn per worker in reverse creation order, with no
-main turn. Exact lane-local continuations and per-agent durable suffixes reject
-lane rebinding and cross-agent transcript leakage; roster rows are compared as
-an ID-keyed set rather than by RPC order.
+main turn. Each accepted worker prompt produces live non-replay `active` stats,
+and the same-daemon roster retains `active` after both workers return idle. Exact
+lane-local continuations and per-agent durable suffixes reject lane rebinding and
+cross-agent transcript leakage; roster rows are compared as an ID-keyed set rather
+than by RPC order. An input-free Boot C consumes no provider turn or action and
+reports both delegated workers as `active_auto`, proving the accepted prompts'
+implicit navigation writes are not restored from durable history.
 S5 consumes three main turns and one held worker turn before the synchronized
 crash. Boot B consumes exactly two main turns for explicit watch recreation and
 no worker turn; Boot C consumes no provider turn. The decoded fake cursor

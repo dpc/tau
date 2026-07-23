@@ -514,9 +514,14 @@ reports.
 ## Agent navigation modes
 
 Navigation modes are same-user UI control state with presentation-only effects.
-The harness accepts absolute mutations only through UI intake; extensions cannot
-mutate them. Modes do not authorize loading, routing, prompt delivery, watches,
-execution, or model access and are intentionally not durable.
+The harness accepts absolute mutations only through authenticated attached-local
+UI intake; extensions and external peers cannot mutate them. This authority
+covers explicit navigation requests and the implicit `active` write after a
+visible human prompt is durably admitted for an existing target. Payload
+`originator`, submission provenance, durable prompt replay, and later queue/steer
+processing are not authentication and cannot independently cause the write.
+Modes do not authorize loading, routing, prompt delivery, watches, execution, or
+model access and are intentionally not durable.
 
 The directed agent-roster RPC is available only to same-user local connections
 classified as UI clients. It exposes stable ids, lifecycle/persistence,

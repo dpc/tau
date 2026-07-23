@@ -24,7 +24,9 @@ clean resume, concurrent lane isolation, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
 watch, explicit post-resume watch recreation with exact new-subscription
 notifications, loaded/unloaded/ephemeral membership composition, two-worker
-restore with reverse-creation activation and ID-keyed ordering/isolation, a
+restore with reverse-creation activation, live `active` publication/retention,
+input-free cold recomputation of delegated `active_auto`, and ID-keyed
+ordering/isolation, a
 synchronized held-worker crash followed by two dispatch-uncertain fail-closed
 resumes, an acknowledged interrupted worker foreground tool repaired exactly
 once across two cold resumes, and startup rejection of invalid
@@ -71,7 +73,10 @@ journal or durable membership record.
 A fourth fixture configures one main with only `agent_start` plus two distinct
 tool-free worker roles. It cold-restores all three durable routes, compares
 roster rows as an ID-keyed set, activates workers in reverse creation order, and
-proves retained lane ownership and per-worker transcript isolation.
+proves retained lane ownership and per-worker transcript isolation. Each accepted
+worker prompt publishes live `active` stats and leaves the worker `active` after
+completion; an input-free second cold resume consumes no provider action and
+recomputes both delegated workers as `active_auto`.
 A fifth fixture reuses the exact two-role `agent_start`/`agent_watch` surface. It
 correlates one held worker prompt across the durable dispatch checkpoint, decoded
 fake cursor, and live `hold_ready` trace before killing the private process

@@ -126,6 +126,10 @@ Navigation classification is shared by UIs attached to the same daemon. Use
 presentation remain local to each UI. Overrides survive UI reconnect while the
 agent remains loaded in the same daemon session; unload, session switch, and
 harness restart forget them.
+Selecting an agent does not resume it. Successfully submitting a visible prompt
+to an existing selected agent does: the harness makes that exact target `active`,
+and the CLI waits for the authoritative complete stats snapshot rather than
+changing its cache optimistically.
 
 Use `tau agent list <session-id>` for a stable headerless TSV roster from a
 running session; `--include-suspended`, `--include-unavailable`,

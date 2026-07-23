@@ -1,5 +1,12 @@
 # SPEC-tau-cli-agent-message-labels: Agent message endpoint labels
 
+## Record justification
+
+Agent identity and activity presentation spans transcript event folding,
+session-scoped metadata, watch, and navigation caches, message and status-row
+rendering, and lifecycle replay. No single owning module can state their combined
+identity, authority, and projection rules coherently.
+
 The CLI presents an agent endpoint in harness-owned message activity as its
 unambiguous `@`-prefixed routing id followed by a supplemental display name in
 parentheses when authoritative metadata for that endpoint is known. Sender and
@@ -56,6 +63,10 @@ remain UI-local. Keyboard previous/next navigation forms a ring containing the
 no-selection overview followed by the active agents in stable known-agent order;
 suspended agents are skipped. Modes do not affect loading, addressability, or
 delivery.
+Selection alone preserves mode. Successful admission of direct visible human
+input to the selected existing agent makes that exact target `active` for
+subsequent navigation; complete harness stats, not the local prompt event, update
+the CLI cache.
 
 Execution state (`running` or `waiting`) describes the outer agent turn from
 activating input until the final response or termination returns control. It

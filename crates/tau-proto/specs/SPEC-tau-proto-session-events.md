@@ -128,6 +128,17 @@ Every `agent.stats_updated` complete operational snapshot carries a required
 navigation mode independently of runtime state. Transient
 `ui.set_agent_navigation_mode` requests absolute changes; requester-directed
 results acknowledge processing but do not replace the authoritative snapshot.
+Successful admission of an authenticated visible human `ui.prompt_submitted` to
+an existing loaded target is an implicit absolute `active` write. It produces no
+navigation result, but the harness broadcasts a fresh complete stats snapshot
+before queue or dispatch, including for an already-active target.
+
+Explicit requests and accepted prompts share event-loop last-write-wins
+ordering. Selection, rejected or non-visible prompts, later queue/steer
+promotion, and replay do not write. Navigation state is daemon-lifetime state:
+same-daemon catch-up reports the current value, while cold restore recomputes
+defaults rather than deriving it from durable prompt history. UI caches change
+only from complete stats snapshots, never outgoing or replayed prompt events.
 
 ## Directed current-session agent roster
 

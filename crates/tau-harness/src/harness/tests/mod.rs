@@ -505,7 +505,7 @@ fn user_skill_command_expands_prompt_block() {
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "/skill manual do this".to_owned(),
         agent_id: agent_id.clone(),

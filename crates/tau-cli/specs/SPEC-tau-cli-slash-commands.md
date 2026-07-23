@@ -1,5 +1,12 @@
 # SPEC-tau-cli-slash-commands: Slash commands
 
+## Record justification
+
+Slash-command behavior spans input parsing and completion, local CLI state,
+protocol request construction, harness-owned execution, and renderer feedback.
+No single owning module can state command ownership and cross-boundary behavior
+coherently.
+
 The terminal input loop has multiple slash-command owners. CLI-owned commands
 such as `/quit`, `/session`, `/agent`, `/name`, `/role`, `/model`, `/set`, and
 `/theme` are handled locally. Dynamic extension actions are parsed against the
@@ -39,9 +46,10 @@ The strict durable/reference parsing boundary is recorded in
 Completion matches both input spellings but inserts the existing canonical bare
 id and does not duplicate candidates; after an `@`, the special switch target
 `none` is not offered as though it were an agent reference.
-Accepted input preserves the mode. `/agent resume` or `/resume` requests
-unconditional `active`, `/agent suspend` requests `suspended`, and `/agent auto`
-requests `active-auto`.
+Accepted switch/picker/selection input preserves the mode. An accepted visible
+human prompt to the selected existing target makes that target `active`.
+`/agent resume` or `/resume` requests unconditional `active`, `/agent suspend`
+requests `suspended`, and `/agent auto` requests `active-auto`.
 
 `/name <display name>` is the selected-agent shortcut for `/agent name
 <agent_id> <display name>`. It emits the same display-name update as `/agent

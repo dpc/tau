@@ -69,4 +69,5 @@ Canceling the picker, a missing `fzf`, malformed output, or a stale selection
 does not change the selected transcript or prompt draft. Before switching, Tau
 rechecks the session, live lifecycle, and the selected picker's eligibility
 rule. Selecting through M-a does not resume a suspended agent. The picker never
-loads or resumes an unloaded agent.
+loads or resumes an unloaded agent. A later successfully admitted visible prompt
+to that selected existing agent does make it `active`.

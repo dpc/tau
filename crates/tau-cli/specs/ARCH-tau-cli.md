@@ -176,6 +176,10 @@ subscriptions remain independent of the chat allow-list.
 The CLI caches harness-owned navigation classification only from complete
 `agent.stats_updated` snapshots. Selected transcript, drafts, editor state, and
 presentation remain local to each UI.
+Submitting a prompt does not optimistically mutate this cache. For accepted
+visible prompts to existing targets, the harness applies the implicit `active`
+write and the later complete stats snapshot is authoritative across submitting,
+observing, reconnecting, and replaying UIs.
 
 The local previous/next cycle includes the no-selection overview alongside the
 active agents. That overview remains the start-new-agent input target and owns a
