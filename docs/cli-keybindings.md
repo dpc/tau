@@ -26,7 +26,7 @@ sample `config/cli.yaml`.
 | `Up`, `Down` | `cursor-up`, `cursor-down` | Cycle completion candidates, move/scroll within capped multiline input, then step prompt history at the input edges. |
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
 | `C-b` | `agent-pick` | Pick a currently active agent with optional `fzf`. |
-| `C-B` | `agent-pick-all` | Pick any current live agent, including automatically or manually suspended agents. |
+| `M-a` | `agent-pick-all` | Pick any current live agent, including automatically or manually suspended agents. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
 | `C-k` | `agent-previous` | Cycle to the previous active agent or overview. |
 | `C-j` | `agent-next` | Cycle to the next active agent or overview. |
@@ -80,10 +80,16 @@ These keys are handled by named actions in the default binding file, with raw fa
 
 Bindings live under `cli.bind` in config. The built-in bindings are merged below user bindings, so configuring one key does not remove the rest.
 Control-letter bindings are case-sensitive: for example, `C-b` means Ctrl+B
-without Shift, while `C-B` means Ctrl+Shift+B. Distinguishing those two chords
-requires a terminal path that supports enhanced keyboard reporting (Kitty
-keyboard protocol/CSI-u). Legacy terminal paths collapse both to `C-b`; bind
-`agent-pick-all` to another distinguishable key there.
+without Shift, while `C-B` means Ctrl+Shift+B. Canonical
+`M-<ascii-character>` denotes an exact Alt-only character event; the uppercase
+`M-` prefix and exactly one ASCII suffix character are required. For example,
+`M-a` means Alt+A and works with both Crossterm Alt events and the legacy
+terminal `ESC a` encoding.
+
+The all-live picker default moved from `C-B` to `M-a` because common terminal
+and multiplexer paths may collapse Ctrl+Shift+B into Ctrl+B. Explicit user
+bindings still override built-ins, including explicit `C-B` bindings on paths
+that preserve Shift.
 
 - `submit-prompt` — submit the current prompt, or accept a previewed completion without submitting.
 - `insert-newline` — insert a newline at the cursor.

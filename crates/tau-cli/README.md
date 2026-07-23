@@ -43,12 +43,11 @@ The public `tau agent list <session-id>` command reads a directed harness roster
 and emits stable headerless TSV; it does not infer membership or navigation from
 renderer state. The C-b picker and C-j/C-k navigation ring use the
 effective-active rule: `active` agents remain eligible while idle, and
-`active-auto` agents are eligible only while running. C-B instead lists every
+`active-auto` agents are eligible only while running. M-a instead lists every
 current live agent, including idle `active-auto` and explicitly suspended
 agents. Both pickers retain the independent running/idle column. The overview
-remains the input target for starting a new agent.
-The shifted default requires enhanced keyboard reporting; legacy terminals may
-bind `agent-pick-all` to another distinguishable key.
+remains the input target for starting a new agent. M-a uses Alt/Meta transport
+and does not depend on terminals preserving Shift on Ctrl letters.
 
 `tau session list` prints one escaped row per distinct current session id
 reported by responsive local harnesses. Runtime paths only locate socket

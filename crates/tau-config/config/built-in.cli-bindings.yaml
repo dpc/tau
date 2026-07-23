@@ -46,7 +46,7 @@ C-f:
   trim: true
 C-b:
   action: agent-pick
-C-B:
+M-a:
   action: agent-pick-all
 C-k:
   action: agent-previous

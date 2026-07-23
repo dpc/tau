@@ -207,7 +207,7 @@ runtime or persisted state.
 
 `tau agent list` obtains membership, runtime, and navigation authority through
 the harness's directed current-session roster RPC, then owns filtering, stable
-parent-before-child TSV ordering, and escaping. The C-b active action and C-B
+parent-before-child TSV ordering, and escaping. The C-b active action and M-a
 all-agent action invoke `fzf` directly through `tau-cli-term`, which projects
 width-aware aligned display columns without changing the stable TSV selection
 row. Active filtering uses navigation mode plus runtime eligibility without
@@ -217,5 +217,5 @@ agent against the same category with a second snapshot and uses the existing
 local selection transition. Picker cancellation and failure do not retarget the
 prompt draft. This eligibility projection follows
 [DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).
-The default C-B distinction depends on enhanced keyboard reporting; legacy
-terminal paths collapse it with C-b and require a different user binding.
+The default M-a distinction uses Alt/Meta transport, including legacy `ESC a`,
+and does not depend on terminals preserving Shift on Ctrl letters.

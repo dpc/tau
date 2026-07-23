@@ -20,7 +20,7 @@
 # bind:
 #   C-b:
 #     action: agent-pick
-#   C-B:
+#   M-a:
 #     action: agent-pick-all
 #   C-g:
 #     action: shell-prompt-insert

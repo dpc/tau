@@ -4817,6 +4817,91 @@ fn control_letter_bindings_distinguish_shift() {
     ));
 }
 
+/// Meta character bindings match exact Alt-only events, including the
+/// Crossterm event produced by the legacy `ESC a` terminal encoding, without
+/// stealing plain text or modifier combinations.
+#[test]
+fn meta_character_binding_matches_alt_only() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_bindings(vec![
+        ("M-a".to_owned(), "all".to_owned()),
+        ("M-z".to_owned(), "second-meta".to_owned()),
+        ("m-q".to_owned(), "invalid-lowercase-prefix".to_owned()),
+        ("C-a".to_owned(), "control".to_owned()),
+    ]);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT,
+        )))
+        .expect("send M-a");
+    assert!(matches!(
+        term.get_next_event().expect("M-a event"),
+        Event::Binding(action) if action == "all"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::ALT,
+        )))
+        .expect("send M-z");
+    assert!(matches!(
+        term.get_next_event().expect("M-z event"),
+        Event::Binding(action) if action == "second-meta"
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send plain a");
+    assert!(matches!(
+        term.get_next_event().expect("plain a event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "a");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )))
+        .expect("send M-S-a");
+    assert!(matches!(
+        term.get_next_event().expect("M-S-a event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "aa");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::ALT,
+        )))
+        .expect("send Alt-q for invalid m-q spelling");
+    assert!(matches!(
+        term.get_next_event().expect("unbound Alt-q event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "aaq");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        )))
+        .expect("send M-C-a");
+    assert!(matches!(
+        term.get_next_event().expect("M-C-a event"),
+        Event::Binding(action) if action == "control"
+    ));
+}
+
 /// Shifted punctuation remains a plain control binding because uppercase
 /// binding syntax distinguishes shifted letters only.
 #[test]

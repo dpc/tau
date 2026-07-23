@@ -131,7 +131,7 @@ Use `tau agent list <session-id>` for a stable headerless TSV roster from a
 running session; `--include-suspended`, `--include-unavailable`,
 `--include-unloaded`, and `--all` widen its default live non-suspended view.
 Inside the terminal UI, C-b opens optional `fzf` over effectively active agents
-(`active`, or running `active-auto`), while C-B includes every current live
+(`active`, or running `active-auto`), while M-a includes every current live
 agent, including suspended agents. Both show runtime independently and
-revalidate the selection before switching. C-B requires enhanced keyboard
-reporting; legacy terminal paths must bind `agent-pick-all` to another key.
+revalidate the selection before switching. M-a uses Alt/Meta transport,
+including legacy `ESC a`, and does not depend on Shift reporting.

@@ -686,6 +686,7 @@ impl SharedState {
 enum KeyBinding {
     Ctrl(char),
     CtrlShift(char),
+    Meta(char),
     CtrlKey(KeyCode),
     Key(KeyCode),
 }
@@ -712,6 +713,11 @@ fn parse_key_binding(input: &str) -> Option<KeyBinding> {
     let input = input.trim_matches('`');
     if let Some(code) = parse_plain_key_code(input) {
         return Some(KeyBinding::Key(code));
+    }
+    if let Some(rest) = input.strip_prefix("M-") {
+        let mut chars = rest.chars();
+        let ch = chars.next()?;
+        return (chars.next().is_none() && ch.is_ascii()).then_some(KeyBinding::Meta(ch));
     }
     let rest = input
         .strip_prefix("C-")
@@ -740,6 +746,7 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
     let ctrl_only = modifiers == KeyModifiers::CONTROL;
 
     match key.code {
+        KeyCode::Char(ch) if modifiers == KeyModifiers::ALT => Some(KeyBinding::Meta(ch)),
         KeyCode::Char(ch)
             if ctrl
                 && ch.is_ascii_alphabetic()
@@ -1819,8 +1826,10 @@ impl Term {
     ///
     /// Supported key spellings include `Tab`, `BackTab`, `Shift-Tab`, `Enter`,
     /// `Esc`, arrow/navigation/editing keys, `C-Enter`, `C-Up`, `C-Down`, and
-    /// `C-<letter>`. Control letters are case-sensitive: `C-b` and shifted
-    /// `C-B` may have different actions when the terminal reports Shift.
+    /// `C-<letter>`, and canonical `M-<ascii-character>` for exact Alt-only
+    /// character events. Control letters are case-sensitive:
+    /// `C-b` and shifted `C-B` may have different actions when the terminal
+    /// reports Shift.
     pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (String, String)>) {
         self.bindings = bindings
             .into_iter()

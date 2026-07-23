@@ -98,10 +98,10 @@ distinct session id authoritatively reported by responsive local harnesses,
 without treating historical session directories as live. Exact canonical
 project-root filtering is available with `--dir`; `--json` returns each
 responsive harness's session id and startup project root as one array.
-The terminal's C-b binding picks an effectively active agent, while C-B includes
+The terminal's C-b binding picks an effectively active agent, while M-a includes
 all current live agents, through optional `fzf` without changing durable
-navigation state. The shifted chord requires enhanced keyboard reporting and
-can be rebound on legacy terminal paths.
+navigation state. M-a uses Alt/Meta transport and does not depend on terminals
+preserving Shift on Ctrl letters.
 
 See [agent messaging](docs/agent-messaging.md),
 [agent roles](docs/agent-roles.md), and the
