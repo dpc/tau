@@ -1002,13 +1002,6 @@ fn skill_search_result(
     let display_args = format!("{}{scope_label}", needles.join(" "));
     let mut display = skill_ok_display(&display_args);
     display.stats = skill_search_stats(&outcome.hits);
-    if outcome.truncated {
-        display.status_text = format!(
-            "ok: showing {} of {} matches",
-            outcome.hits.len(),
-            outcome.total_matches
-        );
-    }
     let total_matches = outcome.total_matches;
     let truncated = outcome.truncated;
     let matches = CborValue::Array(

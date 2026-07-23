@@ -78,6 +78,21 @@ fn cbor_map_bool(value: &CborValue, key: &str) -> Option<bool> {
             })
     })
 }
+
+fn cbor_map_u64(value: &CborValue, key: &str) -> Option<u64> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(entry_key, entry_value)| {
+        matches!(entry_key, CborValue::Text(text) if text == key)
+            .then_some(entry_value)
+            .and_then(|value| match value {
+                CborValue::Integer(value) => u64::try_from(*value).ok(),
+                _ => None,
+            })
+    })
+}
+
 fn wait_args_exact(call_id: &str) -> CborValue {
     CborValue::Map(vec![(
         CborValue::Text("tool_call_id".to_owned()),
@@ -1201,6 +1216,38 @@ fn finish_agent_start_success_passes_informative_display() {
     assert_eq!(display.info_chips, vec!["@engineer_child"]);
     assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
+}
+
+/// Ensures truncated skill searches keep pagination details in structured
+/// result metadata instead of duplicating them in the successful outcome label.
+#[test]
+fn truncated_skill_search_uses_standard_success_status() {
+    let hits = (0..50)
+        .map(|index| SkillSearchHit {
+            matched_terms: 1,
+            matched_fields: vec!["name".to_owned()],
+            name: format!("common-{index}"),
+            description: String::new(),
+        })
+        .collect();
+    let (result, display) = skill_search_result(
+        &["common".to_owned()],
+        false,
+        SkillSearchOutcome {
+            hits,
+            total_matches: 56,
+            truncated: true,
+            auto_load_name: None,
+            warnings: Vec::new(),
+        },
+    );
+    let display = display.expect("skill search display");
+
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+    assert_eq!(display.stats.matches, Some(50));
+    assert_eq!(cbor_map_u64(&result, "total_matches"), Some(56));
+    assert_eq!(cbor_map_bool(&result, "truncated"), Some(true));
 }
 
 #[test]
