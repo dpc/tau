@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+
 use tau_proto::{
     ActionInvocationId, AgentPromptId, CborValue, ExtensionInstanceId, ExtensionName,
     HarnessInputMessage, ModelId, PromptOriginator, ProviderResponseFinished,
@@ -14,6 +16,91 @@ fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("parse line"))
         .collect()
+}
+
+/// Append timing must report exact content-free EOF boundaries so slow-write
+/// diagnostics can distinguish file position from current-line size.
+#[test]
+fn append_timing_reports_exact_eof_boundaries() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let path = td.path().join("timing.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("open log");
+    let first_line = b"{\"type\":\"first\"}\n";
+    let second_line = b"{\"type\":\"second\"}\n";
+    let first = append_line(&mut file, first_line).expect("append first");
+    let second = append_line(&mut file, second_line).expect("append second");
+    let first_end = first_line.len() as u64;
+    let second_end = first_end + second_line.len() as u64;
+
+    assert_eq!(first.start_offset, Some(0));
+    assert_eq!(first.end_offset, Some(first_end));
+    assert_eq!(second.start_offset, first.end_offset);
+    assert_eq!(second.end_offset, Some(second_end));
+    assert_eq!(first.rollback, Duration::ZERO);
+    assert_eq!(second.rollback, Duration::ZERO);
+}
+
+/// A failed append with successful rollback reports the exact restored EOF.
+#[test]
+fn append_timing_reports_clean_rollback_boundary() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let path = td.path().join("timing.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open log");
+    let line = b"{\"type\":\"failed\"}\n";
+    let error = append_line(
+        &mut FaultInjectingFile::new(
+            &mut file,
+            AppendFault {
+                fail_write_at: Some(1),
+                ..AppendFault::default()
+            },
+            line.len(),
+        ),
+        line,
+    )
+    .expect_err("append should fail");
+
+    assert_eq!(error.timing.start_offset, Some(0));
+    assert_eq!(error.timing.end_offset, Some(0));
+}
+
+/// Uncertain rollback reports no end boundary so slow-cycle diagnostics do not
+/// imply that the failed line was removed.
+#[test]
+fn append_timing_omits_uncertain_rollback_boundary() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let path = td.path().join("timing.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open log");
+    let line = b"{\"type\":\"failed\"}\n";
+    let error = append_line(
+        &mut FaultInjectingFile::new(
+            &mut file,
+            AppendFault {
+                fail_write_at: Some(1),
+                fail_truncate: true,
+                ..AppendFault::default()
+            },
+            line.len(),
+        ),
+        line,
+    )
+    .expect_err("append should fail");
+
+    assert_eq!(error.timing.start_offset, Some(0));
+    assert_eq!(error.timing.end_offset, None);
+    assert!(error.rollback.is_some());
 }
 
 /// Every possible line-byte failure, including the final newline, rolls back to

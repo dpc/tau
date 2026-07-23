@@ -23,6 +23,14 @@ single runtime sequence/timestamp, writes debug/event-log records, persists
 eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
 Extension prompt-fragment projection runs only after this ordinary commit.
+
+`tau_harness::commit_timing` traces each accepted non-message commit's exact
+monotonic microsecond total plus debug-log, semantic-persistence, bus-enqueue,
+post-commit, and residual/unattributed phases. It carries only event name,
+terminal result class, and durations. Cycles over 500 milliseconds emit the
+same fields at warning level. This operational tracing never enters
+`events.jsonl`, changes commit ordering, or affects persistence/publication.
+
 When lifecycle teardown destructively cancels an intercepted publication, the
 harness temporarily skips that interceptor registration until it consumes the
 single outstanding stale reply. This preserves the extension connection and

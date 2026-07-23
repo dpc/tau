@@ -140,6 +140,7 @@ const MAX_SESSION_AGENT_LIST_ENTRIES: usize = 4_096;
 const MAX_SESSION_AGENT_LIST_FIRST_RECORD_BYTES: u64 = 256 * 1024;
 const MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES: u64 = 4 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const SLOW_COMMIT_EVENT_CYCLE: Duration = Duration::from_millis(500);
 const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
@@ -151,6 +152,98 @@ const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
+
+/// Content-free phase timings for one event that reached commit processing.
+struct CommitEventTiming {
+    /// Built-in or validated custom event name.
+    event_name: tau_proto::EventName,
+    /// Start of commit processing after stale-event rejection.
+    started: Instant,
+    /// Synchronous debug JSONL publication time.
+    debug_log: Duration,
+    /// Semantic journal/store processing time.
+    semantic_persist: Duration,
+    /// Event-bus publication/routing time.
+    bus_enqueue: Duration,
+    /// Post-broadcast reaction time.
+    post_commit: Duration,
+    /// Terminal status of this commit attempt.
+    result: CommitEventTimingResult,
+}
+
+/// Terminal classification for one measured commit attempt.
+#[derive(Clone, Copy, Debug)]
+enum CommitEventTimingResult {
+    /// Guard dropped before terminal classification, including unwinding.
+    Aborted,
+    /// Semantic storage rejected the event.
+    SemanticPersistError,
+    /// Commit and every post-commit reaction completed.
+    Ok,
+}
+
+impl CommitEventTiming {
+    fn new(event_name: tau_proto::EventName) -> Self {
+        Self {
+            event_name,
+            started: Instant::now(),
+            debug_log: Duration::ZERO,
+            semantic_persist: Duration::ZERO,
+            bus_enqueue: Duration::ZERO,
+            post_commit: Duration::ZERO,
+            result: CommitEventTimingResult::Aborted,
+        }
+    }
+}
+
+impl Drop for CommitEventTiming {
+    fn drop(&mut self) {
+        let total = self.started.elapsed();
+        let total_us = duration_as_micros(total);
+        let debug_log_us = duration_as_micros(self.debug_log);
+        let semantic_persist_us = duration_as_micros(self.semantic_persist);
+        let bus_enqueue_us = duration_as_micros(self.bus_enqueue);
+        let post_commit_us = duration_as_micros(self.post_commit);
+        let attributed = self
+            .debug_log
+            .saturating_add(self.semantic_persist)
+            .saturating_add(self.bus_enqueue)
+            .saturating_add(self.post_commit);
+        let unattributed_us = duration_as_micros(total.saturating_sub(attributed));
+        let event_name = &self.event_name;
+        let result = self.result;
+        tracing::trace!(
+            target: "tau_harness::commit_timing",
+            %event_name,
+            ?result,
+            total_us,
+            debug_log_us,
+            semantic_persist_us,
+            bus_enqueue_us,
+            post_commit_us,
+            unattributed_us,
+            "harness commit processing cycle"
+        );
+        if SLOW_COMMIT_EVENT_CYCLE < total {
+            tracing::warn!(
+                target: "tau_harness::commit_timing",
+                %event_name,
+                ?result,
+                total_us,
+                debug_log_us,
+                semantic_persist_us,
+                bus_enqueue_us,
+                post_commit_us,
+                unattributed_us,
+                "slow harness commit processing cycle"
+            );
+        }
+    }
+}
+
+fn duration_as_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
 
 fn bounded_extension_config_error(mut message: String) -> String {
     if message.len() <= MAX_EXTENSION_CONFIG_ERROR_BYTES {
@@ -4713,6 +4806,7 @@ impl Harness {
             self.emit_info("dropping stale completion publication after agent/session teardown");
             return;
         }
+        let mut commit_timing = CommitEventTiming::new(event.name());
         // When this publish was stamped with a conversation, fold
         // the event onto that agent's branch directly. This
         // skips the `UiNavigateTree` head-bouncing dance that
@@ -4751,6 +4845,7 @@ impl Harness {
         // outbound copy. Offline cache/cost analysis tools that read
         // `events.jsonl` would otherwise see zeros where the running
         // session totals belong.
+        let debug_log_started = Instant::now();
         let skip_debug_log = peer_context
             .extension
             .as_ref()
@@ -4760,6 +4855,7 @@ impl Harness {
             let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
             self.observe_debug_log_result(result);
         }
+        commit_timing.debug_log = debug_log_started.elapsed();
         let persistence_source = match &event {
             // A configured peer's durable request must not retain its run-local
             // connection id. The stable configured publisher is the only identity
@@ -4771,16 +4867,20 @@ impl Harness {
                 .or(source),
             _ => source,
         };
-        let append_outcome = match self.persist_semantic_event(
+        let semantic_persist_started = Instant::now();
+        let append_result = self.persist_semantic_event(
             persistence_source,
             &event,
             persist,
             parent_for_fold,
             sync_head_for.as_ref(),
             recorded_at,
-        ) {
+        );
+        commit_timing.semantic_persist = semantic_persist_started.elapsed();
+        let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
+                commit_timing.result = CommitEventTimingResult::SemanticPersistError;
                 self.rollback_rejected_activation_successor(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
                 if semantic_event_router::session_membership_id_for_event(&event)
@@ -4924,6 +5024,7 @@ impl Harness {
             recorded_at,
             event_without_provider_image_bytes(&event),
         );
+        let bus_enqueue_started = Instant::now();
         if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
             // Provider-owned prompt execution is point-to-point: observers still
             // see the durable prompt fact, but execution clients do not all race
@@ -4997,6 +5098,8 @@ impl Harness {
         } else {
             let _ = self.bus.publish_from(source, observer_frame);
         }
+        commit_timing.bus_enqueue = bus_enqueue_started.elapsed();
+        let post_commit_started = Instant::now();
         if let Event::ShellCommandProgress(progress) = &event {
             self.release_pending_ephemeral_shell_canonical_marker(&progress.command_id);
         }
@@ -5029,6 +5132,8 @@ impl Harness {
             self.complete_agent_publish(&cid, completion, through);
         }
         self.complete_pending_external_receive(&event);
+        commit_timing.post_commit = post_commit_started.elapsed();
+        commit_timing.result = CommitEventTimingResult::Ok;
     }
 
     /// Require an exact live `AwaitingCheckpoint` owner for every delayed

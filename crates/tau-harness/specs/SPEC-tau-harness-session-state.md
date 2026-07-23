@@ -104,6 +104,13 @@ boundary. This non-authoritative diagnostic mirror does not promise crash or
 power-loss durability: termination can leave a missing or torn final line, and
 restart neither repairs nor salvages that line.
 
+`tau_harness::debug_log_timing` traces exact monotonic microseconds for the
+whole write cycle and its serialization, EOF lookup, write/flush, and rollback
+phases, plus line byte count, start/end EOF, event name, and result class. Cycles
+over 500 milliseconds emit the same content-free fields at warning level. These
+diagnostics remain tracing output only: they never write recursively to
+`events.jsonl` and do not alter append, flush, rollback, or failure behavior.
+
 The debug JSONL mirror also has a narrow temporary redaction exception for
 `action.invoke` events with action id `email.auth.google.finish`: the harness
 redacts raw action arguments because the current action schema cannot mark the

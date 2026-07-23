@@ -3,6 +3,7 @@
 
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use test_io::{AppendFault, FaultInjectingFile};
@@ -10,6 +11,7 @@ use test_io::{AppendFault, FaultInjectingFile};
 const DEBUG_STRING_COMPACT_THRESHOLD: usize = 100;
 const DEBUG_STRING_COMPACT_EDGE_BYTES: usize = 20;
 const DEBUG_LOG_DIAGNOSTIC_CHARS: usize = 256;
+const SLOW_DEBUG_LOG_CYCLE: Duration = Duration::from_millis(500);
 
 use tau_proto::{ConnectionId, Event, UnixMicros};
 
@@ -156,7 +158,21 @@ impl DebugEventLog {
         if self.poisoned {
             return Err(DebugLogError::Disabled);
         }
-        let mut line = serde_json::to_vec(entry).map_err(DebugLogError::Serialize)?;
+        let cycle_started = Instant::now();
+        let serialize_started = Instant::now();
+        let mut line = match serde_json::to_vec(entry) {
+            Ok(line) => line,
+            Err(error) => {
+                let timing = DebugLogCycleTiming {
+                    total: cycle_started.elapsed(),
+                    serialize: serialize_started.elapsed(),
+                    ..DebugLogCycleTiming::default()
+                };
+                timing.trace(entry, 0, DebugLogCycleResult::SerializeError);
+                return Err(DebugLogError::Serialize(error));
+            }
+        };
+        let serialize = serialize_started.elapsed();
         line.push(b'\n');
 
         #[cfg(test)]
@@ -171,15 +187,31 @@ impl DebugEventLog {
         #[cfg(not(test))]
         let result = append_line(&mut self.file, &line);
 
-        result.map_err(|error| {
-            if error.rollback.is_some() {
-                self.poisoned = true;
+        let (append, result) = match result {
+            Ok(append) => (append, Ok(())),
+            Err(error) => {
+                if error.rollback.is_some() {
+                    self.poisoned = true;
+                }
+                let debug_error = DebugLogError::Append {
+                    source: error.source,
+                    rollback: error.rollback,
+                };
+                (error.timing, Err(debug_error))
             }
-            DebugLogError::Append {
-                source: error.source,
-                rollback: error.rollback,
-            }
-        })
+        };
+        let timing = DebugLogCycleTiming {
+            total: cycle_started.elapsed(),
+            serialize,
+            append,
+        };
+        let result_class = if result.is_ok() {
+            DebugLogCycleResult::Ok
+        } else {
+            DebugLogCycleResult::AppendError
+        };
+        timing.trace(entry, line.len(), result_class);
+        result
     }
 
     /// Installs one deterministic failure for the next line append.
@@ -323,24 +355,133 @@ struct LineAppendError {
     source: io::Error,
     /// Rollback failure, when future append position is uncertain.
     rollback: Option<io::Error>,
+    /// Phase timing and offsets observed before the failure.
+    timing: LineAppendTiming,
+}
+
+/// Content-free measurements for one append/rollback attempt.
+#[derive(Clone, Copy, Debug, Default)]
+struct LineAppendTiming {
+    /// Time spent obtaining the exact pre-append EOF.
+    eof: Duration,
+    /// Time spent writing and applying the existing flush policy.
+    write_flush: Duration,
+    /// Time spent truncating and flushing after failure.
+    rollback: Duration,
+    /// Exact EOF before mutation, when it could be obtained.
+    start_offset: Option<u64>,
+    /// Exact expected EOF after successful append or rollback.
+    end_offset: Option<u64>,
+}
+
+/// Content-free measurements for serialization plus append processing.
+#[derive(Clone, Copy, Debug, Default)]
+struct DebugLogCycleTiming {
+    /// Whole `write_entry` cycle.
+    total: Duration,
+    /// JSON serialization phase.
+    serialize: Duration,
+    /// File append and possible rollback phases.
+    append: LineAppendTiming,
+}
+
+/// Terminal classification for one measured debug-log cycle.
+#[derive(Clone, Copy, Debug)]
+enum DebugLogCycleResult {
+    /// Serialization failed before file mutation.
+    SerializeError,
+    /// Append, flush, or rollback processing failed.
+    AppendError,
+    /// One complete line was appended and flushed.
+    Ok,
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+impl DebugLogCycleTiming {
+    fn trace(&self, entry: &serde_json::Value, line_bytes: usize, result: DebugLogCycleResult) {
+        let event_name = entry
+            .get("event_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<none>");
+        let total_us = duration_micros(self.total);
+        let serialize_us = duration_micros(self.serialize);
+        let eof_us = duration_micros(self.append.eof);
+        let write_flush_us = duration_micros(self.append.write_flush);
+        let rollback_us = duration_micros(self.append.rollback);
+        let start_eof = self.append.start_offset;
+        let end_eof = self.append.end_offset;
+        tracing::trace!(
+            target: "tau_harness::debug_log_timing",
+            event_name,
+            ?result,
+            total_us,
+            serialize_us,
+            eof_us,
+            write_flush_us,
+            rollback_us,
+            line_bytes,
+            ?start_eof,
+            ?end_eof,
+            "debug JSONL write cycle"
+        );
+        if SLOW_DEBUG_LOG_CYCLE < self.total {
+            tracing::warn!(
+                target: "tau_harness::debug_log_timing",
+                event_name,
+                ?result,
+                total_us,
+                serialize_us,
+                eof_us,
+                write_flush_us,
+                rollback_us,
+                line_bytes,
+                ?start_eof,
+                ?end_eof,
+                "slow debug JSONL write cycle"
+            );
+        }
+    }
 }
 
 /// Appends and flushes one complete line, rolling back every failed mutation.
-fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<(), LineAppendError> {
-    let start_offset = io.seek_to_end().map_err(|source| LineAppendError {
-        source,
-        rollback: None,
-    })?;
+fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<LineAppendTiming, LineAppendError> {
+    let mut timing = LineAppendTiming::default();
+    let eof_started = Instant::now();
+    let start_offset = match io.seek_to_end() {
+        Ok(offset) => offset,
+        Err(source) => {
+            timing.eof = eof_started.elapsed();
+            return Err(LineAppendError {
+                source,
+                rollback: None,
+                timing,
+            });
+        }
+    };
+    timing.eof = eof_started.elapsed();
+    timing.start_offset = Some(start_offset);
+    let write_flush_started = Instant::now();
     let append_result = io.write_all(line).and_then(|()| io.flush());
+    timing.write_flush = write_flush_started.elapsed();
     if let Err(source) = append_result {
+        let rollback_started = Instant::now();
         let truncate_error = io.truncate(start_offset).err();
         let rollback_flush_error = io.flush().err();
+        timing.rollback = rollback_started.elapsed();
+        if truncate_error.is_none() && rollback_flush_error.is_none() {
+            timing.end_offset = Some(start_offset);
+        }
         return Err(LineAppendError {
             source,
             rollback: truncate_error.or(rollback_flush_error),
+            timing,
         });
     }
-    Ok(())
+    timing.end_offset = Some(start_offset.saturating_add(line.len() as u64));
+    Ok(timing)
 }
 
 fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessInputMessage) {
