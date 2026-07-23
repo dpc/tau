@@ -540,12 +540,7 @@ fn user_skill_command_expands_prompt_block() {
             _ => None,
         })
         .expect("provider prompt");
-    let escaped = expanded
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;");
+    let escaped = expanded.replace("</user>", "&lt;/user&gt;");
     assert_eq!(
         provider_prompt.context.flatten(),
         vec![ContextItem::Message(MessageItem {

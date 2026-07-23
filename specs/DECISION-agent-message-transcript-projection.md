@@ -27,7 +27,7 @@ deferral boundary: minimal commit ordering applies. The outbound assistant
 projection remains provider-visible after the sender's message-tool result.
 
 Provider context is rendered from the typed canonical fact. A local inbound
-ordinary message keeps the escaped, stable-sender-labelled `[tau-internal]`
+ordinary message keeps the exact-close-framed, stable-sender-labelled `[tau-internal]`
 wrapper and `<message>` boundary used by live delivery. Cross-session inbound,
 watch, and outbound projections retain their distinct typed forms. Initial or
 redundant structured watch snapshots produce no provider block and do not
@@ -95,3 +95,6 @@ history after tool closure. Dormant branch ownership preserves explicit
 navigation without falsely acknowledging unseen sibling context. Message-ID or
 body-based legacy repair cannot distinguish repeated bodies, retries, escaping,
 or self-send directions, so recorded history remains untouched.
+
+Body framing follows
+[DECISION-exact-sentinel-prompt-envelopes](DECISION-exact-sentinel-prompt-envelopes.md).

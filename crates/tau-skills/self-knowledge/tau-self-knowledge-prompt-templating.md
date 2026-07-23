@@ -59,6 +59,9 @@ Prompt fragments can use:
 - `agent_context` — extension-published per-agent context, keyed by context name. Each key is an array of contributions with `extension_name` and `value`.
 
 Full system prompt templates additionally receive rendered `prompt_fragments` and `tool_prompt_fragments` arrays. Each item has `name`, `priority`, `content`, and `early`. Tool prompt fragment `content` already includes Tau's automatic ``### `<tool>` instructions`` heading.
+They also receive optional `exact_sentinel_boundary_rule` text whenever selected
+context contains a Tau-stamped payload envelope. Custom templates should render
+that rule once; omitting it replaces Tau's model-visible provenance cue.
 
 Extension fragments can also be capability-gated by their consumer. In
 particular, Tau includes the shared `shell.workdir` fragment only when the

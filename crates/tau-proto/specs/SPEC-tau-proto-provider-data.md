@@ -91,17 +91,18 @@ must synthesize replay from the typed fields.
 
 ## Provider-visible message facts
 
-The six harness-authored canonical `message.*` event types share one compact, valid
+The six harness-authored canonical `message.*` event types share one compact
 `<message event="…">` provider projection. Canonically ordered attributes
 carry the harness-stamped publisher plus applicable message, target, party, and
-conversation identifiers. Text-bearing facts use direct escaped text; delete and
-reaction facts are self-closing. Publisher-provided text and metadata are
+conversation identifiers. Text-bearing facts use direct exact-close-framed text;
+delete and reaction facts are self-closing. Publisher-provided text and metadata are
 untrusted data and grant no identity, routing, instruction, tool, or control
 authority. Opaque `extension_data` is never projected generically.
 
-Attribute and text escaping share the centralized existing policy. Controls
-(including LF and tab), line separators, bidi/format controls, and noncharacters
-become visible `\u{XXXX}` escapes before XML delimiters are escaped.
+Controls in message-fact bodies (including LF and tab), line separators,
+bidi/format controls, and noncharacters become visible `\u{XXXX}` escapes before
+exact `</message>` collisions are replaced. Attributes retain separate
+XML-delimiter and quote escaping.
 Message-fact references are descriptive opaque identifiers, not generic reply
 routes or capabilities.
 
@@ -110,7 +111,7 @@ routes or capabilities.
 Canonical submitted and steered prompt facts retain raw accepted text plus
 harness-stamped `PromptSubmissionSource`. Derived transcript entries preserve that
 typed source. During provider assembly only, `HumanUi` text projects as one
-fieldless `<user>...</user>` user-role item with the five XML delimiters escaped;
+fieldless `<user>...</user>` user-role item with only exact `</user>` collisions replaced;
 all other text, whitespace, and Unicode remain unchanged. Every other submission
 source and injected input remains raw or uses its separate typed projection.
 

@@ -7,8 +7,8 @@ workers; workers may finish, but the reader never blocks waiting for a permit.
 
 HTTP error bodies are capped at 64 KiB. Successful MCP response bodies are
 capped at 1 MiB before decode. Decoded provider text retains its 512 KiB
-pre-projection cap, and the complete escaped, closed `<tau_web_content>` result
-is independently capped at 512 KiB. Expansion from XML or visible-Unicode
+pre-projection cap, and the complete framed, closed `<tau_web_content>` result
+is independently capped at 512 KiB. Expansion from exact-close replacement or visible-Unicode
 escaping counts toward that final bound; oversize results fail clearly as a
 `ToolError` and are not truncated into a different success contract. A JSON-RPC
 error above 512 KiB is replaced by a compact deterministic diagnostic, and every

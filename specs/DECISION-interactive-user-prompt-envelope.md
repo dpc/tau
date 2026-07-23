@@ -5,8 +5,8 @@ Authority: confirmed, 2026-07-23, dpc
 Every accepted prompt whose harness-stamped submission source is `HumanUi`
 projects into provider context as exactly one user-role text item:
 `<user>{body}</user>`. The element has no attributes or added whitespace. Tau
-XML-escapes `&`, `<`, `>`, `"`, and `'` in the accepted effective prompt and
-otherwise preserves its text and whitespace.
+replaces only exact `</user>` occurrences in the accepted effective prompt with
+`&lt;/user&gt;` and otherwise preserves its text and whitespace.
 
 The raw accepted text and submission source remain canonical in
 `agent.prompt_submitted` or `agent.prompt_steered`. UI requests, transcript
@@ -17,7 +17,7 @@ role, activation, wake, route, identity, or trust authority.
 
 This covers existing-agent, new-agent initial, and queued/steered interactive UI
 prompts. A successful `:skill` invocation wraps the harness-expanded canonical
-prompt, so its literal inner markup is escaped in the `<user>` body. Injected,
+prompt, so only an exact outer-close collision is replaced in the `<user>` body. Injected,
 internal, extension, external-message, and agent-message inputs retain their
 separate projections.
 
@@ -42,5 +42,7 @@ interactive instruction channel.
 
 This decision is approved under
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md)
-and follows
+and its body framing follows
+[DECISION-exact-sentinel-prompt-envelopes](DECISION-exact-sentinel-prompt-envelopes.md).
+It follows
 [DECISION-no-backward-compatibility](DECISION-no-backward-compatibility.md).

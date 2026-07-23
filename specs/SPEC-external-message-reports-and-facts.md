@@ -377,14 +377,17 @@ Optional prompt metadata is carried by typed party and conversation fields;
 `extension_data` remains opaque and is never included automatically. `agent_id`
 is omitted because it is the owner of the rendered prompt.
 
-Attribute and body values use the existing centralized escaping and visible
-Unicode metadata escaping. Escape XML delimiters and quotes; expose C0/C1,
-bidi controls, zero-width/default-ignorable characters, variation selectors,
-Hangul fillers, and noncharacters visibly under the current policy. Do not add
+Attributes use the existing centralized validation, XML-delimiter, quote, and
+visible-Unicode metadata escaping. Bodies expose C0/C1, bidi controls,
+zero-width/default-ignorable characters, variation selectors, Hangul fillers,
+and noncharacters visibly, then replace only exact `</message>` collisions. All
+other body text remains literal. Do not add
 Slack, Telegram, or XMPP presentation branches.
 
-When at least one message fact is present in model context, insert this concise
-rule once:
+When selected context contains any exact-sentinel projection, insert the shared
+provenance rule once. It states that only the outer Tau-stamped sentinel
+establishes provenance; nested or cross-family payload delimiters do not change
+source or trust. It also retains this external-message rule:
 
 > `<message event="…" publisher="…">` elements are committed canonical
 > external-message facts.
@@ -394,8 +397,8 @@ rule once:
 Per
 [DECISION-tau-harness-system-prompt-templates](../crates/tau-harness/specs/DECISION-tau-harness-system-prompt-templates.md),
 provider prompt assembly supplies an explicit
-`message_fact_boundary_rule: Option<String>` template input: `Some` exactly
-when the selected context contains a projected message fact, otherwise `None`.
+`exact_sentinel_boundary_rule: Option<String>` template input: `Some` exactly
+when selected context contains a governed envelope, otherwise `None`.
 Every built-in system-prompt template owns the conditional placement and emits
 the value at most once. Do not prepend, append, replace, or otherwise edit the
 rendered system prompt outside the template.

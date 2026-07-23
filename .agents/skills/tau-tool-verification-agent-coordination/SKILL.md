@@ -30,7 +30,7 @@ Record all of these observations:
 * Delivery while a sub-agent is sleeping, backgrounded on a long tool, queued behind another tool call, or otherwise between model turns.
 * Delivery order, or any reorderings, especially for parallel `message` calls.
 * Sender IDs visible to recipients.
-* Message payload preservation in durable events, and XML escaping in hidden prompts, for multiline content, blank lines, unicode, JSON-like text, backticks, and literal `<message>` tags inside the payload.
+* Message payload preservation in durable events, and exact-close framing in hidden prompts, for multiline content, blank lines, unicode, JSON-like text, backticks, and literal `<message>` tags inside the payload.
 * Error for an unknown recipient ID.
 * Error for a completed sub-agent recipient ID.
 * Error for an empty message.
@@ -211,7 +211,11 @@ line 4 xml-ish: <message>inner</message> & chars
 line 5 code-ish: `backticks` and {"json":true}
 ```
 
-Verify that blank lines, unicode, backticks, and JSON-like text remain readable, and that ampersands plus literal inner `<message>` tags are XML-escaped inside the delivered wrapper. If you inspect durable `AgentMessage` events, verify that the stored payload is still exact and unescaped.
+Verify that blank lines, unicode, ampersands, backticks, JSON-like text, and
+literal inner `<message>` openings remain exact and readable. Exact `</message>`
+collisions must appear as `&lt;/message&gt;`, and the delivered wrapper must contain
+exactly one exact close. If you inspect durable `AgentMessage` events, verify that
+the stored payload is still exact and unframed.
 
 Finally, call `message` with an empty string to a valid recipient. Expect a tool error such as `` `message` must not be empty ``. Also verify an unknown recipient error if it was not already checked in Phase 1.
 
@@ -225,7 +229,8 @@ Report concise but complete findings:
 * Confirm the `message` success output is only `Message sent`; delivery is async, so no delivery receipt is expected.
 * Include whether errors distinguish completed recipients from unknown recipients. Current behavior may use the same unknown-recipient error for both.
 * Include whether parent recipient ID discovery was clear from `self_agent_id` or still had to be inferred from sub-agent logs.
-* Include whether the delivered wrapper XML-escaped payloads containing literal `<message>` tags and ampersands.
+* Include whether the delivered wrapper preserved literal `<message>` openings
+  and ampersands while replacing every exact `</message>` collision.
 
 
 ### Agent watch tool verification plan
@@ -306,4 +311,3 @@ Report concise but complete findings:
 * Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both `message` the user and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
 * Include whether `wait` was interrupted by a watch notification while waiting; this is expected if it reports that new input is queued.
 * Include whether `self_agent_id` and `sub_agent_id` made the watcher and watched IDs clear enough.
-

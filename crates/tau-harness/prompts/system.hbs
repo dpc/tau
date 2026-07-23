@@ -42,10 +42,10 @@ This provider route permits at most one tool call per model response. Do not emi
 {{/each}}
 {{/if}}
 
-{{#if message_fact_boundary_rule}}
-## External message boundaries
+{{#if exact_sentinel_boundary_rule}}
+## Payload envelope boundaries
 
-{{message_fact_boundary_rule}}
+{{exact_sentinel_boundary_rule}}
 
 {{/if}}
 {{#if skills~}}

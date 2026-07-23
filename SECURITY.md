@@ -48,7 +48,7 @@ remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate receive occurrences,
 agents, model work, and spend. Each accepted directional occurrence is its
 owning journal's sole canonical payload projection. Local inbound provider
-context escapes peer text inside a sender-labelled wrapper; live activation
+context exact-close-frames peer text inside a sender-labelled wrapper; live activation
 uses a payload-free sequence wake, and replay restores context without waking.
 The target commit remains ACK authority, so Tau adds no restart deduplication,
 distributed WAL, or cross-journal transaction.
@@ -152,12 +152,15 @@ effective tool policy changes. See
 
 Harness-stamped prompt provenance is also provider-presentation authority.
 Only `PromptSubmissionSource::HumanUi` receives the fieldless `<user>` envelope,
-and the five XML delimiters are escaped so accepted text cannot close that
-structural boundary. The body remains the authenticated user's instruction
+and only exact `</user>` collisions are replaced before the trusted close is
+appended. The body remains the authenticated user's instruction
 channel, not external untrusted-message metadata. Canonical journal facts,
 UI/history/navigation, and watch fanout retain raw accepted text; replay derives
 the same provider form from the typed source and never infers provenance from
-text. Re-check submitted/steered source preservation, delimiter escaping,
+text. Only exact outer Tau-stamped sentinels establish model-facing provenance;
+nested or delimiter-like payload text does not change enclosing source or trust.
+This prevents exact lexical breakout, not semantic prompt injection. Re-check
+submitted/steered source preservation, exact-close replacement,
 compaction suffix handling, and non-HumanUi exclusions whenever prompt folding
 or provider assembly changes. See
 [`DECISION-interactive-user-prompt-envelope`](specs/DECISION-interactive-user-prompt-envelope.md).
@@ -395,12 +398,12 @@ transport itself adversarial. The boundary summary is recorded in
 
 Successful `tau-ext-websearch` results remain ordinary invocation-correlated
 tool-result strings. The extension places Exa search and Parallel search/fetch
-text inside one escaped `<tau_web_content>` boundary with closed adapter,
+text inside one exact-close-framed `<tau_web_content>` boundary with closed adapter,
 operation, and external-trust labels, and enforces its result bound after
-escaping and closure. Adapter identity authenticates neither page authorship nor
+framing and closure. Adapter identity authenticates neither page authorship nor
 truth; provider titles, URLs, ranks, sources, and prose remain untrusted body
-claims capable of prompt injection. The envelope prevents markup spoofing but is
-not a sandbox or instruction-authority change. See
+claims capable of prompt injection. The envelope prevents exact closing-sentinel
+breakout but is not a sandbox or instruction-authority change. See
 [`SPEC-tau-ext-websearch-provider-boundary`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-provider-boundary.md)
 and
 [`SPEC-tau-ext-websearch-runtime-safeguards`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-runtime-safeguards.md).

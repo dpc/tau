@@ -13,7 +13,8 @@ saturation with responsive control handling, and replay suppression.
 
 Successful-result coverage must exercise Exa search, Parallel search, and
 Parallel fetch with exact canonical `<tau_web_content>` attributes. Adversarial
-coverage keeps provider titles/URLs and attempted markup in the escaped body,
-makes unsafe Unicode visible, checks the exact final 512 KiB post-escape boundary
+coverage keeps provider titles/URLs and attempted markup literal, replaces only
+exact closing sentinels, makes unsafe Unicode visible, checks the exact final
+512 KiB post-framing boundary
 and oversize rejection, and proves identical preservation through Chat
 Completions and Codex/Responses tool-result lowering.

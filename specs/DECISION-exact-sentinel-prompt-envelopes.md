@@ -2,19 +2,6 @@
 
 Authority: confirmed, 2026-07-23, dpc
 
-## Status
-
-The confirmed XML-escaping contracts and their implementations remain current
-until this decision receives final human confirmation and the exact-sentinel
-transition lands. At that transition, this record supersedes only their
-element-body escaping rules; their typed provenance, roles, trust, routing,
-activation, replay, metadata, and attribute contracts remain in force. The
-transition must synchronize the affected harness prompt-dispatch and provider-data
-specifications, agent-message delivery specification, external-message
-specification, web-content boundary and resource-safeguard specifications,
-security documentation, user documentation, prompt-template guidance, and
-deterministic fixture contract.
-
 Tau treats its model-facing payload envelopes as exact sentinels, not XML. The
 trusted projector owns a hard-coded opening token and matching exact closing
 token for each envelope. It assembles and applies any domain normalization and
@@ -126,8 +113,7 @@ near variants and nested markup can remain visually confusing; native typing,
 explicit trust policy, and deterministic action controls address the authority
 boundary rather than claiming punctuation can make hostile instructions inert.
 
-Upon the implementation transition described in this record's status, this
-decision supersedes the body-escaping portions of
+This decision supersedes the body-escaping portions of
 [DECISION-interactive-user-prompt-envelope](DECISION-interactive-user-prompt-envelope.md),
 [DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md),
 and

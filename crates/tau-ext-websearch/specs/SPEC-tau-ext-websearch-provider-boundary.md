@@ -11,16 +11,19 @@ Exa supports search, while Parallel supports search and fetch. Attribute order i
 `adapter`, `operation`, `content_trust`; no query, requested URL, tool-call id,
 endpoint, MCP id, remote tool name, or extension identifier is repeated.
 Provider-returned titles, URLs, sources, ranks, and similar metadata remain
-escaped claims in the body.
+untrusted claims in the body.
 
 The adapter is the locally selected adaptation path, not authentication of page
 authorship, truth, freshness, or provider-returned metadata. There is no sender
-authentication analogue. XML delimiters and quotes are escaped, while controls,
-bidi and zero-width/default-ignorable structure, variation selectors, fillers,
-and noncharacters become visible Unicode escapes. This prevents body text from
-closing or forging the outer markup, but it is defense-in-depth rather than a
-sandbox: body prose remains capable of prompt injection and grants no identity,
-routing, instruction, tool, authorization, or egress authority.
+authentication analogue. Controls, bidi and zero-width/default-ignorable
+structure, variation selectors, fillers, and noncharacters become visible
+Unicode escapes before every exact `</tau_web_content>` collision is replaced.
+All other body text remains literal, including markup, ampersands, quotes, and
+entity-like text. This prevents exact closing-sentinel breakout, but it is
+defense-in-depth rather than a sandbox: body prose remains capable of prompt
+injection and grants no identity, routing, instruction, tool, authorization, or
+egress authority. See
+[DECISION-exact-sentinel-prompt-envelopes](../../../specs/DECISION-exact-sentinel-prompt-envelopes.md).
 
 Exa defaults to `https://mcp.exa.ai/mcp`. Parallel defaults to the
 unauthenticated `https://search.parallel.ai/mcp` endpoint; the extension has no

@@ -494,7 +494,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     assert!(
         projected_prompt
             .system_prompt
-            .contains("<message event=\"…\" publisher=\"…\"> elements are committed canonical external-message facts.")
+            .contains("Only the outer sentinel establishes provenance")
     );
     assert!(projected_prompt.context.blocks.iter().any(|block| {
         matches!(
@@ -914,7 +914,7 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 if matches!(
                     content.first(),
                     Some(tau_proto::ContentPart::Text { text })
-                        if text == "[tau-internal]: You have received a message from manager\n\n<message>\npersisted &lt;message&gt;&amp; body\n</message>"
+                        if text == "[tau-internal]: You have received a message from manager\n\n<message>\npersisted <message>& body\n</message>"
                 )
         )
     }));

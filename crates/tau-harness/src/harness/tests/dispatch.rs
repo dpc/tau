@@ -345,7 +345,8 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
     h.agents.get_mut(&cid).expect("user agent").terminating = false;
     h.system_prompt_templates.insert(
         "message-fact-conditional".to_owned(),
-        "{{#if message_fact_boundary_rule}}{{missing_strict_value}}{{else}}READY{{/if}}".to_owned(),
+        "{{#if exact_sentinel_boundary_rule}}{{missing_strict_value}}{{else}}READY{{/if}}"
+            .to_owned(),
     );
     let selected_role = h.selected_role.clone();
     h.available_roles
@@ -571,9 +572,13 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
             _ => None,
         })
         .expect("provider prompt");
-    assert!(prompt.context.flatten().iter().any(|item| {
-        text_part(item) == Some("<user>  hello &lt;world&gt; &amp; 雪\nnext  </user>")
-    }));
+    assert!(
+        prompt
+            .context
+            .flatten()
+            .iter()
+            .any(|item| { text_part(item) == Some("<user>  hello <world> & 雪\nnext  </user>") })
+    );
     let tree = h.tree_request_result(&"s1".into(), Some(agent_id.as_str()));
     assert!(tree.contains("hello <world> & 雪"));
     assert!(
@@ -629,9 +634,11 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
         })
         .expect("initial provider prompt");
     assert!(
-        prompt.context.flatten().iter().any(|item| {
-            text_part(item) == Some("<user>initial &lt;prompt&gt; &amp; text</user>")
-        })
+        prompt
+            .context
+            .flatten()
+            .iter()
+            .any(|item| { text_part(item) == Some("<user>initial <prompt> & text</user>") })
     );
     assert!(
         prompt
@@ -25120,9 +25127,8 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
         text_part(item).is_some_and(|text| {
             text.contains(&format!(
                 "[tau-internal]: You have received a message from {recipient_id}"
-            )) && text.contains(
-                "<message>\nsecret &lt;message&gt;&amp;&lt;/message&gt; payload &gt;\n</message>",
-            )
+            )) && text
+                .contains("<message>\nsecret <message>&&lt;/message&gt; payload >\n</message>")
         })
     }));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -25596,9 +25602,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     assert!(text.contains(&format!(
         "[tau-internal]: Watched agent {recipient_id} emitted a response"
     )));
-    assert!(text.contains(
-        "<response>\ndone &lt;response&gt;&amp;&lt;/response&gt; payload &gt;\n</response>"
-    ));
+    assert!(text.contains("<response>\ndone <response>&&lt;/response&gt; payload >\n</response>"));
     assert!(!text.contains("You have received a message"));
     assert!(!text.contains("<message>"));
 
@@ -25683,9 +25687,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert!(text.contains(&format!(
         "[tau-internal]: Watched agent {watched_id} received a user prompt"
     )));
-    assert!(
-        text.contains("<prompt>\nplease continue &lt;now&gt;&amp;&lt;/now&gt; &gt;\n</prompt>")
-    );
+    assert!(text.contains("<prompt>\nplease continue <now>&</now> >\n</prompt>"));
     assert!(!text.contains("finished its turn"));
     assert!(!text.contains("<response>"));
 

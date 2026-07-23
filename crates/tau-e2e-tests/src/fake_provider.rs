@@ -888,17 +888,25 @@ impl FakeState {
             }
             let text = match expected {
                 WatchNotificationV2::Response { content } => {
+                    let body = tau_proto::escape_exact_sentinel_close(
+                        content,
+                        "</response>",
+                        "&lt;/response&gt;",
+                    );
                     format!(
                         "[tau-internal]: Watched agent {child_agent_id} emitted a response\n\n\
-                         <response>\n{}\n</response>",
-                        xml_escape(content)
+                         <response>\n{body}\n</response>"
                     )
                 }
                 WatchNotificationV2::Prompt { content } => {
+                    let body = tau_proto::escape_exact_sentinel_close(
+                        content,
+                        "</prompt>",
+                        "&lt;/prompt&gt;",
+                    );
                     format!(
                         "[tau-internal]: Watched agent {child_agent_id} received a user prompt\n\n\
-                         <prompt>\n{}\n</prompt>",
-                        xml_escape(content)
+                         <prompt>\n{body}\n</prompt>"
                     )
                 }
                 WatchNotificationV2::TurnState { state } => match state {
@@ -1220,7 +1228,7 @@ impl FakeState {
                     "scenario first mismatch: no-context agent is not the validated child",
                 ));
             }
-            let actual = latest_scenario_user_text(prompt);
+            let actual = latest_provider_user_text(prompt);
             let candidates = self
                 .v2()?
                 .lanes
@@ -1233,7 +1241,11 @@ impl FakeState {
                             .actions
                             .first()
                             .and_then(ScenarioActionV2::binding_user_text)
-                            == actual.as_deref()
+                            .is_some_and(|expected| {
+                                actual.as_deref().is_some_and(|actual| {
+                                    fixture_user_text_matches(actual, expected)
+                                })
+                            })
                 })
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
@@ -1976,8 +1988,11 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         expected: &str,
     ) -> ClientResult<()> {
-        let actual = latest_scenario_user_text(prompt);
-        if actual.as_deref() != Some(expected) {
+        let actual = latest_provider_user_text(prompt);
+        if !actual
+            .as_deref()
+            .is_some_and(|actual| fixture_user_text_matches(actual, expected))
+        {
             self.trace(&format!(
                 "last user expected={expected:?} actual={actual:?}"
             ))?;
@@ -1993,10 +2008,8 @@ impl FakeState {
         expected: &str,
     ) -> ClientResult<()> {
         let actual = latest_provider_user_text(prompt);
-        let decoded = actual
-            .as_deref()
-            .and_then(decode_scenario_human_ui_user_prompt);
-        if decoded.as_deref() != Some(expected) {
+        let projected = project_fixture_human_ui_user_prompt(expected);
+        if actual.as_deref() != Some(projected.as_str()) {
             self.trace(&format!(
                 "last HumanUi user expected={expected:?} actual={actual:?}"
             ))?;
@@ -2106,19 +2119,12 @@ fn require_repaired_dummy_result(
     Ok(())
 }
 
-fn latest_scenario_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
-    scenario_user_texts(prompt).pop()
-}
-
-/// Return semantic text under the closed deterministic-scenario convention.
+/// Return exact provider user text under the closed fixture convention.
 ///
 /// Exact canonical `<user>` syntax is reserved for fixture HumanUi projections;
-/// the fake cannot infer durable provenance from provider text alone.
+/// the fake does not infer or decode provenance from provider text.
 fn scenario_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
     provider_user_texts(prompt)
-        .into_iter()
-        .map(|text| decode_scenario_human_ui_user_prompt(&text).unwrap_or(text))
-        .collect()
 }
 
 fn latest_provider_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
@@ -2145,16 +2151,15 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
         .collect()
 }
 
-/// Decode one exact provider-only HumanUi envelope into its semantic text.
-fn decode_scenario_human_ui_user_prompt(text: &str) -> Option<String> {
-    let body = text.strip_prefix("<user>")?.strip_suffix("</user>")?;
-    let decoded = body
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&");
-    (xml_escape(&decoded) == body).then_some(decoded)
+/// Project fixture-authored typed HumanUi text without attempting inversion.
+fn project_fixture_human_ui_user_prompt(text: &str) -> String {
+    let body = tau_proto::escape_exact_sentinel_close(text, "</user>", "&lt;/user&gt;");
+    format!("<user>{body}</user>")
+}
+
+/// Match either raw non-HumanUi text or fixture-authored HumanUi projection.
+fn fixture_user_text_matches(actual: &str, expected: &str) -> bool {
+    actual == expected || actual == project_fixture_human_ui_user_prompt(expected)
 }
 
 fn cbor_map_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
@@ -2209,22 +2214,6 @@ fn agent_start_parameters() -> serde_json::Value {
         "required": ["task_name", "prompt"],
         "additionalProperties": false
     })
-}
-
-/// Mirrors the production watch-prompt XML escaping in `tau-harness::prompt`.
-fn xml_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 fn cbor_map(fields: Vec<(&str, CborValue)>) -> CborValue {

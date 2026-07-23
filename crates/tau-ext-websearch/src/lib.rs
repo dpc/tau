@@ -70,6 +70,7 @@ const TOOL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TRUNCATED_SUFFIX: &str = "… (truncated)";
 const REDACTED_COMPONENT: &str = "…";
 const WEB_CONTENT_CLOSE: &str = "</tau_web_content>";
+const WEB_CONTENT_CLOSE_VISIBLE: &str = "&lt;/tau_web_content&gt;";
 
 #[derive(Clone, Copy)]
 enum WebAdapter {
@@ -555,31 +556,28 @@ fn project_web_content(
     operation: WebOperation,
     text: &str,
 ) -> Result<String, String> {
+    let mut body = String::with_capacity(text.len());
+    for character in text.chars() {
+        if tau_proto::requires_visible_escape(character) {
+            let _ = write!(body, "\\u{{{:04X}}}", character as u32);
+        } else {
+            body.push(character);
+        }
+    }
+    let body =
+        tau_proto::escape_exact_sentinel_close(&body, WEB_CONTENT_CLOSE, WEB_CONTENT_CLOSE_VISIBLE);
     let mut output = format!(
         "<tau_web_content adapter=\"{}\" operation=\"{}\" content_trust=\"external\">",
         adapter.as_str(),
         operation.as_str()
     );
-    for character in text.chars() {
-        if tau_proto::requires_visible_escape(character) {
-            let _ = write!(output, "\\u{{{:04X}}}", character as u32);
-        } else {
-            match character {
-                '&' => output.push_str("&amp;"),
-                '<' => output.push_str("&lt;"),
-                '>' => output.push_str("&gt;"),
-                '"' => output.push_str("&quot;"),
-                '\'' => output.push_str("&apos;"),
-                _ => output.push(character),
-            }
-        }
-        if output.len() + WEB_CONTENT_CLOSE.len() > TOOL_OUTPUT_MAX_BYTES {
-            return Err(format!(
-                "{} MCP projected web content exceeded {TOOL_OUTPUT_MAX_BYTES} bytes",
-                adapter.as_str()
-            ));
-        }
+    if output.len() + body.len() + WEB_CONTENT_CLOSE.len() > TOOL_OUTPUT_MAX_BYTES {
+        return Err(format!(
+            "{} MCP projected web content exceeded {TOOL_OUTPUT_MAX_BYTES} bytes",
+            adapter.as_str()
+        ));
     }
+    output.push_str(&body);
     output.push_str(WEB_CONTENT_CLOSE);
     Ok(output)
 }

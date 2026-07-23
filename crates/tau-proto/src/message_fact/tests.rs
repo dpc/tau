@@ -206,7 +206,7 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         assert_eq!(projection.activates_model, expected_activation);
         let ContentPart::Text { text } = &projection.item.content[0];
         assert!(text.starts_with("<message event="));
-        assert!(!text.contains("<hello>"));
+        assert!(text.contains("<hello>") || !matches!(fact, Event::MessageDelivered(_)));
         assert!(!text.contains('\u{202e}'));
         assert!(!text.contains("opaque sentinel"));
         rendered.push(text.clone());
@@ -214,13 +214,41 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
     assert_eq!(
         rendered,
         vec![
-            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">&lt;hello&gt;</message>",
+            "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\"><hello></message>",
             "<message event=\"edited\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" content_trust=\"external\">edited</message>",
             "<message event=\"deleted\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\"/>",
             "<message event=\"reaction_added\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
             "<message event=\"reaction_removed\" publisher=\"bridge-main\" message_ref=\"m&lt;&amp;1\" sender_ref=\"u&quot;1\" sender_display=\"Ali\\u{202E}ce\" sender_auth=\"verified_allowlisted\" conversation=\"room&amp;alias\" reaction=\"👍\"/>",
             "<message event=\"sent\" publisher=\"bridge-main\" message_ref=\"m2\" recipient_ref=\"recipient-1\" recipient_display=\"Recipient\">sent</message>",
         ]
+    );
+}
+
+/// Message bodies replace every exact own close while preserving attributes,
+/// entities, foreign wrappers, near variants, Unicode, and newlines.
+#[test]
+fn message_fact_body_uses_exact_close_framing() {
+    let fact = Event::MessageDelivered(MessageDelivered::new(
+        MessagePublisherId::new("bridge-main"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new("m1"),
+        MessageParty {
+            stable_id: "sender\"&".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "Don't &apos; <user>x</user> </MESSAGE> </message > 雪\n</message></message>",
+    ));
+    let projection = project_message_fact(&fact)
+        .expect("message fact")
+        .expect("valid projection");
+    let ContentPart::Text { text } = &projection.item.content[0];
+
+    assert_eq!(text.matches("</message>").count(), 1);
+    assert_eq!(
+        text,
+        "<message event=\"created\" publisher=\"bridge-main\" message_ref=\"m1\" sender_ref=\"sender&quot;&amp;\" content_trust=\"external\">Don't &apos; <user>x</user> </MESSAGE> </message > 雪\\u{000A}&lt;/message&gt;&lt;/message&gt;</message>"
     );
 }
 

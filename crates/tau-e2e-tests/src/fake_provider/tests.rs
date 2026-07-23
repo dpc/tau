@@ -1,37 +1,24 @@
 use super::*;
 use crate::ScenarioLaneV2;
 
-/// HumanUi scenario matching accepts only the exact fieldless provider envelope
-/// and reverses its five delimiter entities without altering other text.
+/// HumanUi fixture matching projects expected typed text and never invents a
+/// decoded semantic value from the intentionally non-injective provider form.
 #[test]
-fn human_ui_envelope_decoder_is_exact_and_lossless() {
+fn human_ui_fixture_projection_preserves_bytes_and_exposes_close_collision() {
     assert_eq!(
-        decode_scenario_human_ui_user_prompt(
-            "<user> \t&lt;x&gt; &amp; &quot;q&quot; &apos;a&apos;\n雪\u{202e}  </user>"
-        ),
-        Some(" \t<x> & \"q\" 'a'\n雪\u{202e}  ".to_owned())
+        project_fixture_human_ui_user_prompt(" \t<x> &amp; \"q\" 'a'\n雪\u{202e}  "),
+        "<user> \t<x> &amp; \"q\" 'a'\n雪\u{202e}  </user>"
     );
     assert_eq!(
-        decode_scenario_human_ui_user_prompt("<user>&amp;lt;</user>"),
-        Some("&lt;".to_owned()),
-        "literal entity-looking text must decode only once"
+        project_fixture_human_ui_user_prompt("</user>"),
+        project_fixture_human_ui_user_prompt("&lt;/user&gt;"),
+        "exact-close framing is one-way and the fixture must not decode it"
     );
-    for invalid in [
-        "raw",
-        "<user source=\"human\">text</user>",
-        "<user>unclosed",
-        "<user>x</user>suffix",
-        "<user><x></user>",
-        "<user>\"raw quote\" and 'raw apostrophe'</user>",
-        "<user>&lt;x></user>",
-        "<user>&bogus;</user>",
-    ] {
-        assert_eq!(
-            decode_scenario_human_ui_user_prompt(invalid),
-            None,
-            "{invalid}"
-        );
-    }
+    assert!(fixture_user_text_matches(
+        "<user>&lt;/user&gt;</user>",
+        "</user>"
+    ));
+    assert!(fixture_user_text_matches("internal raw", "internal raw"));
 }
 
 /// Ensures strict Configure decoding rejects undeclared control fields.

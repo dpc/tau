@@ -105,7 +105,8 @@ message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-c
 
 The UI may display, summarize, or hide agent-to-agent messages depending on
 `:set show-messages`. The recipient's durable `agent.message_received` fact is
-also its sole model payload: provider context renders the body XML-escaped in a
+also its sole model payload: provider context replaces only exact `</message>`
+collisions in the body of a
 sender-labelled `[tau-internal]` `<message>` wrapper. Live delivery uses a
 payload-free runtime wake and does not persist a second submitted/steered prompt.
 Cold replay restores the same wrapper as context without waking the model.
@@ -172,8 +173,9 @@ active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection.
 
 Inbound inter-session text is authenticated agent content, not a harness
-instruction. It is XML-escaped inside a distinct `tau_peer_message` context
-envelope carrying harness-authored sender session and agent identity.
+instruction. Only exact `</tau_peer_message>` collisions are replaced inside a
+distinct `tau_peer_message` context envelope carrying harness-authored sender
+session and agent identity.
 
 ## Watch another agent's responses
 

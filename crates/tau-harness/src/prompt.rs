@@ -10,6 +10,16 @@ pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
 const BUILT_IN_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/system.hbs");
 const BIG_SYSTEM_TEMPLATE_NAME: &str = "big";
 const BIG_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/big.hbs");
+const USER_CLOSE: &str = "</user>";
+const USER_CLOSE_VISIBLE: &str = "&lt;/user&gt;";
+const MESSAGE_CLOSE: &str = "</message>";
+const MESSAGE_CLOSE_VISIBLE: &str = "&lt;/message&gt;";
+const PEER_MESSAGE_CLOSE: &str = "</tau_peer_message>";
+const PEER_MESSAGE_CLOSE_VISIBLE: &str = "&lt;/tau_peer_message&gt;";
+const WATCH_RESPONSE_CLOSE: &str = "</response>";
+const WATCH_RESPONSE_CLOSE_VISIBLE: &str = "&lt;/response&gt;";
+const WATCH_PROMPT_CLOSE: &str = "</prompt>";
+const WATCH_PROMPT_CLOSE_VISIBLE: &str = "&lt;/prompt&gt;";
 
 pub(crate) fn built_in_system_prompt_templates() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([
@@ -57,8 +67,8 @@ pub(crate) struct RolePromptTemplateContext<'a> {
     /// Durable agent id whose prompt is being rendered, when the render targets
     /// a concrete agent instead of a role-only preview.
     pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
-    /// Conditional trust-boundary rule for selected message-fact context.
-    pub(crate) message_fact_boundary_rule: Option<&'a str>,
+    /// Conditional provenance rule for selected exact-sentinel context.
+    pub(crate) exact_sentinel_boundary_rule: Option<&'a str>,
 }
 
 /// Harness-owned capabilities visible to one prompt render.
@@ -139,7 +149,7 @@ impl<'a> RolePromptTemplateContext<'a> {
         Self {
             role_name,
             agent_id: None,
-            message_fact_boundary_rule: None,
+            exact_sentinel_boundary_rule: None,
         }
     }
 
@@ -148,13 +158,13 @@ impl<'a> RolePromptTemplateContext<'a> {
         Self {
             role_name,
             agent_id: Some(agent_id),
-            message_fact_boundary_rule: None,
+            exact_sentinel_boundary_rule: None,
         }
     }
 
-    /// Supply the explicit conditional message-fact trust-boundary input.
-    pub(crate) fn with_message_fact_boundary_rule(mut self, rule: Option<&'a str>) -> Self {
-        self.message_fact_boundary_rule = rule;
+    /// Supply the explicit conditional exact-sentinel provenance input.
+    pub(crate) fn with_exact_sentinel_boundary_rule(mut self, rule: Option<&'a str>) -> Self {
+        self.exact_sentinel_boundary_rule = rule;
         self
     }
 }
@@ -305,7 +315,7 @@ fn system_prompt_template_data(
     agent_context: serde_json::Value,
     capabilities: PromptCapabilities,
 ) -> Result<serde_json::Value, handlebars::RenderError> {
-    let message_fact_boundary_rule = context.message_fact_boundary_rule;
+    let exact_sentinel_boundary_rule = context.exact_sentinel_boundary_rule;
     let mut data = prompt_template_data(context, skills, agent_context, capabilities);
     let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data)?;
     let rendered_tool_fragments =
@@ -316,9 +326,9 @@ fn system_prompt_template_data(
     object.insert("prompt_fragments".to_owned(), rendered_fragments);
     object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
     object.insert(
-        "message_fact_boundary_rule".to_owned(),
-        serde_json::to_value(message_fact_boundary_rule)
-            .expect("optional message fact boundary rule serializes"),
+        "exact_sentinel_boundary_rule".to_owned(),
+        serde_json::to_value(exact_sentinel_boundary_rule)
+            .expect("optional exact-sentinel boundary rule serializes"),
     );
     Ok(data)
 }
@@ -906,8 +916,42 @@ pub(crate) fn chrono_free_date() -> String {
 pub(crate) struct AssembledPromptContext {
     /// Provider context with prompt-local presentation facts applied.
     pub(crate) context: tau_proto::PromptContext,
-    /// Whether selected context contains a projected message fact.
-    pub(crate) contains_message_fact: bool,
+    /// Whether selected context contains a Tau-stamped payload envelope.
+    pub(crate) contains_exact_sentinel_envelope: bool,
+}
+
+fn is_exact_sentinel_projection(text: &str) -> bool {
+    [
+        ("<user>", USER_CLOSE),
+        ("<message", MESSAGE_CLOSE),
+        ("<tau_peer_message", PEER_MESSAGE_CLOSE),
+        ("<response>", WATCH_RESPONSE_CLOSE),
+        ("<prompt>", WATCH_PROMPT_CLOSE),
+        ("<tau_web_content", "</tau_web_content>"),
+    ]
+    .into_iter()
+    .any(|(open, close)| {
+        text.ends_with(close)
+            && (text.starts_with(open)
+                || (text.starts_with("[tau-internal]:") && text.contains(open)))
+    })
+}
+
+fn context_items_contain_exact_sentinel(items: &[ContextItem]) -> bool {
+    items.iter().any(|item| match item {
+        ContextItem::Message(message) => message.content.iter().any(|part| {
+            let tau_proto::ContentPart::Text { text } = part;
+            is_exact_sentinel_projection(text)
+        }),
+        ContextItem::ToolResult(result) => is_exact_sentinel_projection(&result.output.body),
+        _ => false,
+    })
+}
+
+fn tool_results_contain_exact_sentinel(items: &[tau_proto::ToolResultItem]) -> bool {
+    items
+        .iter()
+        .any(|item| is_exact_sentinel_projection(&item.output.body))
 }
 
 /// Assembles provider context from the selected transcript branch.
@@ -916,7 +960,7 @@ pub(crate) fn assemble_prompt_context_from(
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
-    let mut contains_message_fact = false;
+    let mut contains_exact_sentinel_envelope = false;
     let branch_ids = tree.branch_node_ids_from(head);
     let branch: Vec<_> = branch_ids
         .iter()
@@ -937,6 +981,7 @@ pub(crate) fn assemble_prompt_context_from(
             Some((index, replacement_window, *cut))
         })
     {
+        contains_exact_sentinel_envelope = context_items_contain_exact_sentinel(replacement_window);
         blocks.push(tau_proto::ContextBlock::UserInput(
             tau_proto::UserInputBlock {
                 items: replacement_window.clone(),
@@ -962,7 +1007,8 @@ pub(crate) fn assemble_prompt_context_from(
                 replacement_window, ..
             } => {
                 blocks.clear();
-                contains_message_fact = false;
+                contains_exact_sentinel_envelope =
+                    context_items_contain_exact_sentinel(replacement_window);
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: replacement_window.clone(),
@@ -981,6 +1027,8 @@ pub(crate) fn assemble_prompt_context_from(
                 submission_source,
                 ..
             } => {
+                contains_exact_sentinel_envelope |=
+                    submission_source.as_ref() == Some(&tau_proto::PromptSubmissionSource::HumanUi);
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: project_user_prompt_items(items, submission_source.as_ref()),
@@ -1003,6 +1051,7 @@ pub(crate) fn assemble_prompt_context_from(
                 ));
             }
             AgentEntry::ToolResults { items } => {
+                contains_exact_sentinel_envelope |= tool_results_contain_exact_sentinel(items);
                 blocks.push(tau_proto::ContextBlock::ToolResults(
                     tau_proto::ToolResultsBlock {
                         items: items.clone(),
@@ -1020,20 +1069,32 @@ pub(crate) fn assemble_prompt_context_from(
                 ..
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
+                    contains_exact_sentinel_envelope |=
+                        *direction == tau_core::AgentMessageDirection::Inbound;
                     let message_text = match (direction, sender_session_id) {
                         (tau_core::AgentMessageDirection::Inbound, Some(sender_session_id)) => {
+                            let body = tau_proto::escape_exact_sentinel_close(
+                                message,
+                                PEER_MESSAGE_CLOSE,
+                                PEER_MESSAGE_CLOSE_VISIBLE,
+                            );
                             format!(
                                 "[tau-internal]: Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
                                 xml_escape(sender_session_id.as_str()),
                                 xml_escape(sender_id.as_str()),
-                                xml_escape(message)
+                                body
                             )
                         }
-                        (tau_core::AgentMessageDirection::Inbound, None) => format!(
-                            "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
-                            sender_id,
-                            xml_escape(message)
-                        ),
+                        (tau_core::AgentMessageDirection::Inbound, None) => {
+                            let body = tau_proto::escape_exact_sentinel_close(
+                                message,
+                                MESSAGE_CLOSE,
+                                MESSAGE_CLOSE_VISIBLE,
+                            );
+                            format!(
+                                "[tau-internal]: You have received a message from {sender_id}\n\n<message>\n{body}\n</message>"
+                            )
+                        }
                         (tau_core::AgentMessageDirection::Outbound, _) => message.clone(),
                     };
                     blocks.push(tau_proto::ContextBlock::UserInput(
@@ -1056,6 +1117,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
                 tau_proto::AgentMessageKind::WatchResponse => {
                     if *direction == tau_core::AgentMessageDirection::Inbound {
+                        contains_exact_sentinel_envelope = true;
                         let sender_label = sender_session_id
                             .as_ref()
                             .map(|session_id| format!("{session_id}/{sender_id}"))
@@ -1065,10 +1127,17 @@ pub(crate) fn assemble_prompt_context_from(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
-                                        text: format!(
-                                            "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{}\n</response>",
-                                            xml_escape(message)
-                                        ),
+                                        text: {
+                                            let body =
+                                                tau_proto::escape_exact_sentinel_close(
+                                                    message,
+                                                    WATCH_RESPONSE_CLOSE,
+                                                    WATCH_RESPONSE_CLOSE_VISIBLE,
+                                                );
+                                            format!(
+                                                "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{body}\n</response>"
+                                            )
+                                        },
                                     }],
                                     phase: None,
                                     responses_raw_json: None,
@@ -1079,6 +1148,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
                 tau_proto::AgentMessageKind::WatchPrompt => {
                     if *direction == tau_core::AgentMessageDirection::Inbound {
+                        contains_exact_sentinel_envelope = true;
                         let sender_label = sender_session_id
                             .as_ref()
                             .map(|session_id| format!("{session_id}/{sender_id}"))
@@ -1088,10 +1158,17 @@ pub(crate) fn assemble_prompt_context_from(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
-                                        text: format!(
-                                            "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{}\n</prompt>",
-                                            xml_escape(message)
-                                        ),
+                                        text: {
+                                            let body =
+                                                tau_proto::escape_exact_sentinel_close(
+                                                    message,
+                                                    WATCH_PROMPT_CLOSE,
+                                                    WATCH_PROMPT_CLOSE_VISIBLE,
+                                                );
+                                            format!(
+                                                "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{body}\n</prompt>"
+                                            )
+                                        },
                                     }],
                                     phase: None,
                                     responses_raw_json: None,
@@ -1148,7 +1225,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
             },
             AgentEntry::MessageFact { item, .. } => {
-                contains_message_fact = true;
+                contains_exact_sentinel_envelope = true;
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: vec![ContextItem::Message(*item.clone())],
@@ -1160,7 +1237,7 @@ pub(crate) fn assemble_prompt_context_from(
 
     AssembledPromptContext {
         context: tau_proto::PromptContext { blocks },
-        contains_message_fact,
+        contains_exact_sentinel_envelope,
     }
 }
 
@@ -1181,7 +1258,9 @@ fn project_user_prompt_items(
         if let ContextItem::Message(message) = item {
             for part in &mut message.content {
                 let tau_proto::ContentPart::Text { text } = part;
-                *text = format!("<user>{}</user>", xml_escape(text));
+                let body =
+                    tau_proto::escape_exact_sentinel_close(text, USER_CLOSE, USER_CLOSE_VISIBLE);
+                *text = format!("<user>{body}</user>");
             }
         }
     }

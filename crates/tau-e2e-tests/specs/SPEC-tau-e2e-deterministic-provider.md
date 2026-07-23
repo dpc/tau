@@ -25,8 +25,10 @@ actions fail closed with bounded synthetic diagnostics.
 Scenario `user_text` remains semantic accepted text. Closed fixtures reserve the
 exact canonical fieldless `<user>...</user>` syntax for HumanUi provider
 projections; the fake cannot infer durable provenance from provider text alone.
-It decodes that reserved syntax before V2 lane and action matching, while every
-other fixture string remains literal. A future non-Human fixture that needs the
+Under this closed fixture convention it projects fixture-authored expected
+HumanUi text and compares provider bytes without decoding; raw `</user>` and raw
+`&lt;/user&gt;` intentionally collide in the one-way provider form. Every other
+fixture string remains literal. A future non-Human fixture that needs the
 same literal syntax requires a typed scenario distinction rather than heuristic
 inference. V1's first text and tool-call actions additionally require the exact
 HumanUi envelope, so the always-on deterministic lane fails if interactive

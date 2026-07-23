@@ -76,26 +76,32 @@ prompt text:
 
 - outbound `Message` uses assistant role;
 - local inbound `Message` uses user role and exactly this shape, with stable
-  sender ID and XML-escaped body:
+  sender ID and an exact-close-framed body:
 
   ```text
   [tau-internal]: You have received a message from <stable-agent-id>
 
   <message>
-  <XML-escaped body>
+  <body with exact </message> collisions replaced>
   </message>
   ```
 
 - cross-session inbound `Message` retains the authenticated
   `<tau_peer_message>` envelope and stable typed sender session/agent identity;
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
-  wrappers and escaped bodies;
+  wrappers and replace only their own exact closing sentinel in each body;
 - `WatchTurnState` and `WatchProviderStatus` render only wording reconstructed
   from their structured state.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
 harness instructions. Initial and redundant structured watch snapshots render
 zero provider blocks.
+
+All body text other than the current envelope's own exact close remains literal,
+including ampersands, quotes, entity-like strings, nested tags, and other
+families' close tokens. Dynamic peer attributes retain separate attribute-safe
+escaping. See
+[DECISION-exact-sentinel-prompt-envelopes](DECISION-exact-sentinel-prompt-envelopes.md).
 
 ## Live activation and waits
 

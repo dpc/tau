@@ -54,31 +54,34 @@ impl Drop for CompactExitRelease {
     }
 }
 
-/// Ensures successful extension-owned web-content XML remains byte-for-byte
-/// intact on the Codex/Responses native function-call-output path.
+/// Ensures historical XML-escaped and current exact-close web results remain
+/// byte-for-byte intact on the Codex/Responses function-call-output path.
 #[test]
 fn web_content_envelope_is_preserved_in_responses_tool_result() {
-    let envelope = "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: &lt;claim&gt;</tau_web_content>";
-    let result = ToolResultItem {
-        call_id: "call-web".into(),
-        tool_type: tau_proto::ToolType::Function,
-        status: ToolResultStatus::Success,
-        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
-            envelope.to_owned(),
-        )),
-        provider_content: Vec::new(),
-    };
-    let mut budget = ImageRequestBudget {
-        supported: false,
-        responses_lite: false,
-        image_bytes: 0,
-        data_url_bytes: 0,
-    };
-
-    assert_eq!(
-        convert_tool_result_output(&result, &mut budget),
-        serde_json::Value::String(envelope.to_owned())
-    );
+    for envelope in [
+        "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: &lt;claim&gt;</tau_web_content>",
+        "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: <claim> & &lt;/tau_web_content&gt;</tau_web_content>",
+    ] {
+        let result = ToolResultItem {
+            call_id: "call-web".into(),
+            tool_type: tau_proto::ToolType::Function,
+            status: ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                envelope.to_owned(),
+            )),
+            provider_content: Vec::new(),
+        };
+        let mut budget = ImageRequestBudget {
+            supported: false,
+            responses_lite: false,
+            image_bytes: 0,
+            data_url_bytes: 0,
+        };
+        assert_eq!(
+            convert_tool_result_output(&result, &mut budget),
+            serde_json::Value::String(envelope.to_owned())
+        );
+    }
 }
 
 /// Golden compatibility guard for the exact ChatGPT Responses function
